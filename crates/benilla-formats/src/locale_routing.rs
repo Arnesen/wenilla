@@ -210,9 +210,10 @@ const PROBES: &[(&str, Probe)] = &[
             out
         },
     ),
+    // The label; the key (`name`) is column 11, English on every locale by design.
     ("SpellDispelType.Name", |c| {
         let cat = crate::load_spell_dispel_types(c).unwrap();
-        owned((0..10).map(|id| cat.name(id)))
+        owned((0..10).map(|id| cat.label(id)))
     }),
     ("SpellFocusObject.Name", |c| {
         let cat = crate::load_spell_focus_catalog(c).unwrap();

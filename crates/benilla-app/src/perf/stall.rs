@@ -72,10 +72,12 @@ pub(super) fn plugin(app: &mut App) {
     // `None` on a hermetic capture, which still gets the watchdog. The folder is created only
     // when there is a sample to write.
     let dir = crate::local_state::diagnostics_dir();
-    START
-        .set(Instant::now())
-        .expect("stall_sample plugin built twice");
+    // Every app beats. The watchdog's state is the statics above, so a process starts one: a test
+    // binary builds many apps, and the first one's watchdog watches every app's beat.
     app.add_systems(Last, beat);
+    if START.set(Instant::now()).is_err() {
+        return;
+    }
     std::thread::Builder::new()
         .name("stall-sample".into())
         .spawn(move || watchdog(dir))

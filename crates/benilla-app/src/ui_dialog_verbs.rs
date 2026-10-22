@@ -10,7 +10,6 @@ use bevy::platform::time::Instant;
 
 use benilla_protocol::messages::{BattlefieldStatus, MeetingStoneNotice};
 use benilla_ui::script::{ScriptValue, UiScript};
-use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
@@ -428,100 +427,104 @@ pub(crate) struct MeetingStoneInputs<'w, 's> {
 /// The meeting stone's feed: the `0x295` lines, the rebuild and `MEETINGSTONE_CHANGED` per
 /// arrival; the four display replies; the two globals pushed when they moved.
 fn feed_meeting_stone(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut stone: ResMut<MeetingStone>,
     mut inputs: MeetingStoneInputs,
     mut sink: crate::ui_action::MessageSink,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let areas = inputs.areas.as_deref();
-    let mut lines = Vec::new();
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let areas = inputs.areas.as_deref();
+        let mut lines = Vec::new();
 
-    for (old, status) in std::mem::take(&mut stone.updates) {
-        let new = stone.area;
-        lines.extend(stone_line(&script, areas, old, new, status));
-        if status == 1 && new != old {
-            // Status 1's extra block (`0x4ca363`): `Effect_C` kind `0xc` on the local player,
-            // then the Meeting Stones tutorial.
-            if let (Some(visuals), Ok(entity)) = (inputs.visuals.as_deref(), inputs.self_q.single())
-            {
-                if let Some(fx) = meeting_stone_join_fx(visuals, entity) {
-                    inputs.fx.write(fx);
+        for (old, status) in std::mem::take(&mut stone.updates) {
+            let new = stone.area;
+            lines.extend(stone_line(script, areas, old, new, status));
+            if status == 1 && new != old {
+                // Status 1's extra block (`0x4ca363`): `Effect_C` kind `0xc` on the local player,
+                // then the Meeting Stones tutorial.
+                if let (Some(visuals), Ok(entity)) =
+                    (inputs.visuals.as_deref(), inputs.self_q.single())
+                {
+                    if let Some(fx) = meeting_stone_join_fx(visuals, entity) {
+                        inputs.fx.write(fx);
+                    }
+                }
+                if let Some(t) = inputs.tutorials.as_mut() {
+                    t.write(crate::tutorial::TutorialEvent::trigger(
+                        crate::tutorial::id::MEETING_STONES,
+                    ));
                 }
             }
-            if let Some(t) = inputs.tutorials.as_mut() {
-                t.write(crate::tutorial::TutorialEvent::trigger(
-                    crate::tutorial::id::MEETING_STONES,
-                ));
-            }
+            // Every status, silent or out of range, rebuilds and fires. The globals reach the VM
+            // first: the stock handler's first call is `IsInMeetingStoneQueue()`
+            // (`Minimap.xml:222`).
+            let text = build_stone_text(script, areas, new);
+            stone.text = StoneText::Built(text.clone());
+            stone.dirty = false;
+            script.set_meeting_stone(new, Some(text));
+            script.fire_event("MEETINGSTONE_CHANGED", vec![]);
         }
-        // Every status, silent or out of range, rebuilds and fires. The globals reach the VM
-        // first: the stock handler's first call is `IsInMeetingStoneQueue()` (`Minimap.xml:222`).
-        let text = build_stone_text(&script, areas, new);
-        stone.text = StoneText::Built(text.clone());
-        stone.dirty = false;
-        script.set_meeting_stone(new, Some(text));
-        script.fire_event("MEETINGSTONE_CHANGED", vec![]);
-    }
 
-    for notice in std::mem::take(&mut stone.notices) {
-        match notice {
-            MeetingStoneNotice::Success => {
-                lines.extend(crate::ui_action::keyed_line(
-                    &script,
-                    "ERR_MEETING_STONE_SUCCESS",
-                ));
-            }
-            MeetingStoneNotice::InProgress => {
-                lines.extend(crate::ui_action::keyed_line(
-                    &script,
-                    "ERR_MEETING_STONE_IN_PROGRESS",
-                ));
-            }
-            MeetingStoneNotice::MemberAdded { guid } => stone.pending_members.push(guid),
-            MeetingStoneNotice::JoinFailed { code } => {
-                let key = match code {
-                    1 => "ERR_MEETING_STONE_MUST_BE_LEADER",
-                    2 => "ERR_MEETING_STONE_GROUP_FULL",
-                    3 => "ERR_MEETING_STONE_NO_RAID_GROUP",
-                    _ => continue,
-                };
-                lines.extend(crate::ui_action::keyed_line(&script, key));
+        for notice in std::mem::take(&mut stone.notices) {
+            match notice {
+                MeetingStoneNotice::Success => {
+                    lines.extend(crate::ui_action::keyed_line(
+                        script,
+                        "ERR_MEETING_STONE_SUCCESS",
+                    ));
+                }
+                MeetingStoneNotice::InProgress => {
+                    lines.extend(crate::ui_action::keyed_line(
+                        script,
+                        "ERR_MEETING_STONE_IN_PROGRESS",
+                    ));
+                }
+                MeetingStoneNotice::MemberAdded { guid } => stone.pending_members.push(guid),
+                MeetingStoneNotice::JoinFailed { code } => {
+                    let key = match code {
+                        1 => "ERR_MEETING_STONE_MUST_BE_LEADER",
+                        2 => "ERR_MEETING_STONE_GROUP_FULL",
+                        3 => "ERR_MEETING_STONE_NO_RAID_GROUP",
+                        _ => continue,
+                    };
+                    lines.extend(crate::ui_action::keyed_line(script, key));
+                }
             }
         }
-    }
-    // `0x299`'s name-cache callback: the line when the name lands, nothing until then.
-    let pending = std::mem::take(&mut stone.pending_members);
-    let asked = std::mem::take(&mut stone.members_asked);
-    for (i, guid) in pending.into_iter().enumerate() {
-        match inputs
-            .names
-            .resolve_player(guid, Ask::at(i >= asked, &inputs.commands))
-            .map(str::to_string)
-        {
-            Some(name) => lines.extend(crate::ui_action::keyed_line_s(
-                &script,
-                "ERR_MEETING_STONE_MEMBER_ADDED_S",
-                &[&name],
-            )),
-            None => stone.pending_members.push(guid),
+        // `0x299`'s name-cache callback: the line when the name lands, nothing until then.
+        let pending = std::mem::take(&mut stone.pending_members);
+        let asked = std::mem::take(&mut stone.members_asked);
+        for (i, guid) in pending.into_iter().enumerate() {
+            match inputs
+                .names
+                .resolve_player(guid, Ask::at(i >= asked, &inputs.commands))
+                .map(str::to_string)
+            {
+                Some(name) => lines.extend(crate::ui_action::keyed_line_s(
+                    script,
+                    "ERR_MEETING_STONE_MEMBER_ADDED_S",
+                    &[&name],
+                )),
+                None => stone.pending_members.push(guid),
+            }
         }
-    }
-    stone.members_asked = stone.pending_members.len();
-    if !lines.is_empty() {
-        crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", lines);
-    }
+        stone.members_asked = stone.pending_members.len();
+        if !lines.is_empty() {
+            crate::ui_action::show_messages(script, &mut sink, "ui_dialog_verbs", lines);
+        }
 
-    if std::mem::take(&mut stone.dirty) {
-        let text = match &stone.text {
-            StoneText::None => None,
-            StoneText::Unknown => Some(global_text(&script, "UNKNOWN")),
-            StoneText::Built(t) => Some(t.clone()),
-        };
-        script.set_meeting_stone(stone.area, text);
-    }
+        if std::mem::take(&mut stone.dirty) {
+            let text = match &stone.text {
+                StoneText::None => None,
+                StoneText::Unknown => Some(global_text(script, "UNKNOWN")),
+                StoneText::Built(t) => Some(t.clone()),
+            };
+            script.set_meeting_stone(stone.area, text);
+        }
+    })
 }
 
 /// The world-enter cascade's meeting-stone leg (`0x490a14` → `0x4c9f40`), after the battlefield
@@ -603,7 +606,7 @@ const MEETING_STONE_PARTY_CAP: usize = 4;
 
 /// The join drain: the meeting stone's use slot, run with the click's guid.
 fn drain_meeting_stone_joins(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut uses: MessageReader<MeetingStoneUse>,
     group: Option<Res<GroupState>>,
     self_guid: Res<SelfGuid>,
@@ -613,44 +616,46 @@ fn drain_meeting_stone_joins(
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
 ) {
-    let Some(mut script) = script else {
-        uses.clear();
-        return;
-    };
-    let level = self_q.single().ok().and_then(|s| s.0.unit_level());
-    let mut lines = Vec::new();
-    for &MeetingStoneUse { go_guid } in uses.read() {
-        let stone = templates
-            .of_guid(&objects, go_guid)
-            .and_then(|t| t.meeting_stone);
-        let verdict = meeting_stone_join_refusal(group.as_deref(), self_guid.0, level, stone);
-        // Traced on the click's own `use` tag: a refusal, the no-player silence, or the send.
-        if benilla_assets::trace::enabled_for("use") {
-            benilla_assets::trace::line(
-                "use",
-                &match verdict {
-                    StoneJoin::Silent => format!("meeting stone {go_guid:#x}: no local player"),
-                    StoneJoin::Refuse(key) => {
-                        format!("meeting stone {go_guid:#x} refused: {key}")
-                    }
-                    StoneJoin::Send => {
-                        format!("SEND CMSG_MEETINGSTONE_JOIN guid={go_guid:#x}")
-                    }
-                },
-            );
-        }
-        match verdict {
-            StoneJoin::Silent => {}
-            StoneJoin::Refuse(key) => lines.extend(crate::ui_action::keyed_line(&script, key)),
-            StoneJoin::Send => {
-                debug!("meeting stone: join {go_guid:#x}");
-                let _ = commands.0.send(ClientCommand::MeetingStoneJoin { go_guid });
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            uses.clear();
+            return;
+        };
+        let level = self_q.single().ok().and_then(|s| s.0.unit_level());
+        let mut lines = Vec::new();
+        for &MeetingStoneUse { go_guid } in uses.read() {
+            let stone = templates
+                .of_guid(&objects, go_guid)
+                .and_then(|t| t.meeting_stone);
+            let verdict = meeting_stone_join_refusal(group.as_deref(), self_guid.0, level, stone);
+            // Traced on the click's own `use` tag: a refusal, the no-player silence, or the send.
+            if benilla_assets::trace::enabled_for("use") {
+                benilla_assets::trace::line(
+                    "use",
+                    &match verdict {
+                        StoneJoin::Silent => format!("meeting stone {go_guid:#x}: no local player"),
+                        StoneJoin::Refuse(key) => {
+                            format!("meeting stone {go_guid:#x} refused: {key}")
+                        }
+                        StoneJoin::Send => {
+                            format!("SEND CMSG_MEETINGSTONE_JOIN guid={go_guid:#x}")
+                        }
+                    },
+                );
+            }
+            match verdict {
+                StoneJoin::Silent => {}
+                StoneJoin::Refuse(key) => lines.extend(crate::ui_action::keyed_line(script, key)),
+                StoneJoin::Send => {
+                    debug!("meeting stone: join {go_guid:#x}");
+                    let _ = commands.0.send(ClientCommand::MeetingStoneJoin { go_guid });
+                }
             }
         }
-    }
-    if !lines.is_empty() {
-        crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", lines);
-    }
+        if !lines.is_empty() {
+            crate::ui_action::show_messages(script, &mut sink, "ui_dialog_verbs", lines);
+        }
+    })
 }
 
 /// The leave-world sweep's meeting-stone leg (`0x490b2f` → `0x4c9f80`): the text dropped, the
@@ -666,7 +671,7 @@ fn area_spirit_healer_leave_world(mut spirit: ResMut<AreaSpiritHealer>) {
 }
 
 pub(crate) fn feed_dialog_verbs(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut pet: ResMut<PetUnlearnState>,
     mut boot: ResMut<InstanceBoot>,
     mut spirit: ResMut<AreaSpiritHealer>,
@@ -674,141 +679,148 @@ pub(crate) fn feed_dialog_verbs(
     mut sink: crate::ui_action::MessageSink,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let now = Instant::now();
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let now = Instant::now();
 
-    script.set_pet_untrainer_pending(pet.pending().is_some());
-    if pet.ask {
-        pet.ask = false;
-        script.fire_event(
-            "CONFIRM_PET_UNLEARN",
-            vec![ScriptValue::Int(i64::from(pet.cost))],
-        );
-    }
-
-    script.set_instance_boot_secs(boot.secs(now));
-    for edge in std::mem::take(&mut boot.events) {
-        match edge {
-            BootEdge::Start => script.fire_event("INSTANCE_BOOT_START", vec![]),
-            BootEdge::Stop => script.fire_event("INSTANCE_BOOT_STOP", vec![]),
+        script.set_pet_untrainer_pending(pet.pending().is_some());
+        if pet.ask {
+            pet.ask = false;
+            script.fire_event(
+                "CONFIRM_PET_UNLEARN",
+                vec![ScriptValue::Int(i64::from(pet.cost))],
+            );
         }
-    }
-    let lines: Vec<_> = std::mem::take(&mut boot.errors)
-        .into_iter()
-        .filter_map(|key| crate::ui_action::keyed_line(&script, key))
-        .collect();
-    if !lines.is_empty() {
-        crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", lines);
-    }
 
-    let secs = spirit.secs(now);
-    script.set_area_spirit_healer(spirit.healer().is_some(), secs);
-    if std::mem::take(&mut spirit.in_range) {
-        script.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
-    }
-
-    for id in std::mem::take(&mut queue.tutorials) {
-        if let Some(t) = tutorials.as_mut() {
-            t.write(crate::tutorial::TutorialEvent::trigger(id));
+        script.set_instance_boot_secs(boot.secs(now));
+        for edge in std::mem::take(&mut boot.events) {
+            match edge {
+                BootEdge::Start => script.fire_event("INSTANCE_BOOT_START", vec![]),
+                BootEdge::Stop => script.fire_event("INSTANCE_BOOT_STOP", vec![]),
+            }
         }
-    }
-    if std::mem::take(&mut queue.changed) {
-        script.fire_event("UPDATE_BATTLEFIELD_STATUS", vec![]);
-    }
+        let lines: Vec<_> = std::mem::take(&mut boot.errors)
+            .into_iter()
+            .filter_map(|key| crate::ui_action::keyed_line(script, key))
+            .collect();
+        if !lines.is_empty() {
+            crate::ui_action::show_messages(script, &mut sink, "ui_dialog_verbs", lines);
+        }
+
+        let secs = spirit.secs(now);
+        script.set_area_spirit_healer(spirit.healer().is_some(), secs);
+        if std::mem::take(&mut spirit.in_range) {
+            script.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
+        }
+
+        for id in std::mem::take(&mut queue.tutorials) {
+            if let Some(t) = tutorials.as_mut() {
+                t.write(crate::tutorial::TutorialEvent::trigger(id));
+            }
+        }
+        if std::mem::take(&mut queue.changed) {
+            script.fire_event("UPDATE_BATTLEFIELD_STATUS", vec![]);
+        }
+    })
 }
 
 /// The pet trainer's confirm and the spirit healer's accept, the two drains over a latch.
 fn drain_latch_verbs(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     pet: Res<PetUnlearnState>,
     spirit: Res<AreaSpiritHealer>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
 
-    // ConfirmPetUnlearn: `cost > coinage` shows ERR_NOT_ENOUGH_MONEY and sends nothing.
-    let confirms = script.take_pet_unlearn_confirms();
-    if confirms > 0 {
-        if let Some(npc) = pet.pending() {
-            let money = self_q
-                .single()
-                .ok()
-                .and_then(|store| store.0.player_money())
-                .unwrap_or(0);
-            if pet.cost > money {
-                if let Some(line) = crate::ui_action::keyed_line(&script, "ERR_NOT_ENOUGH_MONEY") {
-                    crate::ui_action::show_messages(
-                        &mut script,
-                        &mut sink,
-                        "ui_dialog_verbs",
-                        [line],
-                    );
-                }
-            } else {
-                for _ in 0..confirms {
-                    let _ = commands.0.send(ClientCommand::PetUnlearn { trainer: npc });
+        // ConfirmPetUnlearn: `cost > coinage` shows ERR_NOT_ENOUGH_MONEY and sends nothing.
+        let confirms = script.take_pet_unlearn_confirms();
+        if confirms > 0 {
+            if let Some(npc) = pet.pending() {
+                let money = self_q
+                    .single()
+                    .ok()
+                    .and_then(|store| store.0.player_money())
+                    .unwrap_or(0);
+                if pet.cost > money {
+                    if let Some(line) = crate::ui_action::keyed_line(script, "ERR_NOT_ENOUGH_MONEY")
+                    {
+                        crate::ui_action::show_messages(
+                            script,
+                            &mut sink,
+                            "ui_dialog_verbs",
+                            [line],
+                        );
+                    }
+                } else {
+                    for _ in 0..confirms {
+                        let _ = commands.0.send(ClientCommand::PetUnlearn { trainer: npc });
+                    }
                 }
             }
         }
-    }
 
-    // AcceptAreaSpiritHeal: the cached healer's guid, nothing without one.
-    let accepts = script.take_area_spirit_accepts();
-    if let Some(healer) = spirit.healer() {
-        for _ in 0..accepts {
-            let _ = commands
-                .0
-                .send(ClientCommand::AreaSpiritHealerQueue { healer });
+        // AcceptAreaSpiritHeal: the cached healer's guid, nothing without one.
+        let accepts = script.take_area_spirit_accepts();
+        if let Some(healer) = spirit.healer() {
+            for _ in 0..accepts {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::AreaSpiritHealerQueue { healer });
+            }
         }
-    }
+    })
 }
 
 /// The battleground port and the meeting-stone leave, the two drains over a queue.
 fn drain_queue_verbs(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     queue: Res<BattlefieldQueue>,
     group: Option<Res<GroupState>>,
     self_guid: Res<SelfGuid>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
 
-    for (index, accept) in script.take_battlefield_port_requests() {
-        if let Some(map_id) = queue.map_id(index) {
-            let _ = commands
-                .0
-                .send(ClientCommand::BattlefieldPort { map_id, accept });
-        }
-    }
-
-    // CancelMeetingStoneRequest: in a party we do not lead, ERR_MEETING_STONE_NOT_LEADER;
-    // otherwise `0x293`, queued or not.
-    let cancels = script.take_meeting_stone_cancels();
-    if cancels > 0 {
-        let not_leader = group
-            .as_deref()
-            .is_some_and(|g| g.in_group && Some(g.leader) != self_guid.0);
-        if not_leader {
-            if let Some(line) =
-                crate::ui_action::keyed_line(&script, "ERR_MEETING_STONE_NOT_LEADER")
-            {
-                crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", [line]);
-            }
-        } else {
-            for _ in 0..cancels {
-                let _ = commands.0.send(ClientCommand::MeetingStoneLeave);
+        for (index, accept) in script.take_battlefield_port_requests() {
+            if let Some(map_id) = queue.map_id(index) {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::BattlefieldPort { map_id, accept });
             }
         }
-    }
+
+        // CancelMeetingStoneRequest: in a party we do not lead, ERR_MEETING_STONE_NOT_LEADER;
+        // otherwise `0x293`, queued or not.
+        let cancels = script.take_meeting_stone_cancels();
+        if cancels > 0 {
+            let not_leader = group
+                .as_deref()
+                .is_some_and(|g| g.in_group && Some(g.leader) != self_guid.0);
+            if not_leader {
+                if let Some(line) =
+                    crate::ui_action::keyed_line(script, "ERR_MEETING_STONE_NOT_LEADER")
+                {
+                    crate::ui_action::show_messages(script, &mut sink, "ui_dialog_verbs", [line]);
+                }
+            } else {
+                for _ in 0..cancels {
+                    let _ = commands.0.send(ClientCommand::MeetingStoneLeave);
+                }
+            }
+        }
+    })
 }
 
 /// The area-spirit-healer poll `0x4923b0`, run every frame from `CGWorldFrame`'s `OnUpdate`
@@ -827,86 +839,79 @@ fn poll_area_spirit_healer(
         ),
         Without<SelfPlayer>,
     >,
-    factions: Option<Res<crate::target::Factions>>,
-    reputations: Res<crate::net::Reputations>,
-    index: Option<Res<crate::net::GuidIndex>>,
-    stores: Query<&ObjectStore>,
+    relations: crate::target::RelationWorld,
     commands: Res<NetCommands>,
-    mut script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
 ) {
-    let mut apply = |outcome: SetHealerOutcome| {
-        if outcome.cancel_aura {
-            // `0x6e7040(0xA18)`: the event with no argument, the packet with no guid.
-            if let Some(script) = script.as_deref_mut() {
-                script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+    hosted_vm.run(|mut script| {
+        let mut apply = |outcome: SetHealerOutcome| {
+            if outcome.cancel_aura {
+                // `0x6e7040(0xA18)`: the event with no argument, the packet with no guid.
+                if let Some(script) = script.as_deref_mut() {
+                    script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+                }
+                let _ = commands.0.send(ClientCommand::CancelAura {
+                    spell_id: AREA_SPIRIT_HEALER_AURA,
+                });
             }
-            let _ = commands.0.send(ClientCommand::CancelAura {
-                spell_id: AREA_SPIRIT_HEALER_AURA,
-            });
-        }
-        if let Some(healer) = outcome.query {
-            let _ = commands
-                .0
-                .send(ClientCommand::AreaSpiritHealerQuery { healer });
-        }
-    };
+            if let Some(healer) = outcome.query {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::AreaSpiritHealerQuery { healer });
+            }
+        };
 
-    let Ok((self_store, self_tf)) = me.single() else {
-        apply(spirit.set_healer(None));
-        return;
-    };
-    if !self_store.0.player_is_ghost() {
-        apply(spirit.set_healer(None));
-        return;
-    }
-    let here = self_tf.translation;
-
-    // Retain: a guid that no longer streams drops like one out of range (an `ObjectPtr` miss).
-    if let Some(cached) = spirit.healer() {
-        let still = units.iter().find(|(guid, ..)| guid.0 == cached);
-        let keep = still.is_some_and(|(_, _, _, tf)| {
-            tf.translation.distance_squared(here) <= SPIRIT_GUIDE_RETAIN_YD * SPIRIT_GUIDE_RETAIN_YD
-        });
-        if !keep {
+        let Ok((self_store, self_tf)) = me.single() else {
             apply(spirit.set_healer(None));
+            return;
+        };
+        if !self_store.0.player_is_ghost() {
+            apply(spirit.set_healer(None));
+            return;
         }
-    }
-    if spirit.healer().is_some() {
-        return;
-    }
+        let here = self_tf.translation;
 
-    // Acquire: `can_assist` is `0x6066f0`; its owner lookup wants a store by guid.
-    let store_of = |guid: u64| -> Option<ObjectStore> {
-        let entity = *index.as_ref()?.0.get(&guid)?;
-        stores.get(entity).ok().cloned()
-    };
-    let mut adopted = None;
-    for (guid, kind, store, tf) in units.iter() {
-        if kind.kind != benilla_protocol::EntityKind::Unit {
-            continue;
+        // Retain: a guid that no longer streams drops like one out of range (an `ObjectPtr` miss).
+        if let Some(cached) = spirit.healer() {
+            let still = units.iter().find(|(guid, ..)| guid.0 == cached);
+            let keep = still.is_some_and(|(_, _, _, tf)| {
+                tf.translation.distance_squared(here)
+                    <= SPIRIT_GUIDE_RETAIN_YD * SPIRIT_GUIDE_RETAIN_YD
+            });
+            if !keep {
+                apply(spirit.set_healer(None));
+            }
         }
-        if store.0.unit_npc_flags() & NPC_FLAG_SPIRITGUIDE == 0 {
-            continue;
+        if spirit.healer().is_some() {
+            return;
         }
-        if tf.translation.distance_squared(here) > SPIRIT_GUIDE_ACQUIRE_YD * SPIRIT_GUIDE_ACQUIRE_YD
-        {
-            continue;
+
+        // Acquire: `CanAssist 0x6066f0` with the guide as `this` (`0x492506`).
+        let (rel, Some(me)) = (relations.get(), relations.me()) else {
+            return;
+        };
+        let mut adopted = None;
+        for (guid, kind, store, tf) in units.iter() {
+            if kind.kind != benilla_protocol::EntityKind::Unit {
+                continue;
+            }
+            if store.0.unit_npc_flags() & NPC_FLAG_SPIRITGUIDE == 0 {
+                continue;
+            }
+            if tf.translation.distance_squared(here)
+                > SPIRIT_GUIDE_ACQUIRE_YD * SPIRIT_GUIDE_ACQUIRE_YD
+            {
+                continue;
+            }
+            if !rel.can_assist(&relations.unit_of(guid.0, store), &me) {
+                continue;
+            }
+            adopted = Some(guid.0); // last wins: the callback never stops the walk
         }
-        if !crate::target::can_assist(
-            Some(store),
-            factions.as_deref(),
-            &reputations,
-            Some(self_store),
-            store_of,
-            crate::target::Assist::UnitToPlayer,
-        ) {
-            continue;
+        if let Some(guid) = adopted {
+            apply(spirit.set_healer(Some(guid)));
         }
-        adopted = Some(guid.0); // last wins: the callback never stops the walk
-    }
-    if let Some(guid) = adopted {
-        apply(spirit.set_healer(Some(guid)));
-    }
+    })
 }
 
 /// The dialog verbs' packet handlers: each parks a question or a countdown for the feed.
@@ -938,14 +943,12 @@ mod net {
     fn on_pet_unlearn_confirm(
         In(ev): In<SessionEvent>,
         mut unlearn: ResMut<PetUnlearnState>,
-        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+        errors: Res<crate::ui_action::UiErrorKeys>,
     ) {
         if let SessionEvent::PetUnlearnConfirm { trainer, cost } = ev {
             if trainer == 0 {
                 debug!("net: pet unlearn refused (zero trainer) — no dialog");
-                errors
-                    .0
-                    .push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
+                errors.push(crate::ui_action::UiError::key("ERR_TALENT_WIPE_ERROR"));
             } else {
                 debug!("net: trainer {trainer:#x} asks to unlearn the pet for {cost} copper");
                 unlearn.ask(trainer, cost);
@@ -1021,9 +1024,9 @@ impl Plugin for UiDialogVerbsPlugin {
                     // healer: the reference resolves an Accept press in the UI dispatch, before
                     // its pick and poll run later in the frame.
                     drain_latch_verbs
-                        .after(UiInput)
+                        .in_set(crate::ui_script::UiDrain)
                         .before(crate::target::TargetUpdate),
-                    drain_queue_verbs.after(UiInput),
+                    drain_queue_verbs.in_set(crate::ui_script::UiDrain),
                     // After the target chain, which writes `MeetingStoneUse`, so the join leaves
                     // on the click's own frame.
                     drain_meeting_stone_joins
@@ -1217,6 +1220,7 @@ mod tests {
         }
         world.spawn((
             SelfPlayer,
+            crate::net::Guid(0x1),
             fields(&[
                 (PLAYER_FLAGS_FIELD, if ghost { 0x10 } else { 0 }),
                 (FACTION_TEMPLATE_FIELD, 1),
@@ -1305,7 +1309,7 @@ mod tests {
         let _ = queries(&rx);
 
         let guide = world
-            .query_filtered::<Entity, With<crate::net::Guid>>()
+            .query_filtered::<Entity, (With<crate::net::Guid>, Without<SelfPlayer>)>()
             .iter(&world)
             .next()
             .expect("the guide entity");

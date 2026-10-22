@@ -30,11 +30,12 @@ fn backdrop_installs_and_extracts_pieces_with_colors() {
         .extract()
         .into_iter()
         .filter_map(|q| match q.content {
+            // An untinted piece (white on an empty slot stores nothing, `0x77f766`) draws white.
             QuadContent::Texture {
                 path: Some(path),
-                color: Some(color),
+                color,
                 ..
-            } => Some((path, color)),
+            } => Some((path, color.unwrap_or([1.0; 4]))),
             _ => None,
         })
         .collect();
@@ -54,6 +55,7 @@ fn backdrop_installs_and_extracts_pieces_with_colors() {
 #[test]
 fn get_backdrop_reconstructs_from_the_struct() {
     let s = script();
+    crate::test_support::install_law43(&s);
     s.run(
         r#"
         local f = CreateFrame("Frame", "GB")
@@ -61,6 +63,8 @@ fn get_backdrop_reconstructs_from_the_struct() {
         -- How many values did that return? 5.0 answers with the implicit vararg table's `n`;
         -- `select` is 5.1's base library and is not a 1.12 global (`lua50::install`).
         local function count(...) return arg.n end
+        -- Lengths come back through the getter steps, `G(S(v))`, a hair off the number given.
+        local function near(a, b) return a == law(b) end
 
         -- TRAP 2: no backdrop => ZERO values, not nil. The count is the only way to see it.
         assert(count(f:GetBackdrop()) == 0, "unset backdrop must return no values at all")
@@ -78,9 +82,9 @@ fn get_backdrop_reconstructs_from_the_struct() {
         assert(b.alien == nil, "keys SetBackdrop never read cannot reappear")
         assert(b.insets ~= passed.insets, "the insets subtable is rebuilt too")
         assert(b.bgFile == "bg" and b.edgeFile == "edge", "files round-trip")
-        assert(b.tileSize == 16 and b.edgeSize == 24, "sizes round-trip")
-        assert(b.insets.left == 1 and b.insets.right == 2
-               and b.insets.top == 3 and b.insets.bottom == 4, "insets round-trip")
+        assert(near(b.tileSize, 16) and near(b.edgeSize, 24), "sizes round-trip")
+        assert(near(b.insets.left, 1) and near(b.insets.right, 2)
+               and near(b.insets.top, 3) and near(b.insets.bottom, 4), "insets round-trip")
 
         -- TRAP 4: `tile` is the NUMBER 1, never the boolean the caller passed.
         assert(type(b.tile) == "number", "tile must be a number, got " .. type(b.tile))
@@ -95,7 +99,7 @@ fn get_backdrop_reconstructs_from_the_struct() {
         f:SetBackdrop({ edgeFile = "onlyedge" })
         local p = f:GetBackdrop()
         assert(p.bgFile == "", "an omitted bgFile is the empty string, not nil")
-        assert(p.edgeSize == 32, "an omitted edgeSize is the ctor's 32, not the previous 24")
+        assert(near(p.edgeSize, 32), "an omitted edgeSize is the ctor's 32, not the previous 24")
         assert(p.tileSize == 0, "an omitted tileSize is 0, not the previous 16")
         assert(p.insets.left == 0 and p.insets.right == 0
                and p.insets.top == 0 and p.insets.bottom == 0, "omitted insets are 0, not 1/2/3/4")
@@ -111,7 +115,7 @@ fn get_backdrop_reconstructs_from_the_struct() {
         assert(mine.insets == ins, "an existing insets subtable is reused, not replaced")
         assert(mine.tile == nil, "a stale tile key is erased from a recycled table")
         assert(mine.stale == "kept", "keys it does not write are left alone")
-        assert(mine.edgeSize == 32 and ins.bottom == 0, "the recycled table is filled")
+        assert(near(mine.edgeSize, 32) and ins.bottom == 0, "the recycled table is filled")
 
         -- SetBackdrop(nil) is indistinguishable from never having set one: back to zero values.
         f:SetBackdrop(nil)
@@ -126,6 +130,7 @@ fn get_backdrop_reconstructs_from_the_struct() {
 fn get_backdrop_round_trips_through_set_backdrop() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
+    crate::test_support::install_law43(&s);
     s.run(
         r#"
         local f = CreateFrame("Frame", "BC2Plate")
@@ -141,9 +146,10 @@ fn get_backdrop_round_trips_through_set_backdrop() {
         backdrop["edgeSize"] = 32
         f:SetBackdrop(backdrop)
         local b = f:GetBackdrop()
+        local function near(a, v) return a == law(v) end
         assert(b.bgFile == "bg" and b.edgeFile == "edge", "files survive the round trip")
-        assert(b.tile == 1 and b.tileSize == 32 and b.edgeSize == 32, "tiling survives")
-        assert(b.insets.left == 11 and b.insets.bottom == 11, "insets survive")
+        assert(b.tile == 1 and near(b.tileSize, 32) and near(b.edgeSize, 32), "tiling survives")
+        assert(near(b.insets.left, 11) and near(b.insets.bottom, 11), "insets survive")
     "#,
     )
     .unwrap();
@@ -179,6 +185,28 @@ fn set_backdrop_nil_tears_down() {
         .all(|q| !matches!(q.content, QuadContent::Texture { .. })));
 }
 
+/// Both colour getters push nothing for a frame with no backdrop (`0x777c68`, `0x778008`), before
+/// one is set and after `SetBackdrop(nil)`.
+#[test]
+fn backdrop_colour_getters_answer_nothing_without_a_backdrop() {
+    let s = script();
+    s.run(
+        r#"
+        local function count(...) return arg.n end
+        local f = CreateFrame("Frame", "Bare")
+        assert(count(f:GetBackdropColor()) == 0, "bare GetBackdropColor")
+        assert(count(f:GetBackdropBorderColor()) == 0, "bare GetBackdropBorderColor")
+        f:SetBackdrop({ bgFile = "bg", edgeFile = "edge" })
+        assert(count(f:GetBackdropColor()) == 4, "with a backdrop")
+        assert(count(f:GetBackdropBorderColor()) == 4, "with a backdrop")
+        f:SetBackdrop(nil)
+        assert(count(f:GetBackdropColor()) == 0, "removed GetBackdropColor")
+        assert(count(f:GetBackdropBorderColor()) == 0, "removed GetBackdropBorderColor")
+    "#,
+    )
+    .unwrap();
+}
+
 /// The colour setters (`0x777d30`, `0x7780d0`) read r/g/b with a bare `lua_tonumber` (nil is 0.0)
 /// and gate alpha on `lua_isnumber` (`0x778227`) over a staged 1.0 (`0x778220`).
 #[test]
@@ -193,23 +221,25 @@ fn backdrop_colors_coerce_rgb_but_default_alpha_opaque() {
     .unwrap();
 
     s.run("f:SetBackdropBorderColor(nil, 1, 1, 1)").unwrap();
+    // Each byte reads back times the float at `0x81c6b4` (`0x777c98`): 255 is 0.9999978.
+    let one = crate::color::quant::read32(1.0);
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return f:GetBackdropBorderColor()")
             .unwrap(),
-        (0.0, 1.0, 1.0, 1.0)
+        (0.0, one, one, one)
     );
 
     s.run("f:SetBackdropColor(0.2, 0.4, 0.6)").unwrap();
     let (_, _, _, a) = s
         .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
         .unwrap();
-    assert_eq!(a, 1.0, "a missing alpha is opaque");
+    assert_eq!(a, one, "a missing alpha is opaque");
     s.run("f:SetBackdropColor(0.2, 0.4, 0.6, nil)").unwrap();
     let (_, _, _, a) = s
         .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
         .unwrap();
     assert_eq!(
-        a, 1.0,
+        a, one,
         "an explicit nil alpha is opaque too — the isnumber gate"
     );
 
@@ -218,9 +248,9 @@ fn backdrop_colors_coerce_rgb_but_default_alpha_opaque() {
     let (r, g, b, a) = s
         .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
         .unwrap();
-    assert_eq!((r, g, b), (1.0, 0.0, 0.0));
-    // Stored as a byte: 0.5 reads back as 128/255.
-    assert_eq!(a, 128.0 / 255.0);
+    assert_eq!((r, g, b), (one, 0.0, 0.0));
+    // Stored as a byte: 0.5 is 128, read back as 128 times the float scale.
+    assert_eq!(a, crate::color::quant::read32(0.5));
 }
 
 /// The pieces are textures anchored and sized in the frame's own units (`0x77e8d0`), so the layout
@@ -447,7 +477,7 @@ fn a_resize_re_runs_the_edge_texcoords() {
         .eval::<(f32, f32, f32, f32, f32, f32, f32, f32)>(left)
         .unwrap();
     // 100 / 16 - 2 = 4.25 periods down the LEFT edge, slice 0.
-    assert_eq!(uv, (0.0, 0.0, 0.0, 4.25, 0.125, 0.0, 0.125, 4.25));
+    crate::assert_near!(uv, (0.0, 0.0, 0.0, 4.25, 0.125, 0.0, 0.125, 4.25));
     s.run("f:SetHeight(64)").unwrap();
     s.resolve();
     let uv = s
@@ -530,7 +560,7 @@ fn the_piece_quads_are_the_backdrop_geometry() {
                 let (fr, eff) = {
                     let model = s.model_ref();
                     let fh = *model.backdrops.keys().next().unwrap();
-                    let fr = model.resolved[&fh];
+                    let fr = model.frame_rect(fh).expect("rect");
                     (fr, crate::script::object::eff_scale(&model, fh))
                 };
                 let quads: Vec<_> = s
@@ -553,15 +583,15 @@ fn the_piece_quads_are_the_backdrop_geometry() {
                             bg_file: t.get("bgFile").ok(),
                             edge_file: t.get("edgeFile").ok(),
                             tile: t.get::<Option<f32>>("tile").ok().flatten().is_some(),
-                            tile_size: t.get("tileSize").unwrap(),
-                            edge_size: t.get("edgeSize").unwrap(),
+                            tile_size: crate::layout::Len::Script(t.get("tileSize").unwrap()),
+                            edge_size: crate::layout::Len::Script(t.get("edgeSize").unwrap()),
                             insets: {
                                 let ins: mlua::Table = t.get("insets").unwrap();
                                 Insets {
-                                    left: ins.get("left").unwrap(),
-                                    right: ins.get("right").unwrap(),
-                                    top: ins.get("top").unwrap(),
-                                    bottom: ins.get("bottom").unwrap(),
+                                    left: crate::layout::Len::Script(ins.get("left").unwrap()),
+                                    right: crate::layout::Len::Script(ins.get("right").unwrap()),
+                                    top: crate::layout::Len::Script(ins.get("top").unwrap()),
+                                    bottom: crate::layout::Len::Script(ins.get("bottom").unwrap()),
                                 }
                             },
                             ..Default::default()
@@ -570,14 +600,15 @@ fn the_piece_quads_are_the_backdrop_geometry() {
                     let c = s
                         .eval::<(f32, f32, f32, f32)>("return f:GetBackdropColor()")
                         .unwrap();
-                    b.bg_color = [c.0, c.1, c.2, c.3];
+                    b.bg_color = crate::color::Rgba8::from_f32([c.0, c.1, c.2, c.3]);
                     let c = s
                         .eval::<(f32, f32, f32, f32)>("return f:GetBackdropBorderColor()")
                         .unwrap();
-                    b.border_color = [c.0, c.1, c.2, c.3];
+                    b.border_color = crate::color::Rgba8::from_f32([c.0, c.1, c.2, c.3]);
                     b
                 };
-                let mut want = pieces(fr, &spec, eff);
+                let units = s.model_ref().layout_units();
+                let mut want = pieces(fr, &spec, units, eff);
                 // The four sides (wrap flag on) and the four corners (off) are two textures in one
                 // BORDER batch, the sides' made first, which its End sorts (`0x7731a0`) by the CRT's
                 // selection sort (`0x73f87b`): it swaps the first-found largest to the end each
@@ -586,8 +617,8 @@ fn the_piece_quads_are_the_backdrop_geometry() {
                     let keys: Vec<u64> = (0..want.len() - first_edge)
                         .map(|k| u64::from(k >= 4))
                         .collect();
-                    let (mut perm, mut stack) = (Vec::new(), Vec::new());
-                    crate::script::layer_batch::crt_qsort_into(&keys, &mut perm, &mut stack);
+                    let mut perm: Vec<usize> = (0..keys.len()).collect();
+                    crate::crt::qsort(&mut perm, |&a, &b| keys[a].cmp(&keys[b]) as i32);
                     let edges: Vec<_> = perm.iter().map(|&k| want[first_edge + k]).collect();
                     want.splice(first_edge.., edges);
                 }
@@ -622,8 +653,12 @@ fn the_piece_quads_are_the_backdrop_geometry() {
                     } else {
                         spec.border_color
                     };
-                    assert_eq!(*color, Some(want_color), "{ctx} piece {k} colour");
-                    assert_eq!(*alpha, 0.5, "{ctx} piece {k}: the frame's alpha");
+                    assert_eq!(*color, Some(want_color.to_f32()), "{ctx} piece {k} colour");
+                    assert_eq!(
+                        *alpha,
+                        127.0 / 255.0,
+                        "{ctx} piece {k}: the frame's alpha byte"
+                    );
                     // An untiled background keeps the whole texture (no `SetTexCoord`).
                     let uvs = match tc {
                         Some(TexCoords::Corners(c)) => *c,
@@ -765,15 +800,16 @@ fn a_resize_repaints_a_piece_over_its_own_vertex_colour() {
     let left = "local r = { f:GetRegions() } return r[2]:GetVertexColor()";
     s.run("local r = { f:GetRegions() } r[2]:SetVertexColor(0, 1, 0)")
         .unwrap();
+    let one = crate::color::quant::read32(1.0);
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>(left).unwrap(),
-        (0.0, 1.0, 0.0, 1.0)
+        (0.0, one, 0.0, one)
     );
     s.run("f:SetWidth(120)").unwrap();
     s.resolve();
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>(left).unwrap(),
-        (1.0, 0.0, 0.0, 1.0),
+        (one, 0.0, 0.0, one),
         "the resize put the border colour back"
     );
 }
@@ -783,8 +819,10 @@ fn a_resize_repaints_a_piece_over_its_own_vertex_colour() {
 #[test]
 fn the_bg_bottomright_anchor_answers_the_top_inset() {
     let s = script();
+    crate::test_support::install_law43(&s);
     s.run(
         r#"
+        local function near(a, b) return a == law(b) end -- G(S(v)) of each inset
         local f = CreateFrame("Frame")
         f:SetBackdrop({ bgFile = "bg", insets = { left = 3, right = 4, top = 7, bottom = 9 } })
         local bg = f:GetRegions()
@@ -793,10 +831,10 @@ fn the_bg_bottomright_anchor_answers_the_top_inset() {
             local point, rel, relPoint, x, y = bg:GetPoint(i)
             if point == "BOTTOMRIGHT" then
                 assert(rel == f and relPoint == "BOTTOMRIGHT", "on the frame's corner")
-                assert(x == -4 and y == 7, "x " .. x .. ", y " .. y .. ": the top inset")
+                assert(near(x, -4) and near(y, 7), "x " .. x .. ", y " .. y .. ": the top inset")
                 found = true
             elseif point == "BOTTOMLEFT" then
-                assert(x == 3 and y == 9, "the bottom-left takes the bottom inset")
+                assert(near(x, 3) and near(y, 9), "the bottom-left takes the bottom inset")
             end
         end
         assert(found, "a BOTTOMRIGHT anchor")
@@ -839,7 +877,7 @@ fn a_teardown_leaves_what_anchored_to_a_piece_in_place() {
     s.resolve();
     let incremental = {
         let m = s.model_ref();
-        (m.resolved.clone(), m.region_resolved.clone())
+        (m.frame_rects.clone(), m.region_rects.clone())
     };
     {
         let mut m = s.model_mut();
@@ -849,7 +887,7 @@ fn a_teardown_leaves_what_anchored_to_a_piece_in_place() {
     s.resolve();
     let full = {
         let m = s.model_ref();
-        (m.resolved.clone(), m.region_resolved.clone())
+        (m.frame_rects.clone(), m.region_rects.clone())
     };
     assert!(
         incremental == full,
@@ -898,8 +936,10 @@ fn backdrop_pieces_load_with_the_reference_wrap_flags() {
                         },
                         Some(r),
                     ) if *p == file => {
-                        // A corner is one edge size square; a side is a strip.
-                        Some((r.width() == 16.0 && r.height() == 16.0, *wrap))
+                        // A corner is one edge size square, through the law's sub-unit drift; a
+                        // side is a strip.
+                        let edge = |v: f32| (v - 16.0).abs() < 1e-3;
+                        Some((edge(r.width()) && edge(r.height()), *wrap))
                     }
                     _ => None,
                 })
@@ -912,7 +952,7 @@ fn backdrop_pieces_load_with_the_reference_wrap_flags() {
         );
         let edges = wraps(format!("edge{i}"));
         assert_eq!(edges.len(), 8);
-        assert_eq!(edges.iter().filter(|(corner, _)| *corner).count(), 4);
+        crate::assert_near!(edges.iter().filter(|(corner, _)| *corner).count(), 4);
         assert!(
             edges.iter().all(|(corner, wrap)| *wrap == !*corner),
             "sides wrap and corners clamp: {edges:?}"

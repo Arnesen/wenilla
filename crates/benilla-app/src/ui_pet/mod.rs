@@ -13,7 +13,6 @@ use benilla_protocol::messages::PetSpells;
 use crate::net::{GuidIndex, ObjectStore};
 use crate::spell::Cooldowns;
 use crate::ui_action::CooldownEvents;
-use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod bar;
@@ -23,12 +22,14 @@ mod menu;
 mod net;
 mod unit;
 mod usable;
+// The predicate `0x4bcf70` over what the caller already holds, for the action bar's pet legs.
+pub(crate) use usable::actions_usable as pet_actions_usable;
 
 use bar::{feed_pet_bar, fire_pet_cooldown_events};
-use drain::drain_pet_actions;
+pub(crate) use drain::drain_pet_actions;
 // A pet bar press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::pet_stop_on_old_target_clear;
-pub(crate) use drain::PetPress;
+pub(crate) use drain::{cast_pet_press, PetPress, PetStep};
 use menu::{drain_pet_menu, feed_pet_menu};
 pub(crate) use unit::feed_pet_unit;
 
@@ -99,6 +100,10 @@ impl Plugin for UiPetPlugin {
                 pet_stop_on_old_target_clear
                     .in_set(UnitFeed)
                     .before(feed_pet_bar),
+                // The GCDs the attempt's sends owe the pet's list, in before the bar reads it.
+                drain::arm_owed_pet_gcds
+                    .in_set(UnitFeed)
+                    .before(feed_pet_bar),
                 // After the pet snapshot: these feeds' events reach Lua at once, and their
                 // handlers read `HasPetUI()`, which `crate::ui_pet_stats` pushes. The bar pushes
                 // its cooldown triples before the cooldown events and the pet's flush fires after
@@ -117,10 +122,8 @@ impl Plugin for UiPetPlugin {
                 feed_pet_menu.in_set(UnitFeed),
                 // After this frame's presses, as the one drain before it ran them ahead of the
                 // toggles, stops and writes.
-                drain_pet_actions
-                    .after(UiInput)
-                    .after(crate::script_calls::apply_script_calls),
-                drain_pet_menu.after(UiInput),
+                drain_pet_actions.in_set(crate::ui_script::UiDrain),
+                drain_pet_menu.in_set(crate::ui_script::UiDrain),
             ),
         );
     }

@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use mlua::{Lua, MultiValue, Table, Value};
 
+use super::binding_abi::{optional_string, usage};
 use super::object::frame_handle_of;
 use super::Model;
 use crate::widget::{model_key, FrameHandle, KindState, ModelFileFacts, ModelLight, ModelState};
@@ -30,29 +31,48 @@ impl Model {
     /// holds `1/√(a²+1)`): the unit of `SetPosition` and of the implicit rect. `a` is 4/3 before a
     /// screen exists.
     pub(crate) fn layout_unit(&self) -> f32 {
-        let (w, h) = (self.screen.width(), self.screen.height());
-        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
+        let a = self.screen_aspect();
         768.0 * (a * a + 1.0).sqrt()
     }
 
-    /// `ApplyRect`'s size threshold, 2⁻²² in the reference's layout units (`0x76b5e7`,
-    /// `0x76b602`, `[0x8029d4]`), in ours: [`crate::layout::SIZE_EPS`] times the layout unit.
+    /// The aspect the screen-scale cells are set from: the window's, as
+    /// [`crate::script::UiScript::set_window_size`] gave it, else the root's own width over height,
+    /// else 4/3.
+    pub(crate) fn screen_aspect(&self) -> f32 {
+        Self::aspect_of(self.screen, self.aspect)
+    }
+
+    /// [`Self::screen_aspect`] for a root `screen` and a window aspect `aspect`.
+    pub(crate) fn aspect_of(screen: crate::layout::Rect, aspect: Option<f32>) -> f32 {
+        if let Some(a) = aspect {
+            return a;
+        }
+        let (w, h) = (screen.width(), screen.height());
+        if h > 0.0 && w > 0.0 {
+            w / h
+        } else {
+            4.0 / 3.0
+        }
+    }
+
+    /// `ApplyRect`'s size threshold, 2⁻²² layout units (`0x76b5e7`, `0x76b602`, `[0x8029d4]`), in
+    /// the root's units, for a reader that compares root-unit rects: [`crate::layout::SIZE_EPS`]
+    /// times the layout unit. The resolver compares its layout rects against the constant itself.
     pub(crate) fn size_eps(&self) -> f64 {
         crate::layout::SIZE_EPS * f64::from(self.layout_unit())
     }
 
-    /// The aspect globals `SetPoint`'s unchanged-anchor test quantizes offsets by
-    /// ([`crate::layout::Anchors::set`]), for the screen aspect [`Self::layout_unit`] reads.
+    /// The screen-scale cells (`0x41ad10`) for [`Self::screen_aspect`].
+    #[inline]
     pub(crate) fn layout_units(&self) -> crate::layout::LayoutUnits {
-        let (w, h) = (self.screen.width(), self.screen.height());
-        let a = if h > 0.0 && w > 0.0 { w / h } else { 4.0 / 3.0 };
-        crate::layout::LayoutUnits::from_aspect(a)
+        self.space.units()
     }
 
-    /// The drain's keep threshold, 1e-5 in the reference's layout units (`[0x80c5c8]`, tested in
-    /// `0x768d20`), in ours: [`crate::layout::RESOLVE_EPS`] times the layout unit.
-    pub(crate) fn resolve_eps(&self) -> f64 {
-        crate::layout::RESOLVE_EPS * f64::from(self.layout_unit())
+    /// The layout space of the screen root under [`Self::layout_units`]: the root's extent in
+    /// layout units and the map back to its own units.
+    #[inline]
+    pub(crate) fn layout_space(&self) -> crate::layout::LayoutSpace {
+        self.space
     }
 
     /// `SetModel` on the pane `h` (`0x76cce0`): the file, seeded now if its facts are held (else
@@ -73,10 +93,16 @@ impl Model {
         self.apply_implicit_rect(h);
     }
 
-    /// `SetCamera(idx)` on the pane `h` (`0x76cec0`), against the facts of the file it holds.
+    /// `SetCamera(idx)` on the pane `h` (`0x76cec0`): on a character pane's copy, else against
+    /// the facts of the file it holds.
     pub(crate) fn set_pane_camera(&mut self, h: FrameHandle, idx: i32) {
-        let path = match self.arena.frame(h).map(|f| &f.kind_state) {
-            Some(KindState::Model(m)) => m.path.clone(),
+        let path = match self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            Some(KindState::Model(m)) => {
+                if m.character.as_mut().is_some_and(|c| c.set_camera(idx)) {
+                    return;
+                }
+                m.path.clone()
+            }
             _ => return,
         };
         let facts = path.and_then(|p| self.model_facts_for(&p));
@@ -104,7 +130,7 @@ impl Model {
                 && self
                     .layout_inputs
                     .get(&h)
-                    .is_some_and(|i| i.width != 0.0 || i.height != 0.0);
+                    .is_some_and(|i| !i.width.is_zero() || !i.height.is_zero());
             if authored {
                 return;
             }
@@ -112,10 +138,10 @@ impl Model {
         };
         let (w, ht) = (extent.0 * unit, extent.1 * unit);
         let input = self.layout_inputs.entry(h).or_default();
-        let changed =
-            input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
-        input.width = w;
-        input.height = ht;
+        let changed = input.width.bits() != crate::layout::Len::Script(w).bits()
+            || input.height.bits() != crate::layout::Len::Script(ht).bits();
+        input.width = crate::layout::Len::Script(w);
+        input.height = crate::layout::Len::Script(ht);
         // The model-ready size write invalidates the frame (`0x76ce70`).
         self.invalidate_frame(h, changed);
         if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
@@ -131,14 +157,18 @@ impl Model {
         }
     }
 
-    /// The host's facts for `path`; on a miss the path is queued, once, for the host to load.
+    /// The host's facts for `path`; on a miss the path is queued, once per key, for the host to
+    /// load.
     pub(crate) fn model_facts_for(&mut self, path: &str) -> Option<Arc<ModelFileFacts>> {
         let key = model_key(path);
         match self.model_facts.get(&key) {
             Some(facts) => Some(facts.clone()),
             None => {
-                if !self.model_facts_wanted.contains(&key) {
-                    self.model_facts_wanted.push(key);
+                if !self.model_facts_wanted.iter().any(|w| w.key == key) {
+                    self.model_facts_wanted.push(ModelWanted {
+                        key,
+                        path: path.to_string(),
+                    });
                 }
                 None
             }
@@ -297,32 +327,6 @@ fn parse_set_light(a: &[Value]) -> SetLight {
     SetLight::Set(light)
 }
 
-/// A string argument as `lua_isstring` gates it: a string or a number (tags 3 and 4), the number
-/// rendered as decimal text.
-fn string_arg(v: &Value) -> Option<std::borrow::Cow<'_, str>> {
-    match v {
-        Value::String(s) => s
-            .to_str()
-            .ok()
-            .map(|t| std::borrow::Cow::Owned(t.to_string())),
-        Value::Number(n) => Some(std::borrow::Cow::Owned(n.to_string())),
-        Value::Integer(i) => Some(std::borrow::Cow::Owned(i.to_string())),
-        _ => None,
-    }
-}
-
-/// The client's `Usage:` error, naming the receiver by `GetName()` or `<unnamed>` (`0x84c7f0`).
-fn usage(lua: &Lua, this: &Table, call: &str) -> mlua::Error {
-    let name = this
-        .get::<mlua::Function>("GetName")
-        .and_then(|f| f.call::<Option<String>>(this.clone()))
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "<unnamed>".to_string());
-    let _ = lua;
-    mlua::Error::runtime(format!("Usage: {name}:{call}"))
-}
-
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
@@ -338,9 +342,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetModel",
         lua.create_function(|lua, (this, path): (Table, Value)| {
-            let path = string_arg(&path)
-                .ok_or_else(|| usage(lua, &this, "SetModel(\"file\")"))?
-                .to_string();
+            // `lua_isstring` then `lua_tostring` (`0x76d9dc`, `0x76d9ec`).
+            let path = optional_string(lua, &path)
+                .ok_or_else(|| usage(lua, &this, "SetModel(\"file\")"))?;
             // A pane of this kind, or the error.
             with_model(lua, &this, |_| ())?;
             let h = frame_handle_of(lua, &this)?;
@@ -414,7 +418,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     // `SetCamera(n)` (`0x76e0e0` → `0x76cec0`) picks a camera by raw table index, not through
     // `cameraLookup`; past the table it installs the NULL (orthographic) camera, and until the
-    // facts arrive the pane draws nothing.
+    // facts arrive the pane draws nothing. `PlayerModel` adds no `SetCamera` (`0x84f1fc`), so a
+    // character pane's copy takes this one, until its next build installs the pane's own.
     m.set(
         "SetCamera",
         lua.create_function(|lua, (this, c): (Table, Value)| {
@@ -557,10 +562,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "ReplaceIconTexture",
         lua.create_function(|lua, (this, path): (Table, Value)| {
-            let Some(path) = string_arg(&path) else {
+            // `lua_isstring` then `lua_tostring` (`0x76edfc`, `0x76ee0d`).
+            let Some(path) = optional_string(lua, &path) else {
                 return Err(usage(lua, &this, "ReplaceIconTexture(\"texture\")"));
             };
-            let path = path.to_string();
             with_model(lua, &this, |m| {
                 if m.path.is_some() {
                     m.icon = Some(path);
@@ -586,9 +591,9 @@ pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
         "SetUnit",
         lua.create_function(|lua, (this, unit): (Table, Value)| {
             with_model(lua, &this, |_| ())?;
-            let token = string_arg(&unit)
-                .ok_or_else(|| mlua::Error::runtime(SET_UNIT_USAGE))?
-                .to_string();
+            // `lua_isstring` then `lua_tostring` (`0x505dfc`, `0x505e20`).
+            let token =
+                optional_string(lua, &unit).ok_or_else(|| mlua::Error::runtime(SET_UNIT_USAGE))?;
             let h = frame_handle_of(lua, &this)?;
             let guid = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -703,6 +708,7 @@ impl crate::script::UiScript {
                     pending: c.pending(),
                     copy: c.copy,
                     file: m.path.is_some(),
+                    camera: c.view_camera(),
                     facing: m.facing,
                     light: m.light,
                     fog: m.scene_fog(),
@@ -794,7 +800,7 @@ impl crate::script::UiScript {
         let facts = Arc::new(facts);
         let mut model = self.model_mut();
         model.model_facts.insert(key.clone(), facts.clone());
-        model.model_facts_wanted.retain(|k| *k != key);
+        model.model_facts_wanted.retain(|w| w.key != key);
         // The panes holding this file: the waiters the reference links on its streaming drain
         // (`0x71d640`).
         let handles: Vec<_> = model
@@ -834,9 +840,9 @@ impl crate::script::UiScript {
         }
     }
 
-    /// Drain the model files panes named with no facts yet, as [`crate::widget::model_key`]s; the
-    /// host loads each once and answers through [`Self::set_model_facts`].
-    pub fn model_facts_wanted(&mut self) -> Vec<String> {
+    /// Drain the model files panes named with no facts yet; the host loads each once and answers
+    /// through [`Self::set_model_facts`].
+    pub fn model_facts_wanted(&mut self) -> Vec<ModelWanted> {
         std::mem::take(&mut self.model_mut().model_facts_wanted)
     }
 
@@ -897,11 +903,22 @@ pub struct CharacterPaneFrame {
     pub copy: Option<crate::widget::PaneCopy>,
     /// A file `SetModel` put at `+0x318` since the last copy: the pane draws that, not a copy.
     pub file: bool,
+    /// The camera the copy draws through (`+0x31c`).
+    pub camera: crate::widget::CopyCamera,
     /// The facing, the root's yaw (`+0x39c`).
     pub facing: f32,
     /// The pane's light and the fog its scene draws with.
     pub light: ModelLight,
     pub fog: Option<crate::widget::ModelFog>,
+}
+
+/// A model file a pane named whose facts the host has yet to load. `key` ([`model_key`]) is only
+/// the match key, `.mdx`, `.mdl` and `.m2` spellings alike; `path` is the pane's own, as given to
+/// `SetModel` or `file=`, which the host opens through the cache's extension rule (`0x706a50`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelWanted {
+    pub key: String,
+    pub path: String,
 }
 
 /// One row of [`UiScript::visible_model_panes`].

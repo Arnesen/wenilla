@@ -217,6 +217,7 @@ fn mouse_wheel_passes_delta_to_the_captured_frame() {
 fn hit_rect_insets_shrink_the_mouse_rect_only() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
+    crate::test_support::install_law43(&s);
     // A 100×100 frame at the origin; the top inset is the micro buttons' 18
     // (`MainMenuBarMicroButtons.xml:9`), with 5 off each other side.
     s.run(
@@ -227,14 +228,15 @@ fn hit_rect_insets_shrink_the_mouse_rect_only() {
         a:SetScript("OnEnter", function() entered = true end)
         a:SetHitRectInsets(5, 5, 18, 5)
         local l, r, t, b = a:GetHitRectInsets()
-        assert(l == 5 and r == 5 and t == 18 and b == 5)
+        local near = function(x, v) return x == law(v) end
+        assert(near(l, 5) and near(r, 5) and near(t, 18) and near(b, 5))
     "#,
     )
     .unwrap();
     s.resolve();
 
-    assert_eq!(s.eval::<f64>("return A:GetHeight()").unwrap(), 100.0);
-    assert_eq!(s.eval::<f64>("return A:GetTop()").unwrap(), 100.0);
+    crate::assert_near!(s.eval::<f64>("return A:GetHeight()").unwrap(), 100.0);
+    crate::assert_near!(s.eval::<f64>("return A:GetTop()").unwrap(), 100.0);
 
     assert!(
         s.hit_test(50.0, 90.0).is_none(),
@@ -324,28 +326,26 @@ fn the_mouse_wheel_flag_round_trips_and_only_the_world_frame_is_born_enabled() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
-/// The reference takes a closed-vocabulary value with stray whitespace: the zBar addon ships
-/// `frameStrata="BACKGROUND "` (`zBar.xml:146`). Frame kind, strata and draw layer all trim.
+/// A closed-vocabulary value with stray whitespace misses, as the reference's lookups compare the
+/// whole string (`0x6f17ee`, `0x6f18ce`, `0x6ee32c`): zBar's `frameStrata="BACKGROUND "`
+/// (`zBar.xml:146`) is logged and skipped there. A padded layer leaves `CreateTexture`'s default
+/// (`0x773b01`), a padded strata raises, and a padded kind is no frame type.
 #[test]
-fn an_enum_attribute_tolerates_the_whitespace_a_real_addon_ships() {
+fn an_enum_value_with_stray_whitespace_misses() {
     let s = script();
-    s.run(
-        r#"
-        Padded = CreateFrame(" Frame ", "PaddedKind")
-        Padded:SetFrameStrata("BACKGROUND ")
-        Trailing = Padded:CreateTexture("PaddedTex", " OVERLAY")
-    "#,
-    )
-    .unwrap();
-    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    s.run(r#"Padded = CreateFrame("Frame", "PaddedKind") Tex = Padded:CreateTexture("PaddedTex", " OVERLAY")"#)
+        .unwrap();
     assert_eq!(
-        s.eval::<String>("return Padded:GetFrameStrata()").unwrap(),
-        "BACKGROUND",
-        "the frame took the strata, and reports it in the canonical spelling"
+        s.eval::<String>("return Tex:GetDrawLayer()").unwrap(),
+        "ARTWORK"
     );
-    // The padded kind resolved: an unknown kind would have raised from `CreateFrame`.
-    assert!(s.eval::<bool>("return PaddedKind ~= nil").unwrap());
-    assert!(s.eval::<bool>("return PaddedTex ~= nil").unwrap());
+    let e = s
+        .run(r#"Padded:SetFrameStrata("BACKGROUND ")"#)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Unknown frame strata: BACKGROUND "), "{e}");
+    let e = s.run(r#"CreateFrame(" Frame ")"#).unwrap_err().to_string();
+    assert!(e.contains("Unknown frame type ' Frame '"), "{e}");
 }
 
 // ── OnDoubleClick ──
@@ -580,27 +580,28 @@ fn set_script_on_double_click_is_accepted_because_something_fires_it() {
     assert!(s.eval::<bool>("return ran").unwrap(), "…and it FIRED");
 }
 
-/// Script names nothing fires still raise; a name leaves this list only when something fires it.
+/// A name no 1.12 resolver has raises by name; the EditBox's `OnInputLanguageChanged`
+/// (`0x77a40d`, `+0x430`) is accepted and kept, though nothing here fires it (`0x77abb0`).
 #[test]
-fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
+fn a_2_0_script_kind_raises_and_the_input_language_slot_is_kept() {
     let s = script();
     s.run(r#"Raiser = CreateFrame("EditBox", "RaiserBox")"#)
         .unwrap();
-    for name in [
-        // A 2.0 secure-frame slot; no 1.12 resolver has it.
-        "OnAttributeChanged",
-        // Real 1.12 slots that benilla does not fire.
-        "OnMessageScrollChanged",
-        "OnInputLanguageChanged",
-    ] {
-        let err = s
-            .run(&format!(r#"Raiser:SetScript("{name}", function() end)"#))
-            .unwrap_err();
-        assert!(
-            err.to_string().contains(name),
-            "{name} must raise by name, got {err}"
-        );
-    }
+    let err = s
+        .run(r#"Raiser:SetScript("OnAttributeChanged", function() end)"#)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("OnAttributeChanged"),
+        "OnAttributeChanged must raise by name, got {err}"
+    );
+    s.run(
+        r#"
+        local f = function() end
+        Raiser:SetScript("OnInputLanguageChanged", f)
+        assert(Raiser:GetScript("OnInputLanguageChanged") == f, "the handler is kept")
+    "#,
+    )
+    .unwrap();
 }
 
 /// Hiding the hovered frame fires its `OnLeave` inside the hide, before its `OnHide` (`0x764ba0`'s

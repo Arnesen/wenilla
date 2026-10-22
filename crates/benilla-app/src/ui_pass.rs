@@ -14,6 +14,7 @@
 //! and material state, one `Mesh2d` draw each. A run never spans a quad of another state, so the
 //! total order holds and interleaved textures pay one draw per switch.
 
+use benilla_ui::script::BlendMode;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::CameraOutputMode;
@@ -62,8 +63,8 @@ impl UvRect {
     }
 }
 
-/// One resolved screen-space quad, the pass's whole input. `texture`, the flags from `additive`
-/// to `uv_clamp`, and `mask` are material state: a quad differing in any of them starts a new run.
+/// One resolved screen-space quad, the pass's whole input. `texture`, the fields from `blend` to
+/// `uv_clamp`, and `mask` are material state: a quad differing in any of them starts a new run.
 #[derive(Clone, PartialEq)]
 pub(crate) struct UiQuad {
     /// Screen pixels, y-down, anchor-resolved.
@@ -79,8 +80,11 @@ pub(crate) struct UiQuad {
     /// corner and interpolated across the quad: a texture's `<Gradient>`, whose four colours the
     /// reference submits with a vertex stride of 4 (`0x77304d`).
     pub corner_colors: Option<[[f32; 4]; 4]>,
-    /// WoW `ADD` blend (EGxBlend 3, `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`) instead of straight alpha.
-    pub additive: bool,
+    /// The EGxBlend the quad draws with, `SetBlendMode`'s five (`systems/gx/renderstate.md`):
+    /// `DISABLE` and `ALPHAKEY` blend nothing, the second with the alpha test at 224/255
+    /// (`0x85ad20[1]`); `BLEND` is `SrcAlpha/InvSrcAlpha`, `ADD` `SrcAlpha/One` and `MOD`
+    /// `DestColor/Zero` (`0x80a1fc`, `0x80a228`). A producer passes the mode the submit draws with.
+    pub blend: BlendMode,
     /// Mask to the inscribed circle: the live unit portrait.
     pub circular: bool,
     /// Draw the texel's luminance (`Texture:SetDesaturated(1)`), folded in gamma bytes before the
@@ -123,6 +127,9 @@ pub(crate) struct UiQuadMask {
     pub texture: Handle<Image>,
     /// The span it covers, in [`UiQuad::rect`]'s y-down logical px; it samples 0..1 across it.
     pub rect: Rect,
+    /// The mask's stage modulates colour too, so the quad's colour is times the mask texel's RGB
+    /// (combine preset 1 on stage 1); off, only its alpha is coverage.
+    pub modulate_rgb: bool,
 }
 
 impl Default for UiQuad {
@@ -134,7 +141,7 @@ impl Default for UiQuad {
             uv: UvRect::FULL,
             color: [1.0, 1.0, 1.0, 1.0],
             corner_colors: None,
-            additive: false,
+            blend: BlendMode::Blend,
             circular: false,
             desaturated: false,
             premultiplied: false,
@@ -198,13 +205,15 @@ pub(crate) struct UiQuadBatch;
 #[derive(Resource)]
 struct UiWhiteTexture(Handle<Image>);
 
-/// The quad material: a texture and the [`UiQuad`] flags as uniforms, drawn through one
-/// premultiplied-alpha pipeline (`ui_quad.wgsl`). It holds no colour, so it is its identity key
-/// alone and a steady frame re-prepares none.
+/// The quad material: a texture and the [`UiQuad`] flags as uniforms, drawn through the
+/// premultiplied-alpha pipeline (`ui_quad.wgsl`), or the multiply one for `MOD` ([`UiQuadKey`]). It
+/// holds no colour, so it is its identity key alone and a steady frame re-prepares none.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(UiQuadKey)]
 pub(crate) struct UiQuadMaterial {
+    /// The EGxBlend, 0 to 4 ([`UiQuad::blend`]).
     #[uniform(0)]
-    additive: u32,
+    blend: u32,
     #[texture(1)]
     #[sampler(2)]
     texture: Option<Handle<Image>>,
@@ -225,9 +234,27 @@ pub(crate) struct UiQuadMaterial {
     #[texture(5)]
     #[sampler(6)]
     mask: Option<Handle<Image>>,
+    /// The mask texel's RGB multiplies the colour ([`UiQuadMask::modulate_rgb`]).
+    #[uniform(12)]
+    mask_rgb: u32,
     /// `(u_min, v_min, u_max, v_max)`; `min > max` on an axis disables that axis.
     #[uniform(11)]
     uv_clamp: Vec4,
+}
+
+/// The pipeline axis of [`UiQuadMaterial`]: `MOD` alone needs a blend state of its own, since the
+/// shader folds the other four modes into the one premultiplied state.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiQuadKey {
+    modulate: bool,
+}
+
+impl From<&UiQuadMaterial> for UiQuadKey {
+    fn from(m: &UiQuadMaterial) -> Self {
+        Self {
+            modulate: m.blend == BlendMode::Mod as u32,
+        }
+    }
 }
 
 /// A run's one colour for the batch entity's [`MeshTag`], unpacked by `ui_quad.wgsl`'s vertex
@@ -251,7 +278,8 @@ impl UiQuadMaterial {
     /// the forced blend of [`Self::specialize`] is a plain replace: the reference's blending off.
     pub(crate) fn interior_tile(texture: Handle<Image>, alpha_ref: f32) -> Self {
         Self {
-            additive: 0,
+            // The alpha-test arm returns before the blend modes.
+            blend: BlendMode::Blend as u32,
             texture: Some(texture),
             circular: 0,
             desaturate: 0,
@@ -260,6 +288,7 @@ impl UiQuadMaterial {
             // The alpha-test arm decodes explicitly, so the tile's SKIP_DECODE holds without this.
             gamma_texel: 0,
             mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
+            mask_rgb: 0,
             mask: None,
             uv_clamp: UV_CLAMP_OFF,
         }
@@ -291,21 +320,32 @@ impl Material2d for UiQuadMaterial {
     fn specialize(
         descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
         _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
-        _key: Material2dKey<Self>,
+        key: Material2dKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         if let Some(fragment) = descriptor.fragment.as_mut() {
             if let Some(target) = fragment.targets.first_mut().and_then(|t| t.as_mut()) {
-                // `(One, OneMinusSrcAlpha)` over gamma values: the shader emits `(rgb·a, a)` for
-                // BLEND and `(rgb·a, 0)` for ADD, so this one state is EGxBlend 2 and EGxBlend 3,
-                // clamped at each write like the reference's 8-bit backbuffer.
-                let premultiplied = BlendComponent {
-                    src_factor: BlendFactor::One,
-                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                let component = |src_factor, dst_factor| BlendComponent {
+                    src_factor,
+                    dst_factor,
                     operation: BlendOperation::Add,
                 };
-                target.blend = Some(BlendState {
-                    color: premultiplied,
-                    alpha: premultiplied,
+                target.blend = Some(if key.bind_group_data.modulate {
+                    // EGxBlend 4, `DestColor/Zero`: the shader emits the tinted texel, so the
+                    // target is multiplied by it; its alpha stays.
+                    BlendState {
+                        color: component(BlendFactor::Dst, BlendFactor::Zero),
+                        alpha: component(BlendFactor::Zero, BlendFactor::One),
+                    }
+                } else {
+                    // `(One, OneMinusSrcAlpha)` over gamma values: the shader emits `(rgb·a, a)`
+                    // for BLEND, `(rgb·a, 0)` for ADD and `(rgb, 1)` for DISABLE and a passing
+                    // ALPHAKEY texel, so this one state is EGxBlend 0 to 3, clamped at each write
+                    // like the reference's 8-bit backbuffer.
+                    let premultiplied = component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha);
+                    BlendState {
+                        color: premultiplied,
+                        alpha: premultiplied,
+                    }
                 });
             }
         }
@@ -486,7 +526,7 @@ fn clip_quad(
 /// One run: contiguous quads, in `z_key` order, sharing a texture and every material flag.
 struct Run {
     texture: Handle<Image>,
-    additive: bool,
+    blend: BlendMode,
     circular: bool,
     desaturated: bool,
     premultiplied: bool,
@@ -505,7 +545,7 @@ impl Run {
     fn new(texture: Handle<Image>, q: &UiQuad) -> Self {
         Self {
             texture,
-            additive: q.additive,
+            blend: q.blend,
             circular: q.circular,
             desaturated: q.desaturated,
             premultiplied: q.premultiplied,
@@ -690,7 +730,7 @@ impl StoredRun {
 /// A material's full identity, floats by their bits so byte-equal materials share one entry.
 type MatKey = (
     AssetId<Image>,
-    bool,
+    BlendMode,
     bool,
     bool,
     bool,
@@ -699,6 +739,7 @@ type MatKey = (
     Option<AssetId<Image>>,
     [u32; 4],
     [u32; 4],
+    bool,
 );
 
 /// The [`UiQuadMaterial::uv_clamp`] that clamps neither axis: `min > max` turns an axis off.
@@ -919,7 +960,7 @@ fn rebuild_ui_mesh(
         let texture = q.texture.clone().unwrap_or_else(|| white.0.clone());
         let same_run = runs.last().is_some_and(|r| {
             (r.texture == texture || one_texture_probe())
-                && r.additive == q.additive
+                && r.blend == q.blend
                 && r.circular == q.circular
                 && r.desaturated == q.desaturated
                 && r.premultiplied == q.premultiplied
@@ -982,6 +1023,7 @@ fn rebuild_ui_mesh(
             ),
             None => (Vec4::new(0.0, 0.0, -1.0, -1.0), None),
         };
+        let mask_rgb = run.mask.as_ref().is_some_and(|m| m.modulate_rgb);
         if *UI_PROBE && run.mask.is_some() {
             info!(
                 "ui probe: masked run {i}: mask_rect={mask_rect:?} scale={scale} tex={:?}",
@@ -992,7 +1034,7 @@ fn rebuild_ui_mesh(
         let uv_clamp = run.uv_clamp.map_or(UV_CLAMP_OFF, Vec4::from_array);
         let key: MatKey = (
             run.texture.id(),
-            run.additive,
+            run.blend,
             run.circular,
             run.desaturated,
             run.premultiplied,
@@ -1001,6 +1043,7 @@ fn rebuild_ui_mesh(
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
             uv_clamp.to_array().map(f32::to_bits),
+            mask_rgb,
         );
         // The per-slot skip gate: a rebuild covers the whole stream, but a slot whose run matches
         // its pooled mesh in full is not rewritten. A one-colour run stores white vertices and
@@ -1032,7 +1075,7 @@ fn rebuild_ui_mesh(
             .entry(key)
             .or_insert_with(|| {
                 materials.add(UiQuadMaterial {
-                    additive: u32::from(run.additive),
+                    blend: run.blend as u32,
                     texture: Some(run.texture.clone()),
                     circular: u32::from(run.circular),
                     desaturate: u32::from(run.desaturated),
@@ -1041,6 +1084,7 @@ fn rebuild_ui_mesh(
                     gamma_texel: u32::from(run.gamma_texel),
                     mask_rect,
                     mask: mask.clone(),
+                    mask_rgb: u32::from(mask_rgb),
                     uv_clamp,
                 })
             })
@@ -1429,6 +1473,145 @@ mod tests {
             flags,
             vec![0, 1],
             "one material greys and one does not — the uniform the shader branches on"
+        );
+    }
+
+    /// A minimap tile's mask modulates colour as well as alpha (stage 1 at combine preset 1,
+    /// `0x4eae83`), so the mask's RGB reaches the material as its own uniform: a tile and the
+    /// interior blit under one mask cannot share a run.
+    #[test]
+    fn a_colour_modulating_mask_splits_the_run_and_lands_on_the_material() {
+        let mut app = rebuild_app();
+        let texture: Handle<Image> =
+            bevy::asset::uuid_handle!("d0000000-0000-4000-8000-0000000000c1");
+        let mask = |modulate_rgb| UiQuadMask {
+            texture: texture.clone(),
+            rect: Rect::new(0.0, 0.0, 128.0, 64.0),
+            modulate_rgb,
+        };
+        let mut quads = app.world_mut().resource_mut::<UiQuads>();
+        quads.quads.push(UiQuad {
+            rect: Rect::new(0.0, 0.0, 64.0, 64.0),
+            z_key: 1,
+            mask: Some(mask(true)),
+            ..default()
+        });
+        quads.quads.push(UiQuad {
+            rect: Rect::new(64.0, 0.0, 128.0, 64.0),
+            z_key: 2,
+            mask: Some(mask(false)),
+            ..default()
+        });
+        quads.dirty = true;
+        app.update();
+        let mut flags: Vec<u32> = app
+            .world_mut()
+            .resource::<Assets<UiQuadMaterial>>()
+            .iter()
+            .filter(|(_, m)| m.mask.is_some())
+            .map(|(_, m)| m.mask_rgb)
+            .collect();
+        flags.sort_unstable();
+        assert_eq!(
+            flags,
+            vec![0, 1],
+            "one masked run modulates colour, one does not"
+        );
+    }
+
+    /// Each texture mode reaches the pass as the reference sets it: `DISABLE`, `ALPHAKEY`,
+    /// `BLEND` and `ADD` share the premultiplied pipeline and differ by the mode uniform the shader
+    /// branches on, and `MOD` keys its own `DestColor/Zero` pipeline (`0x80a1fc[4] = 9`,
+    /// `0x80a228[4] = 1`).
+    #[test]
+    fn each_blend_mode_splits_the_run_and_mod_keys_the_multiply_pipeline() {
+        use bevy::render::render_resource::{
+            ColorTargetState, ColorWrites, FragmentState, RenderPipelineDescriptor,
+        };
+        let mut app = rebuild_app();
+        let mut quads = app.world_mut().resource_mut::<UiQuads>();
+        for (i, blend) in [
+            BlendMode::Disable,
+            BlendMode::AlphaKey,
+            BlendMode::Add,
+            BlendMode::Mod,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let x = 64.0 * (i as f32 + 1.0);
+            quads.quads.push(UiQuad {
+                rect: Rect::new(x, 0.0, x + 64.0, 64.0),
+                z_key: i as u128 + 1,
+                blend,
+                ..default()
+            });
+        }
+        quads.dirty = true;
+        app.update();
+        assert_eq!(batches(&mut app), 5, "a run per mode");
+        let mut modes: Vec<(u32, bool)> = app
+            .world_mut()
+            .resource::<Assets<UiQuadMaterial>>()
+            .iter()
+            .map(|(_, m)| (m.blend, UiQuadKey::from(m).modulate))
+            .collect();
+        modes.sort_unstable();
+        assert_eq!(
+            modes,
+            vec![(0, false), (1, false), (2, false), (3, false), (4, true)],
+            "the EGxBlend as the uniform, and MOD alone on the multiply key"
+        );
+
+        let blend_of = |modulate: bool| {
+            let mut descriptor = RenderPipelineDescriptor {
+                fragment: Some(FragmentState {
+                    targets: vec![Some(ColorTargetState {
+                        format: TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                    ..default()
+                }),
+                ..default()
+            };
+            let layout = tile_quad_mesh()
+                .get_mesh_vertex_buffer_layout(&mut bevy::mesh::MeshVertexBufferLayouts::default());
+            UiQuadMaterial::specialize(
+                &mut descriptor,
+                &layout,
+                Material2dKey {
+                    mesh_key: bevy::sprite_render::Mesh2dPipelineKey::empty(),
+                    bind_group_data: UiQuadKey { modulate },
+                },
+            )
+            .unwrap();
+            descriptor.fragment.unwrap().targets[0]
+                .clone()
+                .unwrap()
+                .blend
+                .unwrap()
+        };
+        let component = |src_factor, dst_factor| BlendComponent {
+            src_factor,
+            dst_factor,
+            operation: BlendOperation::Add,
+        };
+        assert_eq!(
+            blend_of(true),
+            BlendState {
+                color: component(BlendFactor::Dst, BlendFactor::Zero),
+                alpha: component(BlendFactor::Zero, BlendFactor::One),
+            },
+            "MOD multiplies the target"
+        );
+        let premultiplied = component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(
+            blend_of(false),
+            BlendState {
+                color: premultiplied,
+                alpha: premultiplied,
+            }
         );
     }
 

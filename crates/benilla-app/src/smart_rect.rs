@@ -73,9 +73,7 @@ impl SmartBucket {
     fn solve(&self, input: Rect, viewport: Vec2) -> Rect {
         let (seed, flags) = clamp_to_bands(input, viewport);
         let region = region_index(flags);
-        // `0x509dd0`. A degenerate size saturates, but never overlaps, so adopts at once.
-        let bound = ((viewport.x / input.width()).trunc() as i64 + 1)
-            .saturating_mul((viewport.y / input.height()).trunc() as i64 + 1);
+        let bound = search_bound(input, viewport);
         let mut queue = VecDeque::from([seed]);
         for _ in 0..bound {
             let Some(node) = queue.pop_front() else {
@@ -95,6 +93,24 @@ impl SmartBucket {
         }
         input
     }
+}
+
+/// The search bound (`0x509dd0`): `(_ftol(viewport.x / width) + 1) * (_ftol(viewport.y / height) + 1)`
+/// in 32-bit registers (`inc`, `imul`, no overflow check), which `0x5097a0` compares unsigned
+/// (`jae` at `0x509839`). The divisor is the rect's two edges subtracted unrounded (`fsub`, then
+/// `fdivr` on the x87 stack at 53 bits), so the quotient is an `f64` of the `f32` inputs. A
+/// zero-width rect or a 0x0 viewport makes a quotient infinite or NaN, which `_ftol` turns into 0
+/// (the integer indefinite's low dword), so that factor is 1.
+fn search_bound(input: Rect, viewport: Vec2) -> u32 {
+    let across = benilla_ui::script::ftol(
+        f64::from(viewport.x) / (f64::from(input.max.x) - f64::from(input.min.x)),
+    )
+    .wrapping_add(1);
+    let down = benilla_ui::script::ftol(
+        f64::from(viewport.y) / (f64::from(input.max.y) - f64::from(input.min.y)),
+    )
+    .wrapping_add(1);
+    across.wrapping_mul(down) as u32
 }
 
 /// The on-screen clamp (`0x509e20`), physical bottom, top, left, right, so an oversize rect pins
@@ -269,6 +285,31 @@ mod tests {
                 got.min.y
             );
         }
+    }
+
+    /// `0x509dd0`: a zero-width rect or a 0x0 viewport divides to infinity or NaN, which `_ftol`
+    /// reads as 0, so that factor is 1 and nothing overflows or panics.
+    #[test]
+    fn a_degenerate_rect_or_viewport_bounds_the_search_as_the_reference_does() {
+        let plate = Rect::new(100.0, 100.0, 140.0, 120.0);
+        assert_eq!(search_bound(plate, VP), (25 + 1) * (38 + 1));
+        let flat = Rect::new(510.0, 385.0, 510.0, 395.0);
+        assert_eq!(search_bound(flat, VP), 77);
+        assert_eq!(search_bound(plate, Vec2::ZERO), 1);
+        assert_eq!(search_bound(Rect::new(1.0, 1.0, 1.0, 1.0), Vec2::ZERO), 1);
+        let mut b = SmartBucket::default();
+        seat(&mut b, Rect::new(500.0, 380.0, 540.0, 400.0));
+        let _ = b.resolve(flat, VP);
+        let _ = b.resolve(flat, Vec2::ZERO);
+        let _ = b.resolve(plate, Vec2::ZERO);
+    }
+
+    /// The quotient runs at 53 bits (`0x509df5`, `0x509e05`): 1024 / 6.4f32 is 159.99999762 there,
+    /// so the factor is 160, where an `f32` division rounds it to 160.0 and gives 161.
+    #[test]
+    fn the_bound_divides_at_double_precision() {
+        let rect = Rect::new(0.0, 0.0, 6.4, 1.0);
+        assert_eq!(search_bound(rect, Vec2::new(1024.0, 1.0)), 160 * 2);
     }
 
     #[test]

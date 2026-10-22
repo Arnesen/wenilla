@@ -22,10 +22,14 @@ const FACTION_GROUP: &str = "DBFilesClient\\FactionGroup.dbc";
 const CHR_RACES: &str = "DBFilesClient\\ChrRaces.dbc";
 
 /// One `FactionTemplate.dbc` row: the fields the reaction comparator reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FactionTemplate {
     /// The row's `Faction.dbc` id, what another template's `enemies`/`friends` lists name.
     pub faction: u32,
+    /// Column 2, `Flags` (`row+0x8`): bit `0x1000` makes the template's units hostile to a
+    /// contested player (`0x6065be`), vmangos `FACTION_TEMPLATE_FLAG_ATTACK_PVP_ACTIVE_PLAYERS`
+    /// (`DBCEnums.h:81`).
+    pub flags: u32,
     /// The faction-group bits this template belongs to (Player/Alliance/Horde/Monster).
     pub group_mask: u32,
     pub friend_group_mask: u32,
@@ -255,6 +259,27 @@ impl FactionCatalog {
         }
     }
 
+    /// This catalog with one `Faction.dbc` row's reputation identity: list slot `rep_index`, and
+    /// `base` for the races in `race_mask`, whatever the class. Fixture constructor for tests.
+    pub fn with_reputation(
+        mut self,
+        faction_id: u32,
+        rep_index: i32,
+        race_mask: u32,
+        base: i32,
+    ) -> Self {
+        let info = FactionInfo {
+            rep_index,
+            team: 0,
+            race_masks: [race_mask, 0, 0, 0],
+            class_masks: [0; 4],
+            base: [base, 0, 0, 0],
+            flags: [0; 4],
+        };
+        self.factions.insert(faction_id, info);
+        self
+    }
+
     /// The template row for a `UNIT_FIELD_FACTIONTEMPLATE` id.
     pub fn template(&self, id: u32) -> Option<&FactionTemplate> {
         self.templates.get(&id)
@@ -423,6 +448,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
                 id,
                 FactionTemplate {
                     faction: at(1),
+                    flags: at(2),
                     group_mask: at(3),
                     friend_group_mask: at(4),
                     enemy_group_mask: at(5),
@@ -525,11 +551,7 @@ mod tests {
     fn tpl(faction: u32) -> FactionTemplate {
         FactionTemplate {
             faction,
-            group_mask: 0,
-            friend_group_mask: 0,
-            enemy_group_mask: 0,
-            enemies: [0; 4],
-            friends: [0; 4],
+            ..Default::default()
         }
     }
 

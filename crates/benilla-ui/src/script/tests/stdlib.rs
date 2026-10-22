@@ -402,10 +402,8 @@ fn time_is_epoch_seconds_and_date_formats_them() {
         ("%I:%M %p", "01:46 AM"),
         ("%j", "252"),
         ("%w", "0"),
-        ("%c", "Sun Sep  9 01:46:40 2001"),
         ("100%%", "100%"),
-        // An unknown specifier is emitted verbatim rather than swallowed.
-        ("%Q", "%Q"),
+        ("!%H", "01"),
     ] {
         let got: String = s
             .eval(&format!(r#"return date("{fmt}", 1000000000)"#))
@@ -423,6 +421,118 @@ fn time_is_epoch_seconds_and_date_formats_them() {
     // A leap day, the civil conversion's edge case.
     let leap: String = s.eval(r#"return date("%Y-%m-%d %A", 951782400)"#).unwrap();
     assert_eq!(leap, "2000-02-29 Tuesday");
+}
+
+/// `date` formats with the client's MSVC `strftime` (`0x4134e3`) in the C locale (`0x8323a0`):
+/// `%x` `M/d/yy` and `%X` `H:mm:ss`, zero-padded all the same (`0x4138e2`), `%c` both, `#` the
+/// long date and unpadded numbers, `%U`/`%W` weeks, `%z`/`%Z` the zone's name, and an unknown
+/// specifier writes nothing. An empty or 256-byte answer raises, a negative time answers nil.
+#[test]
+fn date_formats_as_msvcs_strftime() {
+    let s = script();
+    let date = |args: &str| -> String {
+        s.eval::<String>(&format!("return date({args})"))
+            .unwrap_or_else(|e| format!("error: {e}"))
+    };
+    // 1_000_000_000 is Sunday 2001-09-09 01:46:40, the next day a Monday.
+    for (args, want) in [
+        (r#""%c", 1000000000"#, "09/09/01 01:46:40"),
+        (r#""%x", 1000000000"#, "09/09/01"),
+        (r#""%X", 1000000000"#, "01:46:40"),
+        (
+            r#""%#c", 1000000000"#,
+            "Sunday, September 09, 2001 01:46:40",
+        ),
+        (r#""%#x", 1000000000"#, "Sunday, September 09, 2001"),
+        (r#""%#d.%#m %#H:%#M %#j", 1000000000"#, "9.9 1:46 252"),
+        (r#""%U %W", 1000086400"#, "36 37"),
+        (r#""%U %W", 1000000000"#, "36 36"),
+        (
+            r#""%Z|%z", 1000000000"#,
+            "Coordinated Universal Time|Coordinated Universal Time",
+        ),
+        (r#""a%Qb%hc%ed", 1000000000"#, "abcd"),
+        (r#""*tx", 1000000000"#, "*tx"),
+        (r#""%Y", "1000000000""#, "2001"),
+        (r#"20010909, 1000000000"#, "20010909"),
+    ] {
+        assert_eq!(date(args), want, "date({args})");
+    }
+    assert_eq!(date(r#"string.rep("a", 255), 0"#).len(), 255);
+    for args in [
+        r#""""#,
+        r#""%Q""#,
+        r#"string.rep("a", 256)"#,
+        r#"string.rep("%c", 16)"#,
+    ] {
+        assert!(
+            date(args).ends_with("`date' format too long"),
+            "date({args}): {}",
+            date(args)
+        );
+    }
+    let nil: bool = s
+        .eval(r#"return date("%c", -5) == nil and date("*t", -2) == nil"#)
+        .unwrap();
+    assert!(nil, "a negative time is no date");
+}
+
+/// `time` with a table converts it (`0x7035a0`): its fields through `lua_gettable` and `__ftol`,
+/// `hour` 12 by default, `day`, `month` and `year` required, then the runtime's `_mktime`
+/// (`0x74066b`): the month folded into the year, years 1969 to 2039 only, a 32-bit overflow or a
+/// negative time nil.
+#[test]
+fn time_converts_a_date_table() {
+    let s = script();
+    let time = |t: &str| -> String {
+        s.eval::<mlua::Value>(&format!("return time({t})"))
+            .map(|v| match v {
+                mlua::Value::Nil => "nil".to_string(),
+                v => format!("{}", v.as_f64().unwrap()),
+            })
+            .unwrap_or_else(|e| format!("error: {e}"))
+    };
+    for (t, want) in [
+        (
+            "{year=2001, month=9, day=9, hour=1, min=46, sec=40}",
+            "1000000000",
+        ),
+        ("{year=1970, month=1, day=1}", "43200"),
+        ("{year=2000, month=14, day=1, hour=0}", "980985600"),
+        ("{year=2001, month=2, day=1, hour=0}", "980985600"),
+        (
+            "{year=2001, month=9, day=9, hour=1, min=46, sec=40, isdst=true}",
+            "1000000000",
+        ),
+        (
+            r#"{year="2001", month="9", day=9.9, hour=1.5, min=46, sec=40}"#,
+            "1000000000",
+        ),
+        (
+            "setmetatable({}, {__index = {year=2001, month=9, day=9, hour=1, min=46, sec=40}})",
+            "1000000000",
+        ),
+        (
+            "{year=2038, month=1, day=19, hour=3, min=14, sec=7}",
+            "2147483647",
+        ),
+        ("{year=2038, month=1, day=19, hour=3, min=14, sec=8}", "nil"),
+        ("{year=1969, month=12, day=31, hour=0}", "nil"),
+        ("{year=1968, month=12, day=31}", "nil"),
+        ("{year=2040, month=1, day=1}", "nil"),
+        ("{year=2001, month=-11, day=1, hour=0}", "946684800"),
+    ] {
+        assert_eq!(time(t), want, "time({t})");
+    }
+    assert!(time("{year=2001, month=9}").ends_with("field `day' missing in date table"));
+    assert!(time("{day=1}").ends_with("field `month' missing in date table"));
+    assert!(time("5").ends_with("bad argument #1 to `time' (table expected, got number)"));
+    let round: bool = s
+        .eval(
+            "local t = date('*t', 1000000000) return time(t) == 1000000000 and time(nil) == time()",
+        )
+        .unwrap();
+    assert!(round, "a date table converts back");
 }
 
 // ── RunScript ──
@@ -530,4 +640,66 @@ fn setglobal_sets_the_top_value_as_the_clients() {
         )
         .unwrap();
     assert_eq!(got, ["SgOne", "6", "6"]);
+}
+
+/// `debugprofilestop` (`0x702860`) reads its counter live at the call, so a span inside one frame
+/// measures; ours answers it in milliseconds (the `Deviation:` at `install_profile`).
+#[test]
+fn debugprofilestop_measures_within_a_frame_in_milliseconds() {
+    let s = script();
+    s.run("debugprofilestart()").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let ms = s.eval::<f64>("return debugprofilestop()").unwrap();
+    assert!(
+        (20.0..2000.0).contains(&ms),
+        "no tick between, 20 ms slept: {ms}"
+    );
+    let busy = s
+        .eval::<f64>(
+            "debugprofilestart() local x = 0 for i = 1, 100000 do x = x + i end \
+             return debugprofilestop()",
+        )
+        .unwrap();
+    assert!(
+        busy > 0.0,
+        "a span of work inside one call answers above 0: {busy}"
+    );
+}
+
+/// `lua_getinfo`'s `n` falls back on a global holding the function when the calling instruction
+/// names nothing (`0x6fbe11` → `travglobals` `0x6fbf90`), as for a function a C function called:
+/// `debugstack` and `luaL_argerror` both print that global's name.
+#[test]
+fn a_frame_no_instruction_names_takes_a_globals_name() {
+    let s = script();
+    let stack = s
+        .eval::<String>(
+            r#"
+            function NamedOnlyByAGlobal() return debugstack(1, 1, 0) end
+            local _, stack = pcall(NamedOnlyByAGlobal)
+            return stack
+            "#,
+        )
+        .unwrap();
+    assert!(
+        stack.contains("in function `NamedOnlyByAGlobal'"),
+        "{stack}"
+    );
+    let e = s
+        .eval::<String>("local _, e = pcall(strfind) return e")
+        .unwrap();
+    assert!(e.contains("bad argument #1 to `strfind'"), "{e}");
+    let named = s
+        .eval::<String>(
+            r#"
+            local function unnamed() return debugstack(1, 1, 0) end
+            local _, stack = pcall(unnamed)
+            return stack
+            "#,
+        )
+        .unwrap();
+    assert!(
+        named.contains("in function <"),
+        "no global holds it: {named}"
+    );
 }

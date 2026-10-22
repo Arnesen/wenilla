@@ -129,22 +129,33 @@ impl super::UiScript {
     }
 }
 
-/// The guild-name check `BuyGuildCharter` and `RenamePetition` share (`0x4f5160`), which maps the
-/// checker `0x6c9b70`'s code to a message and accepts only `0xd`; `Err` carries the GlobalStrings
-/// key to show, and no packet is built. Only codes 0 (empty), 10 (an edge space) and 11
-/// (consecutive spaces) are built; the rest pass, as the checker's rules are untraced and the
-/// server re-checks every name (`ObjectMgr::IsValidCharterName`).
-pub fn validate_guild_name(name: &str) -> Result<(), &'static str> {
-    if name.is_empty() {
-        return Err("ERR_GUILD_ENTER_NAME");
-    }
-    if name.starts_with(' ') || name.ends_with(' ') {
-        return Err("ERR_GUILD_NAME_INVALID_SPACE");
-    }
-    if name.contains("  ") {
-        return Err("ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES");
-    }
-    Ok(())
+/// The guild-name check `BuyGuildCharter` and `RenamePetition` share (`0x4f5160`): the checker
+/// `0x6c9b70` at the client's locale (`[0xc0e080]`, `0x4f5162`), its accept (`0xd`) passing and
+/// every other code mapped to a message by the table at `0x4f51ec`; `Err` carries the
+/// GlobalStrings key to show, and no packet is built.
+pub fn validate_guild_name(
+    name: &str,
+    lists: &dyn super::NameLists,
+    charsets: super::NameCharsets,
+) -> Result<(), &'static str> {
+    use super::char_name as code;
+    Err(match code::check_guild_name(name, lists, charsets) {
+        code::SUCCESS => return Ok(()),
+        code::NO_NAME => "ERR_GUILD_ENTER_NAME",
+        code::TOO_SHORT => "ERR_GUILD_NAME_TOO_SHORT",
+        code::MIXED_LANGUAGES => "ERR_GUILD_NAME_MIXED_LANGUAGES",
+        code::PROFANE => "ERR_GUILD_NAME_PROFANE",
+        code::RESERVED => "ERR_GUILD_NAME_RESERVED",
+        code::INVALID_SPACE => "ERR_GUILD_NAME_INVALID_SPACE",
+        code::CONSECUTIVE_SPACES => "ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES",
+        // 2, 3, 7, 8, 9 and 12 (`0x4f51df`).
+        _ => "ERR_GUILD_NAME_INVALID",
+    })
+}
+
+/// [`validate_guild_name`] against the lists and the charsets this VM's client holds.
+fn check(model: &Model, name: &str) -> Result<(), &'static str> {
+    validate_guild_name(name, &*model.glue.name_lists(), model.name_charsets())
 }
 
 /// A cached name as a string, an uncached one as nil.
@@ -202,7 +213,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // argument raises, through mlua's coercion as through the reference's `Usage:`.
     g.set(
         "GetPetitionNameInfo",
-        lua.create_function(|lua, index: i64| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetPetitionNameInfo(index)` (`0x84cf94`, `0x4f453a`).
+            let index = i64::from(binding_abi::number_arg(
+                lua,
+                index,
+                "Usage: GetPetitionNameInfo(index)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(name) = usize::try_from(index)
                 .ok()
@@ -260,10 +277,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // 1, not 0 (`0x4f46d9`, `0x4f4749 Put8`); the server skips it.
     g.set(
         "SignPetition",
-        lua.create_function(|lua, n: Option<f64>| {
+        lua.create_function(|lua, n: Value| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // `trunc` toward zero, then narrowed the way the `Put8` does.
-            let byte = n.map_or(1i8, |v| v.trunc() as i64 as i8);
+            // `lua_isnumber` (`0x4f46e2`) gates the read, a miss keeping the 1 (`0x4f46d9`); `_ftol`
+            // truncates toward zero, then the `Put8` keeps the low byte.
+            let byte = crate::script::binding_abi::is_number(lua, n)
+                .map_or(1i8, |v| crate::script::binding_abi::ftol(v) as i8);
             model.petition_requests.push(PetitionRequest::Sign(byte));
             Ok(())
         })?,
@@ -275,7 +294,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "BuyGuildCharter",
         lua.create_function(|lua, name: String| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            match validate_guild_name(&name) {
+            match check(&model, &name) {
                 Ok(()) => {
                     model.petition_requests.push(PetitionRequest::Buy(name));
                     Ok(Value::Integer(1))
@@ -297,7 +316,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "RenamePetition",
         lua.create_function(|lua, name: String| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            match validate_guild_name(&name) {
+            match check(&model, &name) {
                 Ok(()) => model.petition_requests.push(PetitionRequest::Rename(name)),
                 Err(key) => model
                     .petition_requests
@@ -520,30 +539,110 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_validator_refuses_only_what_it_can_prove() {
-        assert_eq!(validate_guild_name(""), Err("ERR_GUILD_ENTER_NAME"));
-        assert_eq!(
-            validate_guild_name(" Legacy"),
-            Err("ERR_GUILD_NAME_INVALID_SPACE")
-        );
-        assert_eq!(
-            validate_guild_name("Legacy "),
-            Err("ERR_GUILD_NAME_INVALID_SPACE")
-        );
-        assert_eq!(
-            validate_guild_name("Legacy  of Steel"),
-            Err("ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES")
-        );
-        // Passed through: the length, profanity and script rules live in the untraced `0x6c9b70`,
-        // and the server re-checks them.
-        for ok in ["Legacy of Steel", "A", "Ab", "Éclair", "x y z"] {
-            assert_eq!(
-                validate_guild_name(ok),
-                Ok(()),
-                "{ok:?} passes to the server"
-            );
+    /// One word per list, so a test can tell which lists a check searches.
+    struct ThreeWords;
+
+    impl crate::script::NameLists for ThreeWords {
+        fn names_profanity(&self, name: &str) -> bool {
+            name.to_ascii_lowercase().contains("darn")
         }
+
+        fn chat_profanity(&self, name: &str) -> bool {
+            name.to_ascii_lowercase().contains("heck")
+        }
+
+        fn names_reserved(&self, name: &str) -> bool {
+            name.to_ascii_lowercase().contains("thrall")
+        }
+    }
+
+    /// What `BuyGuildCharter(name)` queues: the buy, or the refusal's key.
+    fn bought(s: &mut UiScript, name: &str) -> PetitionRequest {
+        s.run(&format!("BuyGuildCharter({name:?})")).unwrap();
+        let mut requests = s.take_petition_requests();
+        assert_eq!(requests.len(), 1, "{name:?}: {requests:?}");
+        requests.remove(0)
+    }
+
+    /// The guild name check `0x6c9b70`: the validator `0x6c96c0` at the client's locale
+    /// (`[0xc0e080]`, `0x4f5162`) with a space as its one extra character (`0x6c9b88`), the
+    /// NamesProfanity and ChatProfanity lists on and NamesReserved off (`0x6c9b76`-`0x6c9b7a`), and
+    /// a cap of 24 units (`0x6c9b9e`, code 2); `0x4f51ec` maps each code to its message.
+    #[test]
+    fn the_guild_name_check_is_the_clients() {
+        let mut s = UiScript::new().unwrap();
+        s.set_glue_name_lists(std::rc::Rc::new(ThreeWords));
+        let refused = |key: &'static str| PetitionRequest::NameRefused(key);
+        for (name, want) in [
+            ("", refused("ERR_GUILD_ENTER_NAME")),
+            ("A", refused("ERR_GUILD_NAME_TOO_SHORT")),
+            // A space is the one extra (`0x6c9851`): never first, never last, never doubled.
+            (" ", refused("ERR_GUILD_NAME_INVALID_SPACE")),
+            (" Legacy", refused("ERR_GUILD_NAME_INVALID_SPACE")),
+            ("Legacy ", refused("ERR_GUILD_NAME_INVALID_SPACE")),
+            ("A ", refused("ERR_GUILD_NAME_INVALID_SPACE")),
+            (
+                "Legacy  of",
+                refused("ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES"),
+            ),
+            ("Ab  ", refused("ERR_GUILD_NAME_NAME_CONSECUTIVE_SPACES")),
+            // Outside the charset (3), the apostrophe included, and three alike (9) are the
+            // generic message (`0x4f51df`).
+            ("Legacy1", refused("ERR_GUILD_NAME_INVALID")),
+            ("Leg'acy", refused("ERR_GUILD_NAME_INVALID")),
+            ("Legacy_", refused("ERR_GUILD_NAME_INVALID")),
+            ("Leeegacy", refused("ERR_GUILD_NAME_INVALID")),
+            ("BaAa", refused("ERR_GUILD_NAME_INVALID")),
+            ("李小龙", refused("ERR_GUILD_NAME_INVALID")),
+            // 25 units is over the cap (2); 24 is not.
+            (
+                "Abcdefghij Abcdefghij Abc",
+                refused("ERR_GUILD_NAME_INVALID"),
+            ),
+            (
+                "Abcdefghij Abcdefghij Ab",
+                PetitionRequest::Buy("Abcdefghij Abcdefghij Ab".into()),
+            ),
+            // A match in either profanity list is RESERVED (`0x6c9a51`, then `0x4f51b8`); the
+            // reserved list is not searched.
+            ("Darnwood", refused("ERR_GUILD_NAME_RESERVED")),
+            ("Heckwood", refused("ERR_GUILD_NAME_RESERVED")),
+            ("Thrallwood", PetitionRequest::Buy("Thrallwood".into())),
+            (
+                "Legacy of Steel",
+                PetitionRequest::Buy("Legacy of Steel".into()),
+            ),
+            ("Éclair", PetitionRequest::Buy("Éclair".into())),
+            ("Ab", PetitionRequest::Buy("Ab".into())),
+        ] {
+            assert_eq!(bought(&mut s, name), want, "{name:?}");
+        }
+        // The walk decides by position: a digit before a doubled space is INVALID.
+        assert_eq!(bought(&mut s, "A1  b"), refused("ERR_GUILD_NAME_INVALID"));
+        // RenamePetition runs the same check (`0x4f4987`).
+        s.run("RenamePetition('A')").unwrap();
+        assert_eq!(
+            s.take_petition_requests(),
+            vec![refused("ERR_GUILD_NAME_TOO_SHORT")]
+        );
+    }
+
+    /// The charsets are the client's locale's (`0x6c9a70`): a zhCN client takes ideographs, and
+    /// the cap stays 24 whatever the charset.
+    #[test]
+    fn the_guild_name_check_reads_the_locales_charsets() {
+        let mut s = UiScript::new().unwrap();
+        s.set_locale(4);
+        assert_eq!(
+            bought(&mut s, "李小龙"),
+            PetitionRequest::Buy("李小龙".into())
+        );
+        assert_eq!(
+            bought(&mut s, "李a"),
+            PetitionRequest::NameRefused("ERR_GUILD_NAME_INVALID")
+        );
+        let long: String = ["一", "二", "三", "四", "五", "六", "七", "八"].concat();
+        assert_eq!(bought(&mut s, &long), PetitionRequest::Buy(long.clone()));
     }
 
     /// `GetTabardInfo()` pushes nothing (`0x4f535f`) and queues the designer's opener.

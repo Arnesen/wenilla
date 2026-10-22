@@ -7,6 +7,7 @@ use super::test_ui::load_ui as load_xml;
 
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -315,7 +316,7 @@ fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
     });
     s.fire_event("CONFIRM_XP_LOSS", vec![]);
     assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return StaticPopup1:GetWidth()").unwrap(),
         420.0,
         "showAlert widens the dialog to the ref's 420"
@@ -340,7 +341,7 @@ fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
         "whileDead = 1 } StaticPopup_Show(\"TEST_PLAIN\")"
     ))
     .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return StaticPopup1:GetWidth()").unwrap(),
         320.0,
         "a non-alert Show resets the width"

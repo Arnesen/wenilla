@@ -4,7 +4,8 @@
 //! The list builder (`0x4c56e0`) walks the whole DBC and admits a row when:
 //! 1. `MapID` is -1 or the scope's map;
 //! 2. `AreaID` is 0 or the scope's area;
-//! 3. `Type` is 0, or 1 while [`defense_channel_joined`]; 2 (battleground scoreboard columns)
+//! 3. `Type` is 0, or 1 while the zone-defense flag is set
+//!    ([`crate::ui_chat::ChannelState::defense_channel`]); 2 (battleground scoreboard columns)
 //!    never.
 //!
 //! The scope is the server's last `SMSG_INIT_WORLD_STATES`, not the player's position: the
@@ -13,11 +14,10 @@
 //! The world-PvP rows (Eastern Plaguelands, Silithus) are all `Type` 1, so leaving the zone
 //! defense channel hides them; the map icons, gated on the states themselves, stay.
 
-use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
 
-use benilla_formats::{chat_channel_flags as chan, WorldStateUiCatalog, WorldStateUiRow};
-use benilla_ui::script::{UiScript, WorldStateUiView};
+use benilla_formats::{WorldStateUiCatalog, WorldStateUiRow};
+use benilla_ui::script::WorldStateUiView;
 
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
@@ -40,16 +40,6 @@ fn load_world_state_ui(mut commands: Commands, assets: Option<Res<WorldAssets>>)
         }
         Err(e) => warn!("world-state UI: WorldStateUI.dbc failed — no readout: {e:#}"),
     }
-}
-
-/// The `Type == 1` gate: a joined channel whose `ChatChannels.dbc` flags carry both `ZONE_DEP` and
-/// `DEFENSE` (`0x49bd9b`, `0x49bda2`), which is row 22 alone. A custom channel resolves to no row.
-fn defense_channel_joined(channels: &crate::ui_chat::ChannelState) -> bool {
-    const REQUIRED: u32 = chan::ZONE_DEP | chan::DEFENSE;
-    channels
-        .iter_names()
-        .filter_map(|name| channels.channels.row_for_name(name))
-        .any(|row| row.flags & REQUIRED == REQUIRED)
 }
 
 /// Expands a `WorldStateUI` label (`0x508560`), a different expander from [`crate::npc_text`]'s,
@@ -148,29 +138,25 @@ fn resolve(row: &WorldStateUiRow, states: &WorldStates) -> WorldStateUiView {
 }
 
 /// Pushes the readout when a world-state packet arrives or the defense-channel flag flips, the
-/// reference's two rebuild triggers.
+/// reference's two rebuild triggers (`0x49bdc7`-`0x49bdcf`).
 fn feed_world_state_ui(
-    script: Option<NonSendMut<UiScript>>,
+    mut vm: crate::script_calls::VmWith<Res<'static, crate::ui_chat::ChannelState>>,
     catalog: Option<Res<WorldStateUiRes>>,
     states: Res<WorldStates>,
-    channels: Res<crate::ui_chat::ChannelState>,
-    mut defense_channel: Local<bool>,
     mut last: Local<crate::ui_script::VmMemo<Option<(u64, bool)>>>,
 ) {
-    // Only when the roster moves; a first run sees it changed.
-    if channels.is_changed() {
-        *defense_channel = defense_channel_joined(&channels);
-    }
-    let defense_channel = *defense_channel;
-    let (Some(mut script), Some(catalog)) = (script, catalog) else {
-        return;
-    };
-    let key = (states.generation(), defense_channel);
-    if *last.get(&script) == Some(key) {
-        return;
-    }
-    *last.get(&script) = Some(key);
-    script.set_world_state_ui(build(&catalog.0, &states, defense_channel));
+    let defense_channel = vm.own().defense_channel;
+    vm.run(|script| {
+        let (Some(script), Some(catalog)) = (script, catalog) else {
+            return;
+        };
+        let key = (states.generation(), defense_channel);
+        if *last.get(script) == Some(key) {
+            return;
+        }
+        *last.get(script) = Some(key);
+        script.set_world_state_ui(build(&catalog.0, &states, defense_channel));
+    })
 }
 
 pub(crate) struct WorldStateUiPlugin;
@@ -185,6 +171,7 @@ impl Plugin for WorldStateUiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_formats::chat_channel_flags as chan;
 
     fn row(map_id: u32, area_id: u32, ui_type: u32) -> WorldStateUiRow {
         WorldStateUiRow {
@@ -407,6 +394,105 @@ mod tests {
             REQUIRED,
             "the realm-wide defense channel carries DEFENSE without ZONE_DEP and must NOT qualify"
         );
+    }
+
+    /// `0x49bd50` counts a record with a number (`0x49bd72`) in state 0 (`0x49bd7c`), and reads its
+    /// row through its `+0x94` id (`0x49bd83`): a pending or suspended LocalDefense, a freed record
+    /// and a custom channel of that name are none, and any name on row 22 is one.
+    #[test]
+    fn the_defense_gate_counts_a_confirmed_slot_by_its_row_id() {
+        use crate::ui_chat::edit::{ChannelSlot, SlotRecord, SlotState};
+        let joined = |slot: SlotRecord| crate::ui_chat::ChannelState {
+            joined: vec![slot],
+            channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+                benilla_formats::ChatChannelRow {
+                    id: 22,
+                    flags: 0x1_0003,
+                    pattern: "LocalDefense - %s".into(),
+                    shortcut: "LocalDefense".into(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let name = "LocalDefense - Elwynn Forest";
+        let suspended = ChannelSlot {
+            state: SlotState::Suspended,
+            ..ChannelSlot::confirmed(name, 22)
+        };
+        for (slot, want) in [
+            (ChannelSlot::confirmed(name, 22).into(), true),
+            (ChannelSlot::confirmed("Anything", 22).into(), true),
+            (ChannelSlot::pending(name, 22).into(), false),
+            (suspended.into(), false),
+            (ChannelSlot::confirmed(name, 0).into(), false),
+            (SlotRecord::Freed { id: 22 }, false),
+        ] {
+            let label = format!("{slot:?}");
+            let mut channels = joined(slot);
+            channels.recompute_defense_channel();
+            assert_eq!(channels.defense_channel, want, "{label}");
+        }
+    }
+
+    /// The flag `0x49bd50` stores (`0xb6e5dc`) moves only at a confirm (`0x49bbbf`) or a free
+    /// (`0x49bc41`): the walk's rename (state 2) and a pending join keep the defense rows up until
+    /// a notice confirms or frees a slot.
+    #[test]
+    fn the_defense_rows_hold_through_a_rename_until_a_confirm_or_a_free() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("a VM"));
+        let mut states = WorldStates::default();
+        states.init_scope(0, 139);
+        world.insert_resource(states);
+        world.insert_resource(WorldStateUiRes(WorldStateUiCatalog::from_rows(vec![(
+            1,
+            row(0, 139, 1),
+        )])));
+        let mut channels = crate::ui_chat::ChannelState {
+            channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
+                benilla_formats::ChatChannelRow {
+                    id: 22,
+                    flags: 0x1_0003,
+                    pattern: "LocalDefense - %s".into(),
+                    shortcut: "LocalDefense".into(),
+                },
+            ]),
+            zone_mask: Some(0),
+            ..Default::default()
+        };
+        let (east, west) = (
+            "LocalDefense - Eastern Plaguelands",
+            "LocalDefense - Western Plaguelands",
+        );
+        channels.claim_slot(east, 22);
+        channels.confirm_slot(east);
+        world.insert_resource(channels);
+        let shown = |world: &mut World| -> i64 {
+            world
+                .run_system_once(feed_world_state_ui)
+                .expect("the feed runs");
+            world
+                .non_send_resource::<benilla_ui::script::UiScript>()
+                .eval("return GetNumWorldStateUI()")
+                .expect("the count")
+        };
+        assert_eq!(shown(&mut world), 1);
+        world
+            .resource_mut::<crate::ui_chat::ChannelState>()
+            .rename_slot(east, west);
+        world
+            .resource_mut::<crate::ui_chat::ChannelState>()
+            .claim_slot("MyChan", 0);
+        assert_eq!(shown(&mut world), 1, "a rename and a pending join keep it");
+        world
+            .resource_mut::<crate::ui_chat::ChannelState>()
+            .confirm_slot(west);
+        assert_eq!(shown(&mut world), 1, "the confirm recomputes: still joined");
+        world
+            .resource_mut::<crate::ui_chat::ChannelState>()
+            .free_slot(west);
+        assert_eq!(shown(&mut world), 0, "the free recomputes");
     }
 
     /// An init clears the table.

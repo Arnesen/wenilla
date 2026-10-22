@@ -119,9 +119,11 @@ pub(super) struct Rig {
     pub(super) feed: Schedule,
 }
 
-/// A VM whose listener records every event the pet's lists fire into `SEEN`, in order.
+/// A VM whose listener records every event the pet's lists fire into `SEEN`, in order. No engine
+/// is behind it, so it keeps the calls its verbs make; the rig applies a press itself.
 pub(super) fn listening_vm() -> benilla_ui::script::UiScript {
-    let script = benilla_ui::script::UiScript::new().expect("a VM");
+    let mut script = benilla_ui::script::UiScript::new().expect("a VM");
+    script.keep_calls();
     listen(&script);
     script
 }
@@ -179,6 +181,7 @@ pub(super) fn rig(
     let mut feed = Schedule::default();
     feed.add_systems(
         (
+            super::drain::arm_owed_pet_gcds,
             crate::ui_pet_book::feed_pet_book,
             feed_pet_bar,
             fire_pet_cooldown_events,
@@ -215,6 +218,16 @@ impl Rig {
             .world_mut()
             .run_system_once(move |mut press: PetPress| press.press_slot(slot))
             .expect("the press applies as a one-shot system");
+    }
+
+    /// `CastPetAction(slot)` as the stock bar runs it, with the call host lent, so a press the bar
+    /// hands to the attempt casts through the ladder.
+    pub(super) fn cast_pet_action(&mut self, slot: u32) {
+        crate::script_calls::with_hosted_vm(self.app.world_mut(), |s| {
+            s.expect("a VM")
+                .run(&format!("CastPetAction({slot})"))
+                .expect("CastPetAction runs");
+        });
     }
 
     /// `PetAttack` and the other one-shot orders, as their slot's packed word, applied.
@@ -332,36 +345,371 @@ fn a_spell_without_a_gcd_pair_starts_none() {
     assert!(rig.frame().is_empty(), "no cooldown edge either");
 }
 
-/// `0x4bd35e`-`0x4bd365`: a possessed unit's press returns into the generic cast entry
-/// (`0x6e4b60`), which starts its own GCD at its send (`0x6e58fb`), so this arm starts none.
-#[test]
-fn a_possessed_units_press_starts_no_pet_gcd() {
-    let charmed = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+/// `PLAYER_FARSIGHT`, low word: the view `0x5ee5a0` reads (`0x5ee5e9`).
+const FARSIGHT: u16 = 712;
+
+/// The rig's player with its view on `guid`, as vmangos puts it on a unit it possesses.
+fn view_on(rig: &mut Rig, guid: u64) {
+    let world = rig.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(player_with(&[
+        (FARSIGHT, guid as u32),
+        (FARSIGHT + 1, (guid >> 32) as u32),
+    ]));
+}
+
+/// A unit the player mind-controls: charmed by us and possessed (`SpellAuras.cpp:2968-2969`).
+fn possessed() -> ObjectStore {
+    ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
         (CHARMEDBY, ME as u32),
         (CHARMEDBY + 1, 0),
         (FLAGS, crate::target::UNIT_FLAG_POSSESSED),
-    ]));
-    let mut rig = rig(vec![(CLAW, claw())], &[CLAW], Some(charmed));
-
-    rig.press(1);
-
-    assert!(rig.pet_list_untouched());
-    assert!(rig.frame().is_empty());
+    ]))
 }
 
-/// `0x4bd355`: `AttributesEx4 & 0x20` takes the same route out of the arm.
+/// The pet casts the commands sent carry, as `(caster, spell, target block)`.
+fn pet_casts(sent: &[ClientCommand]) -> Vec<(u64, u32, benilla_protocol::messages::UseItemTarget)> {
+    sent.iter()
+        .filter_map(|c| match c {
+            ClientCommand::PetCastSpell {
+                caster_guid,
+                spell_id,
+                target,
+            } => Some((*caster_guid, *spell_id, *target)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `0x4bd35e`-`0x4bd365`: the unit the player possesses, the one `0x5ee5a0` answers, has its spell
+/// press returned into the attempt with it as the caster (`0x4bd385`), whose send is
+/// `CMSG_PET_CAST_SPELL` with the unit's guid (`0x6e5808`-`0x6e582d`), not `CMSG_PET_ACTION`. The
+/// GCD is the send's (`0x6e58fb`), into the pet's list since the unit's charmer is the player
+/// (`0x6e58c2`-`0x6e58f3`), and the arm's own (`0x4bd36e`) never runs.
 #[test]
-fn a_client_targeted_spell_press_starts_no_pet_gcd() {
-    let ground = || SpellDisplay {
+fn a_possessed_units_press_casts_through_the_attempt_as_the_units_cast() {
+    let mut rig = rig(vec![(CLAW, claw())], &[CLAW], Some(possessed()));
+    view_on(&mut rig, PET);
+
+    rig.cast_pet_action(1);
+
+    let sent = rig.sent();
+    assert_eq!(pet_actions(&sent), 0, "no CMSG_PET_ACTION");
+    assert_eq!(
+        pet_casts(&sent),
+        [(
+            PET,
+            CLAW,
+            benilla_protocol::messages::UseItemTarget::SelfImplicit
+        )]
+    );
+    assert!(rig.player_list_untouched(), "the GCD is not the player's");
+    // The send's GCD reaches the pet's list before the bar's feed reads it, and sweeps the slot.
+    assert_eq!(
+        rig.frame(),
+        [
+            "ACTIONBAR_UPDATE_COOLDOWN",
+            "SPELL_UPDATE_COOLDOWN",
+            "PET_BAR_UPDATE_COOLDOWN"
+        ]
+    );
+    assert_eq!(rig.pet_reads(CLAW, &claw()).1, 1500);
+    let (_, duration, enable) = rig.cooldown(1);
+    assert!((duration - 1.5).abs() < 1e-9 && enable == 1, "{duration}");
+}
+
+/// `0x5ee5a0` answers the far-sight unit alone (`0x5ee5e9`): with no view held the same unit's
+/// press is the bar's order, which starts the GCD itself (`0x4bd36e`) and sends. A view held on
+/// another unit leaves no bar to press (`0x4bcfbf`-`0x4bd012`).
+#[test]
+fn a_possessed_unit_the_view_is_not_on_presses_as_a_pet_order() {
+    let mut rig = rig(vec![(CLAW, claw())], &[CLAW], Some(possessed()));
+    view_on(&mut rig, 0);
+
+    rig.cast_pet_action(1);
+
+    let sent = rig.sent();
+    assert_eq!(pet_actions(&sent), 1);
+    assert!(pet_casts(&sent).is_empty());
+    assert_eq!(rig.pet_reads(CLAW, &claw()).1, 1500, "the arm's own GCD");
+}
+
+/// `0x4bd355`: a spell with `AttributesEx4 & 0x20` takes the same route on an ordinary pet's bar.
+/// With nothing selected its unit word (`Targets 0x2`) raises the targeting cursor (`0x6e50c8`),
+/// which keeps the pet as the record's caster, so the bind `SpellTargetUnit` makes (`0x6e5b10`)
+/// sends `CMSG_PET_CAST_SPELL` (`0x6e54f0`) at that unit, with the send's GCD the pet's.
+#[test]
+fn a_client_targeted_spell_press_casts_through_the_cursor_as_the_pets_cast() {
+    let aimed = || SpellDisplay {
         attributes_ex4: 0x20,
+        targets: 0x2,
         ..claw()
     };
-    let mut rig = rig(vec![(CLAW, ground())], &[CLAW], Some(owned_pet()));
+    let mut rig = rig(vec![(CLAW, aimed())], &[CLAW], Some(owned_pet()));
 
-    rig.press(1);
+    crate::script_calls::with_hosted_vm(rig.app.world_mut(), |s| {
+        let s = s.expect("a VM");
+        let up: bool = s
+            .eval("CastPetAction(1) return SpellIsTargeting() == 1")
+            .unwrap();
+        assert!(up, "the cursor is up for the pet's spell");
+        s.run(r#"SpellTargetUnit("player")"#).unwrap();
+    });
 
-    assert!(rig.pet_list_untouched());
-    assert!(rig.frame().is_empty());
+    let sent = rig.sent();
+    assert_eq!(pet_actions(&sent), 0);
+    assert_eq!(
+        pet_casts(&sent),
+        [(
+            PET,
+            CLAW,
+            benilla_protocol::messages::UseItemTarget::Unit(ME)
+        )]
+    );
+    assert!(rig.player_list_untouched());
+    rig.frame();
+    assert_eq!(rig.pet_reads(CLAW, &claw()).1, 1500, "the send's GCD");
+}
+
+/// A spell with the attack-start bits (`0x6e5200`, here `AttributesEx 0x200`) that the possessed
+/// unit casts goes through TryCast's attack pick with that unit as the actor, while it is not
+/// attacking (`0x6e4ee8`-`0x6e4f13`: `0x60ecb0`, then `0x612df0(unit, &guid)`). With nothing
+/// selected and no enemy near, the pick refuses with `ERR_NO_ATTACK_TARGET` and nothing is cast.
+/// At a foe it keeps, the cast goes out, and TryCast's tail (`0x6e51c9`-`0x6e51de`) calls
+/// `StartAttack 0x6131a0` on the unit, which for the pet bar's unit (`0x613200`) presses the
+/// bar's Attack at that foe (`0x4bd630`, word `0x07000002`): its `CMSG_PET_ACTION`, and the attack
+/// latch a possessed unit raises (`0x4bd42e`).
+#[test]
+fn a_possessed_units_combat_spell_picks_its_target_and_orders_the_attack() {
+    const FOE: u64 = 0x77;
+    const STRIKE: u32 = 3010;
+    let strike = || SpellDisplay {
+        attributes_ex: 0x200,
+        targets: 0x2,
+        ..claw()
+    };
+    let unit = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (CHARMEDBY, ME as u32),
+        (CHARMEDBY + 1, 0),
+        (FLAGS, crate::target::UNIT_FLAG_POSSESSED),
+        (22, 100),
+        (28, 100),
+    ]));
+    let mut rig = rig(vec![(STRIKE, strike())], &[STRIKE], Some(unit));
+    // The view on the unit, and a player-controlled actor, whose `CanAttack` arm needs no faction
+    // table.
+    let world = rig.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(player_with(&[
+        (FARSIGHT, PET as u32),
+        (FARSIGHT + 1, 0),
+        (FLAGS, 0x8),
+    ]));
+    // The call fires its refusals as it returns (`UI_ERROR_MESSAGE`).
+    let script = world.non_send_resource::<benilla_ui::script::UiScript>();
+    script
+        .run(
+            r#"
+            ERR_NO_ATTACK_TARGET = "There is nothing to attack."
+            ERRORS = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UI_ERROR_MESSAGE")
+            f:SetScript("OnEvent", function() table.insert(ERRORS, arg1) end)
+        "#,
+        )
+        .expect("the error listener registers");
+    let errors = |rig: &mut Rig| {
+        let script = rig
+            .app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let seen = script.eval::<Vec<String>>("return ERRORS").unwrap();
+        script.run("ERRORS = {}").unwrap();
+        seen
+    };
+
+    rig.cast_pet_action(1);
+    assert!(pet_casts(&rig.sent()).is_empty(), "the pick refused");
+    assert_eq!(errors(&mut rig), ["There is nothing to attack."]);
+    assert!(
+        !rig.app
+            .world()
+            .resource::<crate::spell::SpellTargeting>()
+            .active(),
+        "the pick stops the attempt before its cursor"
+    );
+
+    let world = rig.app.world_mut();
+    let foe = world
+        .spawn((
+            Guid(FOE),
+            Transform::default(),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (22, 100),
+                (28, 100),
+            ])),
+        ))
+        .id();
+    world.resource_mut::<GuidIndex>().0.insert(FOE, foe);
+    *world.resource_mut::<crate::target::Selection>() = crate::target::Selection {
+        target: Some(foe),
+        guid: Some(FOE),
+        ..Default::default()
+    };
+
+    rig.cast_pet_action(1);
+    let sent = rig.sent();
+    let attack = PET_COMMAND_ATTACK | (u32::from(PET_ACT_COMMAND) << 24);
+    assert_eq!(
+        pet_casts(&sent),
+        [(
+            PET,
+            STRIKE,
+            benilla_protocol::messages::UseItemTarget::Unit(FOE)
+        )]
+    );
+    assert!(
+        matches!(
+            sent.last(),
+            Some(ClientCommand::PetAction { pet_guid: PET, packed, target_guid: FOE }) if *packed == attack
+        ),
+        "the Attack order follows the cast: {sent:?}"
+    );
+    assert!(
+        latched(&rig).2,
+        "a possessed unit's Attack raises the latch"
+    );
+    assert!(errors(&mut rig).is_empty());
+}
+
+/// TryCast's tail owes the attack at the guid the pick settled (`[ebx+0xc]`, `[ebx+0x10]` at
+/// `0x6e51d4`-`0x6e51de`), whatever the spell bound: a possessed unit's area melee spell (Crowd
+/// Pummel's shape, `AttributesEx 0x200` on implicit targets) binds no unit and still presses the
+/// bar's Attack at the foe.
+#[test]
+fn a_possessed_units_area_melee_spell_orders_the_attack_at_the_pick() {
+    const FOE: u64 = 0x77;
+    const PUMMEL: u32 = 10887;
+    let pummel = || SpellDisplay {
+        attributes_ex: 0x200,
+        targets: 0,
+        ..claw()
+    };
+    let unit = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (CHARMEDBY, ME as u32),
+        (CHARMEDBY + 1, 0),
+        (FLAGS, crate::target::UNIT_FLAG_POSSESSED),
+        (22, 100),
+        (28, 100),
+    ]));
+    let mut rig = rig(vec![(PUMMEL, pummel())], &[PUMMEL], Some(unit));
+    let world = rig.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(player_with(&[
+        (FARSIGHT, PET as u32),
+        (FARSIGHT + 1, 0),
+        (FLAGS, 0x8),
+    ]));
+    let foe = world
+        .spawn((
+            Guid(FOE),
+            Transform::default(),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (22, 100),
+                (28, 100),
+            ])),
+        ))
+        .id();
+    world.resource_mut::<GuidIndex>().0.insert(FOE, foe);
+    *world.resource_mut::<crate::target::Selection>() = crate::target::Selection {
+        target: Some(foe),
+        guid: Some(FOE),
+        ..Default::default()
+    };
+
+    rig.cast_pet_action(1);
+    let sent = rig.sent();
+    let attack = PET_COMMAND_ATTACK | (u32::from(PET_ACT_COMMAND) << 24);
+    assert_eq!(
+        pet_casts(&sent),
+        [(
+            PET,
+            PUMMEL,
+            benilla_protocol::messages::UseItemTarget::SelfImplicit
+        )]
+    );
+    assert!(
+        matches!(
+            sent.last(),
+            Some(ClientCommand::PetAction { pet_guid: PET, packed, target_guid: FOE }) if *packed == attack
+        ),
+        "the Attack order follows the cast: {sent:?}"
+    );
+}
+
+/// The cursor binds a unit caster's cast against that caster: `BindTarget` resolves the record's
+/// caster (`0x6e5b6d`-`0x6e5b89`, `0xceac50`) for its relations and its range test
+/// (`0x6e6059`-`0x6e6063` → `0x6e47b0`). A spell that excludes its caster (`AttributesEx
+/// 0x80000`) binds us for the pet, and a 5 yd spell is out of range at us from a pet 30 yd off.
+#[test]
+fn the_cursor_binds_a_unit_casters_spell_against_that_unit() {
+    const MEND: u32 = 3111;
+    const NEAR: u32 = 1;
+    // Client-targeted (`AttributesEx4 0x20`), a unit word, a 5 yd row.
+    let aimed = |attributes_ex| SpellDisplay {
+        attributes_ex4: 0x20,
+        attributes_ex,
+        targets: 0x2,
+        range_index: NEAR,
+        ..claw()
+    };
+    let bound_at_us = |spell: SpellDisplay, pet_at: Vec3| {
+        let mut rig = rig(
+            vec![(MEND, spell)],
+            &[MEND],
+            Some(owned_pet_with(&[(22, 100), (28, 100)])),
+        );
+        let world = rig.app.world_mut();
+        let pet = world.resource::<GuidIndex>().0[&PET];
+        world
+            .entity_mut(pet)
+            .insert(GlobalTransform::from_translation(pet_at));
+        world.resource_mut::<Spells>().ranges = benilla_formats::SpellRangeCatalog::from_rows(
+            [(
+                NEAR,
+                benilla_formats::SpellRange {
+                    min: 0.0,
+                    max: 5.0,
+                    flags: 0,
+                },
+            )]
+            .into(),
+        );
+        crate::script_calls::with_hosted_vm(rig.app.world_mut(), |s| {
+            let s = s.expect("a VM");
+            let up: bool = s
+                .eval("CastPetAction(1) return SpellIsTargeting() == 1")
+                .unwrap();
+            assert!(up, "the cursor is up for the pet's spell");
+            s.run(r#"SpellTargetUnit("player")"#).unwrap();
+        });
+        pet_casts(&rig.sent())
+    };
+    let at_us = [(
+        PET,
+        MEND,
+        benilla_protocol::messages::UseItemTarget::Unit(ME),
+    )];
+    assert_eq!(
+        bound_at_us(aimed(0x80000), Vec3::ZERO),
+        at_us,
+        "we are not the pet's spell's caster"
+    );
+    assert_eq!(
+        bound_at_us(aimed(0), Vec3::new(30.0, 0.0, 0.0)),
+        [],
+        "out of the pet's range"
+    );
 }
 
 /// `0x4bd24f`: a press on a running aura cancels it and returns before the arm.
@@ -633,15 +981,10 @@ fn a_pet_attack_with_the_cursor_up_casts_before_the_pet_acts() {
         0x0002,
     );
     rig.frame();
-    rig.app
-        .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
-        .run_binding("PetAttack()")
-        .expect("the key runs");
-    rig.app
-        .world_mut()
-        .run_system_once(crate::script_calls::apply_script_calls)
-        .expect("the calls apply as a one-shot system");
+    crate::script_calls::with_hosted_vm(rig.app.world_mut(), |s| {
+        s.expect("a VM").run_binding("PetAttack()")
+    })
+    .expect("the key runs");
 
     let sent = rig.sent();
     assert!(

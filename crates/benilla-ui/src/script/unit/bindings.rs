@@ -6,14 +6,12 @@
 use mlua::{Lua, Value};
 
 use super::super::binding_abi::flag;
-use super::super::calls::ScriptCall;
+use super::super::calls::{submit, ScriptCall};
 use super::super::protected::select_may_cast;
 use super::super::Model;
-use super::UnitState;
 use super::{
-    check_unit_token, classification_word, grey_band, level_reads_unknown, parse_unit_token,
-    pick_unit_token, unit_is_grey, unit_predicate, unknownobject, with_unit, PlayerRecord,
-    SelectionRequest, UnitBase, UnitTokenParse,
+    check_unit_token, classification_word, grey_band, level_is_hidden, unit_is_grey,
+    unit_predicate, unknownobject, with_unit, PlayerRecord, SelectionRequest,
 };
 
 /// The `"player"` fast path of `UnitName`, `UnitRace`, `UnitClass` and `UnitSex`, never
@@ -32,6 +30,17 @@ fn player_record_arm<T>(
     }
     let model = lua.app_data_ref::<Model>().expect("model app_data");
     Some(f(&model.player_record))
+}
+
+/// `SStrCmpI(a, b, 0x7fffffff) == 0` (`0x64a4c0` through `__strnicmp`, `0x414310`): `A` to `Z`
+/// fold, every other byte exact, and a NUL in either string ends the compare.
+fn c_str_eq_ignore_case(a: &str, b: &str) -> bool {
+    fn c_str(s: &str) -> &[u8] {
+        let bytes = s.as_bytes();
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        &bytes[..end]
+    }
+    c_str(a).eq_ignore_ascii_case(c_str(b))
 }
 
 /// The class ids `GetComboPoints` (`0x51a190`) accepts: it compares the class, `UNIT_FIELD_BYTES_0`
@@ -132,11 +141,21 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 };
                 return Ok((name, Value::Nil));
             }
-            let name = with_unit(lua, &token, None, |u| Some(u.name.clone()))?;
+            let name = with_unit(lua, &token, None, |u| {
+                Some((u.name.clone(), u.has_object, u.guid))
+            })?;
             let name = match name {
                 None => Value::Nil,
-                Some(Some(n)) => Value::String(lua.create_string(&n)?),
-                Some(None) => Value::String(unknownobject(lua)?),
+                Some((Some(n), _, _)) => Value::String(lua.create_string(&n)?),
+                Some((None, held, guid)) => {
+                    // A unit with no object reads the name cache by guid with a callback
+                    // (`0x5171eb`), which asks on the miss: the host sends it.
+                    if !held && guid != 0 {
+                        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                        model.unit_name_asks.insert(guid);
+                    }
+                    Value::String(unknownobject(lua)?)
+                }
             };
             Ok((name, Value::Nil))
         })?,
@@ -166,9 +185,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitLevel (`0x517fc0`): the raw level (a raw 0 stays 0), or -1 for a world boss or a hostile
-    // unit 10 or more levels above the player. The reference's attackable-decay override
-    // (`max(1, raw - round(min(b, 100) * 0.05))`, `b` an untraced byte not seen set) is not built.
+    // UnitLevel (`0x517fc0`): -1 for a world boss or a unit hostile to the player 10 or more levels
+    // above it, tested first, so a world boss at level 0 reads -1 ([`level_is_hidden`]); then a
+    // level of 0 or less as it is (`0x518092`); else, for a unit the drunk player can attack
+    // (`0x518096`-`0x5180b1`), the level its drunkenness lowers (`0x5180b3`-`0x5180ec`).
     g.set(
         "UnitLevel",
         lua.create_function(|lua, token: Value| {
@@ -182,13 +202,29 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(u) = token.as_ref().and_then(|t| model.unit(t)) else {
                 return Ok(0i64);
             };
-            Ok(if u.level == 0 {
-                0
-            } else if level_reads_unknown(u, model.player_req.level) {
-                -1
-            } else {
-                i64::from(u.level)
-            })
+            if level_is_hidden(u, model.player_req.level) {
+                return Ok(-1);
+            }
+            if u.level == 0 {
+                return Ok(0);
+            }
+            // The drunk leg needs the unit's object and the active player (`0x518096`).
+            let me = model.unit_guids.player;
+            let drunk = model.unit("player").map_or(0, |p| p.drunk);
+            let attackable = || {
+                model
+                    .unit_relations
+                    .as_deref()
+                    .and_then(|r| r.can_attack(me, u.guid))
+                    .unwrap_or(false)
+            };
+            Ok(i64::from(
+                if u.has_object && me != 0 && drunk != 0 && attackable() {
+                    super::unit_level_drunk_level(u.level, drunk)
+                } else {
+                    u.level
+                },
+            ))
         })?,
     )?;
 
@@ -201,71 +237,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitCanAttack (`0x516c50`) delegates to `CanAttack` (`0x606980`). The snapshot holds only
-    // whether the player can attack the unit, fed for `target`, `targettarget` and `npc`, and that
-    // answers both argument orders; the reverse direction stock FrameXML also asks
-    // (`TargetFrame.lua:147`) is not built.
-    g.set(
-        "UnitCanAttack",
-        lua.create_function(|lua, (a, b): (Value, Value)| {
-            // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let a = Some(crate::script::binding_abi::string_arg(
-                lua,
-                a,
-                r#"Usage: UnitCanAttack("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
-                lua,
-                b,
-                r#"Usage: UnitCanAttack("unit", "otherUnit")"#,
-            )?);
-            let token = pick_unit_token(&a, &b);
-            unit_predicate(lua, &token, |u| u.can_attack)
-        })?,
-    )?;
+    super::relations::register(lua, &["UnitCanAttack", "UnitCanAssist"])?;
 
-    // UnitCanAssist (`0x516bb0`) delegates to `CanAssist` (`0x6066f0`), the first unit `this`
-    // (`0x516c03`). Both tokens are `lua_isstring`-gated and both resolved (`0x515940`, which raises
-    // on an unknown one) before either is judged; nil when either names no unit. The snapshots hold
-    // `CanAssist` with the player on one side only: `can_assist` with the player as `this`, and
-    // `can_assist_player` with the unit as `this`. So the first unit being the player reads the
-    // second's `can_assist`, the second being the player reads the first's `can_assist_player`,
-    // and two units that are neither are not modelled and answer nil.
-    g.set(
-        "UnitCanAssist",
-        lua.create_function(|lua, (a, b): (Value, Value)| {
-            let a = Some(crate::script::binding_abi::string_arg(
-                lua,
-                a,
-                r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
-                lua,
-                b,
-                r#"Usage: UnitCanAssist("unit", "otherUnit")"#,
-            )?);
-            check_unit_token(&a)?;
-            check_unit_token(&b)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let named = |t: &Option<String>| t.as_ref().and_then(|t| model.unit(t));
-            let player_guid = model.unit("player").map_or(0, |p| p.guid);
-            let is_player = |t: &Option<String>, u: &UnitState| {
-                t.as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case("player"))
-                    || (u.guid != 0 && u.guid == player_guid)
-            };
-            let ok = match (named(&a), named(&b)) {
-                (Some(ua), Some(ub)) if is_player(&a, ua) => ub.can_assist,
-                (Some(ua), Some(ub)) if is_player(&b, ub) => ua.can_assist_player,
-                _ => false,
-            };
-            Ok(flag(ok))
-        })?,
-    )?;
-
-    // UnitIsTrivial (`0x519d70`): `0x5f0700`, false for a player (object type bit `0x10`), else
-    // true when the player's level is above the unit's by more than the grey band
-    // ([`unit_is_grey`]). The unit's raw level is read, as `UnitLevel`'s raw 0 is.
+    // UnitIsTrivial (`0x519d70`): `0x5f0700` on the token's object (`0x515940`; nil with none,
+    // `0x519da8`), false for a player (object type bit `0x10`), else true when the player's level
+    // is above the unit's by more than the grey band ([`unit_is_grey`]). The unit's raw level is
+    // read, as `UnitLevel`'s raw 0 is.
     g.set(
         "UnitIsTrivial",
         lua.create_function(|lua, token: Value| {
@@ -280,7 +257,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 .player_req
                 .level;
             unit_predicate(lua, &token, |u| {
-                !u.is_player && unit_is_grey(player_level, u.level)
+                u.has_object && !u.is_player && unit_is_grey(player_level, u.level)
             })
         })?,
     )?;
@@ -332,74 +309,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitReaction(unit, other) (`0x5167e0`): `0x6061e0(unit, other)` plus one (`0x51683e`), so
-    // 1-based, 5 for a unit toward itself, never 0; nil (`0x51685f`) only when a token names no
-    // unit. Our reaction 0 means "not fed" and also answers nil, where the reference answers a
-    // number. The snapshot holds the reaction toward the player, so `other` is checked, not read.
-    g.set(
-        "UnitReaction",
-        lua.create_function(|lua, (token, _other): (Value, Value)| {
-            // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let token = Some(crate::script::binding_abi::string_arg(
-                lua,
-                token,
-                r#"Usage: UnitReaction("unit", "otherUnit")"#,
-            )?);
-            let _other = Some(crate::script::binding_abi::string_arg(
-                lua,
-                _other,
-                r#"Usage: UnitReaction("unit", "otherUnit")"#,
-            )?);
-            let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(if r == 0 {
-                Value::Nil
-            } else {
-                Value::Integer(i64::from(r))
-            })
-        })?,
-    )?;
-
-    // UnitIsEnemy/UnitIsFriend (`0x516890`/`0x516930`) threshold the reaction `UnitReaction`
-    // reads: enemy at 1 or 2, friend at 5 and up, and an unfed 0 is neither. The snapshot holds the
-    // reaction toward the player, so the non-player argument names the unit.
-    g.set(
-        "UnitIsEnemy",
-        lua.create_function(|lua, (a, b): (Value, Value)| {
-            // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let a = Some(crate::script::binding_abi::string_arg(
-                lua,
-                a,
-                r#"Usage: UnitIsEnemy("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
-                lua,
-                b,
-                r#"Usage: UnitIsEnemy("unit", "otherUnit")"#,
-            )?);
-            let token = pick_unit_token(&a, &b);
-            let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(flag((1..=2).contains(&r)))
-        })?,
-    )?;
-    g.set(
-        "UnitIsFriend",
-        lua.create_function(|lua, (a, b): (Value, Value)| {
-            // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let a = Some(crate::script::binding_abi::string_arg(
-                lua,
-                a,
-                r#"Usage: UnitIsFriend("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
-                lua,
-                b,
-                r#"Usage: UnitIsFriend("unit", "otherUnit")"#,
-            )?);
-            let token = pick_unit_token(&a, &b);
-            let r = with_unit(lua, &token, 0u8, |u| u.reaction)?;
-            Ok(flag(r >= 5))
-        })?,
-    )?;
+    super::relations::register(lua, &["UnitReaction", "UnitIsEnemy", "UnitIsFriend"])?;
 
     // UnitIsCivilian(unit): killing the unit would be dishonorable, the predicate `0x612550`. It
     // shares `is_civilian_kill` with the tooltip's civilian line and `UnitPVPName`, so all agree.
@@ -450,35 +360,38 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitIsUnit(a, b): both units exist and are the same token or share a nonzero GUID.
+    // UnitIsUnit(a, b) (`0x516070`): two strings equal without regard to case answer 1 before
+    // either is resolved (`SStrCmpI`, `0x5160c4`; `0x5160cd`); otherwise both resolve
+    // (`0x5160e8`, `0x5160f4`) and a shared nonzero GUID answers 1 (`0x516100`), held or not.
     g.set(
         "UnitIsUnit",
         lua.create_function(|lua, (a, b): (Value, Value)| {
             // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let a = Some(crate::script::binding_abi::string_arg(
+            let a = crate::script::binding_abi::string_arg(
                 lua,
                 a,
                 r#"Usage: UnitIsUnit("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
+            )?;
+            let b = crate::script::binding_abi::string_arg(
                 lua,
                 b,
                 r#"Usage: UnitIsUnit("unit", "otherUnit")"#,
-            )?);
+            )?;
+            if c_str_eq_ignore_case(&a, &b) {
+                return Ok(flag(true));
+            }
+            let (a, b) = (Some(a), Some(b));
             // Both go through the resolver, so either one unrecognised raises.
             check_unit_token(&a)?;
             check_unit_token(&b)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let (Some(a), Some(b)) = (a, b) else {
-                return Ok(Value::Nil);
+            let guid = |t: &Option<String>| {
+                t.as_deref()
+                    .and_then(|t| model.unit(t))
+                    .map_or(0, |u| u.guid)
             };
-            let (Some(ua), Some(ub)) = (model.unit(&a), model.unit(&b)) else {
-                return Ok(Value::Nil);
-            };
-            if !ua.exists || !ub.exists {
-                return Ok(Value::Nil);
-            }
-            Ok(flag(a == b || (ua.guid != 0 && ua.guid == ub.guid)))
+            let (ga, gb) = (guid(&a), guid(&b));
+            Ok(flag(ga != 0 && ga == gb))
         })?,
     )?;
 
@@ -571,68 +484,27 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitInParty(unit): the grouped player or a party member, by token or by roster GUID.
+    // UnitInParty(unit) (`0x516290`): the token's guid (`0x515970`) is the player's or one of the
+    // four party slots' (`0x4e7f70`, `0x468550` and `0xbc6f48`), the tables the resolver itself
+    // reads. No object and no group are asked, so solo `UnitInParty("player")` is 1, and a token
+    // naming an out-of-view member is 1 however it spells them; nobody is guid 0, a miss. No
+    // `Usage:` gate; an unrecognised token raises in the resolver.
     g.set(
         "UnitInParty",
         lua.create_function(|lua, token: Option<String>| {
-            check_unit_token(&token)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(t) = token else {
-                return Ok(Value::Nil);
+            let guids = &model.unit_guids;
+            let guid = match token.as_deref() {
+                Some(t) => guids.guid_of(t)?.unwrap_or(0),
+                None => 0,
             };
-            let Some(u) = model.unit(&t) else {
-                return Ok(Value::Nil);
-            };
-            let grouped = !model.party.members.is_empty();
-            if !u.exists || !grouped {
-                return Ok(Value::Nil);
-            }
-            // A `partyN` token itself names a member; a chain off one (`party1target`) names
-            // whoever that member targets, which the guid arms below judge.
-            let party_slot = matches!(
-                parse_unit_token(&t),
-                UnitTokenParse::Unit {
-                    base: UnitBase::Party(_),
-                    hops: 0
-                }
-            );
-            let hit = party_slot
-                || t.eq_ignore_ascii_case("player")
-                || (u.guid != 0
-                    && (model.unit("player").is_some_and(|p| p.guid == u.guid)
-                        || model
-                            .party
-                            .members
-                            .iter()
-                            .any(|m| m.guid != 0 && m.guid == u.guid)));
-            Ok(flag(hit))
+            Ok(flag(
+                guid != 0 && (guid == guids.player || guids.party.contains(&guid)),
+            ))
         })?,
     )?;
 
-    // Deviation: UnitCanCooperate answers 1 for a friendly (5 and up) player, because the engine
-    // carries no faction templates; the reference resolves their cooperation masks. The verdict
-    // matches for the unit popup's invite and whisper gates.
-    g.set(
-        "UnitCanCooperate",
-        lua.create_function(|lua, (a, b): (Value, Value)| {
-            // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let a = Some(crate::script::binding_abi::string_arg(
-                lua,
-                a,
-                r#"Usage: UnitCanCooperate("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
-                lua,
-                b,
-                r#"Usage: UnitCanCooperate("unit", "otherUnit")"#,
-            )?);
-            let token = pick_unit_token(&a, &b);
-            let ok = with_unit(lua, &token, false, |u| {
-                u.exists && u.is_player && u.reaction >= 5
-            })?;
-            Ok(flag(ok))
-        })?,
-    )?;
+    super::relations::register(lua, &["UnitCanCooperate"])?;
 
     // GetRaidTargetIndex(unit): the mark, 1 to 8, or nil.
     g.set(
@@ -668,12 +540,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitIsPVP",
         lua.create_function(|lua, token: Value| {
-            let token = Some(crate::script::binding_abi::string_arg(
-                lua,
-                token,
-                r#"Usage: UnitIsPVP("unit")"#,
-            )?);
-            unit_predicate(lua, &token, |u| u.pvp)
+            let token =
+                crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitIsPVP("unit")"#)?;
+            super::relations::unit_is_pvp(lua, &token)
         })?,
     )?;
     g.set(
@@ -905,19 +774,22 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitXP/UnitXPMax(unit): `PLAYER_XP` is a private field, so only `"player"` has a value and
-    // any other token answers 0.
-    let is_player = |token: &Option<String>| token.as_deref() == Some("player");
+    // UnitXP/UnitXPMax(unit): the token resolved (`0x51738e`), then the active player's private
+    // `PLAYER_XP` pair for its object by whatever token names it (`0x5173ad`-`0x5173c9`), 0 for
+    // any other unit or none.
+    fn names_self(model: &Model, token: &str) -> bool {
+        token.eq_ignore_ascii_case("player")
+            || (model.unit_guids.player != 0
+                && model.unit_guids.resolve(token).ok().flatten() == Some(model.unit_guids.player))
+    }
     g.set(
         "UnitXP",
-        lua.create_function(move |lua, token: Value| {
-            let token = Some(crate::script::binding_abi::string_arg(
-                lua,
-                token,
-                r#"Usage: UnitXP("unit")"#,
-            )?);
+        lua.create_function(|lua, token: Value| {
+            let token =
+                crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXP("unit")"#)?;
+            check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if is_player(&token) {
+            Ok(if names_self(&model, &token) {
                 i64::from(model.player_xp)
             } else {
                 0
@@ -926,14 +798,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "UnitXPMax",
-        lua.create_function(move |lua, token: Value| {
-            let token = Some(crate::script::binding_abi::string_arg(
-                lua,
-                token,
-                r#"Usage: UnitXPMax("unit")"#,
-            )?);
+        lua.create_function(|lua, token: Value| {
+            let token =
+                crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXPMax("unit")"#)?;
+            check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if is_player(&token) {
+            Ok(if names_self(&model, &token) {
                 i64::from(model.player_next_level_xp)
             } else {
                 0
@@ -1048,47 +918,48 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, ()| Ok(Value::Nil))?,
     )?;
 
-    // TargetUnit(unit): queue the token for the app to resolve and select; a token naming no unit
-    // is a no-op, as in the reference. A held, selectable unit is shown as `"target"` at once, as
-    // `0x4899d0` commits before it returns, unless the targeting cursor is up: `SelectTarget` binds
-    // the unit to the cast then and selects nothing (`0x4935d5`). The gate's tag 2 of that bind
+    // TargetUnit(unit) (`0x4899d0`): the host resolves the token and selects through `SetSelection
+    // 0x493540` before the verb returns, so the next line reads the new `"target"`; a token naming
+    // no unit is a no-op, as in the reference. With the targeting cursor up `SelectTarget` binds
+    // the unit to the cast instead and selects nothing (`0x4935d5`); the gate's tag 2 of that bind
     // (`0x6e5ba5`) is asked here, where the stack that decides it is.
     g.set(
         "TargetUnit",
         lua.create_function(|lua, token: Option<String>| {
             if let Some(token) = token {
                 let may_cast = select_may_cast(lua);
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                if !model.selection_call_declined() {
-                    if let Some(state) = model.held_unit_view(&token) {
-                        model.show_selection(Some(state));
-                    }
-                }
-                model.queue_call(ScriptCall::Select {
-                    request: SelectionRequest::Unit(token),
-                    may_cast,
-                });
+                submit(
+                    lua,
+                    ScriptCall::Select {
+                        request: SelectionRequest::Unit(token),
+                        may_cast,
+                    },
+                )?;
             }
             Ok(())
         })?,
     )?;
 
-    // AssistUnit(unit) (`0x489b80`): select the unit's `UNIT_FIELD_TARGET`. The shared tail
-    // (`0x489bb2`-`0x489c07`) returns silently on 0 and selects through `0x489a40`, which leaves
-    // the selection alone when nothing resolves; no `CanAssist` gate (`0x6066f0`), any unit, and a
-    // swing only with `assistAttack` set (default "0", `0x48fc50`). A token that resolves nothing
-    // is silent here, where the reference shows `0xb8` ERR_GENERIC_NO_TARGET (`0x489c0e`).
+    // AssistUnit(unit) (`0x489b80`): select the unit's `UNIT_FIELD_TARGET`. A non-string raises
+    // `Usage:` (`0x489c22`) and an unknown token `Unknown unit name` (`0x515940` → `0x515970`); a
+    // token naming no unit the object manager holds shows `0xb8` ERR_GENERIC_NO_TARGET
+    // (`0x489c0e`), the host's. The shared tail (`0x489bb2`-`0x489c07`) returns silently on 0 and
+    // selects through `0x489a40`; no `CanAssist` gate (`0x6066f0`), any unit, and a swing only
+    // with `assistAttack` set (default "0", `0x48fc50`).
     g.set(
         "AssistUnit",
-        lua.create_function(|lua, token: Option<String>| {
-            if let Some(token) = token {
-                let may_cast = select_may_cast(lua);
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.queue_call(ScriptCall::Select {
+        lua.create_function(|lua, token: Value| {
+            let token =
+                super::super::binding_abi::string_arg(lua, token, r#"Usage: AssistUnit("unit")"#)?;
+            check_unit_token(&Some(token.clone()))?;
+            let may_cast = select_may_cast(lua);
+            submit(
+                lua,
+                ScriptCall::Select {
                     request: SelectionRequest::Assist(token),
                     may_cast,
-                });
-            }
+                },
+            )?;
             Ok(())
         })?,
     )?;
@@ -1099,11 +970,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "TargetLastEnemy",
         lua.create_function(|lua, ()| {
             let may_cast = select_may_cast(lua);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.queue_call(ScriptCall::Select {
-                request: SelectionRequest::LastEnemy,
-                may_cast,
-            });
+            submit(
+                lua,
+                ScriptCall::Select {
+                    request: SelectionRequest::LastEnemy,
+                    may_cast,
+                },
+            )?;
             Ok(())
         })?,
     )?;
@@ -1113,11 +986,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // so "Rag" selects Ragnaros. Any unit (typemask 8), no dead, reaction, range or self gate. A
     // missing name, or one neither string nor number, raises `Usage:` (`0x489d69`, `0x6f4940`); a
     // number is taken as its string. Deviation: among whole-name matches ours picks the nearest,
-    // because the reference's first-walked pick is order-dependent and reads as a bug. A miss is
-    // silent here, where the reference shows `0x127` ERR_UNIT_NOT_FOUND, or `0xb8`
-    // ERR_GENERIC_NO_TARGET for an empty name. The pick is shown as `"target"` at once, from the
-    // app's candidates (`by_name`), so `UnitName("target")` on the next line names it, unless it
-    // is not selectable and `SetSelection` returns (`0x4935ee`); the queued call still commits it.
+    // because the reference's first-walked pick is order-dependent and reads as a bug. A miss
+    // shows `0x127` ERR_UNIT_NOT_FOUND, or `0xb8` ERR_GENERIC_NO_TARGET for an empty name
+    // (`0x489dbd`, `0x489dcf`), from the app's commit, which selects through `SetSelection
+    // 0x493540` before the verb returns, so `UnitName("target")` on the next line names the pick.
     g.set(
         "TargetByName",
         lua.create_function(|lua, (name, exact): (Value, Option<Value>)| {
@@ -1126,20 +998,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // Argument 2 comes from `0x6f1c10` with default 0: it never raises, and 0 is absent.
             let exact = super::super::binding_abi::bool_or_default(exact.as_ref(), false);
             let may_cast = select_may_cast(lua);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // With the targeting cursor up the pick is bound, not selected (`0x4935d5`), and a
-            // charmed player's select returns first (`0x49359c`).
-            let pick = model
-                .named_unit(&name, exact)
-                .filter(|c| c.selectable && !model.selection_call_declined());
-            if let Some(state) = pick.map(|c| c.state.clone()) {
-                model.show_selection(Some(state));
-            }
-            model.queue_call(ScriptCall::TargetByName {
-                name,
-                exact,
-                may_cast,
-            });
+            submit(
+                lua,
+                ScriptCall::TargetByName {
+                    name,
+                    exact,
+                    may_cast,
+                },
+            )?;
             Ok(())
         })?,
     )?;
@@ -1188,27 +1054,24 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             check_unit_token(&Some(token.clone()))?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.queue_call(ScriptCall::SpellTargetUnit(token));
+            submit(lua, ScriptCall::SpellTargetUnit(token))?;
             Ok(())
         })?,
     )?;
 
     // ClearTarget() (`0x489ff0`): 1 when it cleared a target, nil when there was none, which
-    // `ToggleGameMenu`'s Escape chain needs to fall through to the menu. The deselect is queued
-    // either way: it reads the selection as the calls before it leave it (`0x489ff0`-`0x489fff`),
-    // so `TargetUnit("player") ClearTarget()` ends with nothing selected, and `"target"` reads
-    // nothing for the rest of the chunk.
+    // `ToggleGameMenu`'s Escape chain needs to fall through to the menu. The deselect is the host's
+    // either way, inside the verb: it reads the selection as the calls before it leave it
+    // (`0x489ff0`-`0x489fff`), so `TargetUnit("player") ClearTarget()` ends with nothing selected,
+    // and `"target"` reads nothing for the rest of the chunk.
     g.set(
         "ClearTarget",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let had = model.unit("target").is_some_and(|u| u.exists);
-            // A charmed player's deselect returns first (`0x49359c`).
-            if had && !model.unit("player").is_some_and(|u| u.charmed) {
-                model.show_selection(None);
-            }
-            model.queue_call(ScriptCall::ClearTarget);
+            let had = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.unit("target").is_some_and(|u| u.exists)
+            };
+            submit(lua, ScriptCall::ClearTarget)?;
             Ok(flag(had))
         })?,
     )?;

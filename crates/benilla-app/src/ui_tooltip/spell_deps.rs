@@ -13,7 +13,7 @@ use benilla_protocol::ObjectFields;
 use crate::items::Items;
 use crate::net::{ObjectStore, Objects};
 use crate::spell::usable::{slot_item_cached, SlotItem, EQUIPMENT_MASK, EQUIPMENT_SLOTS};
-use crate::spell::{ModsDiff, SkillSnapshot};
+use crate::spell::{ModsDiff, SkillSnapshot, SpellReads, UnitField};
 
 /// The four percentages a chance-to-X line reads (`0x52f5b1`), in the order [`Seen`] keeps them.
 #[derive(Clone, Copy)]
@@ -43,34 +43,18 @@ impl Chance {
     }
 }
 
-/// One of the player's unit fields a cost, cast or cooldown cell reads, a bit of [`Deps::unit`].
-#[derive(Clone, Copy)]
-pub(super) enum UnitField {
-    Level,
-    BaseMana,
-    BaseHealth,
-    RangedTime,
-}
-
-impl UnitField {
-    pub(super) fn bit(self) -> u16 {
-        match self {
-            UnitField::Level => 1,
-            UnitField::BaseMana => 1 << 1,
-            UnitField::BaseHealth => 1 << 2,
-            UnitField::RangedTime => 1 << 3,
-        }
-    }
-}
-
-/// The player's unit fields those cells read, as the values they read them at (an absent field
-/// reads 0).
+/// The player's unit fields the cost, cast and cooldown cells read ([`UnitField`]), as the values
+/// they read them at (an absent field reads 0, the cast speed `None`).
 #[derive(Clone, Copy, Default, PartialEq)]
 struct UnitFields {
-    level: u32,
     base_mana: u32,
     base_health: u32,
     ranged_time: u32,
+    /// As bits, so a NaN compares equal to itself.
+    cast_speed: Option<u32>,
+    /// `POWER_COST_MODIFIER` and `POWER_COST_MULTIPLIER` (as bits), by school.
+    cost_modifier: [i32; 7],
+    cost_multiplier: [u32; 7],
 }
 
 impl UnitFields {
@@ -79,10 +63,17 @@ impl UnitFields {
             return Self::default();
         };
         Self {
-            level: p.unit_level().unwrap_or(0),
             base_mana: p.unit_base_mana().unwrap_or(0),
             base_health: p.unit_base_health().unwrap_or(0),
             ranged_time: p.unit_ranged_attack_time().unwrap_or(0),
+            cast_speed: p.unit_mod_cast_speed().map(f32::to_bits),
+            cost_modifier: std::array::from_fn(|s| {
+                p.unit_power_cost_modifier(s as u32).unwrap_or(0)
+            }),
+            cost_multiplier: std::array::from_fn(|s| {
+                p.unit_power_cost_multiplier(s as u32)
+                    .map_or(0, f32::to_bits)
+            }),
         }
     }
 
@@ -95,16 +86,34 @@ impl UnitFields {
                 0
             }
         };
-        moved(UnitField::Level, self.level, prev.level)
-            | moved(UnitField::BaseMana, self.base_mana, prev.base_mana)
+        moved(UnitField::BaseMana, self.base_mana, prev.base_mana)
             | moved(UnitField::BaseHealth, self.base_health, prev.base_health)
             | moved(UnitField::RangedTime, self.ranged_time, prev.ranged_time)
+            | if self.cast_speed != prev.cast_speed {
+                UnitField::CastSpeed.bit()
+            } else {
+                0
+            }
+            | if self.cost_modifier != prev.cost_modifier {
+                UnitField::PowerCostModifier.bit()
+            } else {
+                0
+            }
+            | if self.cost_multiplier != prev.cost_multiplier {
+                UnitField::PowerCostMultiplier.bit()
+            } else {
+                0
+            }
     }
 }
 
 /// What one built view read of the player-side inputs the feed watches; the pet's own inputs
 /// ([`super::spell_feed::PetInputs`]) rebuild every pet view and are not recorded. Written where
-/// the builder reads, so a read cannot be added without saying what it depends on.
+/// the read is made: in the builder, and inside the cost, cast-time and equipped-item computations
+/// it shares with the cast path, which report through [`SpellReads`]. The range cell's record is
+/// the one predicate, `benilla_formats::min_max_range_reads_units`, kept beside the
+/// `min_max_range` it describes and held to it by the reach, auto-attack target and run sweeps
+/// (`deps_tests`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Deps {
     /// A `$z` expanded: the bind point.
@@ -122,6 +131,9 @@ pub(super) struct Deps {
     pub(super) worn: u32,
     /// The equipped-item search asked whether the disarm flag hides a hand.
     pub(super) disarm: bool,
+    /// The reputation line read the player's standing with its faction (`0x4d6370`), the wire
+    /// slot on the base its race and class pick.
+    pub(super) reputation: bool,
     /// The player's unit fields the cost, cast and cooldown cells read, a [`UnitField`] bit each.
     /// A pet view's cost and cast cells read the pet's own fields, which are pet inputs, so of
     /// the unit fields only the ranged attack time (read off the player) is recorded for one.
@@ -131,23 +143,14 @@ pub(super) struct Deps {
     pub(super) mod_bits: u64,
     /// The skill lines read, through the view's own spell and each one its text cross-references.
     pub(super) skill_lines: Vec<u32>,
-    /// The reagent entries the reagents line lists.
+    /// The item entries the tools and reagents lines list, whose carried counts and names the
+    /// lines read.
     reagents: Vec<u32>,
 }
 
 impl Deps {
     pub(super) fn chance(&mut self, which: Chance) {
         self.avoidance |= which.bit();
-    }
-
-    pub(super) fn unit(&mut self, field: UnitField) {
-        self.unit |= field.bit();
-    }
-
-    /// The equipped-item search ran over the equipment slots in `slots`.
-    pub(super) fn item_search(&mut self, slots: u32) {
-        self.worn |= slots;
-        self.disarm |= slots != 0;
     }
 
     pub(super) fn skill_line(&mut self, line: u32) {
@@ -162,7 +165,7 @@ impl Deps {
         }
     }
 
-    /// The reagent entries the view lists.
+    /// The tool and reagent entries the view lists.
     pub(super) fn reagents(&self) -> &[u32] {
         &self.reagents
     }
@@ -177,6 +180,7 @@ impl Deps {
             || changes.avoidance & self.avoidance != 0
             || changes.worn & self.worn != 0
             || (changes.disarm && self.disarm)
+            || (changes.reputation && self.reputation)
             || changes.unit & self.unit != 0
             || changes.mod_bits & self.mod_bits != 0
             || self
@@ -187,6 +191,21 @@ impl Deps {
                 .reagents
                 .iter()
                 .any(|entry| changes.reagents.contains(entry))
+    }
+}
+
+impl SpellReads for Deps {
+    fn unit(&mut self, field: UnitField) {
+        self.unit |= field.bit();
+    }
+
+    fn item_search(&mut self, slots: u32) {
+        self.worn |= slots;
+        self.disarm |= slots != 0;
+    }
+
+    fn skill_line(&mut self, line: u32) {
+        Deps::skill_line(self, line);
     }
 }
 
@@ -204,6 +223,8 @@ pub(super) struct Changes {
     /// The equipment slots whose item moved in a way the search can tell, a bit each.
     pub(super) worn: u32,
     pub(super) disarm: bool,
+    /// A reputation standing moved.
+    pub(super) reputation: bool,
     /// A [`UnitField`] bit each.
     pub(super) unit: u16,
     /// The `SpellFamilyFlags` bits with a changed modifier cell.
@@ -222,6 +243,7 @@ impl Changes {
             && self.avoidance == 0
             && self.worn == 0
             && !self.disarm
+            && !self.reputation
             && self.unit == 0
             && self.mod_bits == 0
             && self.skill_lines.is_empty()
@@ -296,6 +318,10 @@ pub(super) struct Seen {
     range_units: RangeSeen,
     /// The unit fields the cost, cast and cooldown cells read.
     unit: UnitFields,
+    /// The wire standings, slot by slot, and the race and class whose base they ride on, which
+    /// the reputation line's standing reads.
+    reputations: Vec<i32>,
+    race_class: (u8, u8),
 }
 
 impl Seen {
@@ -318,17 +344,30 @@ impl Seen {
                 .map(|which| player.and_then(|s| which.read(&s.0)).map(f32::to_bits)),
             range_units,
             unit: UnitFields::of(player),
+            reputations: Vec::new(),
+            race_class: player.map_or((0, 0), |s| {
+                (s.0.unit_race().unwrap_or(0), s.0.unit_class().unwrap_or(0))
+            }),
         }
     }
 
-    /// What differs from the frame `prev` saw, the modifiers and reagents apart.
+    /// The standings the frame saw, which the reputation line reads.
+    pub(super) fn with_reputations(mut self, reputations: &crate::net::Reputations) -> Self {
+        self.reputations = reputations.slots.iter().map(|&(_, w)| w).collect();
+        self
+    }
+
+    /// What differs from the frame `prev` saw, the modifiers and reagents apart. A player
+    /// appearing or going moves every view: one built without a player read none of its state.
     pub(super) fn changes_since(&self, prev: &Seen) -> Changes {
         let mut changes = Changes {
+            everything: self.worn.is_some() != prev.worn.is_some(),
             home: self.home != prev.home,
             gender: self.gender != prev.gender,
             form: self.form != prev.form,
             range_units: self.range_units != prev.range_units,
             disarm: self.disarmed != prev.disarmed,
+            reputation: self.reputations != prev.reputations || self.race_class != prev.race_class,
             unit: self.unit.diff(&prev.unit),
             ..Changes::default()
         };

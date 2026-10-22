@@ -92,6 +92,13 @@ fn spell_and_action_wire() {
         "item cast: u32 id + u16 mask 0x10 + packed item guid"
     );
 
+    // The partner's non-traded slot, 6, as `0x6e6900` binds it: mask 0x1000, packed guid {6, 0}.
+    assert_eq!(
+        messages::cast_spell_trade_item(7418, 6),
+        hx("fa1c000000100106"),
+        "trade-slot cast: u32 id + u16 mask 0x1000 + packed guid 6 (mask 0x01)"
+    );
+
     // CMSG_ATTACKSWING: one full 8-byte guid, not packed.
     assert_eq!(messages::attack_swing(victim), hx("2a000045000030f1"));
 
@@ -343,7 +350,7 @@ fn attack_swing_refusal_wire() {
 /// `Server/Packets/Spell.cpp:54-58`.
 #[test]
 fn spell_visual_wire_golden() {
-    use benilla_protocol::messages::{SpellCastTargets, SpellGo, SpellStart};
+    use benilla_protocol::messages::{SpellCastTargets, SpellGo, SpellGoMiss, SpellStart};
 
     let creature = 0xF130_0000_4500_002Au64; // packs with mask 0xC9
 
@@ -423,6 +430,14 @@ fn spell_visual_wire_golden() {
     }
 
     // SMSG_SPELL_GO: only a SPELL_MISS_REFLECT miss carries the extra reflectResult byte.
+    let go_misses = || {
+        let miss = |target, info, reflect_result| SpellGoMiss {
+            target,
+            info,
+            reflect_result,
+        };
+        vec![miss(0xCC, 2, 0), miss(0xDD, 11, 2)]
+    };
     let body = hx(concat!(
         "0101",             // item_or_caster pguid: guid 1
         "c92a4530f1",       // caster pguid: the creature
@@ -453,7 +468,7 @@ fn spell_visual_wire_golden() {
                     spell_id: 75,
                     cast_flags: 0x120,
                     hits: vec![0xAA, 0xBB],
-                    misses: vec![(0xCC, 2), (0xDD, 11)],
+                    misses: go_misses(),
                     targets: SpellCastTargets {
                         mask: 0x2,
                         unit_target: Some(0xEE),
@@ -478,12 +493,14 @@ fn spell_visual_wire_golden() {
             dest,
             ammo_display_id,
             item_caster,
+            unit_caster,
         } => {
             assert_eq!(caster, creature);
+            assert_eq!(unit_caster, creature, "the second guid as written");
             assert_eq!(spell_id, 75);
             assert_eq!(cast_flags, 0x120);
             assert_eq!(hits, vec![0xAA, 0xBB]);
-            assert_eq!(misses, vec![(0xCC, 2), (0xDD, 11)]);
+            assert_eq!(misses, go_misses());
             assert_eq!(target, Some(0xEE));
             assert_eq!(go_target, None); // a unit-targeted cast leaves the GO target empty
             assert_eq!(dest, None); // …and the ground point empty (mask 0x2, no 0x40)
@@ -563,8 +580,10 @@ fn spell_visual_wire_golden() {
             hits,
             target,
             item_caster,
+            unit_caster,
             ..
         } => {
+            assert_eq!(unit_caster, 0, "the empty caster slot, kept as written");
             assert_eq!(
                 caster, LIGHTWELL,
                 "an empty caster slot falls back to slot 1 — the GameObject IS the caster"
@@ -920,6 +939,7 @@ fn combat_log_wire_golden() {
                 &SpellLogMiss {
                     spell_id: 133,
                     caster: 0x42,
+                    extended: false,
                     misses: vec![(0xAA, 3), (0xBB, 11)],
                 }
             );
@@ -935,7 +955,7 @@ fn combat_log_wire_golden() {
     body.extend_from_slice(&250u32.to_le_bytes()); // total
     body.push(0); // xpType: kill
     body.extend_from_slice(&200u32.to_le_bytes()); // base xp (kept: rested bonus = total − base)
-    body.extend_from_slice(&1.25f32.to_le_bytes()); // group bonus (dropped)
+    body.extend_from_slice(&1.25f32.to_le_bytes()); // group float
     let packet = messages::parse_server(messages::opcode::SMSG_LOG_XPGAIN, &body).unwrap();
     match &packet {
         ServerPacket::XpGain(x) => {
@@ -946,6 +966,7 @@ fn combat_log_wire_golden() {
                     total: 250,
                     base: 200,
                     kill: true,
+                    group: 1.25,
                 }
             );
         }
@@ -969,6 +990,7 @@ fn combat_log_wire_golden() {
                     total: 50,
                     base: 50, // non-kill carries no base on the wire; base = total
                     kill: false,
+                    group: 1.0, // nor a float: the handler's own 1.0
                 }
             );
         }
@@ -1240,7 +1262,7 @@ fn kill_outcome_dispel_enchantment_and_execute_logs_parse() {
         "0000000000000000", // caster 0: the enchant faded
         "0b00000000000000", // owner 11
         "d2040000",         // itemEntry 1234
-        "39050000",         // spellId 1337
+        "39050000",         // enchantment 1337
         "00",               // showAffiliation false
     ));
     match messages::parse_server(messages::opcode::SMSG_ENCHANTMENTLOG, &body).unwrap() {
@@ -1250,7 +1272,7 @@ fn kill_outcome_dispel_enchantment_and_execute_logs_parse() {
                 caster: 0,
                 owner: 11,
                 item_entry: 1234,
-                spell_id: 1337,
+                enchant_id: 1337,
                 show_affiliation: false,
             }
         ),

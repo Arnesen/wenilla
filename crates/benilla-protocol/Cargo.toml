@@ -16,6 +16,8 @@ flate2 = "1.0"
 # The transport seam's reads are `async` so the browser body can suspend on the JS event loop; the
 # native sequencer drives the very same futures to completion with `block_on` on its own thread.
 futures-lite = "2.6.1"
+# The logon's draw among a realmlist's addresses.
+rand = "0.8.6"
 sha1.workspace = true
 # Derives `SessionEventKind`, `SessionEvent`'s fieldless twin that the handler table keys on.
 strum = { version = "0.26", features = ["derive"] }
@@ -23,7 +25,6 @@ strum = { version = "0.26", features = ["derive"] }
 [dev-dependencies]
 # The SRP probe example re-derives the handshake by hand, to vary what `benilla-srp` fixes.
 num-bigint = "0.4.6"
-rand = "0.8.6"
 
 # The browser body of the transport seam (`src/transport/web.rs`) — the page's WebSocket, the timer
 # that bounds a read, and the `SendWrapper` that lets the write half live in a Bevy resource.

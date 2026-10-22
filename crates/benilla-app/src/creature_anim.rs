@@ -96,29 +96,48 @@ impl Wielded {
     }
 }
 
-/// Auto-attacking (`SMSG_ATTACKSTART` to `ATTACKSTOP`), holding the target guid, the reference's
-/// `[+0xc48]`: the Ready idle gates on it, not on sheath (`0x5fd360`); `0x6e3480` reads its reach.
+/// Auto-attacking (`SMSG_ATTACKSTART` to `ATTACKSTOP` or the unit's death, `0x605896`), holding the
+/// target guid, the reference's `[+0xc48]`: the Ready idle gates on it, not on sheath
+/// (`0x5fd360`); `0x6e3480` reads its reach.
 #[derive(Component)]
 pub(crate) struct Engaged(pub(crate) u64);
 
+/// The stop in flight, the reference's `[+0xc54]`, kept for the one unit that sets it: only
+/// `SendAttackStop 0x624370` writes it nonzero (`0x6243b2`), and only on the active player.
+/// StartAttack sends its swing past the already-attacking gate while it is set (`0x5eccda`). The
+/// attack stop's handler clears it (`0x624e40` at `0x624e6b`), so does the unit's death
+/// (`0x6058a8`), and a new object starts clear (`0x5fae74`): a new entity reads clear here.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AttackStopInFlight(Option<Entity>);
+
+impl AttackStopInFlight {
+    /// Whether `unit`'s word is set.
+    pub(crate) fn of(&self, unit: Entity) -> bool {
+        self.0 == Some(unit)
+    }
+
+    /// `0x6243b2`: `unit`'s stop is on the wire.
+    fn set(&mut self, unit: Entity) {
+        self.0 = Some(unit);
+    }
+
+    /// `unit`'s word cleared.
+    pub(crate) fn clear(&mut self, unit: Entity) {
+        if self.0 == Some(unit) {
+            self.0 = None;
+        }
+    }
+}
+
 /// The local player's auto-repeat is armed: the reference's `[+0xd58] & 0x200`, set only by the
 /// local cast-send (`0x6e593b`); with the ranged sheath drawn a standing unit idles on the Load
-/// clip (`0x5fd460`). Cleared only through `cancel_auto_repeat_local`, including on
-/// `SMSG_CANCEL_AUTO_REPEAT`, which vmangos sends when a volley's target dies
+/// clip (`0x5fd460`). Cleared only through `cancel_auto_repeat_local`: on the selection's death
+/// (`0x605906`) and on `SMSG_CANCEL_AUTO_REPEAT`, which vmangos sends when a volley's target dies
 /// (`SpellCaster.cpp:1829`). A remote shooter plays LoadBow once at its `SMSG_SPELL_START`
 /// (`CastHold`, `0x6e7901`), then the fire clip per GO; the reference holds HoldBow (109) from
 /// the end of the Load until the first GO.
 #[derive(Component)]
 pub(crate) struct AutoRepeatArmed;
-
-/// The ranged weapon-visual hold, `[+0xd58] & 0x400`, set for any caster whose ranged visual
-/// plays (`0x60d020`); cleared by a non-ranged visual (`0x6ec39e`), the local cancel, melee
-/// attack-start or a spline move (`0x6020e8`), never by a sheath change or volley end. It gates
-/// nothing here: the reference re-arms the Hold at each completion while it holds (`0x5fc3f0`,
-/// via `0x7075af`), ours loops the Hold once armed. It is no entry into the drawn idle: read as
-/// one, it leaves a shooter aiming after a single Serpent Sting.
-#[derive(Component)]
-pub(crate) struct RangedHold;
 
 /// The displayed nocked ammo, the reference's `[+0xd28]`/`[+0xd2c]` (`UpdateAmmoDisplay`
 /// `0x60ba30`): an `ItemDisplayInfo` model at HandArrow (35), bow only (`0x60bb19`), set per shot
@@ -158,70 +177,141 @@ pub(crate) fn drive_nock_latch(
     }
 }
 
-/// The one local auto-repeat cancel, reference `0x6ea080`: clears the key (`[0xceac30]`), both
-/// idle bits and the nock (`0x60f530`) and sends `CMSG_CANCEL_AUTO_REPEAT_SPELL` (`0x6ea0c6`);
-/// the sheath stays drawn.
+/// The one local auto-repeat stop, `StopAutoRepeatSpell 0x6ea080`: sends
+/// `CMSG_CANCEL_AUTO_REPEAT_SPELL` (`0x6ea0c6`); on our unit clears the arm, ends the repeat
+/// spell's precast, stops its kits and un-nocks ([`UnitEdit::ClearAutoRepeat`]); pops the slot
+/// while it holds that spell (`0x6ea160`); and clears the key (`[0xceac30]`, `0x6ea16a`) with
+/// `STOP_AUTOREPEAT_SPELL` (`0x6ea170`). The sheath stays drawn.
 pub(crate) fn cancel_auto_repeat_local(
     entity: Option<Entity>,
     auto_repeat: &mut crate::spell::AutoRepeatActive,
-    commands: &mut Commands,
-    net: &crate::net::NetCommands,
+    edits: &UnitEdits,
+    core: &mut crate::spell::CastCore,
 ) {
-    if auto_repeat.0.is_none() {
-        // The reference's `[0xceac30] == 0` early-out: nothing running, nothing sent.
+    let Some(spell_id) = auto_repeat.0 else {
+        // The reference's `[0xceac30] == 0` early-out (`0x6ea090`): nothing sent or signalled.
         return;
+    };
+    let _ = core.net.0.send(crate::net::ClientCommand::CancelAutoRepeat);
+    if let Some(entity) = entity {
+        edits.push(UnitEdit::ClearAutoRepeat { entity, spell_id });
     }
+    core.pop_if(spell_id);
     auto_repeat.0 = None;
-    if let Some(e) = entity {
-        commands
-            .entity(e)
-            .remove::<(AutoRepeatArmed, RangedHold, NockedAmmo, NockLatch)>();
-    }
-    let _ = net.0.send(crate::net::ClientCommand::CancelAutoRepeat);
+    core.reports.auto_repeat(false);
 }
 
 /// The local StopAttack, reference `0x5ecac0`: when attacking, `CMSG_ATTACKSTOP` (`0x624370`),
-/// then `CancelQueuedCast` (`0x6e6f30`) cancels a queued on-next-swing spell with
-/// `CMSG_CANCEL_CAST` (`0x6e4940`), which is why Auto Shot (`0x6e5976`) darkens a Raptor Strike
-/// ring. `Engaged` stays until the `SMSG_ATTACKSTOP` echo (`0x624e40`), as in the reference.
+/// then `CancelQueuedCast` (`0x6e6f30`, [`crate::spell::CastCore::cancel_queued`]), which cancels
+/// a queued on-next-swing spell with `CMSG_CANCEL_CAST`: in the slot, as Esc does, with its pop's
+/// signal and `SPELLCAST_STOP`; in the save under a cast, by the packet alone, which is why Auto
+/// Shot (`0x6e5976`) darkens a Raptor Strike ring. `Engaged` stays until the `SMSG_ATTACKSTOP` echo
+/// (`0x624e40`), as in the reference. The send marks `me`'s stop in flight in `word`
+/// (`0x6243b2`).
 pub(crate) fn stop_attack_local(
+    me: Option<Entity>,
     engaged: bool,
-    queued_melee: &mut crate::spell::QueuedMeleeSpell,
-    net: &crate::net::NetCommands,
+    word: &mut AttackStopInFlight,
+    core: &mut crate::spell::CastCore,
 ) {
     if !engaged {
         // The reference's `!IsAttacking(0x60ecb0) && [+0xc50] == 0` early-out (`[+0xc50]`, a
         // locally started attack, is not modelled): nothing sent, a queued strike survives.
         return;
     }
-    let _ = net.0.send(crate::net::ClientCommand::AttackStop);
-    if let Some(spell_id) = queued_melee.current() {
-        let _ = net
-            .0
-            .send(crate::net::ClientCommand::CancelCast { spell_id });
-        queued_melee.clear_if(spell_id);
+    let _ = core.net.0.send(crate::net::ClientCommand::AttackStop);
+    if let Some(me) = me {
+        word.set(me);
+    }
+    core.cancel_queued();
+}
+
+/// What StartAttack (`0x5ecb70`) reads of the active player before it does anything: the pacified
+/// bit of `UNIT_FIELD_FLAGS` (`0x5ecbaa`) and the player-control flag `[0xb4b3e4]` (`0x5ecbc0`)
+/// each end it silently, with no stand (`0x5ecc9b`), select, swing, sheath or auto-repeat
+/// cancel. Every caller reads it from its own state ([`StartGate::of`]) and hands it to
+/// [`start_attack_local`]; a caller that selects first asks [`StartGate::refuses`] ahead of the
+/// select (`0x5eccaa`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StartGate {
+    pacified: bool,
+    control_lost: bool,
+}
+
+impl StartGate {
+    /// The gate from the player's descriptor and `OwnControlLost`.
+    pub(crate) fn of(own: Option<&crate::net::ObjectStore>, control_lost: bool) -> Self {
+        Self {
+            pacified: own.is_some_and(|me| {
+                me.0.unit_flags() & crate::target::cursor_mode::UNIT_FLAG_PACIFIED != 0
+            }),
+            control_lost,
+        }
+    }
+
+    /// StartAttack returns before anything.
+    pub(crate) fn refuses(self) -> bool {
+        self.pacified || self.control_lost
+    }
+
+    /// `[0xb4b3e4]` is set: the Attack toggle's stop arm needs it too (`0x6131ce`).
+    pub(crate) fn has_control(self) -> bool {
+        !self.control_lost
     }
 }
 
-/// The local StartAttack, reference `0x5ecb70`: the swing send (`0x5eccfd`) is skipped while
-/// attacking unless a stop is in flight (`[+0xc54]`, which the target switch passes as
-/// `stop_in_flight`); the tail, melee sheath snap then auto-repeat cancel (`0x5ecd78`), always
-/// runs, so melee and auto-shot are exclusive. Callers own the entry checks: no call from a cast
-/// press while engaged (`0x6e51cb`), the attackability walk (`0x606980`) and `[0xb4b3e4]`.
+/// The local StartAttack, reference `0x5ecb70`: it returns first when [`StartGate::refuses`];
+/// it reads the caster's precast twice, cancelling the cast in flight for a ranged one and
+/// returning after the stand for one auto-attack interrupts; the swing send (`0x5eccfd`) is
+/// skipped while attacking unless a stop is in flight (`[+0xc54]`, [`AttackStopInFlight`], which
+/// every caller reads for `stop_in_flight`); the tail, melee sheath snap, precast bit and auto-repeat cancel
+/// (`0x5ecd78`), runs past both reads, so melee and auto-shot are exclusive. Callers own the
+/// other entry checks: no call from a cast press while engaged (`0x6e51cb`) and the
+/// attackability walk (`0x606980`).
 pub(crate) fn start_attack_local(
     entity: Entity,
     target: u64,
     engaged: bool,
     stop_in_flight: bool,
+    gate: StartGate,
     auto_repeat: &mut crate::spell::AutoRepeatActive,
     sheath: &mut MessageWriter<SheathRequest>,
-    commands: &mut Commands,
-    net: &crate::net::NetCommands,
+    stand: &mut MessageWriter<crate::player::StandStateRequest>,
+    edits: &UnitEdits,
+    spells: Option<&crate::ui_action::Spells>,
+    core: &mut crate::spell::CastCore,
 ) {
+    if gate.refuses() {
+        return;
+    }
+    // Both reads take the caster's precast spell (`+0xc8c`, `0x5ecc56` and `0x5eccaf`) as the
+    // queue answers it, which a send earlier in the pass may have just started (TryCast's tail).
+    let precast_record = || {
+        let spell_id = edits.precast(entity)?.spell_id;
+        spells?.catalog.get(spell_id)
+    };
+    // A ranged spell's precast (`Attributes & 0x2`, `0x5ecc79`) cancels what is in flight,
+    // `CancelCast(1, 1, 0x1c)` (`0x5ecc85`), and the attack goes on.
+    if precast_record().is_some_and(|d| d.ranged_slot()) {
+        core.cancel_reaping(
+            true,
+            true,
+            crate::spell::REASON_ERROR,
+            spells,
+            Some(entity),
+            edits,
+        );
+    }
+    let net = core.net;
     // Starting an attack stands you up (`0x5ecc9b`), after the attackability check but before
     // the range logic and the already-attacking skip, so a re-issued or out-of-reach attack
     // stands you too.
-    commands.write_message(crate::player::StandStateRequest { state: 0 });
+    stand.write(crate::player::StandStateRequest { state: 0 });
+    // A precast that auto-attack interrupts (`InterruptFlags & 0x8`, `0x5eccd0`) returns here,
+    // ahead of the swing and the whole tail (`0x5eccd4` → `0x5ecd9a`).
+    if precast_record().is_some_and(|d| d.interrupt_flags & INTERRUPT_AUTO_ATTACK != 0) {
+        return;
+    }
     if !engaged || stop_in_flight {
         let _ = net
             .0
@@ -233,55 +323,42 @@ pub(crate) fn start_attack_local(
         state: 1,
         ceremony: false,
     });
-    cancel_auto_repeat_local(Some(entity), auto_repeat, commands, net);
+    // `0x60fc50` (`0x5ecd87`): the precast's busy bit, its spell kept.
+    edits.push(UnitEdit::EndPrecastBusy(entity));
+    cancel_auto_repeat_local(Some(entity), auto_repeat, edits, core);
 }
 
-/// The Attack toggle, reference `0x6131a0` (the Attack pseudo-spell, `0x6e4c7a`): stop when
-/// attacking, else start. Only the start arm cancels auto-repeat, so toggling melee off leaves
-/// Auto Shot running. The stop arm's `[0xb4b3e4]` world gate is not modelled.
-pub(crate) fn toggle_attack_local(
-    entity: Entity,
-    target: u64,
-    engaged: bool,
-    queued_melee: &mut crate::spell::QueuedMeleeSpell,
-    auto_repeat: &mut crate::spell::AutoRepeatActive,
-    sheath: &mut MessageWriter<SheathRequest>,
-    commands: &mut Commands,
-    net: &crate::net::NetCommands,
-) {
-    if engaged {
-        stop_attack_local(engaged, queued_melee, net);
-    } else {
-        start_attack_local(
-            entity,
-            target,
-            engaged,
-            false,
-            auto_repeat,
-            sheath,
-            commands,
-            net,
-        );
-    }
-}
+/// `SPELL_INTERRUPT_FLAG_AUTOATTACK`: auto-attack interrupts the spell.
+const INTERRUPT_AUTO_ATTACK: u32 = 0x8;
 
 /// The attack seams' write set as one param, for the selection writers that run the reference's
 /// stop, select, re-swing (`SetSelection` `0x493540`), and the loot its teardown closes.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct AttackSeam<'w, 's> {
     pub(crate) net: Res<'w, crate::net::NetCommands>,
-    pub(crate) queued_melee: ResMut<'w, crate::spell::QueuedMeleeSpell>,
+    /// The in-flight slot StopAttack's tail cancels a strike in, and the targeting word the
+    /// selection seams test first.
+    pub(crate) slots: crate::spell::CastSlots<'w>,
     pub(crate) auto_repeat: ResMut<'w, crate::spell::AutoRepeatActive>,
     pub(crate) sheath: MessageWriter<'w, SheathRequest>,
-    pub(crate) ecs: Commands<'w, 's>,
+    /// The stand-up a swing start asks (`0x5ecc9b`).
+    pub(crate) stand: MessageWriter<'w, crate::player::StandStateRequest>,
+    /// The auto-repeat clear a swing start queues, and the precast it reads.
+    pub(crate) edits: Res<'w, UnitEdits>,
+    /// The precast spell's record StartAttack reads (`0x5ecc79`, `0x5eccd0`).
+    pub(crate) spells: Option<Res<'w, crate::ui_action::Spells>>,
     /// Our own entity.
     pub(crate) me: Query<'w, 's, Entity, With<crate::net::SelfPlayer>>,
-    /// Our own descriptor, for [`Self::player_is_charmed`].
+    /// Our own descriptor, for [`Self::player_is_charmed`] and [`Self::start_gate`].
     self_store: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    /// `[0xb4b3e4]`, for [`Self::start_gate`].
+    own_control: Option<Res<'w, crate::player::OwnControlLost>>,
     /// The open loot, which the selection teardown closes when it loots the outgoing target.
     pub(crate) loot: ResMut<'w, crate::ui_loot::LootState>,
     /// The loot latch: the teardown's close drops it, and the right-click loot legs arm it.
     pub(crate) loot_latch: ResMut<'w, crate::ui_loot::LootLatch>,
+    /// Our stop in flight (`[+0xc54]`), which StopAttack's send sets and StartAttack reads.
+    stop_word: ResMut<'w, AttackStopInFlight>,
 }
 
 impl AttackSeam<'_, '_> {
@@ -293,6 +370,14 @@ impl AttackSeam<'_, '_> {
             .iter()
             .next()
             .is_some_and(|me| me.0.unit_charmed_by().is_some())
+    }
+
+    /// StartAttack's two silent returns about the player (`0x5ecbaa`, `0x5ecbc0`).
+    pub(crate) fn start_gate(&self) -> StartGate {
+        StartGate::of(
+            self.self_store.iter().next(),
+            self.own_control.as_deref().is_some_and(|c| c.0),
+        )
     }
 
     /// The selection teardown's loot close (`0x493910`, `0x493959`–`0x493974`): a window looting
@@ -318,21 +403,54 @@ impl AttackSeam<'_, '_> {
 
     /// StopAttack (`0x5ecac0`).
     pub(crate) fn stop(&mut self, engaged: bool) {
-        stop_attack_local(engaged, &mut self.queued_melee, &self.net);
+        let me = self.me.single().ok();
+        stop_attack_local(
+            me,
+            engaged,
+            &mut self.stop_word,
+            &mut self.slots.core(&self.net),
+        );
     }
 
-    /// StartAttack (`0x5ecb70`); a no-op before our own entity streams in.
-    pub(crate) fn start(&mut self, target: u64, engaged: bool, stop_in_flight: bool) {
+    /// `unit`'s stop in flight cleared, as its death zeroes it (`0x6058a8`).
+    pub(crate) fn clear_stop_word(&mut self, unit: Entity) {
+        self.stop_word.clear(unit);
+    }
+
+    /// Whether our stop is in flight (`[+0xc54]`).
+    pub(crate) fn stop_in_flight(&self) -> bool {
+        self.me.single().is_ok_and(|me| self.stop_word.of(me))
+    }
+
+    /// The Attack toggle, reference `0x6131a0` (the Attack pseudo-spell, `0x6e4c7a`): stop when
+    /// attacking with control (`0x6131ce`), else start, which returns at a clear `[0xb4b3e4]` too.
+    /// Only the start arm cancels auto-repeat, so toggling melee off leaves Auto Shot running.
+    pub(crate) fn toggle(&mut self, target: u64, engaged: bool) {
+        if engaged && self.start_gate().has_control() {
+            self.stop(engaged);
+        } else {
+            self.start(target, engaged);
+        }
+    }
+
+    /// StartAttack (`0x5ecb70`), reading our stop in flight (`0x5eccda`); a no-op before our own
+    /// entity streams in.
+    pub(crate) fn start(&mut self, target: u64, engaged: bool) {
         let Ok(e) = self.me.single() else { return };
+        let gate = self.start_gate();
+        let stop_in_flight = self.stop_in_flight();
         start_attack_local(
             e,
             target,
             engaged,
             stop_in_flight,
+            gate,
             &mut self.auto_repeat,
             &mut self.sheath,
-            &mut self.ecs,
-            &self.net,
+            &mut self.stand,
+            &self.edits,
+            self.spells.as_deref(),
+            &mut self.slots.core(&self.net),
         );
     }
 }
@@ -385,6 +503,9 @@ pub(crate) enum CastEventKind {
     Go,
     /// Died without release (`SMSG_SPELL_FAILED_OTHER`, or our failed `SMSG_CAST_RESULT`).
     Fail,
+    /// `0x614150(spell, 0)` with no cast edge of its own: the spell's kits stop on the unit, as
+    /// the auto-repeat stop stops the repeat spell's (`0x6ea139`).
+    Reap,
     /// The spell landed on this unit (a missile arrival, `0x61dc50`): impact kit, then state kit.
     /// `weapon_visual` is the caster's ranged-weapon `SpellVisual` (`0x60d450`), carried from the
     /// GO since the caster may despawn.
@@ -447,8 +568,9 @@ pub(crate) struct SwingMessage {
     /// 8 deflect.
     pub(crate) victim_state: u32,
     pub(crate) damage: u32,
-    /// `0x625e40`'s display verdict: it gates only the floating number (`0x62440d`); animation,
-    /// flinch, blood, sounds and timers run regardless.
+    /// `0x625e40`'s display verdict: it gates the floating number and the victim's `UNIT_COMBAT`
+    /// (`0x62440d`, returning past both at `0x624414`); animation, flinch, blood, sounds and
+    /// timers run regardless.
     pub(crate) displayed: bool,
     /// `PlaySeq` stamp, in packet order.
     pub(crate) seq: u64,
@@ -524,7 +646,8 @@ pub(crate) struct WoundAnim {
 /// reference's `0x6e8bf0` and `0x6e8a50`).
 #[derive(Message, Clone)]
 pub(crate) struct SpellGoTargets {
-    pub(crate) caster: Entity,
+    /// The caster unit, `None` for a caster that is no unit we hold.
+    pub(crate) caster: Option<Entity>,
     pub(crate) spell_id: u32,
     /// Units the spell landed on; each gets the impact hand-off.
     pub(crate) hits: Vec<Entity>,
@@ -545,7 +668,7 @@ pub(crate) struct SpellGoTargets {
 mod sheath;
 use sheath::{load_anim_data, SheathSwap};
 pub(crate) use sheath::{
-    toggle_sheath_next, AnimData, SheathRequest, SheathSwapMessage, VisualSheath,
+    toggle_sheath_next, AnimData, CommittedSheath, SheathRequest, SheathSwapMessage, VisualSheath,
 };
 
 /// The `SMSG_EMOTE` to `EmoteAnim` consumer.
@@ -576,7 +699,17 @@ use breath::{classify_breath, fire_breath};
 
 mod impact;
 use impact::route_swing_impacts;
-pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingFlush, SwingImpact, SwingSlowdown};
+pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingImpact, SwingSlowdown};
+
+/// The cast and auto-repeat state the seams queue for after the pass.
+mod edits;
+pub(crate) use edits::{apply_unit_edits, flush_unit_edits, UnitEdit, UnitEdits};
+
+/// The unit's precast spell and its busy bit.
+mod precast;
+#[cfg(test)]
+pub(crate) use precast::install_visuals_for_tests;
+pub(crate) use precast::{end_precast, precast_at_send, Precast, PrecastTail};
 
 /// The melee blood spurt.
 mod blood;
@@ -594,13 +727,14 @@ use spell_visual::{
 #[cfg(test)]
 pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
 pub(crate) use spell_visual::{
-    held_strike_sound, ChainProcPlay, FxClass, FxStage, KitPush, MissileSpawn, SpellKitFx,
-    SpellKitShake, SpellKitSound, SpellVisuals,
+    held_strike_sound, ChainProcPlay, FxClass, FxStage, KitPush, MissileSpawn, PrecastTables,
+    PrecastVisuals, SpellKitFx, SpellKitShake, SpellKitSound, SpellVisuals,
 };
 
-/// The per-unit animation state machine; `Transform` is required, its scale divides the rate.
+/// The per-unit animation state machine; `Transform` is required, its scale divides the rate, and
+/// so is the unit's [`CommittedSheath`], which outlives a rebuilt driver.
 #[derive(Component)]
-#[require(Transform)]
+#[require(Transform, CommittedSheath)]
 pub(crate) struct AnimDriver {
     mode: Mode,
     /// The targeted gait id, to cross-fade only on a change; `None` forces a fresh pick.
@@ -625,11 +759,6 @@ pub(crate) struct AnimDriver {
     /// The reference's `[unit+0xd58] & 0xc0000`: while Knockdown, LiftOff or Land holds it, base
     /// requests are refused, so a stun's knockdown survives the root's Stand recompute.
     base_lock: driver::play::BaseAnimLock,
-    /// The committed sheath state, the reference's `[unit+0xd40]`: seeded from the descriptor,
-    /// re-adopted when it changes (`0x604c70`), overwritten by requests and the reconcile.
-    sheath_cur: Option<u8>,
-    /// The last descriptor sheath byte, to detect changes.
-    sheath_byte: Option<u8>,
     /// The pending mid-animation weapon swap while a draw/stow one-shot plays.
     sheath_swap: Option<SheathSwap>,
     /// Whether any animation started this frame, for the weapon-trail latch: the reference reads
@@ -736,8 +865,6 @@ impl Default for AnimDriver {
             interact_player: false,
             interact_hold: false,
             base_lock: driver::play::BaseAnimLock::default(),
-            sheath_cur: None,
-            sheath_byte: None,
             sheath_swap: None,
             started_anim: false,
             overlay: None,
@@ -779,11 +906,6 @@ impl AnimDriver {
         self.active_anim().map(|id| resolved_id(anims, id, catalog))
     }
 
-    /// The client-side sheath state (0 stowed, 1 melee, 2 ranged), `None` until driven.
-    pub(crate) fn sheath_state(&self) -> Option<u8> {
-        self.sheath_cur
-    }
-
     /// Whether this unit started an animation this frame.
     pub(crate) fn started_anim(&self) -> bool {
         self.started_anim
@@ -818,11 +940,12 @@ impl Plugin for CreatureAnimPlugin {
         app.add_message::<AnimSoundEvent>()
             .add_message::<SwingMessage>()
             .add_message::<SwingImpact>()
-            .add_message::<SwingFlush>()
             .add_message::<DefenseAnim>()
             .add_message::<SwingSlowdown>()
             .init_resource::<PendingImpacts>()
             .init_resource::<PlaySeq>()
+            .init_resource::<UnitEdits>()
+            .init_resource::<AttackStopInFlight>()
             .init_resource::<gesture::GestureQueue>()
             .add_message::<EmoteAnim>()
             .add_message::<BaseAnimRecompute>()
@@ -894,10 +1017,14 @@ impl Plugin for CreatureAnimPlugin {
                     // Same frame as the loot kneel: the reference force-plays Loot 50 in the
                     // handler that arms the latch.
                     .after(crate::ui_loot::resolve_loot_kneel)
-                    // `DoEmote`'s local play, written in the chat drain.
+                    // A probe line's emote, played from the chat drain; a `DoEmote` call's is the
+                    // VM pass's, below.
                     .after(crate::ui_chat::ChatDrain)
                     // After Input so a sheath request (the Z toggle) executes the same frame.
                     .after(WorldStage::Input)
+                    // After the VM pass, whose script calls (a cast, a sheath, a stand) arm what
+                    // the driver plays this frame.
+                    .after(crate::vm_pass::VmPass::End)
                     // `VisualSheath` must land before `resolve_equipment` reads it, or a sheath
                     // change double-swaps the weapon placement for a frame.
                     .before(crate::entities::EntityVisualsSet),
@@ -930,51 +1057,418 @@ fn find_resolved<'a>(
 #[cfg(test)]
 mod attack_stand_tests {
     use super::*;
+    use crate::net::ClientCommand;
+    use bevy::ecs::message::Messages;
+    use bevy::ecs::system::RunSystemOnce;
+
+    const TARGET: u64 = 0xdead_beef;
+    /// A precast with neither bit StartAttack reads.
+    const PLAIN: u32 = 133;
+    /// Arcane Shot's `Attributes & 0x2` (a ranged spell), `InterruptFlags` 0.
+    const ARCANE_SHOT: u32 = 3044;
+    /// Slam's `InterruptFlags & 0x8` (auto-attack interrupts it), `Attributes` not ranged.
+    const SLAM: u32 = 1464;
+    /// Aimed Shot: both.
+    const AIMED_SHOT: u32 = 19434;
+    const AUTO_SHOT: u32 = 75;
+    /// A record whose `AttributesEx & 0x4` the cancel's reap skips.
+    const UNREAPED: u32 = 7;
+
+    struct Attack {
+        world: World,
+        me: Entity,
+        sent: crossbeam_channel::Receiver<ClientCommand>,
+    }
+
+    impl Attack {
+        fn new() -> Self {
+            use benilla_formats::{SpellCatalog, SpellDisplay};
+            let mut world = World::new();
+            world.init_resource::<Messages<SheathRequest>>();
+            world.init_resource::<Messages<crate::player::StandStateRequest>>();
+            world.init_resource::<Messages<CastEvent>>();
+            world.init_resource::<PlaySeq>();
+            let (tx, sent) = crossbeam_channel::unbounded();
+            world.insert_resource(crate::net::NetCommands(tx));
+            world.insert_resource(crate::spell::AutoRepeatActive(None));
+            world.init_resource::<UnitEdits>();
+            world.init_resource::<crate::spell::PendingCast>();
+            world.init_resource::<crate::spell::QueuedMeleeSpell>();
+            world.init_resource::<crate::spell::SpellTargeting>();
+            world.init_resource::<crate::ui_cast::CastReports>();
+            let record = |attributes, interrupt_flags| SpellDisplay {
+                attributes,
+                interrupt_flags,
+                ..Default::default()
+            };
+            world.insert_resource(crate::ui_action::Spells {
+                catalog: SpellCatalog::from_displays(std::collections::HashMap::from([
+                    (PLAIN, record(0, 0)),
+                    (ARCANE_SHOT, record(0x1_0002, 0)),
+                    (SLAM, record(0x5_0010, 0xf)),
+                    (AIMED_SHOT, record(0x41_0012, 0xf)),
+                    (
+                        UNREAPED,
+                        SpellDisplay {
+                            attributes_ex: 0x4,
+                            ..Default::default()
+                        },
+                    ),
+                ])),
+                ..crate::ui_action::Spells::empty_for_tests()
+            });
+            let me = world.spawn_empty().id();
+            Self { world, me, sent }
+        }
+
+        fn precast(&mut self, spell_id: u32) {
+            self.world.entity_mut(self.me).insert(Precast {
+                spell_id,
+                busy: true,
+            });
+        }
+
+        /// `spell_id` in the in-flight slot, as its attempt recorded (`0x6e4fb1`, `0x6e4f88`) and
+        /// pushed it, mid-cast on our unit.
+        fn in_flight(&mut self, spell_id: u32) {
+            let mut pending = self.world.resource_mut::<crate::spell::PendingCast>();
+            pending.fill_record();
+            pending.fill_record_spell(spell_id);
+            self.world
+                .run_system_once(
+                    move |mut slots: crate::spell::CastSlots, net: Res<crate::net::NetCommands>| {
+                        slots.core(&net).push(
+                            spell_id,
+                            crate::spell::Held::Cast {
+                                item_flags: None,
+                                item: None,
+                            },
+                        );
+                    },
+                )
+                .unwrap();
+            self.world.entity_mut(self.me).insert(Casting {
+                spell_id,
+                until: None,
+            });
+        }
+
+        /// StartAttack at [`TARGET`], then the pass's end.
+        fn start(&mut self, engaged: bool) {
+            let me = self.me;
+            self.world
+                .run_system_once(
+                    move |mut auto_repeat: ResMut<crate::spell::AutoRepeatActive>,
+                          mut sheath: MessageWriter<SheathRequest>,
+                          mut stand: MessageWriter<crate::player::StandStateRequest>,
+                          edits: Res<UnitEdits>,
+                          spells: Option<Res<crate::ui_action::Spells>>,
+                          mut slots: crate::spell::CastSlots,
+                          net: Res<crate::net::NetCommands>| {
+                        start_attack_local(
+                            me,
+                            TARGET,
+                            engaged,
+                            false,
+                            StartGate::default(),
+                            &mut auto_repeat,
+                            &mut sheath,
+                            &mut stand,
+                            &edits,
+                            spells.as_deref(),
+                            &mut slots.core(&net),
+                        );
+                    },
+                )
+                .unwrap();
+            apply_unit_edits(&mut self.world);
+        }
+
+        fn sent(&self) -> Vec<ClientCommand> {
+            self.sent.try_iter().collect()
+        }
+
+        fn stands(&mut self) -> Vec<u8> {
+            self.world
+                .resource_mut::<Messages<crate::player::StandStateRequest>>()
+                .drain()
+                .map(|r| r.state)
+                .collect()
+        }
+
+        fn sheaths(&mut self) -> usize {
+            self.world
+                .resource_mut::<Messages<SheathRequest>>()
+                .drain()
+                .count()
+        }
+
+        fn held(&self) -> Option<Precast> {
+            self.world.get::<Precast>(self.me).copied()
+        }
+    }
 
     /// StartAttack stands a seated player (`0x5ecc9b`) even on the already-engaged skip, which
     /// jumps past the stand to `0x5ecd78` and sends no `CMSG_ATTACKSWING`.
     #[test]
     fn starting_an_attack_stands_you_even_when_the_swing_is_skipped() {
-        let mut app = App::new();
-        app.add_message::<SheathRequest>()
-            .add_message::<crate::player::StandStateRequest>();
-        // A dead-letter net channel: no packet is under test.
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        app.insert_resource(crate::net::NetCommands(tx));
-        app.insert_resource(crate::spell::AutoRepeatActive(None));
-
-        let me = app.world_mut().spawn_empty().id();
-        app.add_systems(
-            Update,
-            move |mut commands: Commands,
-                  mut auto_repeat: ResMut<crate::spell::AutoRepeatActive>,
-                  mut sheath: MessageWriter<SheathRequest>,
-                  net: Res<crate::net::NetCommands>| {
-                start_attack_local(
-                    me,
-                    0xdead_beef,
-                    true, // already engaged: the skip leg
-                    false,
-                    &mut auto_repeat,
-                    &mut sheath,
-                    &mut commands,
-                    &net,
-                );
-            },
-        );
-        app.update();
-
-        let stands: Vec<u8> = app
-            .world_mut()
-            .resource_mut::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>()
-            .drain()
-            .map(|r| r.state)
-            .collect();
+        let mut a = Attack::new();
+        a.start(true);
         assert_eq!(
-            stands,
+            a.stands(),
             vec![0],
             "StartAttack asks for stand state 0 exactly once, even on the leg that sends no swing"
         );
+        assert!(a.sent().is_empty());
+    }
+
+    /// StartAttack's tail clears the precast's bit alone (`0x5ecd87` → `0x60fc50`), on the
+    /// already-engaged leg too; the spell stays.
+    #[test]
+    fn starting_an_attack_clears_the_precast_bit_and_keeps_its_spell() {
+        let mut a = Attack::new();
+        a.precast(PLAIN);
+        a.start(true);
+        assert_eq!(
+            a.held(),
+            Some(Precast {
+                spell_id: PLAIN,
+                busy: false
+            })
+        );
+    }
+
+    /// A ranged precast (`Attributes & 0x2`, `0x5ecc79`) cancels what is in flight,
+    /// `CancelCast(1, 1, 0x1c)` (`0x5ecc85`), its cast reaped with a failed cast event, and the
+    /// attack goes on: the swing, then the tail.
+    #[test]
+    fn a_ranged_precast_cancels_the_cast_in_flight_and_the_attack_goes_on() {
+        let mut a = Attack::new();
+        a.precast(ARCANE_SHOT);
+        a.in_flight(ARCANE_SHOT);
+        a.start(false);
+        assert!(
+            matches!(
+                a.sent()[..],
+                [
+                    ClientCommand::CancelCast {
+                        spell_id: ARCANE_SHOT
+                    },
+                    ClientCommand::AttackSwing { guid: TARGET },
+                ]
+            ),
+            "the cancel, then the swing"
+        );
+        assert!(a.world.get::<Casting>(a.me).is_none(), "the cast is reaped");
+        let fails: Vec<_> = a
+            .world
+            .resource_mut::<Messages<CastEvent>>()
+            .drain()
+            .map(|e| (e.spell_id, e.kind))
+            .collect();
+        assert_eq!(fails, vec![(ARCANE_SHOT, CastEventKind::Fail)]);
+        assert_eq!(a.held().map(|p| p.busy), Some(false), "the tail ran");
+    }
+
+    /// The cancel's reap is its tail's (`0x6e4a04`-`0x6e4ab7`): only while the record's caster is
+    /// the active player (`0x6e4a11`), of the record's spell `[0xceac58]` (`0x6e4a8e`) whatever
+    /// it popped, and not for a record with `AttributesEx & 0x4` (`0x6e4aad`).
+    #[test]
+    fn the_cancels_reap_is_the_records_spell_and_gated_as_its_tail_is() {
+        let fails = |a: &mut Attack| -> Vec<u32> {
+            a.world
+                .resource_mut::<Messages<CastEvent>>()
+                .drain()
+                .map(|e| e.spell_id)
+                .collect()
+        };
+        let mut a = Attack::new();
+        a.precast(ARCANE_SHOT);
+        a.in_flight(ARCANE_SHOT);
+        a.world
+            .resource_mut::<crate::spell::PendingCast>()
+            .fill_record_spell(PLAIN);
+        a.world.entity_mut(a.me).insert(Casting {
+            spell_id: PLAIN,
+            until: None,
+        });
+        a.start(false);
+        assert!(a.world.get::<Casting>(a.me).is_none(), "the record's cast");
+        assert_eq!(fails(&mut a), vec![PLAIN]);
+
+        let mut a = Attack::new();
+        a.precast(ARCANE_SHOT);
+        a.in_flight(ARCANE_SHOT);
+        a.world
+            .resource_mut::<crate::spell::PendingCast>()
+            .take_caster_event();
+        a.start(false);
+        assert!(
+            matches!(
+                a.sent()[..],
+                [
+                    ClientCommand::CancelCast {
+                        spell_id: ARCANE_SHOT
+                    },
+                    ..
+                ]
+            ),
+            "the cancel goes out"
+        );
+        assert!(
+            a.world.get::<Casting>(a.me).is_some(),
+            "no record caster, no reap"
+        );
+        assert!(fails(&mut a).is_empty());
+
+        let mut a = Attack::new();
+        a.precast(ARCANE_SHOT);
+        a.in_flight(UNREAPED);
+        a.start(false);
+        assert!(a.world.get::<Casting>(a.me).is_some(), "AttributesEx & 0x4");
+        assert!(fails(&mut a).is_empty());
+    }
+
+    /// A precast that auto-attack interrupts (`InterruptFlags & 0x8`, `0x5eccd0`) returns after
+    /// the stand and before the swing and the whole tail (`0x5eccd4` → `0x5ecd9a`): no sheath, no
+    /// bit clear, no auto-repeat cancel.
+    #[test]
+    fn a_precast_auto_attack_interrupts_returns_before_the_swing_and_the_tail() {
+        let mut a = Attack::new();
+        a.precast(SLAM);
+        a.world.resource_mut::<crate::spell::AutoRepeatActive>().0 = Some(AUTO_SHOT);
+        a.start(false);
+        assert!(a.sent().is_empty(), "no swing and no repeat cancel");
+        assert_eq!(a.stands(), vec![0], "the stand comes first");
+        assert_eq!(a.sheaths(), 0, "no sheath");
+        assert_eq!(a.held().map(|p| p.busy), Some(true), "the bit stays");
+        assert_eq!(
+            a.world.resource::<crate::spell::AutoRepeatActive>().0,
+            Some(AUTO_SHOT)
+        );
+
+        let mut a = Attack::new();
+        a.precast(AIMED_SHOT);
+        a.in_flight(AIMED_SHOT);
+        a.start(false);
+        assert!(
+            matches!(
+                a.sent()[..],
+                [ClientCommand::CancelCast {
+                    spell_id: AIMED_SHOT
+                }]
+            ),
+            "both bits: the cancel, then the return"
+        );
+    }
+
+    /// Both reads see the precast as the queue will leave it ([`UnitEdits::precast`]): a send
+    /// queued ahead of the attack in the same pass (TryCast's tail, `0x6e51b5`, after
+    /// `0x6e5898`) is read, and an end queued ahead of it is too.
+    #[test]
+    fn the_reads_see_the_precast_the_queue_will_leave() {
+        let mut a = Attack::new();
+        let me = a.me;
+        a.world.resource::<UnitEdits>().push(UnitEdit::SendPrecast {
+            entity: me,
+            spell_id: SLAM,
+        });
+        a.start(false);
+        assert!(a.sent().is_empty(), "the queued send's precast");
+
+        let mut a = Attack::new();
+        let me = a.me;
+        a.precast(SLAM);
+        a.world.resource::<UnitEdits>().push(UnitEdit::EndPrecast {
+            entity: me,
+            spell_id: Some(SLAM),
+            tail: true,
+        });
+        a.start(false);
+        assert!(
+            matches!(a.sent()[..], [ClientCommand::AttackSwing { guid: TARGET }]),
+            "a queued end"
+        );
+    }
+
+    /// `StopAutoRepeatSpell 0x6ea080`: the send (`0x6ea0c6`), then on the player the arm
+    /// (`0x6ea113`), the precast (`0x6ea12b`), the spell's kits (`0x614150(spell, 0)` at
+    /// `0x6ea139`, here its cast reaped and the visuals' reap event) and the nock (`0x6ea140`);
+    /// the slot popped when it holds the spell (`0x6ea160`), whose signal comes before the key's
+    /// clear and its `STOP_AUTOREPEAT_SPELL` (`0x6ea16a`, `0x6ea170`). With nothing running it
+    /// does nothing.
+    #[test]
+    fn the_auto_repeat_stop_reaps_its_kits_pops_its_slot_and_reports_last() {
+        let mut a = Attack::new();
+        let me = a.me;
+        a.in_flight(AUTO_SHOT);
+        a.precast(AUTO_SHOT);
+        a.world.entity_mut(me).insert((
+            AutoRepeatArmed,
+            NockedAmmo { display_id: 5996 },
+            Casting {
+                spell_id: AUTO_SHOT,
+                until: None,
+            },
+        ));
+        a.world.resource_mut::<crate::spell::AutoRepeatActive>().0 = Some(AUTO_SHOT);
+        a.world
+            .resource_mut::<crate::ui_cast::CastReports>()
+            .clear();
+        let stop = |a: &mut Attack| {
+            a.world
+                .run_system_once(
+                    move |mut auto_repeat: ResMut<crate::spell::AutoRepeatActive>,
+                          edits: Res<UnitEdits>,
+                          mut slots: crate::spell::CastSlots,
+                          net: Res<crate::net::NetCommands>| {
+                        cancel_auto_repeat_local(
+                            Some(me),
+                            &mut auto_repeat,
+                            &edits,
+                            &mut slots.core(&net),
+                        );
+                    },
+                )
+                .unwrap();
+            apply_unit_edits(&mut a.world);
+        };
+        stop(&mut a);
+        assert!(matches!(a.sent()[..], [ClientCommand::CancelAutoRepeat]));
+        assert_eq!(a.world.resource::<crate::spell::AutoRepeatActive>().0, None);
+        let reports: Vec<&'static str> = a
+            .world
+            .resource_mut::<crate::ui_cast::CastReports>()
+            .take()
+            .into_iter()
+            .map(|r| match r {
+                crate::ui_cast::CastReport::Changed => "CHANGED",
+                crate::ui_cast::CastReport::AutoRepeat(false) => "STOP_AUTOREPEAT",
+                _ => "OTHER",
+            })
+            .collect();
+        assert_eq!(
+            reports,
+            ["CHANGED", "STOP_AUTOREPEAT"],
+            "the pop, then the stop"
+        );
+        let world = &a.world;
+        assert!(world.get::<AutoRepeatArmed>(me).is_none());
+        assert!(world.get::<NockedAmmo>(me).is_none());
+        assert_eq!(a.held(), None, "the repeat spell's precast");
+        assert!(world.get::<Casting>(me).is_none(), "its cast reaped");
+        let reaps: Vec<_> = a
+            .world
+            .resource_mut::<Messages<CastEvent>>()
+            .drain()
+            .map(|e| (e.entity, e.spell_id, e.kind))
+            .collect();
+        assert_eq!(reaps, vec![(me, AUTO_SHOT, CastEventKind::Reap)]);
+
+        // Nothing running: nothing sent, nothing reported.
+        stop(&mut a);
+        assert!(a.sent().is_empty());
+        assert!(a.world.resource::<crate::ui_cast::CastReports>().is_empty());
     }
 }
 

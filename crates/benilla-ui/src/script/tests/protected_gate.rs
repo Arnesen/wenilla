@@ -413,7 +413,7 @@ const VERBS: &[Verb] = &[
     gone("TogglePetAutocast(2)"),
     gone("ToggleSpellAutocast(1, BOOKTYPE_PET)"),
     gone(r#"StartDuel("Bob")"#),
-    gone(r#"StartDuelUnit("target")"#),
+    gone(r#"StartDuelUnit("party1")"#),
     gone("Stuck()"),
     gone("ReloadUI()"),
     gone("TargetNearestEnemy()"),
@@ -438,6 +438,7 @@ const VERBS: &[Verb] = &[
 /// and book, a cast in flight, a targeting cursor and a Down-and-Up button for the events.
 fn verbs_world(security: AddonSecurity) -> UiScript {
     let mut s = walker(security);
+    s.keep_calls();
     event_frames(&mut s);
     s.set_spellbook(SpellBookState {
         tabs: vec![SpellTabView {
@@ -461,6 +462,27 @@ fn verbs_world(security: AddonSecurity) -> UiScript {
             packed: 0x8000_0000 | 2649,
             ..Default::default()
         }],
+    });
+    // `StartDuel("Bob")` needs a name the resolver finds: the active player, and Bob in the party,
+    // whom `StartDuelUnit("party1")` names by the token resolver's party slot.
+    s.set_unit_guids(&crate::script::UnitGuids {
+        party: [0xB0B, 0, 0, 0],
+        ..Default::default()
+    });
+    s.set_unit(
+        "player",
+        Some(crate::script::UnitState {
+            exists: true,
+            has_object: true,
+            ..Default::default()
+        }),
+    );
+    s.set_party(crate::script::PartyState {
+        members: vec![crate::script::PartyMemberInfo {
+            name: "Bob".into(),
+            guid: 0xB0B,
+        }],
+        ..Default::default()
     });
     let slot = |name: &str, autocast| PetActionView {
         name: Some(name.into()),
@@ -488,7 +510,10 @@ fn verbs_world(security: AddonSecurity) -> UiScript {
             ..Default::default()
         }),
     );
-    s.set_casting(true);
+    s.set_cast_view(crate::script::CastView {
+        slot: Some(133),
+        ..Default::default()
+    });
     s.set_spell_targeting(true);
     s
 }
@@ -514,7 +539,6 @@ fn effects(s: &mut UiScript) -> Vec<String> {
             .iter()
             .map(|t| format!("drop {t}")),
     );
-    out.extend(s.take_enchant_confirms().iter().map(|a| format!("{a:?}")));
     out.extend(
         s.take_pet_autocast_toggles()
             .iter()

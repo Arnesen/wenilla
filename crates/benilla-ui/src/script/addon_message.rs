@@ -70,8 +70,8 @@ impl AddonDistribution {
     }
 }
 
-/// One queued addon broadcast, composed at the binding as the reference's is (`_snprintf` at
-/// `0x49f9b3`) and drained by the app onto the wire.
+/// One addon broadcast, composed at the binding as the reference's is (`_snprintf` at
+/// `0x49f9b3`) and sent by the host inside the call ([`super::ScriptCall::AddonMessage`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddonSend {
     /// `prefix`, TAB, `message`, cut at 2047 bytes. vmangos passes a `LANG_ADDON` line through
@@ -83,41 +83,6 @@ pub struct AddonSend {
 
 /// `_snprintf(dst, 0x800, …)` writes at most 2047 bytes plus its NUL (`0x64a861`-`0x64a868`).
 const ADDON_MESSAGE_CAP: usize = 0x800 - 1;
-
-/// The reference's `|`-escape scan (`0x49f9bb`-`0x49fa04`), its only text check, run on the
-/// composed payload before the distribution is read. After each `|`: `||` skips both bytes; `|c`
-/// skips past the first later `|r` (case-sensitive `strstr`, `0x49f9f4`), leaving the run between
-/// unchecked; `|c` with no `|r` cuts `text` at the `|` and accepts (`0x49fa6a`); anything else,
-/// the NUL after a trailing `|` included, is `Err` (`0x49fa6f`).
-fn validate_escapes(text: &mut String) -> Result<(), ()> {
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while let Some(off) = bytes[i..].iter().position(|&b| b == b'|') {
-        let pipe = i + off;
-        match bytes.get(pipe + 1) {
-            Some(b'|') => i = pipe + 2,
-            Some(b'c') => {
-                // The reference's `strstr` starts at the `|c`, which cannot itself match `|r`.
-                match bytes[pipe..]
-                    .windows(2)
-                    .position(|w| w == b"|r")
-                    .map(|p| pipe + p)
-                {
-                    // Past the closer: its `|` must not reach the loop head, where `|r` raises.
-                    Some(closer) => i = closer + 2,
-                    // No closer: the reference cuts at the `|` and accepts.
-                    None => {
-                        text.truncate(pipe);
-                        return Ok(());
-                    }
-                }
-            }
-            // Anything else, including `None`: the NUL after a trailing `|`.
-            _ => return Err(()),
-        }
-    }
-    Ok(())
-}
 
 /// `lua_tostring` with the reference's NULL-to-empty replacement (`0x49f96b`-`0x49f97a`): strings
 /// and numbers coerce, anything else is `""`.
@@ -152,12 +117,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     }
                     text.truncate(cut);
                 }
-                // After the compose, before argument 3 is read (`0x49fa06` precedes `0x49fa0b`),
-                // so a bad escape is reported over a bad distribution.
-                if validate_escapes(&mut text).is_err() {
-                    return Err(mlua::Error::RuntimeError(
-                        "Invalid escape code in chat message".into(),
-                    ));
+                // The escape scan (`0x49f9bb`-`0x49fa04`), its only text check: after the compose,
+                // before argument 3 is read (`0x49fa06` precedes `0x49fa0b`), so a bad escape is
+                // reported over a bad distribution.
+                if super::chat_send::validate_escapes(&mut text).is_err() {
+                    return Err(mlua::Error::runtime(super::chat_send::INVALID_ESCAPE));
                 }
                 // `lua_isstring` (`0x49fa15`) is true for a number, so `1` is the token "1" and
                 // raises; anything else that is not a string is PARTY (`0x49fa1c`).
@@ -172,14 +136,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     !model.party.raid.is_empty()
                 };
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .addon_sends
-                    .push(AddonSend {
+                super::calls::submit(
+                    lua,
+                    super::ScriptCall::AddonMessage(AddonSend {
                         text,
                         distribution: asked.effective(in_raid),
-                    });
-                Ok(())
+                    }),
+                )
             },
         )?,
     )?;
@@ -187,9 +150,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 impl super::UiScript {
-    /// Drain the broadcasts `SendAddonMessage` queued since the last call.
+    /// The `SendAddonMessage` broadcasts a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_addon_sends(&mut self) -> Vec<AddonSend> {
-        std::mem::take(&mut self.model_mut().addon_sends)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::AddonMessage(send) => Some(send.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -202,6 +168,7 @@ mod tests {
     #[test]
     fn a_broadcast_is_prefix_tab_message_and_defaults_to_party() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"SendAddonMessage("oRA", "hello")"#).unwrap();
         assert_eq!(
             s.take_addon_sends(),
@@ -216,6 +183,7 @@ mod tests {
     #[test]
     fn the_distribution_set_is_exactly_party_raid_guild_battleground() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         // In a raid, so RAID is not downgraded.
         s.set_party(PartyState {
             raid: vec![RaidMemberInfo::default()],
@@ -269,6 +237,7 @@ mod tests {
     #[test]
     fn a_number_distribution_raises_rather_than_being_read_as_a_type_byte() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let err = s
             .run(r#"SendAddonMessage("p", "m", 1)"#)
             .expect_err("a numeric distribution must raise");
@@ -279,6 +248,7 @@ mod tests {
     #[test]
     fn a_non_string_distribution_takes_the_party_default() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"SendAddonMessage("p", "m", nil)"#).unwrap();
         s.run(r#"SendAddonMessage("p", "m", {})"#).unwrap();
         let sent = s.take_addon_sends();
@@ -291,6 +261,7 @@ mod tests {
     #[test]
     fn raid_outside_a_raid_is_downgraded_to_party() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         // Default PartyState: not in a raid.
         s.run(r#"SendAddonMessage("CTRA", "status", "RAID")"#)
             .unwrap();
@@ -323,6 +294,7 @@ mod tests {
     #[test]
     fn only_both_empty_is_a_usage_error() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let err = s
             .run(r#"SendAddonMessage("", "")"#)
             .expect_err("both empty must raise");
@@ -340,6 +312,7 @@ mod tests {
     #[test]
     fn arguments_coerce_like_lua_tostring_and_nil_becomes_empty() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"SendAddonMessage("v", 314)"#).unwrap();
         assert_eq!(s.take_addon_sends()[0].text, "v\t314");
         s.run(r#"SendAddonMessage(42, "m")"#).unwrap();
@@ -354,6 +327,7 @@ mod tests {
     #[test]
     fn a_tab_inside_the_prefix_is_passed_through_unsanitised() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("SendAddonMessage(\"pre\\tfix\", \"body\")").unwrap();
         assert_eq!(s.take_addon_sends()[0].text, "pre\tfix\tbody");
     }
@@ -361,6 +335,7 @@ mod tests {
     #[test]
     fn the_payload_truncates_silently_at_2047_bytes() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"SendAddonMessage("p", string.rep("x", 4000))"#)
             .unwrap();
         let sent = s.take_addon_sends();
@@ -375,6 +350,7 @@ mod tests {
     #[test]
     fn a_well_formed_colour_run_passes_and_its_closer_is_skipped_not_scanned() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for payload in [
             "|cffff0000red|r",
             "before |cffff0000red|r after",
@@ -404,6 +380,7 @@ mod tests {
     #[test]
     fn every_other_escape_start_raises_including_a_bare_closer_and_a_trailing_pipe() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for payload in [
             "|r",                    // a closer with nothing open
             "|Hitem:1:0:0:0|h[x]|h", // link tokens outside a colour run
@@ -436,6 +413,7 @@ mod tests {
     #[test]
     fn an_unmatched_colour_open_truncates_in_place_and_still_sends() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"SendAddonMessage("P", "keep|cff00ff00dropped", "GUILD")"#)
             .unwrap();
         assert_eq!(s.take_addon_sends()[0].text, "P\tkeep");
@@ -452,6 +430,7 @@ mod tests {
     #[test]
     fn a_colour_run_may_span_the_tab_because_the_scan_is_on_the_composed_buffer() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"SendAddonMessage("|cffff0000pre", "post|r", "GUILD")"#)
             .unwrap();
         assert_eq!(s.take_addon_sends()[0].text, "|cffff0000pre\tpost|r");

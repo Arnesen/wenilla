@@ -3,6 +3,7 @@
 //! the server) and for single-rank lines (`mono`), whose max the reference forces to 1 off
 //! `SkillRaceClassInfo.flags & 0x400` whatever the server sends (`0x4d3610`, branch `0x4d38b1`).
 
+use benilla_ui::color::quant::read32;
 use benilla_ui::script::{QuadContent, SkillEntry, SkillsState, UiScript, UnitState};
 
 fn skill(
@@ -101,6 +102,11 @@ fn page_quads(s: &UiScript) -> Vec<benilla_ui::script::ExtractedQuad> {
 }
 
 /// Row slot `i`'s trough colour (`SkillFrame.lua:158` normal, `:167` proficiency).
+/// Whether `c` is `want` to within a byte, as a colour drawn through the packed bytes is.
+fn near(c: [f32; 4], want: [f32; 4]) -> bool {
+    c.iter().zip(want).all(|(c, w)| (c - w).abs() < 1.0 / 255.0)
+}
+
 fn row_bg(s: &mut UiScript, i: u32) -> [f32; 4] {
     let c = s
         .eval::<(f32, f32, f32, f32)>(&format!(
@@ -125,24 +131,28 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
         text, "",
         "Beast Mastery is single-rank: no rank text, though the server said 300/300"
     );
-    assert_eq!(color, [0.5, 0.5, 0.5, 1.0], "and a gray bar");
+    assert_eq!(color, [0.5, 0.5, 0.5, 1.0].map(read32), "and a gray bar");
     assert_eq!(
         row_bg(&mut s, 2),
-        [1.0, 1.0, 1.0, 0.5],
+        [1.0, 1.0, 1.0, 0.5].map(read32),
         "over the proficiency branch's WHITE trough (ref SkillFrame.lua:167)"
     );
 
     let (text, color) = row(&mut s, 6);
     assert_eq!(text, "", "Cloth is 1/1: no rank text");
-    assert_eq!(color, [0.5, 0.5, 0.5, 1.0], "gray too");
-    assert_eq!(row_bg(&mut s, 6), [1.0, 1.0, 1.0, 0.5], "white trough too");
+    assert_eq!(color, [0.5, 0.5, 0.5, 1.0].map(read32), "gray too");
+    assert_eq!(
+        row_bg(&mut s, 6),
+        [1.0, 1.0, 1.0, 0.5].map(read32),
+        "white trough too"
+    );
 
     let (text, color) = row(&mut s, 4);
     assert_eq!(text, "12/60", "Defense keeps its rank text");
-    assert_eq!(color, [0.0, 0.0, 1.0, 0.5], "and the blue fill");
+    assert_eq!(color, [0.0, 0.0, 1.0, 0.5].map(read32), "and the blue fill");
     assert_eq!(
         row_bg(&mut s, 4),
-        [0.0, 0.0, 0.75, 0.5],
+        [0.0, 0.0, 0.75, 0.5].map(read32),
         "over the normal branch's DARK BLUE trough (ref SkillFrame.lua:158)"
     );
 
@@ -160,15 +170,15 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
         })
         .collect();
     assert!(
-        solids.contains(&[1.0, 1.0, 1.0, 0.1]),
+        solids.iter().any(|c| near(*c, [1.0, 1.0, 1.0, 0.1])),
         "a proficiency trough draws white at 0.1; got {solids:?}"
     );
     assert!(
-        solids.contains(&[0.0, 0.0, 0.75, 0.1]),
+        solids.iter().any(|c| near(*c, [0.0, 0.0, 0.75, 0.1])),
         "a normal row's trough draws dark blue at 0.1; got {solids:?}"
     );
     assert!(
-        !solids.iter().any(|c| c[3] == 0.5),
+        !solids.iter().any(|c| (c[3] - 0.5).abs() < 1.0 / 255.0),
         "nothing draws at the raw vertex alpha — that was the replace bug; got {solids:?}"
     );
 
@@ -184,7 +194,7 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return SkillDetailStatusBarBackground:GetVertexColor()")
             .unwrap(),
-        (1.0, 1.0, 1.0, 0.5),
+        (read32(1.0), read32(1.0), read32(1.0), read32(0.5)),
         "including its trough (the shared PaintBar; ref SkillFrame.lua:376)"
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
@@ -313,7 +323,7 @@ fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_windo
              return b:GetTop(), b:GetBottom(), b:GetLeft(), b:GetRight()",
         )
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (
             (left + right) / 2.0 - page_left,
             (top + bottom) / 2.0 - page_top,
@@ -337,9 +347,9 @@ fn the_pages_close_button_sits_where_the_reference_seats_it_and_closes_the_windo
             _ => None,
         })
         .expect("the Close label draws");
-    assert_eq!(
+    benilla_ui::assert_near!(
         label,
-        Some([1.0, 0.82, 0.0, 1.0]),
+        Some(benilla_ui::color::quant::drawn([1.0, 0.82, 0.0, 1.0])),
         "GameFontNormal — the UIPanelButtonTemplate face's own normal font"
     );
 
@@ -377,7 +387,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
             _ => None,
         })
         .expect("the All label draws");
-    assert_eq!(
+    benilla_ui::assert_near!(
         label,
         (Some([1.0, 1.0, 1.0, 1.0]), Some(12.0)),
         "GameFontHighlight — the SAME face every SkillTypeLabel row wears"
@@ -394,7 +404,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
              return b:GetTop(), b:GetBottom(), b:GetLeft()",
         )
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (tab_top + tab_bottom) / 2.0 - (btn_top + btn_bottom) / 2.0,
         3.0,
         "the fold sits 3px BELOW the cap's centre (ref's -3); +3 above was the bug"
@@ -402,7 +412,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
     let cap_right = s
         .eval::<f64>("return SkillFrameExpandTabLeft:GetRight()")
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         btn_left - cap_right,
         -3.0,
         "and 3px back over the cap (ref's -3 on x)"
@@ -416,7 +426,7 @@ fn the_collapse_all_fold_wears_the_row_font_and_the_references_seat() {
 fn the_expand_tab_fits_its_label_at_load() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = shown_skills_page_with(Some(Box::new(super::FixedWidthFont(7.0))));
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
             .unwrap(),
         7.0 * 3.0 + 45.0,
@@ -429,15 +439,15 @@ fn the_expand_tab_fits_its_label_at_load() {
              SkillFrameExpandTabRight:GetLeft()",
         )
         .unwrap();
-    assert_eq!(mid_r, cap_r_l, "the middle stretches to the right cap");
-    assert_eq!(
+    benilla_ui::assert_near!(mid_r, cap_r_l, "the middle stretches to the right cap");
+    benilla_ui::assert_near!(
         mid_r - mid_l,
         66.0 - 16.0,
         "and carries the whole span minus the two caps"
     );
     s.run("SkillFrame_UpdateSkills()").unwrap();
     s.resolve();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return SkillFrameExpandButtonFrame:GetWidth()")
             .unwrap(),
         66.0
@@ -528,7 +538,7 @@ fn the_list_reaches_its_last_row_at_the_bars_end() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     let n = s.eval::<i64>("return GetNumSkillLines()").unwrap();
-    assert_eq!(n, 25, "22 lines under 3 headers");
+    benilla_ui::assert_near!(n, 25, "22 lines under 3 headers");
     let (last_name, last_is_header) = s
         .eval::<(String, Option<i64>)>(&format!("local n, h = GetSkillLineInfo({n}) return n, h"))
         .unwrap();
@@ -541,7 +551,7 @@ fn the_list_reaches_its_last_row_at_the_bars_end() {
     let (_, bar_max) = s
         .eval::<(f64, f64)>("return SkillListScrollFrameScrollBar:GetMinMaxValues()")
         .unwrap();
-    assert_eq!(bar_max, f64::from((n as i32 - 12) * 15));
+    benilla_ui::assert_near!(bar_max, f64::from((n as i32 - 12) * 15));
     // The overflow as geometry: the stored range is not re-measured for a child's resize.
     let overflow = s
         .eval::<f64>(
@@ -549,7 +559,7 @@ fn the_list_reaches_its_last_row_at_the_bars_end() {
              - SkillListScrollFrame:GetHeight()",
         )
         .unwrap();
-    assert_eq!(overflow, f64::from(n as i32 * 15 - 220));
+    benilla_ui::assert_near!(overflow, f64::from(n as i32 * 15 - 220));
     assert!(
         overflow < bar_max,
         "the frame is taller than its twelve rows"
@@ -562,13 +572,13 @@ fn the_list_reaches_its_last_row_at_the_bars_end() {
     )
     .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<i64>("return FauxScrollFrame_GetOffset(SkillListScrollFrame)")
             .unwrap(),
         n - 12,
         "the row offset reaches the bar's end, not the overflow's"
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<String>("return SkillRankFrame12SkillName:GetText()")
             .unwrap(),
         last_name,

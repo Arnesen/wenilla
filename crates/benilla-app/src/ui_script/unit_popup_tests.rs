@@ -88,6 +88,7 @@ fn bake_strings(s: &UiScript) {
 fn chat_name_right_click_opens_the_invite_menu() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
     load_popup_frames(&s);
@@ -159,11 +160,20 @@ fn chat_name_right_click_opens_the_invite_menu() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The relation functions over us and the target, two human players of guids 1 and 2.
+fn ally(s: &mut UiScript) {
+    use crate::target::relations::fixture::{factions, player, Scene, HUMAN};
+    let mut scene = Scene::new(player(1, HUMAN), Some(factions()));
+    scene.hold(player(2, HUMAN));
+    s.set_unit_relations(Some(scene.relations()));
+}
+
 /// Solo, right-clicking a friendly player target opens the PLAYER menu; Invite invites the unit.
 #[test]
 fn solo_target_right_click_invites_a_player() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
     load_popup_frames(&s);
@@ -172,17 +182,19 @@ fn solo_target_right_click_invites_a_player() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             name: Some("Me".into()),
             is_player: true,
             player_controlled: true,
             ..UnitState::default()
         }),
     );
-    // A same-faction friendly PLAYER target (is_player + reaction 5 → UnitCanCooperate == 1).
+    // A same-faction friendly PLAYER target: `UnitCanCooperate` passes on one faction-group mask.
     s.set_unit(
         "target",
         Some(UnitState {
             exists: true,
+            guid: 2,
             name: Some("Ally".into()),
             health: 40,
             max_health: 40,
@@ -192,6 +204,13 @@ fn solo_target_right_click_invites_a_player() {
             ..UnitState::default()
         }),
     );
+    ally(&mut s);
+    // The resolver's inputs, which `InviteToParty` reads the token through (`0x48a3ed`).
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 1,
+        target: 2,
+        ..Default::default()
+    });
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     s.resolve();
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
@@ -239,7 +258,7 @@ fn solo_target_right_click_invites_a_player() {
         "Duel"
     );
 
-    // Click Invite → UnitPopup_OnClick → InviteToParty("target") → InviteUnit.
+    // Click Invite → UnitPopup_OnClick → InviteToParty("target") → the target's guid.
     let (ix, iy) = s
         .eval::<(f64, f64)>("return DropDownList1Button4:GetCenter()")
         .unwrap();
@@ -247,8 +266,8 @@ fn solo_target_right_click_invites_a_player() {
     s.mouse_button(ix as f32, iy as f32, "LeftButton", false);
     assert_eq!(
         s.take_party_requests(),
-        vec![PartyRequest::InviteUnit("target".into())],
-        "Invite on a player target queues an invite by unit"
+        vec![PartyRequest::InviteGuid(2)],
+        "Invite on a player target queues an invite by its guid"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -258,6 +277,12 @@ fn solo_target_right_click_invites_a_player() {
 fn solo_target_trade_click_queues_an_initiate() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 1,
+        target: 2,
+        ..Default::default()
+    });
     s.set_screen_size(1024.0, 768.0);
     bake_strings(&s);
     load_popup_frames(&s);
@@ -266,6 +291,7 @@ fn solo_target_trade_click_queues_an_initiate() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             name: Some("Me".into()),
             is_player: true,
             player_controlled: true,
@@ -276,6 +302,7 @@ fn solo_target_trade_click_queues_an_initiate() {
         "target",
         Some(UnitState {
             exists: true,
+            guid: 2,
             name: Some("Ally".into()),
             health: 40,
             max_health: 40,
@@ -285,6 +312,7 @@ fn solo_target_trade_click_queues_an_initiate() {
             ..UnitState::default()
         }),
     );
+    ally(&mut s);
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     s.resolve();
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
@@ -309,9 +337,9 @@ fn solo_target_trade_click_queues_an_initiate() {
     s.mouse_button(tx as f32, ty as f32, "LeftButton", true);
     s.mouse_button(tx as f32, ty as f32, "LeftButton", false);
     assert_eq!(
-        s.take_trade_initiates(),
-        vec!["target".to_string()],
-        "clicking Trade queues an initiate against the target token"
+        s.take_trade_calls(),
+        [benilla_ui::script::TradeCall::Initiate(2)],
+        "clicking Trade initiates with the guid the target token names"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -330,6 +358,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             name: Some("Me".into()),
             is_player: true,
             player_controlled: true,
@@ -340,6 +369,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
         "target",
         Some(UnitState {
             exists: true,
+            guid: 2,
             name: Some("Ally".into()),
             health: 40,
             max_health: 40,
@@ -349,6 +379,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
             ..UnitState::default()
         }),
     );
+    ally(&mut s);
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     s.resolve();
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
@@ -398,6 +429,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             name: Some("Me".into()),
             is_player: true,
             player_controlled: true,
@@ -408,6 +440,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
         "target",
         Some(UnitState {
             exists: true,
+            guid: 2,
             name: Some("Ally".into()),
             health: 40,
             max_health: 40,
@@ -417,6 +450,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
             ..UnitState::default()
         }),
     );
+    ally(&mut s);
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     s.resolve();
 

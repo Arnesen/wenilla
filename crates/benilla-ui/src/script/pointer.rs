@@ -16,6 +16,7 @@ use crate::order;
 use crate::widget::{ButtonState, FrameHandle};
 
 use super::clip::{hit_clip, hit_rect};
+use super::tick::verb;
 use super::{button, cursor, editbox, event, protected, Model, UiScript};
 
 /// The double-click interval, 300 ms, a constant in the Button mouse-up dispatcher `0x7792d0`
@@ -24,15 +25,23 @@ use super::{button, cursor, editbox, event, protected, Model, UiScript};
 /// each release only has to hit the frame.
 pub(super) const DOUBLE_CLICK_SECS: f64 = 0.300;
 
-/// Install `GetCursorPosition()` and `GetMouseFocus()`. The cursor (`0x48b820`) answers in the
-/// screen root's units, y up, with no scale divided out: a caller divides by its frame's
-/// `GetEffectiveScale()`, which carries the UI scale inside `UIParent`.
+/// The cursor as `GetCursorPosition` pushes it (`0x48b820`, the glue's `0x46dad0`): its fractions
+/// of the screen root through the reference's rounding ([`crate::layout::LayoutSpace::cursor`]), in
+/// the root's units, y up, with no scale divided out.
+pub(super) fn cursor_position(model: &super::Model) -> (f64, f64) {
+    let (x, y) = model.cursor_pos;
+    model.layout_space().cursor(x, y)
+}
+
+/// Install `GetCursorPosition()` and `GetMouseFocus()`. The cursor ([`cursor_position`]) has no
+/// scale divided out: a caller divides by its frame's `GetEffectiveScale()`, which carries the UI
+/// scale inside `UIParent`.
 pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCursorPosition",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<super::Model>().expect("model app_data");
-            Ok(model.cursor_pos)
+            Ok(cursor_position(&model))
         })?,
     )?;
 
@@ -261,6 +270,11 @@ impl UiScript {
                     self.push_error(e);
                 }
             }
+            // An enabled Button's enter refreshes its label after the base enter and its
+            // `OnEnter` (`0x76b6a0`, then `0x7794ab`).
+            if let Some(h) = new_handle {
+                button::refresh_label(&mut self.model_mut(), h);
+            }
         }
         new_id
     }
@@ -273,8 +287,8 @@ impl UiScript {
             .arena
             .frame(h)
             .and_then(|f| f.title_region)
-            .and_then(|rh| model.region_resolved.get(&rh))
-            .is_some_and(|r| point_in_rect(*r, x, y))
+            .and_then(|rh| model.region_rect(rh))
+            .is_some_and(|r| point_in_rect(r, x, y))
     }
 
     /// `0x765490`'s walk: strata FULLSCREEN_DIALOG down to WORLD, never TOOLTIP (the loop starts
@@ -340,7 +354,7 @@ impl UiScript {
         // it and returns before its sweep (`0x766164`), and the hover stays the frame it was when
         // the drag began.
         let mut release_lost = false;
-        let press_target: Option<crate::widget::FrameHandle> = if down {
+        let (press_target, hooked): (Option<crate::widget::FrameHandle>, bool) = if down {
             let mut model = self.model_mut();
             // A press for a button still held means its release never came (a focus loss); the
             // reference's capture never loses one. That frame gets the release edge so it does not
@@ -363,10 +377,24 @@ impl UiScript {
             } else {
                 hit_id.and_then(|id| model.id_to_frame.get(&id).copied())
             };
-            held.or(hover)
+            // The world input hook `0x492b50`, which the handler runs on the event record before
+            // it picks a frame, and only with no capture held (`0x76635c`-`0x766370`): a right
+            // press with a payload on the cursor or a gift wrap pending clears the cursor and is
+            // consumed.
+            let hooked = held.is_none()
+                && button == "RightButton"
+                && (model.cursor.is_some() || model.pending_wrap.is_some());
+            (held.or(hover), hooked)
         } else {
-            None
+            (None, false)
         };
+        if hooked {
+            // `ClearCursor(1, 1)` at `0x492bb5`; the handler returns without a capture, a raise or
+            // a press slot, so no frame sees this press and its release finds none to go to.
+            self.model_mut().cursor_pos = (x, y);
+            verb(&self.lua, cursor::clear_cursor);
+            return true;
+        }
         let press_id: Option<u32> =
             press_target.and_then(|h| self.model_ref().frame_to_id.get(&h).copied());
         // ── The raise, first ────────────────────────────────────────────────────────────────────
@@ -455,13 +483,14 @@ impl UiScript {
                     Some(h) => model.mouse_down_on.insert(button.to_string(), Some(h)),
                     None => model.mouse_down_on.remove(button),
                 };
-                // The Button press slot `0x779210` runs both legs only with the cursor inside the
-                // button (`0x77925c`) and the mouse button registered for it (`0x77924b` tests
-                // `m | m << 8`): the Down click for `…ButtonDown`, then the press edge,
-                // `SetButtonState(PUSHED)` (`0x7792b1`), for either registration, applied below
-                // after the scripts as the slot orders them.
+                // The Button press slot `0x779210` runs both legs only on an enabled button
+                // (`0x77922e`) with the cursor inside it (`0x77925c`) and the mouse button
+                // registered for it (`0x77924b` tests `m | m << 8`): the Down click for
+                // `…ButtonDown`, then the press edge, `SetButtonState(PUSHED)` (`0x7792b1`), for
+                // either registration, applied below after the scripts as the slot orders them.
                 let inside = press_target.filter(|&h| {
-                    button::wants_press_visual(&model, h, button)
+                    button::is_enabled(&model, h)
+                        && button::wants_press_visual(&model, h, button)
                         && frame_contains(&model, h, x, y)
                 });
                 press_art = inside;
@@ -591,8 +620,8 @@ impl UiScript {
             self.fire_drag_stop(source);
         }
         if let Some(id) = click_id {
-            // Shared with `Click()`: gated on the Button being enabled; a CheckButton toggles
-            // before `OnClick` fires. The mouse raises the gate's click flag around the slot
+            // Shared with `Click()`: a CheckButton toggles, then `OnClick` fires on an enabled
+            // Button. The mouse raises the gate's click flag around the slot
             // (`0x779275`-`0x77928b`); `Click()` does not.
             let _click = protected::raise(&self.lua, protected::Event::Click);
             button::click_button(&self.lua, id, button, down, false);
@@ -709,9 +738,8 @@ pub(super) fn frame_contains(model: &Model, fh: FrameHandle, x: f32, y: f32) -> 
         return false;
     };
     model
-        .resolved
-        .get(&fh)
-        .is_some_and(|r| point_in_rect(hit_rect(model, fh, *r), x, y))
+        .frame_rect(fh)
+        .is_some_and(|r| point_in_rect(hit_rect(model, fh, r), x, y))
         && clip.is_none_or(|c| point_in_rect(c, x, y))
 }
 

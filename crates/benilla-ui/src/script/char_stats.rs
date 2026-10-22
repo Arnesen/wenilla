@@ -13,11 +13,10 @@
 //! vmangos narrows the four buff-split arrays with `uint32(float)` (`Object.cpp:759-763`), so a
 //! negative delta arrives as 0 from an arm64 server and intact from x86.
 
-use mlua::{Lua, Value};
+use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::flag;
 use super::{binding_abi, Model};
-use crate::script::binding_abi::Idx;
 
 /// The `SkillLine.dbc` id behind weapon subclass `0..=20` (vmangos `Item.cpp:700-707`), `None`
 /// for the obsolete, exotic and misc rows; with no weapon the skill is [`SKILL_UNARMED`]
@@ -83,6 +82,12 @@ pub struct UnitCombatStats {
     pub physical_bonus_neg: i32,
     /// The physical damage multiplier (`PLAYER_FIELD_MOD_DAMAGE_DONE_PCT[0]`), 1.0 until streamed.
     pub damage_percent: f32,
+    /// The same three at the ranged weapon's damage school, which `UnitRangedDamage` reads
+    /// (`0x518a77`, `0x518ac0`, `0x518b0e`): the school of the first damage line of the ranged
+    /// slot's record with a minimum above 0, else 0 (`0x5189e1`-`0x518a45`).
+    pub ranged_bonus_pos: i32,
+    pub ranged_bonus_neg: i32,
+    pub ranged_percent: f32,
     /// Attack speeds in ms (`UNIT_FIELD_BASEATTACKTIME[0..2]`).
     pub main_attack_time_ms: u32,
     pub offhand_attack_time_ms: u32,
@@ -92,10 +97,14 @@ pub struct UnitCombatStats {
     pub attack_power: i32,
     pub attack_power_pos: i32,
     pub attack_power_neg: i32,
+    /// `UNIT_FIELD_ATTACK_POWER_MULTIPLIER`, the percent bonus minus 1.0.
+    pub attack_power_multiplier: f32,
     /// Ranged AP + its split mods.
     pub ranged_attack_power: i32,
     pub ranged_attack_power_pos: i32,
     pub ranged_attack_power_neg: i32,
+    /// `UNIT_FIELD_RANGED_ATTACK_POWER_MULTIPLIER`, the same.
+    pub ranged_attack_power_multiplier: f32,
     /// Ranged attack speed in ms (`UNIT_FIELD_RANGEDATTACKTIME`).
     pub ranged_attack_time_ms: u32,
     /// Ranged damage range (`UNIT_FIELD_MINRANGEDDAMAGE`/`MAXRANGEDDAMAGE`).
@@ -137,15 +146,20 @@ impl Default for UnitCombatStats {
             physical_bonus_pos: 0,
             physical_bonus_neg: 0,
             damage_percent: 1.0,
+            ranged_bonus_pos: 0,
+            ranged_bonus_neg: 0,
+            ranged_percent: 1.0,
             main_attack_time_ms: 0,
             offhand_attack_time_ms: 0,
             has_offhand: false,
             attack_power: 0,
             attack_power_pos: 0,
             attack_power_neg: 0,
+            attack_power_multiplier: 0.0,
             ranged_attack_power: 0,
             ranged_attack_power_pos: 0,
             ranged_attack_power_neg: 0,
+            ranged_attack_power_multiplier: 0.0,
             ranged_attack_time_ms: 0,
             ranged_min_damage: 0.0,
             ranged_max_damage: 0.0,
@@ -179,8 +193,11 @@ pub struct InvSlotView {
     /// its contents' summed stacks when its `ItemSubClass.dbc` row has `DisplayFlags & 0x4` (Soul
     /// Bag and quivers, `0x4c881a`), else 0; past 0-based slot `0x16` the binding answers 0 first.
     pub contents_count: Option<u32>,
-    /// Item quality 0..6 (`GetInventoryItemQuality`).
+    /// Item quality 0..6.
     pub quality: i32,
+    /// The record's inventory type (`+0x2c`), `None` while the record is not cached: what
+    /// `GetInventoryItemQuality` tests before the quality (`0x4c8a11`, `0x4c8a16`).
+    pub inventory_type: Option<u32>,
     /// The item's name, once known.
     pub name: Option<String>,
     /// Live durability `(current, max)`, the tooltip's "Durability X / Y" line.
@@ -201,6 +218,9 @@ pub struct InvSlotView {
     /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
     /// runs no query without one (`0x4c8b47`).
     pub spell_0: bool,
+    /// The worn object's `ITEM_FIELD_SPELL_CHARGES`, per spell block (`flds+0x28`), which its
+    /// tooltip's charges lines read (`0x52d9e9`); zeros for a visible-item record.
+    pub spell_charges: [i32; 5],
     /// The arm `UseInventoryItem` takes in the dispatcher, with no equip fork; `link` is set once
     /// the template is cached, which the dispatcher needs (`0x5d8d5c`).
     pub use_fork: super::container::UseFork,
@@ -225,6 +245,8 @@ pub struct InvSlotView {
     pub enchants: Vec<super::EnchantView>,
     /// The instance's remaining lifetime in ms; `None` without a timer.
     pub duration_ms: Option<u64>,
+    /// `ITEM_FIELD_DURATION`, as [`super::container::ContainerSlot::field_duration`].
+    pub field_duration: u32,
 }
 
 /// The doll snapshot: 0 ammo, 1..=19 equipment, 20..=23 the equipped bags, as
@@ -327,9 +349,10 @@ impl super::UiScript {
         self.model_mut().player_combat_stats = stats;
     }
 
-    /// The pet's snapshot; `None` without a pet, so `Unit*("pet")` reads the absent shape.
-    pub fn set_pet_combat_stats(&mut self, stats: Option<UnitCombatStats>) {
-        self.model_mut().pet_combat_stats = stats;
+    /// Drain the ammunition entries the ammo slot's texture and quality getters looked up and
+    /// missed, one per call, each to be registered with the callback `0x4c84f0`.
+    pub fn take_ammo_record_asks(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().ammo_record_asks)
     }
 
     /// Push the doll snapshot, recompute the 12 alert statuses and fire `UPDATE_INVENTORY_ALERTS`.
@@ -378,19 +401,81 @@ pub(super) fn recompute_inventory_alerts(model: &mut Model) {
     model.inventory_alerts = alerts;
 }
 
-fn with_unit_stats<T>(
-    lua: &Lua,
-    token: &Option<String>,
-    f: impl FnOnce(&UnitCombatStats) -> T,
-) -> T {
+/// The unit a stat getter asks after `GetUnitFromToken` (`0x515940`), the gates' inputs beside
+/// its fields; `None` is no object, whose answer is each function's zeros.
+struct Asked<'a> {
+    /// The fields read: the active player's own snapshot, with its PLAYER block and equipment,
+    /// else the unit's ([`super::UnitState::combat`]).
+    fields: &'a UnitCombatStats,
+    /// SELF: the object's GUID is the active player's (`0x468550`).
+    me: bool,
+    /// PLAYER: the type word's player bit (`shr ecx,4; test cl,1`).
+    player: bool,
+    /// SELF or `UNIT_FIELD_SUMMONEDBY` the active player's GUID (`0x519272`, `0x518881`), with
+    /// no zero guard.
+    me_or_mine: bool,
+    /// `UNIT_FIELD_LEVEL`, which a creature's skill body multiplies by 5 (`0x613680`).
+    level: u32,
+}
+
+/// [`Asked`] for `token`, after the resolver's raise for a token it does not know (`0x515c14`).
+/// The `"player"` token's own push is the active player whatever its guid reads, as the resolver
+/// names it.
+fn asked<T>(lua: &Lua, token: &str, f: impl FnOnce(Option<Asked<'_>>) -> T) -> mlua::Result<T> {
+    super::unit::check_unit_token(&Some(token.to_string()))?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let absent = UnitCombatStats::default();
-    let pushed = match token.as_deref() {
-        Some("player") => model.player_combat_stats.as_ref(),
-        Some("pet") => model.pet_combat_stats.as_ref(),
-        _ => None,
-    };
-    f(pushed.unwrap_or(&absent))
+    let player_guid = model.unit_guids.player;
+    let player_push = model.pushed_unit("player");
+    let asked = model.unit(token).filter(|u| u.has_object).map(|u| {
+        let me = player_push.is_some_and(|p| std::ptr::eq(p, u))
+            || (u.guid != 0 && u.guid == player_guid);
+        Asked {
+            fields: if me {
+                model.player_combat_stats.as_ref().unwrap_or(&u.combat)
+            } else {
+                &u.combat
+            },
+            me,
+            player: me || u.is_player,
+            me_or_mine: me || u.summoned_by == player_guid,
+            level: u.level,
+        }
+    });
+    Ok(f(asked))
+}
+
+/// [`asked`] behind the `Usage:` gate the one-argument getters open with (`0x6f3510`).
+fn asked_arg<T>(
+    lua: &Lua,
+    token: Value,
+    usage: &'static str,
+    f: impl FnOnce(Option<Asked<'_>>) -> T,
+) -> mlua::Result<T> {
+    let token = binding_abi::string_arg(lua, token, usage)?;
+    asked(lua, &token, f)
+}
+
+/// A swing time in seconds: the field, an integer, times the single 0.001 at `0x801360`
+/// (`0x518eb8`, `0x51898f`), at the x87's double precision.
+fn swing_seconds(ms: u32) -> f64 {
+    f64::from(ms) * f64::from(0.001f32)
+}
+
+/// One attack power value as `UnitAttackPower` pushes it: `(1 + m) · x` at the x87's double
+/// precision, stored as a single, then `fistp`'d to nearest even (`0x518fe2`-`0x518ffd`).
+fn scaled_attack_power(m: f32, x: i32) -> i64 {
+    (((f64::from(m) + 1.0) * f64::from(x)) as f32).round_ties_even() as i64
+}
+
+/// The damage-bonus triple `UnitDamage` and `UnitRangedDamage` push after the damage: the active
+/// player's own; another player's the zero constant (`0x518cf7`, `0x518d7a`); a non-player's 0, 0
+/// and 1.0 (`0x518dbc`-`0x518dd2`, `0x518b1d`-`0x518b33`).
+fn damage_bonus(a: &Asked<'_>, own: (i32, i32, f32)) -> (i64, i64, f64) {
+    match (a.player, a.me) {
+        (false, _) => (0, 0, 1.0),
+        (true, false) => (0, 0, 0.0),
+        (true, true) => (i64::from(own.0), i64::from(own.1), f64::from(own.2)),
+    }
 }
 
 /// The clamp `UnitDefense` (`0x519298`) and each hand of `UnitAttackBothHands` (`0x5188a7`) apply:
@@ -401,10 +486,15 @@ fn skill_clamped((base, modifier): (i32, i32)) -> (i64, i64) {
     (base, if modifier + base < 0 { -base } else { modifier })
 }
 
-/// A non-player's `UnitDefense` and `UnitAttackBothHands` answer: `CGUnit_C`'s vtable bodies
-/// (`0x613680`, `0x6136b0`) return level * 5 with a 0 modifier; a creature has no skill block.
-fn cgunit_skill(model: &Model, token: &str) -> i64 {
-    model.unit(token).map_or(0, |u| i64::from(u.level)) * 5
+/// The skill pair `UnitDefense` and each hand of `UnitAttackBothHands` ask through the vtable
+/// (`[vtbl+0xac]`, `[vtbl+0xb0]`) behind SELF-or-mine: the active player's skill line
+/// (`0x5eda20`), a creature's level times 5 and 0 (`0x613680`, `0x6136b0`); anyone else's zeros.
+fn vtable_skill(a: Option<&Asked<'_>>, own: (i32, i32)) -> (i32, i32) {
+    match a {
+        Some(a) if a.me => own,
+        Some(a) if a.me_or_mine => ((a.level as i32).wrapping_mul(5), 0),
+        _ => (0, 0),
+    }
 }
 
 /// `token`'s inventory slot, unit-keyed as in the reference so the inspect doll reuses these
@@ -415,6 +505,30 @@ fn player_inv_slot(lua: &Lua, token: &Option<String>, slot: i64) -> Option<InvSl
     let idx = usize::try_from(slot).ok()?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
     model.inv_slot(token, idx)
+}
+
+/// [`player_inv_slot`] for the getters that read the unit's item table (`0x6228a0`), which only
+/// the active player's holds: another player's slot is empty.
+fn own_inv_slot(lua: &Lua, token: &Option<String>, slot: i64) -> Option<InvSlotView> {
+    let own = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        model.inventory_reader(token.as_deref()?) == Some(InvReader::Own)
+    };
+    own.then(|| player_inv_slot(lua, token, slot)).flatten()
+}
+
+/// The ammo slot's record lookup with the callback `0x4c84f0` (`0x4c83bc`, `0x4c89cf`): a view of
+/// the active player's ammunition whose record the cache lacks registers one per call.
+fn ask_ammo_record(lua: &Lua, token: &Option<String>, slot: i64, view: Option<&InvSlotView>) {
+    let Some(v) = view.filter(|v| slot == 0 && v.item_id != 0 && v.name.is_none()) else {
+        return;
+    };
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    // The ammo leg reads the active player's field alone (`0x4c8382`).
+    let own = token.as_deref().and_then(|t| model.inventory_reader(t)) == Some(InvReader::Own);
+    if own {
+        model.ammo_record_asks.push(v.item_id);
+    }
 }
 
 /// The bank's live-API ids, `BankButtonIDToInvSlotID`'s two bands: 24 vault slots, 6 bag slots.
@@ -432,29 +546,75 @@ pub(super) const KEYRING_INV_SLOTS: std::ops::RangeInclusive<usize> = 82..=113;
 /// `ui_items::KEYRING_CONTAINER` in the app, which feeds the keys as that container.
 pub(super) const KEYRING_CONTAINER: i64 = -2;
 
+/// Whose items a slot getter reads after the token's resolve (`0x515940`) and
+/// `CanReadUnitInventory` (`0x4944a0`): the active player's own table, or another player's
+/// visible items, a player it can cooperate with within 10 yards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InvReader {
+    Own,
+    Visible(u64),
+}
+
 impl Model {
+    /// [`InvReader`] for `token`, `None` for a unit the getters may not read or no unit at all.
+    /// `"player"` is the active player whatever its guid reads.
+    pub(super) fn inventory_reader(&self, token: &str) -> Option<InvReader> {
+        if token.eq_ignore_ascii_case("player") {
+            return Some(InvReader::Own);
+        }
+        let guid = self.unit_guids.resolve(token).ok().flatten()?;
+        if guid == self.unit_guids.player {
+            return Some(InvReader::Own);
+        }
+        let reach = self.unit_reach.get(&guid)?;
+        (reach.inspectable && super::inspect::in_inspect_range(reach))
+            .then_some(InvReader::Visible(guid))
+    }
+
     /// The item `token` exposes at live-API id `slot`, the one routing the `GetInventoryItem*`
     /// getters and `GameTooltip:SetInventoryItem` share. Stock paints the bank through this API
     /// (`BankFrame.lua:35`) and hovers a key through it (`ContainerFrame.lua:616-619`), so the
-    /// bank and keyring bands are answered from the container snapshots.
+    /// bank and keyring bands are answered from the container snapshots. Another player answers
+    /// its visible items alone, slots 1-19 (`0x5f0d60`).
     pub(super) fn inv_slot(&self, token: &str, slot: usize) -> Option<InvSlotView> {
-        if token.eq_ignore_ascii_case("player") {
-            if let Some(view) = self.bank_inv_slot(slot) {
-                return Some(view);
-            }
-            if KEYRING_INV_SLOTS.contains(&slot) {
-                let n = (slot - KEYRING_INV_SLOTS.start() + 1) as u32;
-                let keyring = self.containers.get(&KEYRING_CONTAINER)?;
-                return keyring.slots.get(&n).map(InvSlotView::from_container_slot);
-            }
-            return self.inventory_slots.get(slot)?.clone();
+        match self.inventory_reader(token)? {
+            InvReader::Own => self.own_inv_slot(slot),
+            InvReader::Visible(guid) => (1..=19)
+                .contains(&slot)
+                .then(|| self.visible_equipment.get(&guid)?.get(slot)?.clone())
+                .flatten(),
         }
-        self.inspect
-            .as_ref()
-            .filter(|v| v.unit == token)?
-            .slots
-            .get(slot)?
-            .clone()
+    }
+
+    /// The active player's item at live-API id `slot`.
+    fn own_inv_slot(&self, slot: usize) -> Option<InvSlotView> {
+        if let Some(view) = self.bank_inv_slot(slot) {
+            return Some(view);
+        }
+        if KEYRING_INV_SLOTS.contains(&slot) {
+            let n = (slot - KEYRING_INV_SLOTS.start() + 1) as u32;
+            let keyring = self.containers.get(&KEYRING_CONTAINER)?;
+            return keyring.slots.get(&n).map(InvSlotView::from_container_slot);
+        }
+        self.inventory_slots.get(slot)?.clone()
+    }
+
+    /// The bag-slot item object behind the player's live id `slot` in the vault and keyring bands,
+    /// which `SetInventoryItem` resolves through the player's slot list as it does a worn item
+    /// (`0x53314e` → `0x6228a0`); `None` for every other band.
+    pub(super) fn inv_container_slot(
+        &self,
+        slot: usize,
+    ) -> Option<&super::container::ContainerSlot> {
+        let (bag, first) = if BANK_INV_SLOTS.contains(&slot) {
+            (BANK_CONTAINER, *BANK_INV_SLOTS.start())
+        } else if KEYRING_INV_SLOTS.contains(&slot) {
+            (KEYRING_CONTAINER, *KEYRING_INV_SLOTS.start())
+        } else {
+            return None;
+        };
+        let n = (slot - first + 1) as u32;
+        self.containers.get(&bag)?.slots.get(&n)
     }
 
     /// The player's repair cost at live id `slot`, the vault and keyring bands by their container
@@ -526,6 +686,13 @@ fn link_item_name(link: &str) -> Option<String> {
 }
 
 impl InvSlotView {
+    /// An item object whose record the cache does not hold yet, which the app pushes with its
+    /// entry and no name: `SetInventoryItem`'s cooldown query on it asks the record with the
+    /// callback `0x6e2f70` (`0x533188` → `0x5331ec`, `0x6e2efb`).
+    pub fn record_pending(&self) -> bool {
+        self.item_id != 0 && self.name.is_none()
+    }
+
     /// A container slot seen through the inventory API, for `Model::inv_slot`'s bank band.
     fn from_container_slot(slot: &super::container::ContainerSlot) -> Self {
         InvSlotView {
@@ -542,6 +709,7 @@ impl InvSlotView {
             occupied_seats: slot.occupied_seats,
             use_spell: slot.use_spell,
             spell_0: slot.spell_0,
+            spell_charges: slot.spell_charges,
             link: slot.link.clone(),
             guid: slot.guid,
             creator: slot.creator.clone(),
@@ -552,6 +720,7 @@ impl InvSlotView {
             // The item's own flags (UNLOCKED, WRAPPED) and expiry, which the tooltip builder reads.
             flags: slot.flags,
             duration_ms: slot.duration_ms,
+            field_duration: slot.field_duration,
             // Slot 20 (`Bag0Slot`) among `equip_slots` marks a container (`INVTYPE_BAG`). The bank
             // vault is past the `0x16` short-circuit, so only `Some` versus `None` matters.
             contents_count: slot.equip_slots.contains(&20).then_some(0),
@@ -581,186 +750,235 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitStat",
         lua.create_function(|lua, (token, i): (Value, Value)| {
+            // Both arguments' gates, then the resolver (`0x51863f`), then the index (`0x51865a`).
             let token = binding_abi::string_arg(lua, token, STAT_USAGE)?;
             let idx = binding_abi::number_arg(lua, i, STAT_USAGE)? - 1;
+            super::unit::check_unit_token(&Some(token.clone()))?;
             if !(0..5).contains(&idx) {
                 return Err(mlua::Error::RuntimeError(STAT_INDEX_ERROR.into()));
             }
             let idx = idx as usize;
-            Ok(with_unit_stats(lua, &Some(token), |s| {
-                let (raw, pos, neg) = (s.stats[idx], s.stat_pos[idx], s.stat_neg[idx]);
+            asked(lua, &token, |a| {
+                let Some(a) = a else {
+                    return (0, 0, 0, 0);
+                };
+                let s = a.fields;
+                let raw = s.stats[idx];
+                let (pos, neg) = if a.me {
+                    (s.stat_pos[idx], s.stat_neg[idx])
+                } else {
+                    (0, 0)
+                };
                 (
                     i64::from(raw),
                     i64::from(raw.max(0)),
                     i64::from(pos),
                     i64::from(neg),
                 )
-            }))
+            })
         })?,
     )?;
 
-    // UnitResistance(unit, 0..=6) → (base, resistance, positive, negative) through `0x5efcd0`,
-    // school 0 armor: `base = raw - pos - neg` before the clamp, `resistance = max(raw, 0)`.
+    // UnitResistance(unit, 0..=6) → (base, resistance, positive, negative). The active player's
+    // through `0x5efcd0`: `base = raw - pos - neg` before the clamp, `resistance = max(raw, 0)`;
+    // any other unit's the field raised to 0 twice and no buffs (`0x518562`-`0x51857c`).
     g.set(
         "UnitResistance",
         lua.create_function(|lua, (token, school): (Value, Value)| {
+            // Both arguments' gates, then the resolver (`0x5184df`), then the index (`0x5184fd`).
             let token = binding_abi::string_arg(lua, token, RESISTANCE_USAGE)?;
             let school = binding_abi::number_arg(lua, school, RESISTANCE_USAGE)?;
+            super::unit::check_unit_token(&Some(token.clone()))?;
             if !(0..7).contains(&school) {
                 return Err(mlua::Error::RuntimeError(RESISTANCE_INDEX_ERROR.into()));
             }
             let idx = school as usize;
-            Ok(with_unit_stats(lua, &Some(token), |s| {
-                let (raw, pos, neg) = (
-                    s.resistances[idx],
-                    s.resistance_pos[idx],
-                    s.resistance_neg[idx],
-                );
+            asked(lua, &token, |a| {
+                let Some(a) = a else {
+                    return (0, 0, 0, 0);
+                };
+                let s = a.fields;
+                let raw = s.resistances[idx];
+                if !a.me {
+                    let shown = i64::from(raw.max(0));
+                    return (shown, shown, 0, 0);
+                }
+                let (pos, neg) = (s.resistance_pos[idx], s.resistance_neg[idx]);
                 (
                     i64::from(raw - pos - neg),
                     i64::from(raw.max(0)),
                     i64::from(pos),
                     i64::from(neg),
                 )
-            }))
+            })
         })?,
     )?;
 
-    // UnitArmor(unit) → (base, effectiveArmor, armor, posBuff, negBuff): school 0 through
-    // `0x5efcd0`, effectiveArmor and armor both its clamped total.
+    // UnitArmor(unit) → (base, effectiveArmor, armor, posBuff, negBuff): the armor school through
+    // `0x5efcd0` for the active player, effectiveArmor and armor both its clamped total; any
+    // other unit's the field raised to 0 three times and no buffs (`0x51937e`-`0x5193b0`).
     g.set(
         "UnitArmor",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                let (raw, pos, neg) = (s.resistances[0], s.resistance_pos[0], s.resistance_neg[0]);
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitArmor("unit")"#, |a| {
+                let Some(a) = a else {
+                    return (0, 0, 0, 0, 0);
+                };
+                let s = a.fields;
+                let raw = s.resistances[0];
+                let shown = i64::from(raw.max(0));
+                if !a.me {
+                    return (shown, shown, shown, 0, 0);
+                }
+                let (pos, neg) = (s.resistance_pos[0], s.resistance_neg[0]);
                 (
                     i64::from(raw - pos - neg),
-                    i64::from(raw.max(0)),
-                    i64::from(raw.max(0)),
+                    shown,
+                    shown,
                     i64::from(pos),
                     i64::from(neg),
                 )
-            }))
+            })
         })?,
     )?;
 
     // UnitDamage(unit) → (minDamage, maxDamage, minOffHandDamage, maxOffHandDamage,
-    // physicalBonusPos, physicalBonusNeg, percent): the damage fields verbatim, then school 0's
-    // `MOD_DAMAGE_DONE` split, which is inferred, not traced in the reference.
+    // physicalBonusPos, physicalBonusNeg, percent): the four damage fields of any unit
+    // (`0x518c72`-`0x518cc9`), then [`damage_bonus`] at the physical school; seven zeros with no
+    // object (`0x518deb`).
     g.set(
         "UnitDamage",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitDamage("unit")"#, |a| {
+                let Some(a) = a else {
+                    return (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0);
+                };
+                let s = a.fields;
+                let (pos, neg, percent) = damage_bonus(
+                    &a,
+                    (s.physical_bonus_pos, s.physical_bonus_neg, s.damage_percent),
+                );
                 (
                     f64::from(s.min_damage),
                     f64::from(s.max_damage),
                     f64::from(s.min_offhand_damage),
                     f64::from(s.max_offhand_damage),
-                    i64::from(s.physical_bonus_pos),
-                    i64::from(s.physical_bonus_neg),
-                    f64::from(s.damage_percent),
+                    pos,
+                    neg,
+                    percent,
                 )
-            }))
-        })?,
-    )?;
-
-    // UnitAttackSpeed(unit) → (mainSpeed, offhandSpeed) in seconds; nil offhand without a weapon.
-    g.set(
-        "UnitAttackSpeed",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                (
-                    f64::from(s.main_attack_time_ms) / 1000.0,
-                    s.has_offhand
-                        .then_some(f64::from(s.offhand_attack_time_ms) / 1000.0),
-                )
-            }))
-        })?,
-    )?;
-
-    // UnitAttackPower(unit) → (base, posBuff, negBuff): `UNIT_FIELD_ATTACK_POWER` and the signed
-    // halves of `_MODS` (vmangos `StatSystem.cpp:335-336`).
-    g.set(
-        "UnitAttackPower",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                (
-                    i64::from(s.attack_power),
-                    i64::from(s.attack_power_pos),
-                    i64::from(s.attack_power_neg),
-                )
-            }))
-        })?,
-    )?;
-
-    // UnitRangedAttackPower(unit) → (base, posBuff, negBuff), from the ranged fields.
-    g.set(
-        "UnitRangedAttackPower",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                (
-                    i64::from(s.ranged_attack_power),
-                    i64::from(s.ranged_attack_power_pos),
-                    i64::from(s.ranged_attack_power_neg),
-                )
-            }))
-        })?,
-    )?;
-
-    // UnitAttackBothHands(unit) → (mainBase, mainMod, offBase, offMod): `0x518810` calls
-    // `[vtbl+0xb0]` for hand 0 then hand 1. Stock reads only the first pair
-    // (`PaperDollFrame.lua:398-399`). A pet's `CGUnit_C` body (`0x6136b0`) ignores the hand, so
-    // both pairs are `(level * 5, 0)`.
-    g.set(
-        "UnitAttackBothHands",
-        lua.create_function(|lua, token: Option<String>| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(match token.as_deref() {
-                Some("player") => model
-                    .player_combat_stats
-                    .as_ref()
-                    .map_or((0, 0, 0, 0), |s| {
-                        let (mb, mm) = skill_clamped(s.main_weapon_skill);
-                        let (ob, om) = skill_clamped(s.offhand_weapon_skill);
-                        (mb, mm, ob, om)
-                    }),
-                Some("pet") => {
-                    let base = cgunit_skill(&model, "pet");
-                    (base, 0, base, 0)
-                }
-                _ => (0, 0, 0, 0),
             })
         })?,
     )?;
 
-    // UnitRangedAttack(unit) → (base, modifier), the ranged weapon's skill pair.
+    // UnitAttackSpeed(unit) → (mainSpeed, offhandSpeed) in seconds (`0x518ea0`, field 126, for
+    // any unit); the off hand only for a player whose slot-16 item is a weapon (`0x518ecf`,
+    // `0x518f19`), which only the active player's descriptor names, else nil; `0, nil` with no
+    // object (`0x518f55`).
+    g.set(
+        "UnitAttackSpeed",
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitAttackSpeed("unit")"#, |a| {
+                let Some(a) = a else {
+                    return (0.0, None);
+                };
+                let s = a.fields;
+                (
+                    swing_seconds(s.main_attack_time_ms),
+                    (a.player && s.has_offhand).then(|| swing_seconds(s.offhand_attack_time_ms)),
+                )
+            })
+        })?,
+    )?;
+
+    // UnitAttackPower(unit) → (base, posBuff, negBuff): `UNIT_FIELD_ATTACK_POWER` and the signed
+    // halves of `_MODS` (vmangos `StatSystem.cpp:335-336`), each scaled by `1 + _MULTIPLIER` and
+    // rounded alone (`0x518fe2`, `0x519019`, `0x519051`), for any unit (the type word's unit bit,
+    // `0x518fd3`); the server sends them to the owner alone.
+    g.set(
+        "UnitAttackPower",
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitAttackPower("unit")"#, |a| {
+                a.map_or((0, 0, 0), |a| {
+                    let s = a.fields;
+                    let m = s.attack_power_multiplier;
+                    (
+                        scaled_attack_power(m, s.attack_power),
+                        scaled_attack_power(m, s.attack_power_pos),
+                        scaled_attack_power(m, s.attack_power_neg),
+                    )
+                })
+            })
+        })?,
+    )?;
+
+    // UnitRangedAttackPower(unit) → (base, posBuff, negBuff), from the ranged fields scaled the
+    // same way, under `UnitAttackPower`'s usage text (`0x5190d7`).
+    g.set(
+        "UnitRangedAttackPower",
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitAttackPower("unit")"#, |a| {
+                a.map_or((0, 0, 0), |a| {
+                    let s = a.fields;
+                    let m = s.ranged_attack_power_multiplier;
+                    (
+                        scaled_attack_power(m, s.ranged_attack_power),
+                        scaled_attack_power(m, s.ranged_attack_power_pos),
+                        scaled_attack_power(m, s.ranged_attack_power_neg),
+                    )
+                })
+            })
+        })?,
+    )?;
+
+    // UnitAttackBothHands(unit) → (mainBase, mainMod, offBase, offMod): `0x518810` calls
+    // `[vtbl+0xb0]` for hand 0 then hand 1 ([`vtable_skill`]). Stock reads only the first pair
+    // (`PaperDollFrame.lua:398-399`). A creature's body (`0x6136b0`) ignores the hand, so both
+    // pairs are `(level * 5, 0)`.
+    g.set(
+        "UnitAttackBothHands",
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitAttackBothHands("unit")"#, |a| {
+                let own = a.as_ref().map_or(((0, 0), (0, 0)), |a| {
+                    (a.fields.main_weapon_skill, a.fields.offhand_weapon_skill)
+                });
+                let (mb, mm) = skill_clamped(vtable_skill(a.as_ref(), own.0));
+                let (ob, om) = skill_clamped(vtable_skill(a.as_ref(), own.1));
+                (mb, mm, ob, om)
+            })
+        })?,
+    )?;
+
+    // UnitRangedAttack(unit) → (base, modifier), the active player's ranged weapon skill pair
+    // (`0x518be5`, `0x612b40`), behind PLAYER then SELF; any other unit `0, 0`.
     g.set(
         "UnitRangedAttack",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                (
-                    i64::from(s.ranged_weapon_skill.0),
-                    i64::from(s.ranged_weapon_skill.1),
-                )
-            }))
+        lua.create_function(|lua, token: Value| {
+            asked_arg(
+                lua,
+                token,
+                r#"Usage: UnitRangedAttack("unit")"#,
+                |a| match a {
+                    Some(a) if a.player && a.me => (
+                        i64::from(a.fields.ranged_weapon_skill.0),
+                        i64::from(a.fields.ranged_weapon_skill.1),
+                    ),
+                    _ => (0, 0),
+                },
+            )
         })?,
     )?;
 
     // UnitDefense(unit) → (base, modifier); stock splits the modifier's sign itself
-    // (`PaperDollFrame.lua:259-271`). The gate is SELF or `UNIT_FIELD_SUMMONEDBY` = us, then
-    // `[vtbl+0xac]`: `CGPlayer_C` `0x5eda20` reads the Defense skill (`0x6de040`), `CGUnit_C`
-    // `0x613680` answers level * 5 and 0. Any other token gets the gate's zeros.
+    // (`PaperDollFrame.lua:259-271`). SELF or `UNIT_FIELD_SUMMONEDBY` us, then `[vtbl+0xac]`:
+    // `CGPlayer_C` `0x5eda20` reads the Defense skill (`0x6de040`), `CGUnit_C` `0x613680` answers
+    // level * 5 and 0 ([`vtable_skill`]); the clamp runs on every arm (`0x519298`).
     g.set(
         "UnitDefense",
-        lua.create_function(|lua, token: Option<String>| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(match token.as_deref() {
-                Some("player") => model
-                    .player_combat_stats
-                    .as_ref()
-                    .map_or((0, 0), |s| skill_clamped(s.defense_skill)),
-                Some("pet") => (cgunit_skill(&model, "pet"), 0),
-                _ => (0, 0),
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitDefense("unit")"#, |a| {
+                let own = a.as_ref().map_or((0, 0), |a| a.fields.defense_skill);
+                skill_clamped(vtable_skill(a.as_ref(), own))
             })
         })?,
     )?;
@@ -789,20 +1007,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     }
 
     // UnitRangedDamage(unit) → (speed, minDamage, maxDamage, physicalBonusPos, physicalBonusNeg,
-    // percent), with `UnitDamage`'s school-0 mods.
+    // percent): the ranged speed and damage fields of any unit (`0x518977`-`0x5189c8`), then
+    // [`damage_bonus`] at the ranged weapon's school (`0x5189e1`-`0x518b0e`); six zeros with no
+    // object (`0x518b3a`).
     g.set(
         "UnitRangedDamage",
-        lua.create_function(|lua, token: Option<String>| {
-            Ok(with_unit_stats(lua, &token, |s| {
+        lua.create_function(|lua, token: Value| {
+            asked_arg(lua, token, r#"Usage: UnitRangedDamage("unit")"#, |a| {
+                let Some(a) = a else {
+                    return (0.0, 0.0, 0.0, 0, 0, 0.0);
+                };
+                let s = a.fields;
+                let (pos, neg, percent) = damage_bonus(
+                    &a,
+                    (s.ranged_bonus_pos, s.ranged_bonus_neg, s.ranged_percent),
+                );
                 (
-                    f64::from(s.ranged_attack_time_ms) / 1000.0,
+                    swing_seconds(s.ranged_attack_time_ms),
                     f64::from(s.ranged_min_damage),
                     f64::from(s.ranged_max_damage),
-                    i64::from(s.physical_bonus_pos),
-                    i64::from(s.physical_bonus_neg),
-                    f64::from(s.damage_percent),
+                    pos,
+                    neg,
+                    percent,
                 )
-            }))
+            })
         })?,
     )?;
 
@@ -820,11 +1048,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // The getters' shared opening: `is-number-or-string` on the unit (`0x6f3510`) else `usage`,
+    // then the slot reader `0x4c8520` else `invalid`, then the token's resolve, which raises for
+    // one it does not know (`0x4c8328` → `0x515c14`); the 1-based slot back for the lookup.
+    fn inventory_item_args(
+        lua: &Lua,
+        (unit, slot): (Value, Value),
+        usage: &'static str,
+        invalid: &'static str,
+    ) -> mlua::Result<(Option<String>, i64)> {
+        let token = super::binding_abi::string_arg(lua, unit, usage)?;
+        let slot0 = super::inventory_verbs::inventory_slot_arg(lua, slot, invalid)?;
+        let token = Some(token);
+        super::unit::check_unit_token(&token)?;
+        Ok((token, i64::from(slot0) + 1))
+    }
+
     // GetInventoryItemTexture(unit, slot) → icon path, or nil until the item's template arrives.
     g.set(
         "GetInventoryItemTexture",
-        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
-            match player_inv_slot(lua, &token, slot).and_then(|v| v.icon) {
+        lua.create_function(|lua, (unit, slot): (Value, Value)| {
+            // `Usage: GetInventoryItemTexture(unit, slot)` (`0x8488f8`) unless arg 1 is a number or
+            // string, `Invalid inventory slot in GetInventoryItemTexture` (`0x8488c4`) unless the
+            // shared reader passes arg 2 (`0x4c82f8`).
+            let (token, slot) = inventory_item_args(
+                lua,
+                (unit, slot),
+                "Usage: GetInventoryItemTexture(unit, slot)",
+                "Invalid inventory slot in GetInventoryItemTexture",
+            )?;
+            let view = player_inv_slot(lua, &token, slot);
+            // Only while the player carries some (`0x4c83a0`, `CountInventoryItemsByEntry`).
+            ask_ammo_record(lua, &token, slot, view.as_ref().filter(|v| v.count > 0));
+            match view.and_then(|v| v.icon) {
                 Some(icon) => Ok(Value::String(lua.create_string(&icon)?)),
                 None => Ok(Value::Nil),
             }
@@ -835,11 +1091,34 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // arrives with the name and quality.
     g.set(
         "GetInventoryItemLink",
-        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
-            match player_inv_slot(lua, &token, slot).and_then(|v| v.link) {
-                Some(link) => Ok(Value::String(lua.create_string(&link)?)),
-                None => Ok(Value::Nil),
+        lua.create_function(|lua, (unit, slot): (Value, Value)| {
+            // `Usage: GetInventoryItemLink(unit, slot)` (`0x848ad0`) unless arg 1 is a number or
+            // string, `Invalid inventory slot in GetInventoryItemLink` (`0x848aa0`) unless the
+            // shared reader passes arg 2 (`0x4c8c68`).
+            let token = super::binding_abi::string_arg(
+                lua,
+                unit,
+                "Usage: GetInventoryItemLink(unit, slot)",
+            )?;
+            let slot0 = super::inventory_verbs::inventory_slot_arg(
+                lua,
+                slot,
+                "Invalid inventory slot in GetInventoryItemLink",
+            )?;
+            // The ammo slot answers no values ahead of the token's resolve (`0x4c8c8a`).
+            if slot0 == -1 {
+                return Ok(MultiValue::new());
             }
+            let token = Some(token);
+            super::unit::check_unit_token(&token)?;
+            Ok(
+                match player_inv_slot(lua, &token, i64::from(slot0) + 1).and_then(|v| v.link) {
+                    Some(link) => {
+                        MultiValue::from_vec(vec![Value::String(lua.create_string(&link)?)])
+                    }
+                    None => MultiValue::from_vec(vec![Value::Nil]),
+                },
+            )
         })?,
     )?;
 
@@ -863,7 +1142,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     INVALID_SLOT_GET_INVENTORY_ITEM_COUNT.into(),
                 ));
             }
-            let Some(v) = player_inv_slot(lua, &Some(token), i64::from(slot0) + 1) else {
+            let token = Some(token);
+            super::unit::check_unit_token(&token)?;
+            // The item table's slot (`0x6228a0`), empty for another player: 1 (`0x4c8797`).
+            let Some(v) = own_inv_slot(lua, &token, i64::from(slot0) + 1) else {
                 return Ok(1i64);
             };
             Ok(match v.contents_count {
@@ -874,22 +1156,50 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetInventoryItemQuality(unit, slot) → 0..6, or nil for an empty slot (the wiki's shape).
+    // GetInventoryItemQuality(unit, slot) → the record's quality, -1 for a record of inventory
+    // type 0 (`0x4c8a22`), nil for an empty slot or an uncached record (`0x4c8a11`).
     g.set(
         "GetInventoryItemQuality",
-        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
-            match player_inv_slot(lua, &token, slot) {
-                Some(v) if v.item_id != 0 => Ok(Value::Integer(i64::from(v.quality))),
-                _ => Ok(Value::Nil),
-            }
+        lua.create_function(|lua, (unit, slot): (Value, Value)| {
+            // `Usage: GetInventoryItemQuality(unit, slot)` (`0x848a14`) unless arg 1 is a number or
+            // string, `Invalid inventory slot in GetInventoryItemQuality` (`0x8489e0`) unless the
+            // shared reader passes arg 2 (`0x4c8925`).
+            let (token, slot) = inventory_item_args(
+                lua,
+                (unit, slot),
+                "Usage: GetInventoryItemQuality(unit, slot)",
+                "Invalid inventory slot in GetInventoryItemQuality",
+            )?;
+            // The item table's slot (`0x4c89d6` → `0x6228a0`), empty for another player.
+            let view = own_inv_slot(lua, &token, slot);
+            ask_ammo_record(lua, &token, slot, view.as_ref());
+            Ok(
+                match view
+                    .filter(|v| v.item_id != 0)
+                    .map(|v| (v.inventory_type, v.quality))
+                {
+                    Some((Some(0), _)) => Value::Integer(-1),
+                    Some((Some(_), quality)) => Value::Integer(i64::from(quality)),
+                    _ => Value::Nil,
+                },
+            )
         })?,
     )?;
 
     // GetInventoryItemBroken(unit, slot) → 1 or nil, per `slot_is_broken`.
     g.set(
         "GetInventoryItemBroken",
-        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
-            match player_inv_slot(lua, &token, slot) {
+        lua.create_function(|lua, (unit, slot): (Value, Value)| {
+            // `Usage: GetInventoryItemBroken(unit, slot)` (`0x848958`) unless arg 1 is a number or
+            // string, `Invalid inventory slot in GetInventoryItemBroken` (`0x848924`) unless the
+            // shared reader passes arg 2 (`0x4c85ca`).
+            let (token, slot) = inventory_item_args(
+                lua,
+                (unit, slot),
+                "Usage: GetInventoryItemBroken(unit, slot)",
+                "Invalid inventory slot in GetInventoryItemBroken",
+            )?;
+            match own_inv_slot(lua, &token, slot) {
                 Some(v) if slot_is_broken(&v) => Ok(Value::Integer(1)),
                 _ => Ok(Value::Nil),
             }
@@ -924,10 +1234,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     INVALID_SLOT_GET_INVENTORY_ITEM_COOLDOWN.into(),
                 ));
             }
+            // The ammo slot answers three zeros ahead of the token's resolve (`0x4c8ad4`).
+            if slot0 == -1 {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                return Ok(super::container::item_cooldown_triple(None, model.now));
+            }
+            super::unit::check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let live = usize::try_from(slot0 + 1).ok();
+            let own = model.inventory_reader(&token) == Some(InvReader::Own);
             let answer = live
-                .filter(|_| slot0 != -1 && token.eq_ignore_ascii_case("player"))
+                .filter(|_| own)
                 .filter(|&live| {
                     model
                         .inv_slot("player", live)
@@ -942,7 +1259,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // 4 broken.
     g.set(
         "GetInventoryAlertStatus",
-        lua.create_function(|lua, Idx(index): Idx| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetInventoryAlertStatus(index)` (`0x848cbc`, `0x4c94c5`).
+            let index =
+                binding_abi::index_arg(lua, index, "Usage: GetInventoryAlertStatus(index)")?;
             let model = lua.app_data_mut::<Model>().expect("model app_data");
             Ok(if (1..=12).contains(&index) {
                 i64::from(model.inventory_alerts[index - 1])
@@ -1010,7 +1330,60 @@ mod tests {
     use super::{
         weapon_subclass_skill, RESISTANCE_INDEX_ERROR, SKILL_UNARMED, STAT_INDEX_ERROR, STAT_USAGE,
     };
-    use crate::script::{InvSlotView, UiScript, UnitCombatStats};
+    use crate::script::{InvSlotView, UiScript, UnitCombatStats, UnitGuids, UnitState};
+
+    const ME: u64 = 0x10;
+    const PET: u64 = 0xF140_0000_0000_0077;
+    const MOB: u64 = 0xF130_0000_0000_0001;
+    /// Another player.
+    const BOB: u64 = 0x20;
+
+    /// A VM with the active player seated: its snapshot under `"player"` and its guid among the
+    /// resolver's inputs, as the unit feed and the aura feed seat them.
+    fn seated() -> UiScript {
+        let mut s = UiScript::new().unwrap();
+        s.set_unit(
+            "player",
+            Some(UnitState {
+                exists: true,
+                has_object: true,
+                guid: ME,
+                is_player: true,
+                ..Default::default()
+            }),
+        );
+        s.set_unit_guids(&UnitGuids {
+            player: ME,
+            ..Default::default()
+        });
+        s
+    }
+
+    /// A held unit that is not the player, with its own fields.
+    fn held(guid: u64, level: u32, combat: UnitCombatStats) -> UnitState {
+        UnitState {
+            exists: true,
+            has_object: true,
+            guid,
+            level,
+            combat,
+            ..Default::default()
+        }
+    }
+
+    /// Our level-60 pet, which we summoned.
+    fn pet_unit(combat: UnitCombatStats) -> UnitState {
+        UnitState {
+            summoned_by: ME,
+            ..held(PET, 60, combat)
+        }
+    }
+
+    /// A swing time in seconds as the getters scale it: the integer times the single 0.001
+    /// (`0x518eb8`, `0x51898f`), at double precision.
+    fn speed(ms: u32) -> f64 {
+        f64::from(ms) * f64::from(0.001f32)
+    }
 
     /// A filled snapshot exercising every field the bindings read.
     fn stats() -> UnitCombatStats {
@@ -1028,15 +1401,20 @@ mod tests {
             physical_bonus_pos: 25,
             physical_bonus_neg: -3,
             damage_percent: 1.1,
+            ranged_bonus_pos: 40,
+            ranged_bonus_neg: -6,
+            ranged_percent: 1.2,
             main_attack_time_ms: 2900,
             offhand_attack_time_ms: 1500,
             has_offhand: false,
             attack_power: 78,
             attack_power_pos: 30,
             attack_power_neg: -10,
+            attack_power_multiplier: 0.0,
             ranged_attack_power: 52,
             ranged_attack_power_pos: 0,
             ranged_attack_power_neg: -3,
+            ranged_attack_power_multiplier: 0.0,
             ranged_attack_time_ms: 2800,
             ranged_min_damage: 31.0,
             ranged_max_damage: 47.0,
@@ -1094,7 +1472,7 @@ mod tests {
     /// The values are exact in `f32`, so the assertions compare equal.
     #[test]
     fn the_avoidance_verbs_are_player_implicit_and_answer_one_number() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         // Before anything streams: 0, not nil.
         assert_eq!(s.eval::<f64>("return GetDodgeChance()").unwrap(), 0.0);
         s.set_player_combat_stats(Some(UnitCombatStats {
@@ -1120,7 +1498,7 @@ mod tests {
 
     #[test]
     fn unit_stat_serves_the_raw_field_twice_and_the_buff_split() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
         // Str: raw 25 in both first slots; stock subtracts the +4 itself.
         assert_eq!(
@@ -1156,7 +1534,7 @@ mod tests {
     /// `0x518663`): 1.9 is stat 1, while 0.5 and any negative raise.
     #[test]
     fn an_out_of_range_stat_index_raises_the_references_own_string() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
         for arg in ["6", "0", "-3", "0.5", "-0.5"] {
             let err = s
@@ -1202,7 +1580,7 @@ mod tests {
 
     #[test]
     fn unit_resistance_and_armor_decompose_school_zero() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
         // Armor (school 0): 150 total, +30/−10 → base 130.
         assert_eq!(
@@ -1255,7 +1633,7 @@ mod tests {
 
     #[test]
     fn unit_damage_and_attack_speed_read_the_snapshot() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
         assert_eq!(
             s.eval::<(f64, f64, f64, f64, i64, i64, f64)>(r#"return UnitDamage("player")"#)
@@ -1263,9 +1641,11 @@ mod tests {
             (12.5, 19.5, 5.0, 9.0, 25, -3, f64::from(1.1f32))
         );
         // No off-hand weapon: the second return is nil.
-        assert!(s
-            .eval::<bool>(r#"local m, o = UnitAttackSpeed("player") return m == 2.9 and o == nil"#)
-            .unwrap());
+        assert_eq!(
+            s.eval::<(f64, Option<f64>)>(r#"return UnitAttackSpeed("player")"#)
+                .unwrap(),
+            (speed(2900), None)
+        );
         s.set_player_combat_stats(Some(UnitCombatStats {
             has_offhand: true,
             ..stats()
@@ -1273,26 +1653,27 @@ mod tests {
         assert_eq!(
             s.eval::<(f64, f64)>(r#"return UnitAttackSpeed("player")"#)
                 .unwrap(),
-            (2.9, 1.5)
+            (speed(2900), speed(1500))
         );
-        // Another token, or no snapshot: zeros and percent 1.0.
+        // No object, a token naming nobody or the player before its object: seven zeros, the
+        // percent among them (`0x518deb`).
         assert_eq!(
             s.eval::<(f64, f64, f64, f64, i64, i64, f64)>(r#"return UnitDamage("target")"#)
                 .unwrap(),
-            (0.0, 0.0, 0.0, 0.0, 0, 0, 1.0)
+            (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0)
         );
         let fresh = UiScript::new().unwrap();
         assert_eq!(
             fresh
                 .eval::<(f64, f64, f64, f64, i64, i64, f64)>(r#"return UnitDamage("player")"#)
                 .unwrap(),
-            (0.0, 0.0, 0.0, 0.0, 0, 0, 1.0)
+            (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0)
         );
     }
 
     #[test]
     fn attack_power_and_weapon_skill_bindings_serve_the_pairs() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
         assert_eq!(
             s.eval::<(i64, i64, i64)>(r#"return UnitAttackPower("player")"#)
@@ -1315,10 +1696,11 @@ mod tests {
                 .unwrap(),
             (18, 0)
         );
+        // The bonus at the ranged weapon's school, not the physical one.
         assert_eq!(
             s.eval::<(f64, f64, f64, i64, i64, f64)>(r#"return UnitRangedDamage("player")"#)
                 .unwrap(),
-            (2.8, 31.0, 47.0, 25, -3, f64::from(1.1f32))
+            (speed(2800), 31.0, 47.0, 40, -6, f64::from(1.2f32))
         );
         assert_eq!(
             s.eval::<(i64, i64, i64)>(r#"return UnitAttackPower("target")"#)
@@ -1337,17 +1719,9 @@ mod tests {
     /// PLAYER typemask (`0x612b40`, `0x5edae0`, `0x5ea460` are in no vtable), so a pet gets zeros.
     #[test]
     fn ranged_attack_gives_a_pet_zeros_where_defense_gives_it_level_times_five() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
-        s.set_pet_combat_stats(Some(pet_stats()));
-        s.set_unit(
-            "pet",
-            Some(super::super::UnitState {
-                exists: true,
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        s.set_unit("pet", Some(pet_unit(pet_stats())));
         assert_eq!(
             s.eval::<(i64, i64)>(r#"return UnitDefense("pet")"#)
                 .unwrap(),
@@ -1371,7 +1745,7 @@ mod tests {
     /// `0x518810` pushes `(base0, mod0, base1, mod1)`, one pair per hand.
     #[test]
     fn attack_both_hands_answers_a_pair_per_hand() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(UnitCombatStats {
             main_weapon_skill: (300, 5),
             offhand_weapon_skill: (275, -12),
@@ -1406,9 +1780,9 @@ mod tests {
 
     #[test]
     fn the_pet_token_reads_the_pet_snapshot_and_only_it() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
-        s.set_pet_combat_stats(Some(pet_stats()));
+        s.set_unit("pet", Some(pet_unit(pet_stats())));
 
         // Stamina: the pet's 68, the player's 22.
         assert_eq!(
@@ -1465,9 +1839,11 @@ mod tests {
                 .unwrap(),
             (178, 12, -4)
         );
-        assert!(s
-            .eval::<bool>(r#"local m, o = UnitAttackSpeed("pet") return m == 2.0 and o == nil"#)
-            .unwrap());
+        assert_eq!(
+            s.eval::<(f64, Option<f64>)>(r#"return UnitAttackSpeed("pet")"#)
+                .unwrap(),
+            (speed(2000), None)
+        );
 
         // A third token is still the absent shape.
         assert_eq!(
@@ -1481,7 +1857,7 @@ mod tests {
             (0, 0, 0, 0, 0)
         );
         // So is `"pet"` once the pet is dismissed (the feed pushes `None`).
-        s.set_pet_combat_stats(None);
+        s.set_unit("pet", None);
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("pet", 1)"#)
                 .unwrap(),
@@ -1490,7 +1866,7 @@ mod tests {
         assert_eq!(
             s.eval::<(f64, f64, f64, f64, i64, i64, f64)>(r#"return UnitDamage("pet")"#)
                 .unwrap(),
-            (0.0, 0.0, 0.0, 0.0, 0, 0, 1.0)
+            (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0)
         );
         // The player's is untouched by any of it.
         assert_eq!(
@@ -1504,17 +1880,9 @@ mod tests {
     /// 0 modifier; `UnitAttackBothHands` takes the same fork.
     #[test]
     fn unit_defense_forks_the_player_skill_from_a_pets_level_times_five() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         s.set_player_combat_stats(Some(stats()));
-        s.set_pet_combat_stats(Some(pet_stats()));
-        s.set_unit(
-            "pet",
-            Some(super::super::UnitState {
-                exists: true,
-                level: 60,
-                ..Default::default()
-            }),
-        );
+        s.set_unit("pet", Some(pet_unit(pet_stats())));
         assert_eq!(
             s.eval::<(i64, i64)>(r#"return UnitDefense("player")"#)
                 .unwrap(),
@@ -1545,10 +1913,9 @@ mod tests {
         // A token failing the SELF-or-SUMMONEDBY gate gets zeros, not its level.
         s.set_unit(
             "target",
-            Some(super::super::UnitState {
-                exists: true,
-                level: 63,
-                ..Default::default()
+            Some(UnitState {
+                summoned_by: BOB,
+                ..held(MOB, 63, UnitCombatStats::default())
             }),
         );
         assert_eq!(
@@ -1568,9 +1935,134 @@ mod tests {
         );
     }
 
+    /// The stat getters resolve any token to its object (`0x515940`) and read that object's fields
+    /// behind each function's gates (benilla-re `ui/unitstats`, "Who may be asked"): SELF is the
+    /// object's GUID against the active player's (`0x468550`), so a chain that ends on us reads our
+    /// own block; SUMMONEDBY us (`0x519272`) gives the level times 5; PLAYER picks the damage bonus
+    /// arm (`0x518cd4`, `0x5189d5`); no object gives zeros, the percent among them.
+    #[test]
+    fn the_stat_getters_answer_for_any_token_by_its_unit() {
+        let mut s = seated();
+        s.set_player_combat_stats(Some(stats()));
+        s.set_unit_guids(&UnitGuids {
+            player: ME,
+            target: MOB,
+            held: std::collections::HashMap::from([(MOB, ME), (ME, MOB)]),
+            ..Default::default()
+        });
+        // A target's public base attack time (`0x518ea0`, field 126) and nothing owner-only.
+        let mob = UnitCombatStats {
+            main_attack_time_ms: 2000,
+            min_damage: 50.0,
+            max_damage: 70.0,
+            resistances: [900, 0, -5, 0, 0, 0, 0],
+            ..Default::default()
+        };
+        s.set_unit("target", Some(held(MOB, 50, mob.clone())));
+        // The chain `targettarget` ends on us.
+        s.set_unit_by_guid(
+            ME,
+            Some(UnitState {
+                is_player: true,
+                ..held(ME, 60, UnitCombatStats::default())
+            }),
+        );
+        let eval = |s: &UiScript, chunk: &str| -> String {
+            s.eval::<mlua::MultiValue>(&format!("return {chunk}"))
+                .map(|v| {
+                    v.iter()
+                        .map(|v| match v {
+                            mlua::Value::Nil => "nil".to_string(),
+                            mlua::Value::Number(n) => n.to_string(),
+                            mlua::Value::Integer(n) => n.to_string(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_else(|e| panic!("{chunk}: {e}"))
+        };
+        assert_eq!(
+            eval(&s, r#"UnitAttackSpeed("target")"#),
+            format!("{} nil", speed(2000))
+        );
+        assert_eq!(
+            eval(&s, r#"UnitDamage("target")"#),
+            "50 70 0 0 0 0 1",
+            "a creature: the bonus arm's 0, 0 and 1.0"
+        );
+        assert_eq!(
+            eval(&s, r#"UnitResistance("target", 2)"#),
+            "0 0 0 0",
+            "not the player: the field raised to 0 twice (`0x518562`-`0x51857c`)"
+        );
+        assert_eq!(eval(&s, r#"UnitArmor("target")"#), "900 900 900 0 0");
+        assert_eq!(eval(&s, r#"UnitDefense("target")"#), "0 0");
+        // Us by a chain: our own block, the buffs and the skills included.
+        assert_eq!(eval(&s, r#"UnitStat("targettarget", 1)"#), "25 25 4 0");
+        assert_eq!(eval(&s, r#"UnitAttackPower("targettarget")"#), "78 30 -10");
+        assert_eq!(eval(&s, r#"UnitDefense("targettarget")"#), "55 4");
+        assert_eq!(eval(&s, r#"UnitRangedAttack("targettarget")"#), "18 0");
+        // A target that is our pet: its own fields, and our summon's level times 5.
+        s.set_unit("target", Some(pet_unit(pet_stats())));
+        assert_eq!(eval(&s, r#"UnitAttackPower("target")"#), "178 12 -4");
+        assert_eq!(eval(&s, r#"UnitDefense("target")"#), "300 0");
+        assert_eq!(eval(&s, r#"UnitAttackBothHands("target")"#), "300 0 300 0");
+        assert_eq!(eval(&s, r#"UnitRangedAttack("target")"#), "0 0");
+        // Another player: its fields, the bonus arm's 0, 0 and 0.0, no off hand.
+        s.set_unit(
+            "target",
+            Some(UnitState {
+                is_player: true,
+                ..held(BOB, 60, mob)
+            }),
+        );
+        assert_eq!(eval(&s, r#"UnitDamage("target")"#), "50 70 0 0 0 0 0");
+        assert_eq!(eval(&s, r#"UnitRangedDamage("target")"#), "0 0 0 0 0 0");
+        // A party member out of view: no object, zeros.
+        s.set_unit(
+            "party1",
+            Some(UnitState {
+                exists: true,
+                guid: BOB,
+                level: 60,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(eval(&s, r#"UnitAttackSpeed("party1")"#), "0 nil");
+        assert_eq!(eval(&s, r#"UnitStat("party1", 1)"#), "0 0 0 0");
+        // Every one raises `Usage:` for a non-string (`0x6f3510`) and the resolver's error for an
+        // unknown token.
+        for (getter, usage) in [
+            ("UnitArmor", r#"Usage: UnitArmor("unit")"#),
+            ("UnitDamage", r#"Usage: UnitDamage("unit")"#),
+            ("UnitRangedDamage", r#"Usage: UnitRangedDamage("unit")"#),
+            ("UnitAttackSpeed", r#"Usage: UnitAttackSpeed("unit")"#),
+            ("UnitAttackPower", r#"Usage: UnitAttackPower("unit")"#),
+            ("UnitRangedAttackPower", r#"Usage: UnitAttackPower("unit")"#),
+            ("UnitDefense", r#"Usage: UnitDefense("unit")"#),
+            (
+                "UnitAttackBothHands",
+                r#"Usage: UnitAttackBothHands("unit")"#,
+            ),
+            ("UnitRangedAttack", r#"Usage: UnitRangedAttack("unit")"#),
+        ] {
+            let err = s.run(&format!("{getter}()")).unwrap_err().to_string();
+            assert!(err.contains(usage), "{getter}(): {err}");
+            let err = s
+                .run(&format!("{getter}(\"bogus\")"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("Unknown unit name"),
+                "{getter}(\"bogus\"): {err}"
+            );
+        }
+    }
+
     #[test]
     fn has_wand_equipped_reads_the_flag() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         assert!(!s.eval::<bool>("return HasWandEquipped()").unwrap());
         s.set_player_combat_stats(Some(UnitCombatStats {
             has_wand: true,
@@ -1583,7 +2075,7 @@ mod tests {
     /// container in a bank bag slot 0 before the DBC is read.
     #[test]
     fn get_inventory_item_count_forks_on_the_container_bit_and_the_slot() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         let bag = |contents: Option<u32>| {
             Some(InvSlotView {
                 item_id: 4496,
@@ -1662,9 +2154,207 @@ mod tests {
         )
     }
 
+    /// The slot getters resolve their token (`0x4c8328`) and read through
+    /// `CanReadUnitInventory` (`0x4944a0`): any token naming the active player reads its own
+    /// table; another player, a cooperative one within 10 yards, its visible items, slots 1-19
+    /// (`0x4c8420` → `0x5f0d60`), whose quality the item table answers, empty (`0x4c89d6`); a token
+    /// the resolver does not know raises (`0x515c14`).
+    #[test]
+    fn the_slot_getters_resolve_their_token_and_read_through_the_reach_gate() {
+        use crate::script::UnitReach;
+        use std::collections::HashMap;
+        const MATE: u64 = 0x20;
+        const FAR: u64 = 0x30;
+        let mut s = seated();
+        let helm = |id: u32, icon: &str| InvSlotView {
+            item_id: id,
+            icon: Some(icon.into()),
+            count: 1,
+            quality: 3,
+            name: Some(format!("Helm {id}")),
+            link: Some(format!("|cff0070dd|Hitem:{id}:0:0:0|h[Helm {id}]|h|r")),
+            ..Default::default()
+        };
+        let mut own: crate::script::InventorySlots = Default::default();
+        own[1] = Some(helm(1, "Own"));
+        s.set_inventory_slots(own);
+        for (guid, id) in [(MATE, 2), (FAR, 3)] {
+            let mut slots: crate::script::InventorySlots = Default::default();
+            slots[1] = Some(helm(id, &format!("Visible{id}")));
+            s.set_visible_equipment(guid, Some(slots));
+        }
+        let guids = |target: u64| UnitGuids {
+            player: ME,
+            target,
+            party: [MATE, FAR, 0, 0],
+            held: HashMap::from([(ME, 0), (MATE, 0), (FAR, 0)]),
+            ..Default::default()
+        };
+        s.set_unit_guids(&guids(MATE));
+        let reach = |inspectable: bool| {
+            HashMap::from([
+                (
+                    ME,
+                    UnitReach {
+                        dist_sq: 0.0,
+                        inspectable: true,
+                    },
+                ),
+                (
+                    MATE,
+                    UnitReach {
+                        dist_sq: 16.0,
+                        inspectable,
+                    },
+                ),
+                (
+                    FAR,
+                    UnitReach {
+                        dist_sq: 400.0,
+                        inspectable: true,
+                    },
+                ),
+            ])
+        };
+        s.set_unit_reach(reach(true));
+        let texture = |s: &UiScript, token: &str| {
+            s.eval::<Option<String>>(&format!("return GetInventoryItemTexture({token:?}, 1)"))
+                .unwrap()
+        };
+        assert_eq!(texture(&s, "target").as_deref(), Some("Visible2"));
+        assert_eq!(texture(&s, "PARTY1").as_deref(), Some("Visible2"));
+        assert_eq!(texture(&s, "player").as_deref(), Some("Own"));
+        assert_eq!(texture(&s, "party2"), None, "20 yards off");
+        assert_eq!(
+            s.eval::<Option<String>>(r#"return GetInventoryItemLink("target", 1)"#)
+                .unwrap(),
+            Some("|cff0070dd|Hitem:2:0:0:0|h[Helm 2]|h|r".into())
+        );
+        assert_eq!(
+            s.eval::<Option<i64>>(r#"return GetInventoryItemQuality("target", 1)"#)
+                .unwrap(),
+            None,
+            "another player's item table holds nothing"
+        );
+        assert_eq!(
+            s.eval::<i64>(r#"return GetInventoryItemCount("target", 1)"#)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.eval::<Option<String>>(r#"return GetInventoryItemTexture("target", 0)"#)
+                .unwrap(),
+            None,
+            "the ammo slot is the active player's alone"
+        );
+        s.set_unit_reach(reach(false));
+        assert_eq!(
+            texture(&s, "target"),
+            None,
+            "a player we cannot cooperate with"
+        );
+        s.set_unit_guids(&guids(ME));
+        assert_eq!(
+            texture(&s, "target").as_deref(),
+            Some("Own"),
+            "a token naming us reads our table"
+        );
+        for call in [
+            r#"GetInventoryItemTexture("npctarget", 1)"#,
+            r#"GetInventoryItemLink("bogus", 1)"#,
+            r#"GetInventoryItemQuality("bogus", 1)"#,
+            r#"GetInventoryItemCount("bogus", 1)"#,
+            r#"GetInventoryItemBroken("bogus", 1)"#,
+            r#"GetInventoryItemCooldown("bogus", 1)"#,
+        ] {
+            assert!(s.run(call).is_err(), "{call}");
+        }
+    }
+
+    /// The ammo slot's texture and quality getters look the record up with the callback
+    /// `0x4c84f0` (`0x4c83bc`, `0x4c89cf`): each call that misses registers one, the texture's
+    /// only while the player carries some (`0x4c83a0`, `CountInventoryItemsByEntry`). A cached
+    /// record, another getter or another slot registers none.
+    #[test]
+    fn the_ammo_slot_getters_register_a_record_callback_on_a_miss() {
+        let mut s = seated();
+        let mut slots: crate::script::InventorySlots = Default::default();
+        let arrows = |count: u32, name: Option<&str>| InvSlotView {
+            item_id: 2512,
+            count,
+            name: name.map(str::to_string),
+            ..Default::default()
+        };
+        slots[0] = Some(arrows(200, None));
+        slots[1] = Some(InvSlotView {
+            item_id: 2263,
+            count: 1,
+            ..Default::default()
+        });
+        s.set_inventory_slots(slots.clone());
+        s.run(
+            r#"GetInventoryItemTexture("player", 0); GetInventoryItemQuality("player", 0)
+               GetInventoryItemQuality("player", 0); GetInventoryItemLink("player", 0)
+               GetInventoryItemTexture("player", 1); GetInventoryItemQuality("player", 1)"#,
+        )
+        .unwrap();
+        assert_eq!(s.take_ammo_record_asks(), [2512, 2512, 2512]);
+        assert!(s.take_ammo_record_asks().is_empty(), "drained");
+        slots[0] = Some(arrows(0, None));
+        s.set_inventory_slots(slots.clone());
+        s.run(r#"GetInventoryItemTexture("player", 0); GetInventoryItemQuality("player", 0)"#)
+            .unwrap();
+        assert_eq!(
+            s.take_ammo_record_asks(),
+            [2512],
+            "none carried: the quality's alone"
+        );
+        slots[0] = Some(arrows(200, Some("Rough Arrow")));
+        s.set_inventory_slots(slots);
+        s.run(r#"GetInventoryItemTexture("player", 0); GetInventoryItemQuality("player", 0)"#)
+            .unwrap();
+        assert!(s.take_ammo_record_asks().is_empty(), "the record is cached");
+    }
+
+    /// `GetInventoryItemLink` and `GetInventoryItemCooldown` answer the ammo slot ahead of the
+    /// token's resolve (`0x4c8c8a`, `0x4c8ad4`): no values from the link and three zeros from the
+    /// cooldown, for any token, one the resolver does not know included.
+    #[test]
+    fn the_link_and_cooldown_answer_the_ammo_slot_before_the_token() {
+        let mut s = seated();
+        let mut slots: crate::script::InventorySlots = Default::default();
+        slots[0] = Some(InvSlotView {
+            item_id: 2512,
+            count: 200,
+            name: Some("Rough Arrow".into()),
+            link: Some("|cffffffff|Hitem:2512:0:0:0|h[Rough Arrow]|h|r".into()),
+            ..Default::default()
+        });
+        s.set_inventory_slots(slots);
+        for token in ["player", "bogus"] {
+            assert_eq!(
+                s.eval::<i64>(&format!(
+                    "local function n(...) return arg.n end \
+                     return n(GetInventoryItemLink({token:?}, 0))"
+                ))
+                .unwrap(),
+                0,
+                "{token}"
+            );
+            assert_eq!(
+                s.eval::<(f64, f64, f64)>(&format!(
+                    "return GetInventoryItemCooldown({token:?}, 0)"
+                ))
+                .unwrap(),
+                (0.0, 0.0, 0.0),
+                "{token}"
+            );
+        }
+    }
+
     #[test]
     fn inventory_item_bindings_serve_occupied_empty_and_absent_shapes() {
-        let mut s = UiScript::new().unwrap();
+        let mut s = seated();
         let mut slots: crate::script::InventorySlots = Default::default();
         // Head (slot 1) occupied; ammo (slot 0) with a bag-summed count; the rest empty.
         slots[1] = Some(InvSlotView {
@@ -1672,6 +2362,7 @@ mod tests {
             icon: Some("Interface\\Icons\\INV_Misc_Bandana_01".into()),
             count: 1,
             quality: 2,
+            inventory_type: Some(1),
             name: Some("Brawler's Harness".into()),
             link: Some("|cff1eff00|Hitem:2263:0:0:0|h[Brawler's Harness]|h|r".into()),
             ..Default::default()
@@ -1703,8 +2394,10 @@ mod tests {
                 .unwrap(),
             2
         );
-        // The ammo slot (0) reads through the same family.
-        assert_eq!(s.eval::<i64>(&link_id("0")).unwrap(), 2512);
+        // The ammo slot (0) reads through the same family, but for its link (`0x4c8c8a`).
+        assert!(s
+            .eval::<bool>(r#"return GetInventoryItemLink("player", 0) == nil"#)
+            .unwrap());
         assert_eq!(
             s.eval::<i64>(r#"return GetInventoryItemCount("player", 0)"#)
                 .unwrap(),
@@ -1735,13 +2428,17 @@ mod tests {
             1,
             "no item behind the token is the empty answer, and the empty answer is 1"
         );
-        // Out-of-range slots: the empty shape, no error.
-        assert!(s
-            .eval::<bool>(r#"return GetInventoryItemLink("player", 25) == nil"#)
-            .unwrap());
-        assert!(s
-            .eval::<bool>(r#"return GetInventoryItemLink("player", -1) == nil"#)
-            .unwrap());
+        // Slots outside the reader's whitelist raise (`0x4c8520`, `0x848aa0`).
+        for slot in [25, -1] {
+            let e = s
+                .run(&format!(r#"GetInventoryItemLink("player", {slot})"#))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("Invalid inventory slot in GetInventoryItemLink"),
+                "{e}"
+            );
+        }
     }
 
     #[test]
@@ -1849,5 +2546,33 @@ mod tests {
         // A declared frame that is not a model pane has no pane.
         s.run(r#"CreateFrame("Frame", "NotAPane")"#).unwrap();
         assert!(s.model_pane("NotAPane").is_none());
+    }
+
+    /// A vault or keyring item read through the inventory API keeps its `ITEM_FIELD_DURATION`
+    /// (`[item+0x114]+0x24`), the field the auction sell slot refuses on (`0x4ce411`).
+    #[test]
+    fn a_container_slot_seen_as_an_inventory_slot_keeps_its_field_duration() {
+        use crate::script::container::{ContainerSlot, ContainerState};
+        let mut s = seated();
+        for (bag, live_id) in [(super::BANK_CONTAINER, 40), (super::KEYRING_CONTAINER, 82)] {
+            let mut state = ContainerState {
+                num_slots: 24,
+                ..Default::default()
+            };
+            state.slots.insert(
+                1,
+                ContainerSlot {
+                    item_id: 7000,
+                    guid: 0x700,
+                    count: 1,
+                    field_duration: 3_600_000,
+                    ..Default::default()
+                },
+            );
+            s.set_container(bag, Some(state));
+            let view = s.model_ref().inv_slot("player", live_id).unwrap();
+            assert_eq!(view.item_id, 7000, "bag {bag}");
+            assert_eq!(view.field_duration, 3_600_000, "bag {bag}");
+        }
     }
 }

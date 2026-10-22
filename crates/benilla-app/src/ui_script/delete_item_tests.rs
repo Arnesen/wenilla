@@ -17,6 +17,7 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
             occupied_seats: None,
@@ -42,10 +43,11 @@ fn one_item_backpack(item_id: u32, name: &str, quality: u32) -> ContainerState {
             flags: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         },
     );
     ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }

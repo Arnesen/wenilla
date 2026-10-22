@@ -183,6 +183,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // the session's realm when addons load. `Ace/AceState.lua:27` trims it at
     // PLAYER_ENTERING_WORLD, so a nil breaks every Ace addon.
     same("realmName", ""),
+    // `accountName` (`0x402bd2`, record `[0x8826c8]`): registered `""`, help "Saved account
+    // name", category 4. The login screen's remembered name: `GetSavedAccountName` (`0x46cdd0`)
+    // reads it and `SetSavedAccountName` (`0x46cdf0`) sets it.
+    same("accountName", ""),
     // The logon server address (register site `0x5ab6a6`), a string row judged by
     // `realmlist::on_cvar`.
     deviates(
@@ -197,8 +201,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // forward/back, strafe and turn (`0x513d36`/`0x514e23`/`0x514f0b`/`0x514fca`). Off, the clear
     // does nothing at all: no echo, no mirror write, no packet.
     same("autoClearAFK", "1"),
-    same("MasterVolume", "1"),
-    same("SoundVolume", "1"),
+    same("MasterVolume", "1.0"),
+    same("SoundVolume", "1.0"),
     same("MusicVolume", "0.4"),
     same("AmbienceVolume", "0.6"),
     // Registered "1" at `0x45737a`/`0x45739b`/`0x460a9d`. `MasterSoundEffects` is the Enable All
@@ -224,10 +228,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
          machine a player runs today",
     ),
     // FMOD 3's mix-ahead buffer in ms (`0x4571ca`, flags 2: read once at sound init); here it sizes
-    // the render thread's ring ahead of the IO callback (`sound::output`). `0x457520` registers
-    // "50" or "100" by a host probe (`0x835e10`/`0x835e0c`), which one on a current machine
-    // untraced; ours is the larger, since the depth has to hide a whole stalled IO cycle.
-    same("SoundBufferSize", "100").latched(),
+    // the render thread's ring ahead of the IO callback (`sound::output`). The default string is
+    // `0x457520`'s: "50" (`0x835e10`) when the detection record has processor class 1 at `+0x18`
+    // (`0x639a00`), else "100" (`0x835e0c`). Class 1 is a processor frequency above 1500 MHz
+    // (`0x6414c0`). `0x42c0e0` asks `CallNtPowerInformation` for 4 processor records (`0x60` bytes),
+    // which fails on a host with more logical CPUs; `0x42c060` then reads the calibrated counter
+    // rate (`0x884060`), above 1500 MHz on a current x86 part, so those hosts register "50". It is
+    // shipped (`sound::output::MIX_AHEAD_MS` is the same number, and a test holds the two together).
+    same("SoundBufferSize", "50").latched(),
     // benilla's own, not a 1.12 CVar. Deviation: the reference clips at full scale and has no
     // headroom mechanism (its SFX-bus duck `0x457960` is a sidechain armed only by server-pushed
     // voice lines); benilla limits because every SFX is mastered to full scale and overlapping
@@ -384,7 +392,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48. `SetWorldDetail 0x488dd0`
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
     // whose registered 0.04 is stop 1: the reference's slider boots at Medium.
-    same("WorldDetail", "1"),
+    ours(
+        "WorldDetail",
+        "1",
+        "the Environment Detail stop our Graphics page and `GetWorldDetail` read; 1.12 keeps the \
+         stop in `smallCull` and `frillDensity` and registers no CVar of this name",
+    ),
     // `SmallCull` (`0x68854a`: name `0x8696f8`, default `0x869718` "0.04", flags 1, callback
     // `0x688b10`, record `[0xc7f330]`). The callback refuses outside [0.001, 2.0] and stores into
     // `[0x868620]`, which nothing reads: no mechanism here either. Its readers are Lua ones:
@@ -456,8 +469,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // OS-accelerated pixels where we take raw device deltas, so the unit factor lives in
     // `camera::LOOK_YAW_PER_SPEED` and these defaults stay the reference's. The validator
     // `0x50c000` → `0x50b330` refuses values outside [0.1, 360] rather than clamping.
-    same("cameraYawMoveSpeed", "180").checked(benilla_ui::script::check_camera_rate),
-    same("cameraPitchMoveSpeed", "90").checked(benilla_ui::script::check_camera_rate),
+    same("cameraYawMoveSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
+    same("cameraPitchMoveSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
     // MOUSE_SENSITIVITY (`UIOptionsFrame.lua:87`): FrameXML's spelling of the binary's `mouseSpeed`
     // (`0x402c7b`); lookups are case-insensitive (`CVar::Lookup 0x63de30`), here as there. The
     // reference's default is `SPI_GETMOUSESPEED × 0.1`, "1.0" on stock Windows, and its record
@@ -471,7 +484,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`UIOptionsFrame.lua:90`), registered "1.0" (`0x82e92c`) with no validator: the slider's 1
     // to 2 is the slider's, not the CVar's.
     same("cameraDistanceMax", "15.0").checked(benilla_ui::script::check_camera_distance_max),
-    same("cameraDistanceMaxFactor", "1"),
+    same("cameraDistanceMaxFactor", "1.0"),
     // `cameraSmoothStyle` (`0x50ba92`, default `[0x84f4f4]` "1"), the auto-return behind the
     // character. The engine's enum is 0 Never, 1 Smart, 2 Always, as the stock dropdown writes it
     // (`UIOptionsFrame.lua:525,536,547`); 3, the Never entry's position, is the validator's upper
@@ -483,7 +496,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // sets the transition's duration (`|dyaw| / rate * factor`), an average rate, not a slew. The
     // validator `0x50c000` refuses outside [0.1, 360] and the follow reader (`0x512d75`) uses the
     // stored value as is; 90 to 270 is only the stock slider's range.
-    same("cameraYawSmoothSpeed", "180").checked(benilla_ui::script::check_camera_rate),
+    same("cameraYawSmoothSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
     // `UIOptionsFrame.lua:353` names `cameraPitchSmoothSpeed`, registered "45.0" (`0x50b90b`) with
     // the same validator, and `SetCVar` raises on a name no CVar has (`0x488c53`). `FollowRig` has
     // one rate, so nothing reads it.
@@ -494,10 +507,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // Read by the routing (`0x50fff5`/`0x510004`) in radians of camera rotation, so they carry to
     // benilla's raw-device units unchanged.
     same("cameraPivotDXMax", "0.05"),
-    same("cameraPivotDYMin", "0"),
+    same("cameraPivotDYMin", "0.00"),
     // The pitch bias's ease-back once the pivot lets go, deg/s (`[0xbe0fc8]`; `0x512a50` divides
     // |Δ| by rate · π/180 for the duration); no panel row.
-    same("cameraTargetSmoothSpeed", "90").checked(benilla_ui::script::check_camera_rate),
+    same("cameraTargetSmoothSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
     // `cameraWaterCollision` `[0xbe1088]` "1" (`0x50bd63`, `0x82e748`): one register, two consumers
     // that must ship together. `0x50e5ec` builds it; its `0xf0000` nibble joins the trace mask of
     // all three `0x50e570` queries (reaching `0x69cc13`), and `0x50e629` tests it to lift the sweep
@@ -511,24 +524,25 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // floor always binds (20° at 7.5°/s is 2.67 s), so the camera leans rather than tracks.
     // Their validators: `0x50c000` for the rate, `0x50bfe0` for the bounds.
     same("cameraGroundSmoothSpeed", "7.5").checked(benilla_ui::script::check_camera_rate),
-    same("cameraTerrainTiltTimeMin", "3").checked(benilla_ui::script::check_camera_time),
-    same("cameraTerrainTiltTimeMax", "10").checked(benilla_ui::script::check_camera_time),
+    same("cameraTerrainTiltTimeMin", "3.0").checked(benilla_ui::script::check_camera_time),
+    same("cameraTerrainTiltTimeMax", "10.0").checked(benilla_ui::script::check_camera_time),
     // `cameraBobbing` `[0xbe10c0]` "0" (`0x50b76d`), head bob: kernel `0x511920`, gate `0x5105e0`;
     // ours is `player::camera_dynamics::HeadBob`.
     same("cameraBobbing", "0"),
     // Amplitudes in the CVar's units, scaled by 1/36 (`[0x7ff9d0]`) to yards.
     // `cameraBobbingSmoothSpeed` is the decay rate, read only in the disarm `0x51113a`, which
     // divides the largest component by it for the ramp's duration (~0.069 s at these defaults).
-    same("cameraBobbingLRAmplitude", "2"),
-    same("cameraBobbingUDAmplitude", "2"),
+    same("cameraBobbingLRAmplitude", "2.0"),
+    same("cameraBobbingUDAmplitude", "2.0"),
     // Validated by `0x50bfe0` and `0x50c040`.
     same("cameraBobbingFrequency", "0.8").checked(benilla_ui::script::check_camera_time),
     same("cameraBobbingSmoothSpeed", "0.8").checked(benilla_ui::script::check_camera_decay),
     // `statusBarText` (`0x48fc34`, record `[0xb4d904]`, no engine reader), read by
     // `TextStatusBar.lua:47,97`: "0" shows the numbers on hover only.
     same("statusBarText", "0"),
-    // Enhanced Tooltips (`UIOptionsFrame.lua:15`), registered "1" at `0x48fddd` (`0x82e748`); read
-    // only by the stock interface.
+    // Enhanced Tooltips (`UIOptionsFrame.lua:15`), registered "1" at `0x48fddd` (`0x82e748`): the
+    // stock interface's binding-line gate, and `SetAction` and `SetShapeshift`'s compact spell
+    // tooltip when 0 (`0x532622`, `0x532a35`).
     same("UberTooltips", "1"),
     // Registered at `0x603280`: `ChatBubbles` "1", `ChatBubblesParty` "0".
     same("ChatBubbles", "1"),
@@ -695,9 +709,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `SetDeviceGammaRamp`, except when windowed (`byte[dev+0x20b]`). Deviation: benilla, which
     // has no exclusive mode, applies the same curve in the composite pass
     // ([`crate::ui_gamma::DisplayGamma`]), because the skipped upload would make a slider that
-    // moves no pixel. Spelled "1.000000" because `SetGamma 0x4891f0` formats with `"%f"`, and
-    // Restore Defaults must compare equal to the default; [`sync_cvars`] seeds it the same way.
-    same("gamma", "1.000000"),
+    // moves no pixel. `SetGamma 0x4891f0` writes `"%f"` ("1.000000"), which `SaveConfig`
+    // (`0x63da4a`) keeps as a diff against the default "1.0", as the reference does.
+    same("gamma", "1.0"),
     // `DesktopGamma` (`0x402d4d`: name `0x82e930`, default "0" `0x82e570`, flags 0, callback
     // `0x403500`, record `[0x8826d4]`), the stock window's Use Desktop Gamma box, which it also
     // sets whenever Windowed Mode is ticked (`OptionsFrame.lua:399-408`). On 1 the callback puts

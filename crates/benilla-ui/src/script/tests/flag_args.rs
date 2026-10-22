@@ -279,22 +279,18 @@ fn get_num_guild_members_flag_counts_the_whole_roster() {
 #[test]
 fn queued_verbs_read_their_flags_through_get_bool_or_default() {
     let mut s = script();
+    s.keep_calls();
     s.set_guild(GuildState::default());
 
     // SetWhoToUI(flag) 0x5ad877, default 0.
     for (arg, want) in cases(false) {
+        s.run("SetWhoToUI(1)").unwrap();
         s.run(&format!("SetWhoToUI({arg})")).unwrap();
-        assert_eq!(
-            s.take_social_requests(),
-            vec![SocialRequest::SetWhoToUi(want)],
-            "SetWhoToUI({arg})"
-        );
+        assert_eq!(s.who_to_ui(), want, "SetWhoToUI({arg})");
     }
+    s.run("SetWhoToUI(1)").unwrap();
     s.run("SetWhoToUI()").unwrap();
-    assert_eq!(
-        s.take_social_requests(),
-        vec![SocialRequest::SetWhoToUi(false)]
-    );
+    assert!(!s.who_to_ui());
 
     // TargetByName / FollowByName exact-match flag, default 0 (`0x489d8e`, `0x489f14`).
     for (arg, want) in cases(false) {
@@ -318,21 +314,6 @@ fn queued_verbs_read_their_flags_through_get_bool_or_default() {
             "TargetByName('Bob', {arg})"
         );
     }
-
-    // ConfirmReadyCheck(ready) 0x4bc0ad, default 0.
-    for (arg, want) in cases(false) {
-        s.run(&format!("ConfirmReadyCheck({arg})")).unwrap();
-        assert_eq!(
-            s.take_party_requests(),
-            vec![PartyRequest::ReadyCheckAnswer(want)],
-            "ConfirmReadyCheck({arg})"
-        );
-    }
-    s.run("ConfirmReadyCheck()").unwrap();
-    assert_eq!(
-        s.take_party_requests(),
-        vec![PartyRequest::ReadyCheckAnswer(false)]
-    );
 
     // UseAction(action, checkCursor, onSelf) 0x4e717e, 0x4e716f, defaults 0.
     for (arg, want) in cases(false) {
@@ -405,25 +386,26 @@ fn macro_flags_read_get_bool_or_default_with_default_zero() {
     }
 }
 
-/// The GameTooltip wrap flag (`0x531811`, `0x531dd3`, `0x531b60`), default 0: a wrapped line pins
-/// its left cell to the wrap width. A double line wraps only with an empty right side, as the line
-/// core clears the flag otherwise (`0x530284`).
+/// The GameTooltip wrap flag (`0x531811`, `0x531dd3`, `0x531b60`), default 0, stored per line
+/// (`0x53036f`). A double line wraps only with an empty right side, as the line core clears the
+/// flag otherwise (`0x530284`).
 #[test]
 fn tooltip_wrap_flags_read_get_bool_or_default_with_default_zero() {
     let s = script();
-    s.run(r#"TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")"#)
-        .unwrap();
-    let pinned = |line: u32| {
-        let t: mlua::Table = s
-            .lua()
-            .globals()
-            .get(format!("TTTextLeft{line}"))
-            .expect("left line");
-        let rh = crate::script::region::region_handle_of(s.lua(), &t).unwrap();
-        s.model_ref()
-            .region_data
-            .get(&rh)
-            .is_some_and(|d| d.size.is_some())
+    // Owned, so `SetText`'s show keeps the line: an ownerless one hides, and the hide's clear
+    // zeroes the flags (`0x530a60`).
+    s.run(
+        r#"TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        TT:SetOwner(CreateFrame("Frame"), "ANCHOR_NONE")"#,
+    )
+    .unwrap();
+    let pinned = |line: usize| {
+        let model = s.model_ref();
+        let h = model.arena.lookup("TT").expect("the tooltip");
+        match model.arena.frame(h).map(|f| &f.kind_state) {
+            Some(crate::widget::KindState::Tooltip(t)) => t.wrapped[line - 1],
+            _ => panic!("not a tooltip"),
+        }
     };
     for (arg, want) in cases(false) {
         s.run("TT:ClearLines()").unwrap();

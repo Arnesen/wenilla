@@ -54,6 +54,8 @@ pub(super) struct SkipClock {
     pub(super) dt: f32,
     /// The mover held instead of stepping ([`super::Player::settling`]): nothing integrated `dt`.
     pub(super) held: bool,
+    /// The world query gate refused the step ([`super::edge`]): nothing integrated `dt`.
+    pub(super) gated: bool,
     /// The active mover, a possessed unit or our own body; `None` until the server names one.
     pub(super) mover: Option<u64>,
 }
@@ -78,11 +80,31 @@ pub(super) struct ArcEdges {
     pub(super) fall_time: u32,
 }
 
+/// Whether a move message ends the mover's precast: the send `0x60e0a0` clears it (`0x60e15d`)
+/// ahead of every opcode but those it sends at once, which for our moves are the stops
+/// (0xb7, 0xba), the turns (0xbc to 0xbe) and the facing (0xda), class 0 of its table
+/// `0x60e408`. The heartbeat (0xee) and the landing (0xc9) never pass it: their sends call
+/// `0x600a30` directly (`0x616755`, `0x615e47`, `0x617162`, `0x5e221e`; `0x602e13`).
+fn ends_precast(kind: MoveKind) -> bool {
+    !matches!(
+        kind,
+        MoveKind::Stop
+            | MoveKind::StopStrafe
+            | MoveKind::StartTurnLeft
+            | MoveKind::StartTurnRight
+            | MoveKind::StopTurn
+            | MoveKind::SetFacing
+            | MoveKind::Heartbeat
+            | MoveKind::FallLand
+    )
+}
+
 /// Streams this frame's movement as the reference does: a `MSG_MOVE_*` per axis transition (its
 /// broadcaster `0x61a820` picks the opcode from the flag delta, `0x619f00`), a `SET_FACING` each
 /// frame the facing changes off the turn axis, and a heartbeat every 500 ms while moving. Airborne,
 /// the forward, back and strafe transitions go silent and their live bits ride the packets that do
 /// go out. Sends are fire-and-forget; updates `player`'s last-sent flags, facing and heartbeat.
+/// Returns whether a message sent ended the mover's precast ([`ends_precast`]).
 pub(super) fn stream_self_movement(
     sender: &Sender<ClientCommand>,
     player: &mut Player,
@@ -94,7 +116,7 @@ pub(super) fn stream_self_movement(
     knock_ack: Option<super::state::PendingKnockback>,
     transport: Option<TransportPose>,
     skip: SkipClock,
-) {
+) -> bool {
     let ArcEdges {
         jumped,
         wire_launch,
@@ -150,7 +172,8 @@ pub(super) fn stream_self_movement(
     // applies the launch and then sends (`0x61624d` call `0x6179c0`, then `0x616261` push `0xf0`).
     // `launch` is echoed bit for bit, as the reference copies its live fields: vmangos matches the
     // four floats within 0.01 (`Unit.cpp:7097-7100`), and a re-derived quad has no direction at
-    // `xy_speed == 0`.
+    // `xy_speed == 0`. Its send ends the precast: 0xf0 is no opcode `0x60e0a0` exempts.
+    let mut precast_ended = knock_ack.is_some();
     if let Some(k) = knock_ack {
         let _ = sender.send(ClientCommand::KnockBackAck {
             guid: k.guid,
@@ -170,6 +193,7 @@ pub(super) fn stream_self_movement(
     let mut sent = false;
     macro_rules! send_move {
         ($kind:expr) => {{
+            precast_ended |= ends_precast($kind);
             if *crate::net::CAST_TRACE {
                 bevy::log::info!(
                     "cast-trace: SEND move {:?} flags={:#x} pos=[{:.3},{:.3},{:.3}] o={:.3}",
@@ -291,22 +315,33 @@ pub(super) fn stream_self_movement(
     // leaves no catch-up `SET_FACING` behind.
     player.last_facing = facing;
     player.move_flags = wire_flags;
+    precast_ended
 }
 
 /// `CMSG_MOVE_TIME_SKIPPED`: the milliseconds the mover advanced through without integrating. The
 /// reference's common senders are its no-geometry pair (`0x634154`, `0x635742`), time with no
-/// world to resolve against, which is our settle hold; its long-frame site (`0x616642`) has no
-/// counterpart, as we integrate a long frame whole. Deviation: a hold is summed and sent once on
-/// release, without the send's `[mgr+0x130] += lag` heartbeat push, because ours lasts seconds
-/// where the reference's lasts a substep.
+/// world to resolve against: our world query gate, which reports each refused frame as the
+/// reference reports each refused substep, and pushes the heartbeat deadline by it (`0x615b02`),
+/// and our settle hold. Its long-frame site (`0x616642`) has no counterpart, as we integrate a long
+/// frame whole. Deviation: a settle hold is summed and sent once on release, without the push,
+/// because it stands in for the reference's blocking load (`0x694920`), not a refused substep,
+/// and lasts seconds.
 fn stream_skipped_time(sender: &Sender<ClientCommand>, player: &mut Player, skip: SkipClock) {
     if skip.held {
         player.skipped_ms += skip.dt * 1000.0;
         return;
     }
-    // The release edge sends the whole hold in whole ms; the residue is dropped.
-    let lag_ms = player.skipped_ms as u32;
+    // The release edge's whole hold, in whole ms; its residue is dropped.
+    let held_ms = player.skipped_ms as u32;
     player.skipped_ms = 0.0;
+    // A gated frame's own time, in whole ms, its residue carried to the next.
+    let mut gated_ms = 0;
+    if skip.gated {
+        player.gate_skip_ms += skip.dt * 1000.0;
+        gated_ms = player.gate_skip_ms as u32;
+        player.gate_skip_ms -= gated_ms as f32;
+    }
+    let lag_ms = held_ms + gated_ms;
     if lag_ms == 0 {
         return;
     }
@@ -317,6 +352,8 @@ fn stream_skipped_time(sender: &Sender<ClientCommand>, player: &mut Player, skip
     // against `[0xc4da98]`/`[0xc4da9c]`); we name only the one we drive.
     super::move_trace::skipped_time(guid, lag_ms);
     let _ = sender.send(ClientCommand::MoveTimeSkipped { guid, lag_ms });
+    // The deadline push follows a send (`0x615b02`, behind `0x600be0`), by the gated time alone.
+    player.last_heartbeat += gated_ms as f32 / 1000.0;
 }
 
 /// Sends one flag-less `MSG_MOVE_STOP` when the controller stops driving the avatar (free-fly),
@@ -399,6 +436,7 @@ mod tests {
         SkipClock {
             dt: 0.0,
             held: false,
+            gated: false,
             mover: None,
         }
     }
@@ -414,11 +452,13 @@ mod tests {
         let held = |dt: f32| SkipClock {
             dt,
             held: true,
+            gated: false,
             mover: Some(MOVER),
         };
         let released = || SkipClock {
             dt: 0.016,
             held: false,
+            gated: false,
             mover: Some(MOVER),
         };
         // Four held frames, 0.5 s in all.
@@ -444,6 +484,81 @@ mod tests {
             rx.try_recv().is_err(),
             "the report is an edge; a running mover skips nothing and says nothing"
         );
+    }
+
+    #[test]
+    fn a_gated_frame_reports_its_time_at_once_and_pushes_the_heartbeat() {
+        const MOVER: u64 = 0x0000_0000_0000_002a;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        let gated = || SkipClock {
+            dt: 0.0166,
+            held: false,
+            gated: true,
+            mover: Some(MOVER),
+        };
+        let mut sent = Vec::new();
+        for _ in 0..3 {
+            stream_skipped_time(&tx, &mut player, gated());
+            match rx
+                .try_recv()
+                .expect("each refused frame reports, as each substep does")
+            {
+                ClientCommand::MoveTimeSkipped { guid, lag_ms } => {
+                    assert_eq!(guid, MOVER);
+                    sent.push(lag_ms);
+                }
+                other => panic!("expected MoveTimeSkipped, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            sent,
+            [16, 17, 16],
+            "whole ms, the residue carried: 49.8 ms in all"
+        );
+        assert!(
+            (player.last_heartbeat - 0.049).abs() < 1e-6,
+            "the heartbeat deadline moved by the time sent (`0x615b02`): {}",
+            player.last_heartbeat
+        );
+    }
+
+    #[test]
+    fn a_gated_release_frame_sends_the_hold_and_pushes_by_its_own_time_only() {
+        const MOVER: u64 = 0x0000_0000_0000_002a;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        let frame = |held: bool, gated: bool| SkipClock {
+            dt: 0.5,
+            held,
+            gated,
+            mover: Some(MOVER),
+        };
+        for _ in 0..4 {
+            stream_skipped_time(&tx, &mut player, frame(true, false));
+        }
+        // The release frame is itself gated: 2 s held, 0.5 s refused.
+        stream_skipped_time(&tx, &mut player, frame(false, true));
+        match rx.try_recv().expect("the release reports") {
+            ClientCommand::MoveTimeSkipped { lag_ms, .. } => assert_eq!(lag_ms, 2500),
+            other => panic!("expected MoveTimeSkipped, got {other:?}"),
+        }
+        assert!(
+            (player.last_heartbeat - 0.5).abs() < 1e-6,
+            "the deadline moves by the gated frame's 500 ms, not the hold's: {}",
+            player.last_heartbeat
+        );
+        // With no mover named nothing is sent, so nothing is pushed.
+        let mut unnamed = Player::default();
+        let gated = SkipClock {
+            dt: 0.5,
+            held: false,
+            gated: true,
+            mover: None,
+        };
+        stream_skipped_time(&tx, &mut unnamed, gated);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(unnamed.last_heartbeat, 0.0, "no send, no push");
     }
 
     #[test]
@@ -1349,6 +1464,99 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no Stop is sent when we were already reported stopped"
+        );
+    }
+
+    /// `0x60e0a0` ends the mover's precast (`0x60e15d`) ahead of each move it does not send at
+    /// once (`0x60e408` class 0): a start, the jump and the knockback ack do; a stop, a turn and a
+    /// facing change do not. Nor do the heartbeats and the landing, which go to `0x600a30` without
+    /// passing it (`0x616755`, `0x615e47`, `0x617162`, `0x5e221e`; `0x602e13`).
+    #[test]
+    fn the_moves_the_send_does_not_exempt_end_the_precast() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Edge {
+            None,
+            Knock,
+            Jump,
+            Land,
+        }
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        let frame = |player: &mut Player, flags: u32, now: f32, edge: Edge| {
+            let knock = edge == Edge::Knock;
+            let ended = stream_self_movement(
+                &tx,
+                player,
+                flags,
+                0.0,
+                ArcEdges {
+                    jumped: edge == Edge::Jump,
+                    wire_launch: knock,
+                    air_nudged: false,
+                    landed: edge == Edge::Land,
+                    fall_time: 0,
+                },
+                now,
+                &[],
+                knock.then_some(super::super::state::PendingKnockback {
+                    guid: 0x1234,
+                    counter: 1,
+                    launch: benilla_protocol::JumpInfo {
+                        zspeed: -12.0,
+                        cos_angle: 1.0,
+                        sin_angle: 0.0,
+                        xy_speed: 25.0,
+                    },
+                }),
+                None,
+                no_skip(),
+            );
+            let sent: Vec<String> = rx.try_iter().map(|c| format!("{c:?}")).collect();
+            assert!(!sent.is_empty(), "the frame at {now} sends something");
+            ended
+        };
+        let falling = move_flags::FALLING;
+        assert!(
+            frame(&mut player, move_flags::FORWARD, 0.0, Edge::None),
+            "start forward"
+        );
+        assert!(!frame(&mut player, 0, 0.1, Edge::None), "the stop");
+        assert!(
+            !frame(&mut player, move_flags::TURN_LEFT, 0.2, Edge::None),
+            "a turn"
+        );
+        assert!(!frame(&mut player, 0, 0.3, Edge::None), "the turn's stop");
+        assert!(
+            frame(&mut player, move_flags::FORWARD, 1.0, Edge::None),
+            "start again"
+        );
+        assert!(
+            !frame(&mut player, move_flags::FORWARD, 1.6, Edge::None),
+            "the running heartbeat (0x616755)"
+        );
+        assert!(!frame(&mut player, 0, 2.0, Edge::None), "the stop");
+        player.face_yaw += 0.5;
+        assert!(!frame(&mut player, 0, 2.1, Edge::None), "a facing change");
+        player.pos.x += 0.01;
+        assert!(
+            !frame(&mut player, 0, 2.2, Edge::None),
+            "the at-rest position report"
+        );
+        assert!(
+            frame(&mut player, falling, 3.0, Edge::Jump),
+            "the jump (0xbb, 0x615ed1)"
+        );
+        assert!(
+            !frame(&mut player, falling, 3.6, Edge::None),
+            "the falling heartbeat"
+        );
+        assert!(
+            !frame(&mut player, 0, 3.8, Edge::Land),
+            "the landing (0xc9, 0x602e13)"
+        );
+        assert!(
+            frame(&mut player, 0, 4.0, Edge::Knock),
+            "the knockback ack (0xf0)"
         );
     }
 }

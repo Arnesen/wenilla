@@ -14,7 +14,6 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
 use super::Model;
-use crate::script::binding_abi::Idx;
 
 /// The synthetic header key for factions the player moved to the inactive bucket.
 const KEY_INACTIVE: i64 = -1;
@@ -113,6 +112,15 @@ impl super::UiScript {
         model.reputation_collapsed.insert(KEY_INACTIVE);
         model.reputation_groups = groups;
         model.reputation = state;
+    }
+
+    /// The world-enter cascade's rebuild (`0x4909d3` calls `0x4d5430`): the player in the world,
+    /// it re-lists the factions with every header expanded and "Inactive" collapsed (`0x4d5479`),
+    /// and its sort signals `UPDATE_FACTION` (`0x4d55de` → `0x4d5db0`).
+    pub(crate) fn reputation_enter_world(&mut self) {
+        let state = std::mem::take(&mut self.model_mut().reputation);
+        self.set_reputation(state);
+        self.fire_event("UPDATE_FACTION", Vec::new());
     }
 
     /// Push every reputation-indexed faction's standing, the base plus the wire (`0x4d6370`): what
@@ -278,7 +286,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // isCollapsed, isWatched; eleven wide on every path, a miss included.
     g.set(
         "GetFactionInfo",
-        lua.create_function(|lua, Idx(index): Idx| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetFactionInfo(index)` (`0x84a298`, `0x4d6509`).
+            let index = binding_abi::index_arg(lua, index, "Usage: GetFactionInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(row) = index
                 .checked_sub(1)
@@ -352,7 +362,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // SetSelectedFaction(index): a visible index; a header or an out-of-range index clears it.
     g.set(
         "SetSelectedFaction",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: SetSelectedFaction(index)` (`0x84a3b0`, `0x4d6bc1`).
+            let index = binding_abi::index_arg(lua, index, "Usage: SetSelectedFaction(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.reputation_selected = entry_at(&model, index).map(|e| e.rep_list_id);
             Ok(())
@@ -365,7 +377,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`ReputationFrame.xml:9-15`), and the pane repaints on `UPDATE_FACTION` alone.
     g.set(
         "CollapseFactionHeader",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: CollapseFactionHeader(index)` (`0x84a320`, `0x4d6a61`).
+            let index = binding_abi::index_arg(lua, index, "Usage: CollapseFactionHeader(index)")?;
             {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 set_collapsed(&mut model, index, true);
@@ -376,7 +390,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "ExpandFactionHeader",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: ExpandFactionHeader(index)` (`0x84a344`, `0x4d6ab1`).
+            let index = binding_abi::index_arg(lua, index, "Usage: ExpandFactionHeader(index)")?;
             {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 set_collapsed(&mut model, index, false);
@@ -390,7 +406,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // first, and nothing acks it.
     g.set(
         "FactionToggleAtWar",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: FactionToggleAtWar(index)` (`0x84a2b8`, `0x4d6961`).
+            let index = binding_abi::index_arg(lua, index, "Usage: FactionToggleAtWar(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let Some(e) = entry_at_mut(&mut model, index) else {
                 return Ok(());
@@ -414,7 +432,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the pane repaints on; the folds survive, as only a server rebuild resets them.
     g.set(
         "IsFactionInactive",
-        lua.create_function(|lua, Idx(index): Idx| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: IsFactionInactive(index)` (`0x84a368`, `0x4d6b01`).
+            let index = binding_abi::index_arg(lua, index, "Usage: IsFactionInactive(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(binding_abi::flag(
                 entry_at(&model, index).is_some_and(|e| e.inactive),
@@ -484,7 +504,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the descriptor update returns. The app sends none as `-1`, since slot 0 is a real faction.
     g.set(
         "SetWatchedFactionIndex",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: SetWatchedFactionIndex(index)` (`0x84a388`, `0x4d6b71`).
+            let index = binding_abi::index_arg(lua, index, "Usage: SetWatchedFactionIndex(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let slot = entry_at(&model, index).map(|e| e.rep_list_id);
             model.reputation_sends.push(ReputationSend::Watch(slot));

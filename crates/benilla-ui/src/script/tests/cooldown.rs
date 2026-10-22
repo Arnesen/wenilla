@@ -11,8 +11,9 @@ fn action_state_bindings_answer_the_reference_conventions() {
 
     assert!(s.eval::<bool>("return IsUsableAction(3) == nil").unwrap());
     assert!(s.eval::<bool>("return IsActionInRange(3) == nil").unwrap());
+    // An empty slot reaches no cooldown query, so the enable stays the binding's 0 (`0x4e6f0d`).
     assert!(s
-        .eval::<bool>("local st, d, e = GetActionCooldown(3); return st == 0 and d == 0 and e == 1")
+        .eval::<bool>("local st, d, e = GetActionCooldown(3); return st == 0 and d == 0 and e == 0")
         .unwrap());
 
     s.tick(100.0); // an arbitrary clock epoch
@@ -23,12 +24,15 @@ fn action_state_bindings_answer_the_reference_conventions() {
             not_enough_mana: true,
             in_range: Some(false),
             has_range: true,
-            current: true,
-            auto_repeat: false,
+            spell: Some(133),
+            form: None,
+            profession: None,
             is_attack: false,
             equipped: false,
+            item: None,
             // 4 s remaining of a 10 s cooldown, running: started at GetTime 94.
             cooldown: Some((94_000, 10_000, true)),
+            no_cooldown_query: false,
         }),
     );
 
@@ -37,6 +41,12 @@ fn action_state_bindings_answer_the_reference_conventions() {
         .unwrap());
     assert!(s.eval::<bool>("return IsActionInRange(3) == 0").unwrap());
     assert!(s.eval::<bool>("return ActionHasRange(3) == 1").unwrap());
+    assert!(s.eval::<bool>("return IsCurrentAction(3) == nil").unwrap());
+    // Checked while its spell is the one in flight, read live off the cast state.
+    s.set_cast_view(CastView {
+        slot: Some(133),
+        ..Default::default()
+    });
     assert!(s.eval::<bool>("return IsCurrentAction(3) == 1").unwrap());
     assert!(s
         .eval::<bool>("return IsAutoRepeatAction(3) == nil")
@@ -91,6 +101,76 @@ fn action_state_bindings_answer_the_reference_conventions() {
 
     s.set_action_state(3, None);
     assert!(s.eval::<bool>("return IsCurrentAction(3) == nil").unwrap());
+}
+
+/// `GetActionCooldown` (`0x4e6ed0`) starts its enable at 0 (`0x4e6f0d`) and only the cooldown query
+/// writes it, to 1 before any leg (`0x6e1406`): a slot that reaches no query answers `(0, 0, 0)`,
+/// one that reaches it with nothing running `(0, 0, 1)`.
+#[test]
+fn get_action_cooldown_answers_enable_0_for_a_slot_that_reaches_no_query() {
+    let mut s = script();
+    let triple = |s: &UiScript, n: u32| {
+        s.eval::<(f64, f64, i64)>(&format!("return GetActionCooldown({n})"))
+            .unwrap()
+    };
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            spell: Some(133),
+            ..Default::default()
+        }),
+    );
+    s.set_action_state(
+        2,
+        Some(ActionState {
+            no_cooldown_query: true,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        triple(&s, 1),
+        (0.0, 0.0, 1),
+        "a spell with no cooldown running"
+    );
+    assert_eq!(triple(&s, 2), (0.0, 0.0, 0), "a slot that reaches no query");
+    assert_eq!(triple(&s, 3), (0.0, 0.0, 0), "an empty slot");
+    for n in [0, 121] {
+        assert_eq!(triple(&s, n), (0.0, 0.0, 0), "slot {n}, out of 1..120");
+    }
+}
+
+/// `IsCurrentAction`'s item arm (`0x4e53c8`-`0x4e5428`): an item slot is current while the
+/// in-flight cast's item object has the slot's entry, and it answers from that arm alone, never
+/// the spell, form or profession arms.
+#[test]
+fn is_current_action_holds_an_item_slot_against_the_in_flight_item() {
+    let mut s = script();
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            item: Some(6948),
+            ..Default::default()
+        }),
+    );
+    let current = |s: &UiScript| s.eval::<bool>("return IsCurrentAction(1) == 1").unwrap();
+    assert!(!current(&s), "nothing in flight");
+    s.set_cast_view(CastView {
+        slot: Some(8690),
+        item: Some(6948),
+        ..Default::default()
+    });
+    assert!(current(&s), "the Hearthstone's own cast");
+    s.set_cast_view(CastView {
+        slot: Some(8690),
+        item: Some(5512),
+        ..Default::default()
+    });
+    assert!(!current(&s), "another item's cast");
+    s.set_cast_view(CastView {
+        slot: Some(8690),
+        ..Default::default()
+    });
+    assert!(!current(&s), "the spell in flight with no item object");
 }
 
 /// The absolute start anchors the sweep: re-pushing a running cooldown (a kill flipping `usable`)
@@ -148,7 +228,7 @@ fn shapeshift_and_container_cooldowns_keep_their_anchors_too() {
         ..Default::default()
     };
     let bag = || ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots: std::collections::HashMap::from([(1, slot())]),
     };
@@ -252,4 +332,115 @@ fn get_inventory_item_cooldown_answers_the_item_query_under_the_clients_gates() 
         .contains("Usage: GetInventoryItemCooldown(unit, slot)"));
     assert!(err("GetInventoryItemCooldown('player', 30)")
         .contains("Invalid inventory slot in GetInventoryItemCooldown"));
+}
+
+/// `GetContainerItemCooldown` (`0x4f9a7f`) and `GameTooltip:SetBagItem` (`0x53483a`) reach the item
+/// query `0x6e2ed0` with the item's record missing (`0x4f9a46`, `0x5347e1`), which asks it with the
+/// callback `0x6e2f70` (`0x6e2efb`): each call on such a slot queues its entry, and a slot whose
+/// record is cached queues nothing.
+#[test]
+fn a_bag_slots_cooldown_query_asks_for_its_missing_record() {
+    let mut s = script();
+    let bag = ContainerState {
+        name: None,
+        num_slots: 16,
+        slots: std::collections::HashMap::from([
+            (
+                1,
+                ContainerSlot {
+                    item_id: 6948,
+                    count: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                2,
+                ContainerSlot {
+                    item_id: 118,
+                    count: 1,
+                    quality: Some(1),
+                    cooldown: Some((0, 0, true)),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    };
+    s.set_container(0, Some(bag));
+    s.run("GetContainerItemCooldown(0, 2)").unwrap();
+    assert!(s.take_cooldown_record_asks().is_empty(), "a cached record");
+    s.run("GetContainerItemCooldown(0, 1)").unwrap();
+    assert_eq!(s.take_cooldown_record_asks(), vec![6948]);
+    s.run(
+        r#"
+        local owner = CreateFrame("Frame", "CooldownAskOwner")
+        local tt = CreateFrame("GameTooltip", "CooldownAskTT", nil, "TestTooltipTemplate")
+        tt:SetOwner(owner, "ANCHOR_RIGHT")
+        tt:SetBagItem(0, 1)
+        tt:SetBagItem(0, 2)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.take_cooldown_record_asks(),
+        vec![6948],
+        "the tooltip's query"
+    );
+}
+
+/// `GameTooltip:SetInventoryItem` reaches the item query `0x6e2ed0` with the player's item record
+/// missing (`0x533188` → `0x5331ec`), which asks it with the callback `0x6e2f70` (`0x6e2efb`): a
+/// worn or vault item awaiting its record queues its entry; a cached record, and the ammo slot,
+/// which passes an entry and queries nothing (`0x53307d`), queue none.
+#[test]
+fn an_inventory_slots_tooltip_asks_for_its_missing_record() {
+    let mut s = script();
+    let mut inv: InventorySlots = Default::default();
+    inv[0] = Some(InvSlotView {
+        item_id: 2512,
+        count: 200,
+        ..Default::default()
+    });
+    inv[13] = Some(InvSlotView {
+        item_id: 118,
+        name: Some("Minor Healing Potion".into()),
+        ..Default::default()
+    });
+    inv[14] = Some(InvSlotView {
+        item_id: 6948,
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    let vault = ContainerState {
+        name: None,
+        num_slots: 24,
+        slots: std::collections::HashMap::from([(
+            1,
+            ContainerSlot {
+                item_id: 5976,
+                count: 1,
+                ..Default::default()
+            },
+        )]),
+    };
+    s.set_container(-1, Some(vault));
+    s.run(
+        r#"
+        local owner = CreateFrame("Frame", "InventoryAskOwner")
+        InventoryAskTT = CreateFrame("GameTooltip", "InventoryAskTT", nil, "TestTooltipTemplate")
+        InventoryAskTT:SetOwner(owner, "ANCHOR_RIGHT")
+        InventoryAskTT:SetInventoryItem("player", 0)
+        InventoryAskTT:SetInventoryItem("player", 13)
+    "#,
+    )
+    .unwrap();
+    assert!(
+        s.take_cooldown_record_asks().is_empty(),
+        "the ammo slot and a cached record"
+    );
+    s.run(r#"InventoryAskTT:SetInventoryItem("player", 14)"#)
+        .unwrap();
+    assert_eq!(s.take_cooldown_record_asks(), vec![6948], "a worn item");
+    s.run(r#"InventoryAskTT:SetInventoryItem("player", 40)"#)
+        .unwrap();
+    assert_eq!(s.take_cooldown_record_asks(), vec![5976], "a vault item");
 }

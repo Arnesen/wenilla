@@ -13,6 +13,7 @@ use super::test_ui::load_ui as load_xml;
 fn player_unit() -> UnitState {
     UnitState {
         exists: true,
+        has_object: true,
         name: Some("Benilla".into()),
         health: 100,
         max_health: 100,
@@ -53,6 +54,7 @@ fn inventory_with_head_item() -> InventorySlots {
     let mut slots: InventorySlots = Default::default();
     slots[1] = Some(InvSlotView {
         duration_ms: None,
+        field_duration: 0,
         already_bound: false,
         occupied_seats: None,
         bonding: 0,
@@ -60,6 +62,7 @@ fn inventory_with_head_item() -> InventorySlots {
         use_fork: Default::default(),
         bar_placeable: true,
         consumable: false,
+        spell_charges: [0; 5],
         durability: None,
         flags: 0,
         item_id: 1234,
@@ -67,6 +70,7 @@ fn inventory_with_head_item() -> InventorySlots {
         count: 1,
         contents_count: None,
         quality: 2,
+        inventory_type: Some(1),
         name: Some("Test Helm".into()),
         link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
         guid: 0x70e,
@@ -90,6 +94,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
             occupied_seats: None,
@@ -115,10 +120,11 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             flags: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         },
     );
     benilla_ui::script::ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }
@@ -257,7 +263,8 @@ fn shipped_character_frame_drives_end_to_end() {
         "N/A"
     );
 
-    // The app follows a snapshot push with this event; the slots repaint on the event.
+    // The equipment's producers fire this after the push ([`crate::field_watch`],
+    // [`crate::item_watch`]); the slots repaint on the event.
     s.fire_event(
         "UNIT_INVENTORY_CHANGED",
         vec![ScriptValue::Str("player".into())],
@@ -474,7 +481,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     s.resolve();
     let head_icon_dim = s.extract().iter().any(|q| {
         matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), desaturated, .. }
-            if p.contains("INV_Helmet_01") && *desaturated && c[0] == 0.5 && c[1] == 0.5 && c[2] == 0.5)
+            if p.contains("INV_Helmet_01") && *desaturated && c[..3] == benilla_ui::color::quant::drawn([0.5, 0.5, 0.5, 1.0])[..3])
     });
     assert!(head_icon_dim, "the picked slot's icon dims");
 
@@ -627,7 +634,7 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
             _ => None,
         })
     }
-    let red = [0.9, 0.0, 0.0, 1.0];
+    let red = benilla_ui::color::quant::drawn([0.9, 0.0, 0.0, 1.0]);
     let white = [1.0, 1.0, 1.0, 1.0];
     assert_eq!(
         slot_color(&mut s, "CharacterHeadSlot", "Quickslot2"),
@@ -1072,7 +1079,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     for i in [0, 2, 3, 4] {
         let (label, width) = first[i];
         assert!(label > 0.0, "tab {} measured its label", i + 1);
-        assert_eq!(
+        benilla_ui::assert_near!(
             width,
             fitted(label),
             "tab {} is its text plus the two end slices, from OnShow alone",
@@ -1085,8 +1092,9 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
             i + 1
         );
     }
-    assert_eq!(
-        first[1].1, 115.0,
+    benilla_ui::assert_near!(
+        first[1].1,
+        115.0,
         "…and the hidden pet tab is not yet fitted"
     );
 
@@ -1094,7 +1102,7 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     s.run("CharacterFrameTab2:Show()").unwrap();
     s.resolve();
     let (pet_label, pet_width) = widths(&mut s)[1];
-    assert_eq!(
+    benilla_ui::assert_near!(
         pet_width,
         fitted(pet_label),
         "the pet tab fits when it is first shown"
@@ -1105,11 +1113,12 @@ fn the_five_tabs_fit_their_labels_on_the_first_show() {
     }
     s.resolve();
     let settled = widths(&mut s);
-    assert_eq!(
-        settled[0], first[0],
+    benilla_ui::assert_near!(
+        settled[0],
+        first[0],
         "the fit is once, in OnShow — nothing re-fits per frame"
     );
-    assert_eq!(&settled[2..], &first[2..], "…for the whole row");
+    benilla_ui::assert_near!(&settled[2..], &first[2..], "…for the whole row");
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
 

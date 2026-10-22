@@ -46,6 +46,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             .layout_inputs
             .get_mut(&h)
             .is_some_and(|input| input.anchors.clear());
+        if let Some(rec) = model.drag_authored.get_mut(&h) {
+            rec.0.clear();
+        }
         if cleared {
             model.touch_layout_frame(h);
         }
@@ -61,15 +64,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         |lua, (this, n): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
             let idx = get_point_index(lua, n)?;
-            let anchor = {
+            let (anchor, units) = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                model
+                let anchor = model
                     .layout_inputs
                     .get(&h)
                     .and_then(|i| i.anchors.nth(idx))
-                    .copied()
+                    .copied();
+                (anchor, model.layout_units())
             };
-            get_point_values(lua, anchor, |rel| {
+            get_point_values(lua, anchor, units, |rel| {
                 Ok(if rel == SCREEN {
                     Value::Nil
                 } else {
@@ -114,6 +118,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let pair = Anchors::from(pair);
             let changed = !input.anchors.bits_eq(&pair);
             input.anchors = pair;
+            if let Some(rec) = model.drag_authored.get_mut(&h) {
+                rec.0 = pair;
+            }
             model.invalidate_frame(h, changed);
             Ok(())
         },
@@ -127,8 +134,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
-            let changed = input.width.to_bits() != w.to_bits();
-            input.width = w;
+            let changed = input.width.bits() != crate::layout::Len::Script(w).bits();
+            input.width = crate::layout::Len::Script(w);
+            if let Some(rec) = model.drag_authored.get_mut(&h) {
+                rec.1 = crate::layout::Len::Script(w);
+            }
             // A size write moves no edge and no roster membership. It invalidates whether or not
             // the width moved (`0x7683d0`).
             model.invalidate_frame(h, changed);
@@ -145,8 +155,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
-            let changed = input.height.to_bits() != ht.to_bits();
-            input.height = ht;
+            let changed = input.height.bits() != crate::layout::Len::Script(ht).bits();
+            input.height = crate::layout::Len::Script(ht);
+            if let Some(rec) = model.drag_authored.get_mut(&h) {
+                rec.2 = crate::layout::Len::Script(ht);
+            }
             model.invalidate_frame(h, changed);
             model.note_authored_size(h);
             Ok(())
@@ -162,17 +175,17 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         Ok(size_read(lua, h, false))
     })?;
 
-    // GetCenter(): the resolved rect's centre in the frame's own units (screen ÷ effective scale,
-    // y-up), as the reference's coordinate getters report; nil before the first resolve.
+    // GetCenter() (`0x7a1810`): the resolved rect's midpoints over the frame's scale, through the
+    // getter steps ([`crate::layout::LayoutUnits::center`]); two nils before the first resolve.
     set_shared(lua, m, Side::Frame, "GetCenter", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
         settle_frame(lua, h);
         let model = lua.app_data_ref::<Model>().expect("model");
-        let inv = 1.0 / eff_scale(&model, h);
-        Ok(match model.resolved.get(&h) {
+        let (units, s) = (model.layout_units(), layout_scale(&model, h));
+        Ok(match model.frame_rects.get(&h) {
             Some(r) => (
-                Value::Number(f64::from((r.left + r.right) * 0.5 * inv)),
-                Value::Number(f64::from((r.bottom + r.top) * 0.5 * inv)),
+                Value::Number(units.center(r.left, r.right, s)),
+                Value::Number(units.center(r.bottom, r.top, s)),
             ),
             None => (Value::Nil, Value::Nil),
         })
@@ -190,8 +203,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetLeft/GetRight/GetTop/GetBottom: the resolved edges in the frame's own units, y-up from
-    // the screen bottom (`GetRect 0x768320`); nil before the first resolve.
+    // GetLeft/GetRight/GetTop/GetBottom (`0x7a1980`, `0x7a1aa0`, `0x7a1bc0`, `0x7a1ce0`): the
+    // resolved edge (`GetRect 0x768320`) over the frame's scale through the getter steps
+    // ([`crate::layout::LayoutUnits::edge`]), y up from the screen bottom; nil before the first
+    // resolve.
     for (name, pick) in [
         ("GetLeft", 0u8),
         ("GetRight", 1u8),
@@ -201,15 +216,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         set_shared(lua, m, Side::Frame, name, move |lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             settle_frame(lua, h);
-            let model = lua.app_data_mut::<Model>().expect("model");
-            let inv = 1.0 / eff_scale(&model, h);
-            Ok(model.resolved.get(&h).map(|r| {
-                inv * match pick {
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let (units, s) = (model.layout_units(), layout_scale(&model, h));
+            Ok(model.frame_rects.get(&h).map(|r| {
+                let e = match pick {
                     0 => r.left,
                     1 => r.right,
                     2 => r.top,
                     _ => r.bottom,
-                }
+                };
+                units.edge(e, s)
             }))
         })?;
     }
@@ -253,6 +269,16 @@ fn settle_node(lua: &Lua, id: Option<u32>) {
     }
 }
 
+/// The frame's layout scale `[+0x7c]`, which the edge and centre getters divide by as it stands
+/// (`0x7a1a4e`): no guard, as `SetScale` refuses 0 (`0x768366`).
+pub(crate) fn layout_scale(model: &Model, h: FrameHandle) -> f32 {
+    model
+        .arena
+        .frame(h)
+        .map(|f| f.effective_scale)
+        .unwrap_or(1.0)
+}
+
 pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     let s = model
         .arena
@@ -266,28 +292,40 @@ pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     }
 }
 
-/// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the size the frame was given (`+0x1c`/`+0x20`
-/// → `0x768420`/`0x768410`), with no resolve, whatever its anchors span (`0x7a1e99`–`0x7a1ea5`).
-/// Only a zero size resolves a pending frame (`0x7a1eb6`) and answers its rect's span, else 0. The
-/// span is not divided by the effective scale, though the rect carries it: the answer is only
-/// converted (`0x41ad70`, `0x41ae40`), where `GetLeft` divides (`0x7a1a63`).
-fn size_read(lua: &Lua, h: FrameHandle, width: bool) -> f32 {
-    let set = {
+/// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the size the frame was given as it is stored
+/// (`+0x1c`/`+0x20` → `0x768420`/`0x768410`, `S` of the number set) through the getter steps, with
+/// no resolve, whatever its anchors span (`0x7a1e99`–`0x7a1ea5`). Only a stored 0 resolves a
+/// pending frame (`0x7a1eb6`) and answers its rect's span, else 0. The span is not divided by the
+/// effective scale, though the rect carries it: it is only converted (`0x7a1ee6`, `0x41ae40`),
+/// where `GetLeft` divides (`0x7a1a63`).
+fn size_read(lua: &Lua, h: FrameHandle, width: bool) -> f64 {
+    let (units, stored) = {
         let model = lua.app_data_ref::<Model>().expect("model");
-        model
+        let units = model.layout_units();
+        let set = model
             .layout_inputs
             .get(&h)
-            .map_or(0.0, |i| if width { i.width } else { i.height })
+            .map_or(crate::layout::Len::Script(0.0), |i| {
+                if width {
+                    i.width
+                } else {
+                    i.height
+                }
+            });
+        (units, set.layout(units))
     };
-    if set != 0.0 {
-        return set;
+    if stored != 0.0 {
+        return units.load(stored);
     }
     settle_frame(lua, h);
     let model = lua.app_data_ref::<Model>().expect("model");
-    model
-        .resolved
-        .get(&h)
-        .map_or(0.0, |r| if width { r.width() } else { r.height() })
+    model.frame_rects.get(&h).map_or(0.0, |r| {
+        if width {
+            units.span(r.left, r.right)
+        } else {
+            units.span(r.bottom, r.top)
+        }
+    })
 }
 
 /// `SetPoint` (`0x7a2540`) for a frame: the argument ladder is [`super::anchor_args`], shared with
@@ -306,12 +344,14 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
     let units = model.layout_units();
+    let anchor = Anchor::new(point, rel_to_id, rel_point, x, y);
+    // A frame a drag pinned keeps what the scripts last set, which a rebuild would reproduce.
+    if let Some(rec) = model.drag_authored.get_mut(&h) {
+        rec.0.set(anchor, units);
+    }
     let input = model.layout_inputs.entry(h).or_default();
     // An unchanged anchor stores nothing and queues no resolve (`0x767cde` → `0x767d5e`).
-    if input
-        .anchors
-        .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
-    {
+    if input.anchors.set(anchor, units) {
         model.invalidate_frame(h, true);
     }
     Ok(())

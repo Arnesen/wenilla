@@ -102,7 +102,7 @@ fn held(item_id: u32, name: &str, guid: u64, creator: (u64, Option<&str>)) -> Co
 /// slot 2.
 fn backpack(creator: (u64, Option<&str>)) -> ContainerState {
     ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots: HashMap::from([
             (1, held(BAR, "Copper Bar", 0x4000_0000_0000_0001, creator)),
@@ -299,8 +299,8 @@ fn an_item_with_no_creator_waits_for_no_name() {
     assert!(s.take_errors().is_empty());
 }
 
-/// A charter's petition record answers the petition cache (`0x52b92f`): its title and owner lines
-/// appear in place.
+/// A charter's petition miss ends the build at the name, unshown and unpriced (`0x52b944`..
+/// `0x52b94e`); the record's answer (`0x52b92f`) rebuilds it whole and shows it.
 #[test]
 fn a_charters_petition_answer_adds_its_lines() {
     let mut s = fixture();
@@ -314,7 +314,7 @@ fn a_charters_petition_answer_adds_its_lines() {
         },
     );
     let charter = |petition: Option<PetitionSlotView>| ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots: HashMap::from([(
             1,
@@ -327,7 +327,11 @@ fn a_charters_petition_answer_adds_its_lines() {
     s.set_container(0, Some(charter(None)));
     s.run("TT:SetOwner(Slot, 'ANCHOR_RIGHT') TT:SetBagItem(0, 1)")
         .unwrap();
-    assert_eq!(lines(&mut s, "TT"), ["Charter", "[ITEM_SIGNABLE]"]);
+    assert_eq!(lines(&mut s, "TT"), ["Charter"]);
+    assert!(
+        !s.eval::<bool>("return TT:IsShown() == 1").unwrap(),
+        "no show"
+    );
     assert_eq!(
         s.take_petition_asks(),
         vec![0x4000_0000_0000_0009],
@@ -339,6 +343,7 @@ fn a_charters_petition_answer_adds_its_lines() {
             is_charter: false,
             title: "Pact".into(),
             owner: Some("Bob".into()),
+            signatures: 0,
         }))),
     );
     s.tick(0.1);
@@ -350,6 +355,10 @@ fn a_charters_petition_answer_adds_its_lines() {
             "[PETITION_CREATOR Bob]",
             "[ITEM_SIGNABLE]"
         ]
+    );
+    assert!(
+        s.eval::<bool>("return TT:IsShown() == 1").unwrap(),
+        "the rebuild shows"
     );
     assert!(
         s.take_petition_asks().is_empty(),

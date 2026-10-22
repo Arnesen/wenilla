@@ -27,8 +27,8 @@ pub(crate) struct ItemObject {
     pub(crate) container: bool,
 }
 
-/// Spawn an item object into the index. The seed is never merged, so the create raises no field
-/// notify; a re-create of a live guid takes the handler's values path instead.
+/// Spawn an item object into the index with `fields` as its store, notifying nothing: the update
+/// pass runs its create hook or its watches ([`crate::net::FieldChanged`]).
 pub(crate) fn spawn_item(
     commands: &mut Commands,
     index: &mut GuidIndex,
@@ -106,7 +106,7 @@ impl Countdowns {
     }
 
     /// [`Self::enchant_remaining_ms`] floored to the second, for the snapshot feeds: a per-ms read
-    /// would fire `UNIT_INVENTORY_CHANGED` every frame while a timer runs.
+    /// would push a new snapshot every frame while a timer runs.
     pub(crate) fn enchant_remaining_display_ms(&self, slot: u32) -> Option<u64> {
         self.enchant_remaining_ms(slot).map(|ms| ms - ms % 1000)
     }
@@ -386,6 +386,23 @@ pub(crate) struct RollCatalogs<'a> {
     pub(crate) enchants: Option<&'a Enchants>,
 }
 
+/// The two roll catalogs as a system reads them; absent in a world that loaded no DBCs.
+#[derive(SystemParam)]
+pub(crate) struct Rolls<'w> {
+    props: Option<Res<'w, RandomProperties>>,
+    enchants: Option<Res<'w, Enchants>>,
+}
+
+impl Rolls<'_> {
+    /// The catalogs, as [`RollCatalogs`].
+    pub(crate) fn get(&self) -> RollCatalogs<'_> {
+        RollCatalogs {
+            props: self.props.as_deref(),
+            enchants: self.enchants.as_deref(),
+        }
+    }
+}
+
 impl RollCatalogs<'_> {
     /// No DBC catalogs: the plain name and no suffix lines.
     #[cfg(test)]
@@ -430,6 +447,9 @@ pub(crate) struct Items {
     /// callback `0x4c0340` per call, with no dedupe (`0x4c017f`, `0x4c0582`). A lookup registers
     /// it, so it is locked like the in-flight asks and registering takes `&self`.
     trade_waiters: std::sync::Mutex<Vec<u32>>,
+    /// The ammunition entry each ammo-slot getter call that missed asked for, in call order: one
+    /// callback `0x4c84f0` per call (`0x4c83bc`, `0x4c89cf`), registered after the script's tick.
+    ammo_waiters: std::sync::Mutex<Vec<u32>>,
 }
 
 impl Items {
@@ -475,6 +495,23 @@ impl Items {
         before - waiters.len()
     }
 
+    /// An ammo-slot getter missed the cache on `entry` and asked with the callback `0x4c84f0`.
+    pub(crate) fn wait_for_ammo_record(&self, entry: u32) {
+        self.ammo_waiters.lock_recover().push(entry);
+    }
+
+    /// The answer for `entry` landed, or refused it: how many ammo-slot getter calls were
+    /// waiting on it, whose callbacks are spent either way.
+    pub(crate) fn take_ammo_waiters(&mut self, entry: u32) -> usize {
+        let waiters = self
+            .ammo_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = waiters.len();
+        waiters.retain(|&e| e != entry);
+        before - waiters.len()
+    }
+
     /// The item `guid` arrived: its queued enchant updates in arrival order, unlinked (`0x5ebde0`).
     pub(crate) fn take_enchant_times(&mut self, guid: u64) -> Vec<(u32, u32)> {
         let mut taken = Vec::new();
@@ -505,6 +542,12 @@ impl Items {
     /// ([`QueryCache::knows`]).
     pub(crate) fn template_known(&self, entry: u32) -> bool {
         self.templates.knows(entry)
+    }
+
+    /// Whether the cache answered `entry`, with a record or a refusal: the point at which a lookup's
+    /// callback has run, status 1 or 0.
+    pub(crate) fn template_answered(&self, entry: u32) -> bool {
+        self.templates.answered(entry)
     }
 
     /// Whether the server refused `entry`, not still pending; the cast-fail redisplay then shows
@@ -562,6 +605,10 @@ impl Items {
         self.pending_enchant_times.clear();
         self.entry_waiters.clear();
         self.trade_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.ammo_waiters
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -650,9 +697,10 @@ pub(crate) fn test_spawn_object(world: &mut World, guid: u64, fields: ObjectFiel
     e
 }
 
-/// `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` (vmangos `EquipmentSlots`).
+/// `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` / `_RANGED` (vmangos `EquipmentSlots`).
 pub(crate) const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 pub(crate) const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
+pub(crate) const EQUIPMENT_SLOT_RANGED: u8 = 17;
 
 /// Whether the disarm flag is up (`UNIT_FIELD_FLAGS & UNIT_FLAG_DISARMED`), which hides one hand
 /// from the equipped-item search.

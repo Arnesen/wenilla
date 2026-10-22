@@ -14,12 +14,15 @@
 //!    `xor eax,eax; ret` that skips `0x6f4940` (`GetDefaultLanguage`'s failure edges);
 //! 3. raise.
 
-use mlua::{Lua, MultiValue, Value};
+use mlua::{Lua, MultiValue, Table, Value};
+
+use super::Model;
+use crate::widget::{FrameHandle, RegionHandle};
 
 /// `_ftol` (`0x40a2b0`) as the bindings consume it: the x87 rounding control set to chop, a
 /// `fistp` to a qword, and its low dword. What the qword cannot hold (an infinity, NaN, ±2^63 and
 /// beyond) stores the integer-indefinite pattern `0x8000_0000_0000_0000`, whose low dword is 0.
-pub(crate) fn ftol(n: f64) -> i32 {
+pub fn ftol(n: f64) -> i32 {
     const TWO_63: f64 = 9_223_372_036_854_775_808.0;
     let t = n.trunc();
     if (-TWO_63..TWO_63).contains(&t) {
@@ -39,41 +42,40 @@ pub(crate) fn number_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resu
     }
 }
 
+/// [`number_arg`] without the truncation, for a binding's non-index number that its own
+/// `Usage:` gates: `is-number` (`0x6f34d0`) then `tonumber` (`0x6f3620`), so a numeric string
+/// passes (`SetChatWindowColor`'s colour, `PlaceAuctionBid`'s bid).
+pub(crate) fn float_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<f64> {
+    lua.coerce_number(v)?
+        .ok_or_else(|| mlua::Error::RuntimeError(usage.into()))
+}
+
+/// Shape D's gate: `is-number` (`0x6f34d0`) then `tonumber` (`0x6f3620`), a miss the caller's own
+/// fallback. A numeric string passes; nil, a missing argument and any other type miss.
+pub(crate) fn is_number(lua: &Lua, v: Value) -> Option<f64> {
+    lua.coerce_number(v).ok().flatten()
+}
+
 /// An index argument read as the reference reads one: a number or numeric string (`0x6f34d0`)
 /// truncated by `_ftol` ([`ftol`]) and then decremented and compared unsigned, so a zero or
 /// negative index is a huge one and falls out of range where a Rust integer parameter would raise
-/// in the conversion (`GetCraftInfo` `0x4f6ed8`). The inner value is the 32-bit pattern, the
-/// negative a value no table holds. A non-number raises, as the reference's usage error does.
-pub(crate) struct Idx(pub usize);
-
-/// [`Idx`] as a function, for a binding whose reference raises its own usage text for a
-/// non-number (`usage`); the value is the same 32-bit pattern, widened.
+/// in the conversion (`GetCraftInfo` `0x4f6ed8`). The value is the 32-bit pattern, widened, the
+/// negative a value no table holds. A non-number raises the binding's own `usage`, as each
+/// reference binding pushes its own literal to `luaL_error`.
 pub(crate) fn index_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<usize> {
-    number_arg(lua, v, usage).map(|n| n as u32 as usize)
+    index_arg32(lua, v, usage).map(|n| n as usize)
 }
 
-/// [`Idx`] for the parameters the bindings keep as `u32`.
-pub(crate) struct Idx32(pub u32);
-
-fn index_bits(lua: &Lua, v: Value) -> mlua::Result<u32> {
-    match lua.coerce_number(v)? {
-        Some(n) => Ok(ftol(n) as u32),
-        None => Err(mlua::Error::RuntimeError(
-            "bad argument: number expected".into(),
-        )),
-    }
+/// [`index_arg`] for the parameters the bindings keep as `u32`.
+pub(crate) fn index_arg32(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<u32> {
+    number_arg(lua, v, usage).map(|n| n as u32)
 }
 
-impl mlua::FromLua for Idx {
-    fn from_lua(v: Value, lua: &Lua) -> mlua::Result<Self> {
-        index_bits(lua, v).map(|n| Idx(n as usize))
-    }
-}
-
-impl mlua::FromLua for Idx32 {
-    fn from_lua(v: Value, lua: &Lua) -> mlua::Result<Self> {
-        index_bits(lua, v).map(Idx32)
-    }
+/// [`index_arg32`] for a binding whose failed `is-number` takes another branch instead of raising
+/// (`IsActionInRange` pushes nil, `0x4e7563`; `GetNumQuestLeaderBoards` reads the selection,
+/// `0x4e0056`): `None` for a non-number.
+pub(crate) fn index_or(lua: &Lua, v: Value) -> mlua::Result<Option<u32>> {
+    Ok(lua.coerce_number(v)?.map(|n| ftol(n) as u32))
 }
 
 /// Shape D: an `is-number`-gated flag whose failure keeps its zero instead of raising. The value
@@ -139,12 +141,96 @@ pub(crate) fn lua_number_text(v: f64) -> String {
     mlua::benilla_lua::fmt_g14(v)
 }
 
+/// The name an object without one prints as (`0x84c7f0`).
+pub(crate) const UNNAMED: &str = "<unnamed>";
+
+/// The `%s` a method's error line names: the object's own name, its vtable `+4` (`GetName`), or
+/// [`UNNAMED`] when that is NULL. Read off the model, never through a Lua `GetName` an addon can
+/// override. A frame, a region or a Font object; any other table is unnamed.
+pub(crate) fn object_name(model: &Model, this: &Table) -> String {
+    handle_name(model, this)
+        .flatten()
+        .unwrap_or_else(|| UNNAMED.to_string())
+}
+
+/// A frame's, a region's or a Font object's own name, by the handle in its `[0]`: `None` when
+/// `[0]` holds no handle (`lua_touserdata` NULL), `Some(None)` for an object without a name.
+pub(crate) fn handle_name(model: &Model, this: &Table) -> Option<Option<String>> {
+    let Ok(Value::LightUserData(l)) = this.raw_get::<Value>(0) else {
+        return None;
+    };
+    if l.0.is_null() {
+        return None;
+    }
+    let id = l.0 as usize as u32;
+    Some(if let Some(&h) = model.id_to_frame.get(&id) {
+        model.arena.frame(h).and_then(|f| f.name.clone())
+    } else if let Some(&rh) = model.id_to_region.get(&id) {
+        model.arena.region(rh).and_then(|r| r.name.clone())
+    } else if let Some(font) = model.fonts.of_handle(id) {
+        model.fonts.get(font).name.clone()
+    } else {
+        None
+    })
+}
+
+/// [`object_name`] for a frame already resolved.
+pub(crate) fn frame_name(model: &Model, h: FrameHandle) -> String {
+    model
+        .arena
+        .frame(h)
+        .and_then(|f| f.name.clone())
+        .unwrap_or_else(|| UNNAMED.to_string())
+}
+
+/// [`object_name`] for a region already resolved.
+pub(crate) fn region_name(model: &Model, rh: RegionHandle) -> String {
+    model
+        .arena
+        .region(rh)
+        .and_then(|r| r.name.clone())
+        .unwrap_or_else(|| UNNAMED.to_string())
+}
+
+/// [`object_name`], borrowing the model; a caller holding a borrow uses that instead.
+pub(crate) fn name_of(lua: &Lua, this: &Table) -> String {
+    object_name(&lua.app_data_ref::<Model>().expect("model"), this)
+}
+
+/// `Usage: <name>:<line>`, the raise of a method whose format string is `Usage: %s:<line>`.
+pub(crate) fn usage(lua: &Lua, this: &Table, line: &str) -> mlua::Error {
+    mlua::Error::runtime(format!("Usage: {}:{line}", name_of(lua, this)))
+}
+
+/// A method's number argument: `is-number` (`0x6f34d0`) then `tonumber` (`0x6f3620`), so a
+/// numeric string passes, else the method's [`usage`] line naming `this`.
+pub(crate) fn method_number(lua: &Lua, this: &Table, v: Value, line: &str) -> mlua::Result<f64> {
+    lua.coerce_number(v)?.ok_or_else(|| usage(lua, this, line))
+}
+
+/// `SetOrientation`'s argument on the StatusBar and the Slider (`0x78f320`, `0x790610`): a
+/// `lua_isstring` value through the token parse `0x6f1a20`, `true` for VERTICAL. A non-string
+/// raises `Usage: %s:SetOrientation("orientation")` (`0x87b108`), a miss
+/// `%s:SetOrientation(): Unknown orientation: %s` (`0x87b130`), both naming `this`.
+pub(crate) fn orientation_arg(lua: &Lua, this: &Table, v: &Value) -> mlua::Result<bool> {
+    let Some(token) = optional_string(lua, v) else {
+        return Err(usage(lua, this, r#"SetOrientation("orientation")"#));
+    };
+    super::region::orientation(&token).ok_or_else(|| {
+        mlua::Error::runtime(format!(
+            "{}:SetOrientation(): Unknown orientation: {token}",
+            name_of(lua, this)
+        ))
+    })
+}
+
 /// Storm's `SStrToInt` (`0x64ac60`): an optional leading `-` (and no `+`), then the decimal digits
 /// up to the first other byte, with no whitespace skip; none is 0. The accumulator is a 32-bit
 /// register that wraps (`0x64ac98`-`0x64aca5`) and `neg` wraps too, so `"4294967297"` is 1.
-/// `RemoveChatWindowChannel` and `LeaveChannelByName` key on it (`0x49e880`), and the `item:` link
-/// fields and `SStrToFloat`'s exponent read it.
-pub(crate) fn s_str_to_int(s: &str) -> i64 {
+/// It is a CVar record's integer (`rec+0x28`, stored at `0x63e127`), which change callbacks and the
+/// glue read; `RemoveChatWindowChannel` and `LeaveChannelByName` key on it (`0x49e880`), and the
+/// `item:` link fields and `SStrToFloat`'s exponent read it.
+pub fn s_str_to_int(s: &str) -> i32 {
     let b = s.as_bytes();
     let (neg, mut i) = match b.first() {
         Some(b'-') => (true, 1),
@@ -158,7 +244,11 @@ pub(crate) fn s_str_to_int(s: &str) -> i64 {
         n = n.wrapping_mul(10).wrapping_add(i32::from(c - b'0'));
         i += 1;
     }
-    i64::from(if neg { n.wrapping_neg() } else { n })
+    if neg {
+        n.wrapping_neg()
+    } else {
+        n
+    }
 }
 
 /// Storm's `SStrToFloat` (`0x64aaa0`), which `EditBox:GetNumber` (`0x798790`) pushes: a prefix
@@ -184,7 +274,7 @@ pub(crate) fn s_str_to_int(s: &str) -> i64 {
 /// until it is stored, so an exponent past +-308 against a value that pulls it back in range
 /// (`"0.000...1e320"`) is reached here only by scaling in steps of 300 digits, which rounds more
 /// often; `"0e999"` is 0 as there, and only an exponent past +-4932 makes 0 * inf, NaN.
-pub(crate) fn s_str_to_float(s: &str) -> f64 {
+pub fn s_str_to_float(s: &str) -> f64 {
     let b = s.as_bytes();
     let at = |i: usize| b.get(i).copied().unwrap_or(0);
     let neg = at(0) == b'-';
@@ -215,7 +305,7 @@ pub(crate) fn s_str_to_float(s: &str) -> f64 {
         if at(i) == b'+' {
             i += 1;
         }
-        value = scale_by_pow10(value, s_str_to_int(&s[i..]) as i32);
+        value = scale_by_pow10(value, s_str_to_int(&s[i..]));
     }
     if neg {
         -value

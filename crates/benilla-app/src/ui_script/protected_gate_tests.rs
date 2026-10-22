@@ -18,6 +18,8 @@ const FIREBALL: u32 = 133;
 fn stock_ui(tag: &str) -> UiScript {
     let (mut s, failures) = super::layer_tests::production_load_with(tag, false, "", |_| {});
     assert!(failures.is_empty(), "load failures: {failures:#?}");
+    // No engine behind it: the calls the stock paths make are kept, to be read.
+    s.keep_calls();
     s.set_spellbook(SpellBookState {
         tabs: vec![SpellTabView {
             name: "Fire".into(),
@@ -44,12 +46,17 @@ fn stock_ui(tag: &str) -> UiScript {
             use_spell: None,
         }),
     );
-    s.set_casting(true);
+    s.set_cast_view(benilla_ui::script::CastView {
+        slot: Some(FIREBALL),
+        ..Default::default()
+    });
     s.set_spell_targeting(true);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.tick(0.1);
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    // The session start's own calls (`RaidFrame.lua:29`'s `RequestRaidInfo()`) are not the test's.
+    let _ = s.take_script_calls();
     s
 }
 
@@ -133,7 +140,7 @@ fn a_stock_key_binding_casts() {
     // the targeting cursor.
     assert!(s.execute_binding("TOGGLEGAMEMENU", true).unwrap());
     assert_eq!(s.take_script_calls(), [ScriptCall::SpellStopCasting]);
-    s.set_casting(false);
+    s.set_cast_view(Default::default());
     assert!(s.execute_binding("TOGGLEGAMEMENU", true).unwrap());
     assert_eq!(s.take_script_calls(), [ScriptCall::SpellStopTargeting]);
     // The stock TAB body targets through the tag-4 verb.
@@ -241,18 +248,20 @@ fn a_stock_macro_buttons_script_line_casts() {
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.tick(0.1);
-    // The press is applied as the app applies it, in call order, which raises the events the click
-    // ran under around the macro's lines; the same lines run with none are refused.
-    click(&mut s, "ActionButton2");
+    // The press is applied inside its verb, as the app's host applies it, under the events the
+    // click ran under, around the macro's lines; the same lines run with none are refused.
     let mut ran = false;
     let mut casts = Vec::new();
-    crate::script_calls::in_call_order(&mut s, |s, call| match call {
-        ScriptCall::UseAction(press) => {
-            assert_eq!(press.action, 2);
-            ran = crate::ui_macro::run_macro(s, index);
-        }
-        other => casts.push(other),
-    });
+    {
+        let mut host = crate::script_calls::FnHost(|s: &mut UiScript, call| match call {
+            ScriptCall::UseAction(press) => {
+                assert_eq!(press.action, 2);
+                ran = crate::ui_macro::run_macro(s, index);
+            }
+            other => casts.push(other),
+        });
+        s.hosted(&mut host, |s| click(s, "ActionButton2"));
+    }
     assert!(ran, "the macro has a line");
     assert!(
         matches!(casts.as_slice(), [c @ ScriptCall::CastSpell { .. }] if c.may_cast()),

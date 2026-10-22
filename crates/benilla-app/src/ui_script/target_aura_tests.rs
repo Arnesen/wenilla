@@ -31,6 +31,9 @@ fn harness() -> UiScript {
     load_xml(&s, "Interface\\FrameXML\\PartyFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\TargetFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\PetFrame.xml");
+    // `GetDifficultyColor` (`QuestLogFrame.lua:585`), which `TargetFrame_CheckLevel` asks for an
+    // attackable target (`TargetFrame.lua:130`).
+    load_xml(&s, r"Interface\FrameXML\QuestLogFrame.lua");
     load_xml(&s, "Interface\\FrameXML\\BonusActionBarFrame.xml");
 
     // `TargetofTargetFrame` loads shown (`TargetFrame.xml:515`) and hides only after the rows
@@ -40,12 +43,26 @@ fn harness() -> UiScript {
     s
 }
 
-/// Target a unit of the given reaction (2 = hostile, 5 = friendly) carrying `auras`.
+/// Target a unit of the given reaction (2 = hostile, 5 = friendly) carrying `auras`: a creature of
+/// the orc or the human template, toward us, a human player, in the relation functions.
 fn target(s: &mut UiScript, reaction: u8, auras: Vec<AuraState>) {
+    use crate::target::relations::fixture::{creature, factions, player, Scene, HUMAN, ORC};
+    let mut scene = Scene::new(player(1, HUMAN), Some(factions()));
+    scene.hold(creature(TARGET, if reaction >= 5 { HUMAN } else { ORC }));
+    s.set_unit_relations(Some(scene.relations()));
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            guid: 1,
+            ..UnitState::default()
+        }),
+    );
     s.set_unit(
         "target",
         Some(UnitState {
             exists: true,
+            guid: TARGET,
             name: Some("Subject".into()),
             health: 40,
             max_health: 40,
@@ -59,7 +76,7 @@ fn target(s: &mut UiScript, reaction: u8, auras: Vec<AuraState>) {
         target: TARGET,
         ..Default::default()
     });
-    s.set_unit_auras(TARGET, Some(auras));
+    s.set_unit_auras(TARGET, Some(auras.into()));
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
 }
 
@@ -72,6 +89,7 @@ fn debuff(spell_id: u32, name: &str, count: u8, debuff_type: Option<&str>) -> Au
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count,
+        level: 0,
         debuff_type: debuff_type.map(Into::into),
         // The 1.12 wire carries no duration for another unit's auras.
         duration: 0.0,
@@ -81,6 +99,7 @@ fn debuff(spell_id: u32, name: &str, count: u8, debuff_type: Option<&str>) -> Au
         // Only the player's auras carry `untilCancelled`, read by `GetPlayerBuff` alone.
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }
 }
 
@@ -90,6 +109,7 @@ fn buff(spell_id: u32, name: &str) -> AuraState {
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count: 1,
+        level: 0,
         debuff_type: None,
         duration: 0.0,
         expiration_time: 0.0,
@@ -97,6 +117,7 @@ fn buff(spell_id: u32, name: &str) -> AuraState {
         cancelable: false,
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }
 }
 
@@ -144,7 +165,7 @@ fn a_hostile_target_draws_debuffs_first_with_tint_and_count() {
 
     // Hostile: debuffs open at BOTTOMLEFT (5, 32), buffs under Debuff7 (`TargetFrame.lua:329`).
     let (p, rel, rp, x, y) = anchor(&s, "TargetFrameDebuff1");
-    assert_eq!(
+    benilla_ui::assert_near!(
         (p.as_str(), rel.as_str(), rp.as_str(), x, y),
         ("TOPLEFT", "TargetFrame", "BOTTOMLEFT", 5.0, 32.0),
         "hostile: debuffs first"
@@ -153,9 +174,9 @@ fn a_hostile_target_draws_debuffs_first_with_tint_and_count() {
     assert_eq!(rel, "TargetFrameDebuff7", "hostile: buffs below row 2");
 
     // Under the wrap (2 < 6): full 21px icons, 23px borders.
-    assert_eq!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
-    assert_eq!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
-    assert_eq!(size(&s, "TargetFrameBuff1"), (21.0, 21.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameBuff1"), (21.0, 21.0));
 
     // Stack count shows only above 1.
     assert_eq!(
@@ -212,13 +233,13 @@ fn a_friendly_target_puts_the_buff_row_first() {
     );
 
     let (p, rel, rp, x, y) = anchor(&s, "TargetFrameBuff1");
-    assert_eq!(
+    benilla_ui::assert_near!(
         (p.as_str(), rel.as_str(), rp.as_str(), x, y),
         ("TOPLEFT", "TargetFrame", "BOTTOMLEFT", 5.0, 32.0),
         "friendly: buffs first"
     );
     let (p, rel, rp, x, y) = anchor(&s, "TargetFrameDebuff1");
-    assert_eq!(
+    benilla_ui::assert_near!(
         (p.as_str(), rel.as_str(), rp.as_str(), x, y),
         ("TOPLEFT", "TargetFrameBuff1", "BOTTOMLEFT", 0.0, -2.0),
         "friendly: debuffs under the buff row"
@@ -236,15 +257,15 @@ fn reaching_the_wrap_shrinks_the_first_row_to_17px() {
     target(&mut s, 2, debuffs);
 
     // 6 debuffs reach the wrap: 17px icons, 19px borders, first row only (`TargetFrame.lua:349`).
-    assert_eq!(size(&s, "TargetFrameDebuff1"), (17.0, 17.0));
-    assert_eq!(size(&s, "TargetFrameDebuff1Border"), (19.0, 19.0));
-    assert_eq!(size(&s, "TargetFrameBuff1"), (17.0, 17.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1"), (17.0, 17.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1Border"), (19.0, 19.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameBuff1"), (17.0, 17.0));
 
     // Below the wrap they grow back; the feed re-fires UNIT_AURA on the change.
-    s.set_unit_auras(TARGET, Some(vec![debuff(1000, "D0", 1, None)]));
+    s.set_unit_auras(TARGET, Some(vec![debuff(1000, "D0", 1, None)].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
-    assert_eq!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
-    assert_eq!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
+    benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -255,7 +276,7 @@ fn clearing_the_list_or_the_target_hides_the_buttons() {
     target(&mut s, 2, vec![debuff(589, "Pain", 1, Some("Magic"))]);
     assert!(shown(&s, "TargetFrameDebuff1"));
 
-    s.set_unit_auras(TARGET, Some(vec![]));
+    s.set_unit_auras(TARGET, Some(vec![].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
     assert!(
         !shown(&s, "TargetFrameDebuff1"),

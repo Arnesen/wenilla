@@ -46,7 +46,6 @@ use bevy::prelude::*;
 use benilla_ui::script::{ChatTypeColor, ChatWindowLook, UiScript, MESSAGE_GROUPS};
 
 use super::edit::zone_bit;
-use crate::net::{ClientCommand, NetCommands};
 use crate::ui_script::VmMemo;
 
 /// How long a dirty look sits before the save fires, as in `crate::cvars`.
@@ -410,7 +409,6 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
         .auto_join_rows()
         .map(|r| (r.shortcut.clone(), r.id))
         .collect();
-    let commands = world.get_resource::<NetCommands>().map(|c| c.0.clone());
     // The DBC seed: every `ChatChannels.dbc` row the client joins by itself (`flags & 1`).
     let seed_mask = auto_rows.iter().fold(0, |m, (_, id)| m | zone_bit(*id));
     // Scoped, so `ChannelState` can take the mask afterwards.
@@ -485,50 +483,62 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
         // `Some` is the reference's "chat system ready" flag (`0x499a18`): the zone walk and the
         // guild-recruitment cascade wait for it.
         channels.zone_mask = Some(mask);
-        // The custom re-join list, seated here, then moved only by a confirmed join or a leave.
+        // The custom re-join list, seated here, then moved by a confirmed join, a leave and the
+        // free of a slot.
         channels.custom = parsed.joined.clone();
+        // The header's `CHANNELS` names, joined by the walk's third pass after the zone channels
+        // (`0x49a5b4`), which the loader runs (`0x499a22`).
+        channels.deferred_joins = parsed.joined.clone();
     }
-    script.set_guild_recruitment_mode(u8::from(parsed.guild_recruitment_auto));
-    script.set_chat_colors(parsed.colors);
-    script.set_chat_window_looks(parsed.looks);
-    // `UPDATE_CHAT_WINDOWS` once, then `UPDATE_CHAT_COLOR` for every registry entry, file or no
-    // file (`0x4996b9`, `0x499934`).
-    script.fire_event("UPDATE_CHAT_WINDOWS", vec![]);
-    let renorm = |b: u8| f64::from(b as f32 * (1.0f32 / 255.0f32));
-    for entry in script.chat_colors() {
-        script.fire_event(
-            "UPDATE_CHAT_COLOR",
-            vec![
-                benilla_ui::script::ScriptValue::Str(entry.name),
-                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[0])),
-                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[1])),
-                benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[2])),
-            ],
-        );
+    if let Some(mut walk) = world.get_resource_mut::<super::channels::ZoneChannelWalk>() {
+        walk.rewalk();
     }
-    // The header's `CHANNELS` re-join at login, as in the reference; zone channels are the walk's.
-    if let Some(commands) = commands {
-        for name in parsed.joined {
-            let _ = commands.send(ClientCommand::JoinChannel {
-                name,
-                password: String::new(),
-            });
+    // The VM's half with a call host lent, so a call one of the burst's handlers makes applies
+    // inside its verb.
+    let (recruitment, colors, looks) = (
+        u8::from(parsed.guild_recruitment_auto),
+        parsed.colors,
+        parsed.looks,
+    );
+    crate::script_calls::lent_by_world(world, script, |script| {
+        script.set_guild_recruitment_mode(recruitment);
+        script.set_chat_colors(colors);
+        script.set_chat_window_looks(looks);
+        // `UPDATE_CHAT_WINDOWS` once, then `UPDATE_CHAT_COLOR` for every registry entry, file or
+        // no file (`0x4996b9`, `0x499934`).
+        script.fire_event("UPDATE_CHAT_WINDOWS", vec![]);
+        let renorm = |b: u8| f64::from(b as f32 * (1.0f32 / 255.0f32));
+        for entry in script.chat_colors() {
+            script.fire_event(
+                "UPDATE_CHAT_COLOR",
+                vec![
+                    benilla_ui::script::ScriptValue::Str(entry.name),
+                    benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[0])),
+                    benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[1])),
+                    benilla_ui::script::ScriptValue::Number(renorm(entry.rgb[2])),
+                ],
+            );
         }
-    }
+    });
 }
 
 /// Arm the debounce when Lua writes the chat state.
-fn watch_chat_looks(script: Option<NonSendMut<UiScript>>, mut file: ResMut<ChatWindowFile>) {
-    let Some(mut script) = script else { return };
-    let moved = !script.take_chat_window_changes().is_empty();
-    let coloured = script.take_chat_color_changes();
-    // `SetGuildRecruitmentMode` persists here too; a Lua call arms this, the login seat never.
-    let recruitment = script.take_guild_recruitment_change();
-    if !(moved || coloured || recruitment) {
-        return;
-    }
-    *file.dirty.get(&script) = true;
-    file.last_change = Some(bevy::platform::time::Instant::now());
+fn watch_chat_looks(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut file: ResMut<ChatWindowFile>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else { return };
+        let moved = !script.take_chat_window_changes().is_empty();
+        let coloured = script.take_chat_color_changes();
+        // `SetGuildRecruitmentMode` persists here too; a Lua call arms this, the login seat never.
+        let recruitment = script.take_guild_recruitment_change();
+        if !(moved || coloured || recruitment) {
+            return;
+        }
+        *file.dirty.get(script) = true;
+        file.last_change = Some(bevy::platform::time::Instant::now());
+    })
 }
 
 fn write(script: &UiScript, channels: &super::edit::ChannelState, path: &std::path::Path) {
@@ -590,14 +600,16 @@ fn flush(
 
 /// The debounced save, and the `AppExit` flush.
 fn save_chat_looks(
-    script: Option<NonSendMut<UiScript>>,
-    channels: Res<super::edit::ChannelState>,
+    // The slots beside the VM: the save runs no Lua.
+    mut vm: crate::script_calls::VmWith<Res<'static, super::edit::ChannelState>>,
     mut file: ResMut<ChatWindowFile>,
     mut exits: MessageReader<AppExit>,
 ) {
     let exiting = exits.read().next().is_some();
-    let Some(script) = script else { return };
-    flush(&script, &channels, &mut file, exiting);
+    vm.turn(|script, channels| {
+        let Some(script) = script else { return };
+        flush(script, &channels, &mut file, exiting);
+    })
 }
 
 /// The session-end flush, the reference's chat teardown (`0x499a80` from `0x490c55`), called from
@@ -630,13 +642,13 @@ pub(super) fn plugin(app: &mut App) {
             Update,
             // After the tick: every write it watches is Lua's.
             watch_chat_looks
-                .after(crate::ui_script::UiInput)
+                .in_set(crate::ui_script::UiDrain)
                 .in_set(crate::client_state::InWorldGated),
         )
         .add_systems(
             Update,
             save_chat_looks
-                .after(crate::ui_script::UiInput)
+                .in_set(crate::ui_script::UiDrain)
                 .in_set(crate::client_state::InWorldGated),
         );
     // The session-end flush is `fold_dying_vm_chat_cache`; the quit flush rides the exit edge,
@@ -817,20 +829,29 @@ mod tests {
             ]),
             ..Default::default()
         };
-        // Unseated, a join is dropped.
-        state.note_zone_channel_joined("General - Elwynn Forest");
+        // Unseated, a confirmed join's bit is dropped.
+        state.claim_slot("General - Elwynn Forest", 1);
+        state.confirm_slot("General - Elwynn Forest");
         assert_eq!(state.zone_mask, None, "not seated: nothing to OR into");
         state.zone_mask = Some(0);
-        state.note_zone_channel_joined("General - Elwynn Forest");
-        state.note_zone_channel_joined("Trade - City");
-        assert_eq!(state.zone_mask, Some(0b11));
-        state.note_zone_channel_joined("MyChan");
-        assert_eq!(state.zone_mask, Some(0b11), "a custom channel has no bit");
+        // A repeated notice finds no slot outside state 0 and sets nothing (`0x49bb63`).
+        state.confirm_slot("General - Elwynn Forest");
+        assert_eq!(state.zone_mask, Some(0), "already confirmed");
+        state.claim_slot("Trade - City", 2);
+        state.confirm_slot("Trade - City");
+        assert_eq!(
+            state.zone_mask,
+            Some(0b10),
+            "the confirmed slot's id, `0x49bbaf`"
+        );
+        state.claim_slot("MyChan", 0);
+        state.confirm_slot("MyChan");
+        assert_eq!(state.zone_mask, Some(0b10), "a custom channel has no bit");
         // The clear is keyed on the slot the wire name finds and its id (`0x49f0f4`-`0x49f11a`);
         // a name with no slot clears nothing.
-        state.note_zone_channel_left("Trade - City");
-        assert_eq!(state.zone_mask, Some(0b11), "no slot carries it yet");
-        state.claim_slot("Trade - City");
+        state.zone_mask = Some(0b11);
+        state.note_zone_channel_left("Trade - Elwynn Forest");
+        assert_eq!(state.zone_mask, Some(0b11), "no slot carries it");
         state.note_zone_channel_left("Trade - City");
         assert_eq!(
             state.zone_mask,
@@ -840,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn the_custom_list_moves_on_join_and_explicit_leave_only() {
+    fn the_custom_list_moves_on_a_confirmed_join_and_a_leave() {
         let mut state = super::super::edit::ChannelState {
             channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
                 benilla_formats::ChatChannelRow {
@@ -852,10 +873,15 @@ mod tests {
             ]),
             ..Default::default()
         };
-        state.note_custom_channel_joined("General - Elwynn Forest");
+        // The teardown writes the confirmed slots with id 0 (`0x499b90`-`0x499baa`).
+        state.claim_slot("General - Elwynn Forest", 1);
+        state.confirm_slot("General - Elwynn Forest");
         assert!(state.custom.is_empty(), "a zone channel travels as its bit");
-        state.note_custom_channel_joined("MyChan");
-        state.note_custom_channel_joined("mychan");
+        state.claim_slot("MyChan", 0);
+        assert!(state.custom.is_empty(), "not yet confirmed");
+        state.confirm_slot("MyChan");
+        state.claim_slot("mychan", 0);
+        state.confirm_slot("mychan");
         assert_eq!(state.custom, vec!["MyChan".to_string()], "once, by name");
         state.note_custom_channel_left("MYCHAN");
         assert!(state.custom.is_empty(), "an explicit leave drops it");
@@ -1088,6 +1114,7 @@ mod tests {
                 class: 1, // Warrior
                 gender: 0,
                 level: 60,
+                new_character: false,
                 skin: 0,
                 face: 0,
                 hair_style: 0,
@@ -1155,10 +1182,28 @@ mod tests {
         world.insert_resource(roster);
         crate::ui_script::load_ingame_ui_on_world_entry(&mut world);
 
-        // The server confirms the re-join (`YOU_JOINED`) through the real feed arm.
+        assert_eq!(
+            world
+                .resource::<super::super::edit::ChannelState>()
+                .deferred_joins,
+            ["MyChan"],
+            "the header's names wait for the walk's third pass (`0x49a5b4`)"
+        );
+        // The walk joins it, then the server confirms the re-join (`YOU_JOINED`) through the real
+        // feed arm.
         world.resource_scope(
             |world, mut channels: Mut<super::super::edit::ChannelState>| {
                 let mut script = world.non_send_resource_mut::<UiScript>();
+                let (tx, _rx) = crossbeam_channel::unbounded();
+                let errors = crate::ui_action::UiErrorKeys::default();
+                super::super::channels::walk_zone(
+                    &mut channels,
+                    "Elwynn Forest",
+                    0,
+                    None,
+                    (&crate::net::NetCommands(tx), &errors),
+                    Some(&mut script),
+                );
                 let mut windows = super::super::frames::ChatWindows::default();
                 let mut e = super::super::event::ChatEvent::text_only(
                     super::super::event::ChatEventKind::ChannelNotice,

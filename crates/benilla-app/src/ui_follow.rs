@@ -8,10 +8,10 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{FollowRequest as ScriptFollowRequest, ScriptValue, UiScript};
+use benilla_ui::script::{FollowRequest as ScriptFollowRequest, ScriptValue};
 
 use crate::player::{FollowRequest, FollowState};
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 /// The followee guid each VM was last told of, so the events fire on transitions only. A
 /// `/reload` ends a follow before the VM goes ([`crate::player::cancel_move_action_on_ui_shutdown`]),
@@ -27,46 +27,53 @@ struct FollowFeedMemo {
 }
 
 fn feed_follow(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     follow: Res<FollowState>,
     mut feed: ResMut<FollowFeed>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let memo = feed.vm.get(&script);
-    match (follow.guid, memo.told) {
-        // Started, or switched subject: a switch fires END first, as the reference's arm routine
-        // (`0x611130`) calls the canceller (`0x61113e`) before arming.
-        (Some(guid), told) if told != Some(guid) => {
-            if told.is_some() {
-                script.fire_event("AUTOFOLLOW_END", vec![]);
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let memo = feed.vm.get(script);
+        match (follow.guid, memo.told) {
+            // Started, or switched subject: a switch fires END first, as the reference's arm
+            // routine (`0x611130`) calls the canceller (`0x61113e`) before arming.
+            (Some(guid), told) if told != Some(guid) => {
+                if told.is_some() {
+                    script.fire_event("AUTOFOLLOW_END", vec![]);
+                }
+                script.fire_event(
+                    "AUTOFOLLOW_BEGIN",
+                    vec![ScriptValue::Str(follow.name.clone())],
+                );
+                memo.told = Some(guid);
             }
-            script.fire_event(
-                "AUTOFOLLOW_BEGIN",
-                vec![ScriptValue::Str(follow.name.clone())],
-            );
-            memo.told = Some(guid);
+            // Stopped. END carries no name: `AutoFollowStatus` (`ZoneText.lua`) reuses BEGIN's.
+            (None, Some(_)) => {
+                script.fire_event("AUTOFOLLOW_END", vec![]);
+                memo.told = None;
+            }
+            _ => {}
         }
-        // Stopped. END carries no name: `AutoFollowStatus` (`ZoneText.lua`) reuses BEGIN's.
-        (None, Some(_)) => {
-            script.fire_event("AUTOFOLLOW_END", vec![]);
-            memo.told = None;
-        }
-        _ => {}
-    }
+    })
 }
 
-fn drain_follow(script: Option<NonSendMut<UiScript>>, mut out: MessageWriter<FollowRequest>) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for request in script.take_follow_requests() {
-        out.write(match request {
-            ScriptFollowRequest::ByUnit(unit) => FollowRequest::Unit(unit),
-            ScriptFollowRequest::ByName { name, exact } => FollowRequest::Name { name, exact },
-        });
-    }
+pub(crate) fn drain_follow(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut out: MessageWriter<FollowRequest>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for request in script.take_follow_requests() {
+            out.write(match request {
+                ScriptFollowRequest::ByUnit(unit) => FollowRequest::Unit(unit),
+                ScriptFollowRequest::ByName { name, exact } => FollowRequest::Name { name, exact },
+            });
+        }
+    })
 }
 
 pub(crate) struct UiFollowPlugin;
@@ -75,7 +82,10 @@ impl Plugin for UiFollowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FollowFeed>().add_systems(
             Update,
-            (feed_follow.in_set(UiFeed), drain_follow.after(UiInput)),
+            (
+                feed_follow.in_set(UiFeed),
+                drain_follow.in_set(crate::ui_script::UiDrain),
+            ),
         );
     }
 }

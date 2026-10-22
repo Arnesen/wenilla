@@ -22,6 +22,7 @@ use bevy::ecs::entity::EntityHashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use benilla_formats::Reaction;
 use benilla_protocol::EntityKind;
 use benilla_ui::script::{
     unit_is_grey, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND,
@@ -29,9 +30,9 @@ use benilla_ui::script::{
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
-use crate::net::{Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{Guid, NetEntity, ObjectStore, SelfPlayer};
 use crate::query_cache::Ask;
-use crate::target::{ring_reaction, Factions, Hovered, Selection, TargetUpdate};
+use crate::target::{Hovered, Selection, TargetUpdate};
 use benilla_world::view::WorldCamera;
 
 /// The plate border, sharp-resampled so its 128x32 art stays crisp when magnified.
@@ -120,7 +121,17 @@ const PLATE_LIFT: f32 = 2.0 / 3.0;
 const MAX_DIST_SQ: f32 = 20.0 * 20.0;
 /// Deviation: the reference dims non-target plates to `0x7F`; raised because that fades them too
 /// far to read.
-const DIM_ALPHA: f32 = 178.0 / 255.0;
+const DIM_ALPHA: u8 = 178;
+
+/// The alpha of `guid`'s plate off the selected guid (`0x7cb9d7`-`0x7cb9f9`): full with nothing
+/// selected or on the selected unit's own plate, else dimmed, so a selection whose object is not
+/// held, a party member out of range, dims every plate.
+fn plate_alpha(selection: &Selection, guid: u64) -> u8 {
+    match selection.guid {
+        Some(selected) if selected != guid => DIM_ALPHA,
+        _ => 255,
+    }
+}
 
 /// The bar-fill palette, the dwords at `0xcf60d0`/`e8`/`c8`/`dc`, in sRGB.
 const PLATE_HOSTILE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -205,25 +216,27 @@ pub(crate) fn text_px(h: f32, basis: f32) -> f32 {
 
 /// Every frame: fold the plate verbs' writes into the bits, in the order the VM made them.
 pub(crate) fn apply_plate_verbs(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut mode: ResMut<VPlateMode>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let writes = script.take_nameplate_bit_writes();
-    if writes.is_empty() {
-        return;
-    }
-    let now = VPlateMode::from_bits(writes.apply(mode.bits()));
-    if *mode != now {
-        info!(
-            "nameplates: enemy {}, friendly {}",
-            if now.enemies { "ON" } else { "OFF" },
-            if now.friends { "ON" } else { "OFF" }
-        );
-        *mode = now;
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let writes = script.take_nameplate_bit_writes();
+        if writes.is_empty() {
+            return;
+        }
+        let now = VPlateMode::from_bits(writes.apply(mode.bits()));
+        if *mode != now {
+            info!(
+                "nameplates: enemy {}, friendly {}",
+                if now.enemies { "ON" } else { "OFF" },
+                if now.friends { "ON" } else { "OFF" }
+            );
+            *mode = now;
+        }
+    })
 }
 
 /// The world-entry clear of both script bits (`0x60394b`, `0x603952`, in `0x6033c0`), which the
@@ -265,7 +278,7 @@ pub(crate) fn take_legacy_settings(cvars: &mut crate::cvars::Cvars) -> LegacyPla
     )
 }
 
-/// Seat the legacy settings over the saved-variables chunk's values, before `VARIABLES_LOADED`,
+/// Seat the legacy settings over the saved-variables file's values, before `VARIABLES_LOADED`,
 /// as the number 1 or nil (a Lua 0 is truthy). Until now the setting was the CVar, which
 /// outranked the file.
 pub(crate) fn seat_legacy_settings(
@@ -297,8 +310,7 @@ struct PlateWorld<'w, 's> {
         Without<SelfPlayer>,
     >,
     self_q: Query<'w, 's, (&'static Transform, Option<&'static ObjectStore>), With<SelfPlayer>>,
-    factions: Option<Res<'w, Factions>>,
-    reputations: Res<'w, Reputations>,
+    relations: crate::target::RelationWorld<'w, 's>,
     selection: Res<'w, Selection>,
     // With `selection`, the highlight's pair: the watcher's globals `[0xb4e2c8]`/`[0xb4e2d8]`.
     hovered: Res<'w, Hovered>,
@@ -312,14 +324,12 @@ struct PlateWorld<'w, 's> {
 /// [`PlateState`]s. Runs after the targeting chain, whose selection it reads.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn drive_vplates(
+    mut vm: crate::script_calls::VmWith<PlateWorld<'static, 'static>>,
     mode: Res<VPlateMode>,
     mut plates: ResMut<VPlates>,
     mut plate_clicks: ResMut<PlateClicks>,
     rig: Res<crate::player::CameraControl>,
-    world: PlateWorld,
     names: Res<NameCache>,
-    // `None` in a run with no UI VM.
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     anchor_q: (
         Query<&BoneAttach>,
         Query<&benilla_world::rig_anim::RigPose>,
@@ -332,304 +342,326 @@ fn drive_vplates(
     group: Res<crate::ui_party::GroupState>,
     mut mouse_told: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
-    plates.0.clear();
-    bucket.clear();
-    // Every early return retires the plates first, or the widgets stay on screen; the reference
-    // hides each live plate and returns it to the pool (`0x608a10`).
-    let retire_all = |script: Option<NonSendMut<benilla_ui::script::UiScript>>| {
-        if let Some(mut script) = script {
-            script.retire_nameplates();
+    // The plates' widgets change after the turn, with the host lent: each plate's `OnShow` and
+    // `OnHide` run in place as the walk shows or hides it, so a call one makes applies inside its
+    // verb.
+    let step = vm.turn(|script, world| {
+        plates.0.clear();
+        bucket.clear();
+        // Every early return retires the plates first, or the widgets stay on screen; the reference
+        // hides each live plate and returns it to the pool (`0x608a10`).
+        if !mode.enemies && !mode.friends {
+            return PlateStep::Retire;
         }
-    };
-    if !mode.enemies && !mode.friends {
-        retire_all(script);
-        return;
-    }
-    let (Ok((cam, cam_pose)), Ok((self_tf, self_store))) =
-        (world.camera.single(), world.self_q.single())
-    else {
-        retire_all(script);
-        return;
-    };
-    let Some(mut script) = script else {
-        return;
-    };
-    let cam_tf = GlobalTransform::from(*cam_pose);
-    let Some(viewport) = cam.logical_viewport_size() else {
-        script.retire_nameplates();
-        return;
-    };
-    let basis = plate_basis(viewport);
-    let gx = |v: f32| gx_px(v, basis);
-    let window = world.window.single().ok();
-    // Plates stop taking the mouse in freelook (`0x60f830`, called from `0x483e80`/`0x483e70` on
-    // the transitions), written on the edge per VM.
-    let looking = rig.is_looking();
-    if *mouse_told.get(&script) != Some(looking) {
-        *mouse_told.get(&script) = Some(looking);
-        script.set_nameplate_mouse(!looking);
-    }
-    // While a ground-targeted spell is armed (`0x6e6320`'s `flag & 0x60`), plates refuse the hit
-    // test (`0x7cba30`, the `+0x3c` override) without clearing the mouse-enabled bit, so
-    // `IsMouseEnabled()` is unchanged.
-    script.set_nameplate_hit_test_veto(
-        world
-            .targeting
-            .wants(crate::spell::targeting::TargetingWants::Location),
-    );
-    let hovered_key = script.hovered_nameplate();
-    let clicked = script.take_nameplate_clicks();
-    let my_level = self_store.and_then(|s| s.0.unit_level()).unwrap_or(1);
-    let has_target = world.selection.target.is_some();
-
-    let (pw, ph) = (gx(PLATE_W), gx(PLATE_H));
-    let scale = window.map_or(1.0, |w| w.scale_factor());
-    // Everything below is in window px, divided by this once for the widget layer's root units.
-    let seam = window.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
-    let mut states: Vec<PlateState> = Vec::new();
-
-    // Plates seat in squared-distance order from the gx point (0.4, 0.3), Y mirrored from the
-    // reference's Y-up space (`0x608870`, `0x6089a0`, walked by `0x608ce0`); each later plate is
-    // solved off those already claimed. The undamped diagonal: this is position, not size.
-    let diag = viewport.length();
-    let sort_pt = Vec2::new(0.4 * diag, viewport.y - 0.3 * diag);
-    let mut cands = Vec::new();
-    for (entity, net, guid, tf, store) in &world.units {
-        if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
-            continue;
-        }
-        // `NOT_SELECTABLE` (flags bit 25) never gets a plate, re-tested every tick (`0x60f622`,
-        // from CGUnit's OnUpdate `0x607ed0`). A plate hover publishes the mouseover with no
-        // selectability check (`0x7cb869`, unlike the world hover at `0x482982`), so this gate is
-        // what keeps such a unit's tooltip away.
-        if store.is_some_and(|s| s.0.unit_flags() & (1 << 25) != 0) {
-            continue;
-        }
-        // `0x60f600`'s first test: health 0 or less (absent reads 0) has no plate. Feign death
-        // keeps health, so it passes here.
-        if store.is_none_or(|s| s.0.unit_health().unwrap_or(0) == 0) {
-            continue;
-        }
-        // `0x60f62e`: `bytes_1` byte 3 `& 3` (ghost or creep) has no plate.
-        if store.is_some_and(|s| s.0.unit_is_ghost_visual()) {
-            continue;
-        }
-        if (tf.translation - self_tf.translation).length_squared() > MAX_DIST_SQ {
-            continue;
-        }
-        // A CREATEDBY owner, no SUMMONEDBY owner and flags bit 9 (`0x200`): no plate in either
-        // category (`0x60f70b`-`0x60f72d`); the bit's 1.12 name is unknown.
-        if store.is_some_and(|s| {
-            s.0.unit_created_by().is_some_and(|g| g != 0)
-                && s.0.unit_summoned_by().is_none_or(|g| g == 0)
-                && s.0.unit_flags() & 0x200 != 0
-        }) {
-            continue;
-        }
-        // The category is `CanAttack` from the player (a rep faction answers by its at-war bit);
-        // the bar colour is the unit's reaction toward us (by standing). A not-at-war neutral NPC
-        // is a friendly plate with a yellow bar.
-        let rank = ring_reaction(
-            world.factions.as_deref(),
-            &world.reputations,
-            store,
-            self_store,
-        );
-        let is_player = net.kind == EntityKind::Player;
-        let friendly = crate::target::ring::plate_is_friendly(
-            world.factions.as_deref(),
-            &world.reputations,
-            store,
-            self_store,
-            is_player,
-        );
-        if friendly && !mode.friends || !friendly && !mode.enemies {
-            continue;
-        }
-        // Only on the hostile side, a dead-looking unit has no plate (`0x60f733`): a feigning
-        // hunter's plate hides from enemies and stays for friends.
-        if !friendly && store.is_some_and(|s| s.0.unit_reads_dead()) {
-            continue;
-        }
-        // Behind the camera or outside the viewport there is no plate: `0x60f600` destroys it
-        // before the seat, never clamping it in from off-screen.
-        let anchor = overhead_anchor(
-            entity,
-            tf,
-            &anchor_q.0,
-            &anchor_q.1,
-            &anchor_q.2,
-            &anchor_q.3,
-            &anchor_q.4,
-        );
-        let Some(screen) =
-            crate::ui_pass::project_overlay(cam, &cam_tf, anchor + Vec3::Y * PLATE_LIFT, viewport)
+        let (Ok((cam, cam_pose)), Ok((self_tf, self_store))) =
+            (world.camera.single(), world.self_q.single())
         else {
-            continue;
+            return PlateStep::Retire;
         };
-        cands.push((
-            screen.distance_squared(sort_pt),
-            screen,
-            anchor,
-            rank,
-            is_player,
-            entity,
-            guid,
-            store,
-        ));
-    }
-    cands.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for (_, screen, anchor, rank, is_player, entity, guid, store) in cands {
-        plates.0.insert(entity);
-
-        let alpha = if !has_target || world.selection.target == Some(entity) {
-            1.0
-        } else {
-            DIM_ALPHA
+        let Some(script) = script else {
+            return PlateStep::Retire;
         };
-        let tint = plate_tint(rank, is_player);
-        // `WOW_VPLATE_TRACE=1` prints each plate rect in logical px.
-        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let trace = *TRACE.get_or_init(|| std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1"));
-        // The seat (`0x509ec0`): the plate hangs from its top centre on the projected point, is
-        // solved off the plates already claimed, then clamped half a plate inside the screen.
-        let desired = Rect::new(
-            screen.x - pw * 0.5,
-            screen.y,
-            screen.x + pw * 0.5,
-            screen.y + ph,
+        let cam_tf = GlobalTransform::from(*cam_pose);
+        let Some(viewport) = cam.logical_viewport_size() else {
+            return PlateStep::Retire;
+        };
+        let basis = plate_basis(viewport);
+        let gx = |v: f32| gx_px(v, basis);
+        let window = world.window.single().ok();
+        // Plates stop taking the mouse in freelook (`0x60f830`, called from `0x483e80`/`0x483e70`
+        // on the transitions), written on the edge per VM.
+        let looking = rig.is_looking();
+        if *mouse_told.get(script) != Some(looking) {
+            *mouse_told.get(script) = Some(looking);
+            script.set_nameplate_mouse(!looking);
+        }
+        // While a ground-targeted spell is armed (`0x6e6320`'s `flag & 0x60`), plates refuse the
+        // hit test (`0x7cba30`, the `+0x3c` override) without clearing the mouse-enabled bit, so
+        // `IsMouseEnabled()` is unchanged.
+        script.set_nameplate_hit_test_veto(
+            world
+                .targeting
+                .wants(crate::spell::targeting::TargetingWants::Location),
         );
-        let solved = bucket.resolve(desired, viewport);
-        // Snap the left edge, not the centre, which an odd width would put between texels; the
-        // claim takes the snapped rect, so later plates dodge what is drawn.
-        let top = device_snap(solved.min.y, scale);
-        let left = device_snap(solved.min.x, scale);
-        let plate = Rect::new(left, top, left + pw, top + ph);
-        // Trace tag `vpl`, one line per plate per frame: anchor, camera, projected point, solve
-        // and snapped rect, so plate jitter can be attributed to one of them.
-        if benilla_assets::trace::enabled_for("vpl") {
-            let (cp, cf) = (cam_pose.translation, cam_pose.forward());
-            benilla_assets::trace::line(
-                "vpl",
-                &format!(
-                    "e={} vp=({:.0},{:.0}) anchor=[{:.4},{:.4},{:.4}] cam=[{:.4},{:.4},{:.4}] \
-                     fwd=[{:.4},{:.4},{:.4}] scr=({:.3},{:.3}) solved=({:.3},{:.3}) plate=({:.1},{:.1})",
-                    entity.index(),
-                    viewport.x,
-                    viewport.y,
-                    anchor.x,
-                    anchor.y,
-                    anchor.z,
-                    cp.x,
-                    cp.y,
-                    cp.z,
-                    cf.x,
-                    cf.y,
-                    cf.z,
-                    screen.x,
-                    screen.y,
-                    solved.min.x,
-                    solved.min.y,
-                    plate.min.x,
-                    plate.min.y,
-                ),
+        let hovered_key = script.hovered_nameplate();
+        let clicked = script.take_nameplate_clicks();
+        let my_level = self_store.and_then(|s| s.0.unit_level()).unwrap_or(1);
+        let (rel, me) = (world.relations.get(), world.relations.me());
+
+        let (pw, ph) = (gx(PLATE_W), gx(PLATE_H));
+        let scale = window.map_or(1.0, |w| w.scale_factor());
+        // Everything below is in window px, divided by this once for the widget layer's root units.
+        let seam = window.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
+        let mut states: Vec<PlateState> = Vec::new();
+
+        // Plates seat in squared-distance order from the gx point (0.4, 0.3), Y mirrored from the
+        // reference's Y-up space (`0x608870`, `0x6089a0`, walked by `0x608ce0`); each later plate
+        // is solved off those already claimed. The undamped diagonal: this is position, not size.
+        let diag = viewport.length();
+        let sort_pt = Vec2::new(0.4 * diag, viewport.y - 0.3 * diag);
+        let mut cands = Vec::new();
+        for (entity, net, guid, tf, store) in &world.units {
+            if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+                continue;
+            }
+            // `NOT_SELECTABLE` (flags bit 25) never gets a plate, re-tested every tick (`0x60f622`,
+            // from CGUnit's OnUpdate `0x607ed0`). A plate hover publishes the mouseover with no
+            // selectability check (`0x7cb869`, unlike the world hover at `0x482982`), so this gate
+            // is what keeps such a unit's tooltip away.
+            if store.is_some_and(|s| s.0.unit_flags() & (1 << 25) != 0) {
+                continue;
+            }
+            // `0x60f600`'s first test: health 0 or less (absent reads 0) has no plate. Feign death
+            // keeps health, so it passes here.
+            if store.is_none_or(|s| s.0.unit_health().unwrap_or(0) == 0) {
+                continue;
+            }
+            // `0x60f62e`: `bytes_1` byte 3 `& 3` (ghost or creep) has no plate.
+            if store.is_some_and(|s| s.0.unit_is_ghost_visual()) {
+                continue;
+            }
+            if (tf.translation - self_tf.translation).length_squared() > MAX_DIST_SQ {
+                continue;
+            }
+            // A CREATEDBY owner, no SUMMONEDBY owner and flags bit 9 (`0x200`): no plate in either
+            // category (`0x60f70b`-`0x60f72d`); the bit's 1.12 name is unknown.
+            if store.is_some_and(|s| {
+                s.0.unit_created_by().is_some_and(|g| g != 0)
+                    && s.0.unit_summoned_by().is_none_or(|g| g == 0)
+                    && s.0.unit_flags() & 0x200 != 0
+            }) {
+                continue;
+            }
+            // The category is `CanAttack` from the player (a rep faction answers by its at-war
+            // bit); the bar colour is the unit's reaction toward us (by standing). A not-at-war
+            // neutral NPC is a friendly plate with a yellow bar.
+            let is_player = net.kind == EntityKind::Player;
+            let pair = store
+                .map(|s| world.relations.unit_of(guid.0, s))
+                .zip(me.as_ref());
+            let rank = pair.map_or(Reaction::Neutral as u8, |(u, me)| rel.reaction(&u, me));
+            // A unit whose descriptor has not streamed is attackable by nobody, so friendly unless
+            // a player, whom `CanCooperate` cannot pass.
+            let friendly = pair.map_or(!is_player, |(u, me)| {
+                crate::target::ring::plate_is_friendly(&rel, &u, me, is_player)
+            });
+            if friendly && !mode.friends || !friendly && !mode.enemies {
+                continue;
+            }
+            // Only on the hostile side, a dead-looking unit has no plate (`0x60f733`): a feigning
+            // hunter's plate hides from enemies and stays for friends.
+            if !friendly && store.is_some_and(|s| s.0.unit_reads_dead()) {
+                continue;
+            }
+            // Behind the camera or outside the viewport there is no plate: `0x60f600` destroys it
+            // before the seat, never clamping it in from off-screen.
+            let anchor = overhead_anchor(
+                entity,
+                tf,
+                &anchor_q.0,
+                &anchor_q.1,
+                &anchor_q.2,
+                &anchor_q.3,
+                &anchor_q.4,
             );
+            let Some(screen) = crate::ui_pass::project_overlay(
+                cam,
+                &cam_tf,
+                anchor + Vec3::Y * PLATE_LIFT,
+                viewport,
+            ) else {
+                continue;
+            };
+            cands.push((
+                screen.distance_squared(sort_pt),
+                screen,
+                anchor,
+                rank,
+                is_player,
+                entity,
+                guid,
+                store,
+            ));
         }
-        bucket.claim(plate);
-        let hover = hovered_key == Some(guid.0);
-        // The mouseover or the target lights the bar; `hover` joins directly so the brighten does
-        // not lag the yellow name by the frame the mouseover takes to publish.
-        let lit =
-            hover || world.hovered.target == Some(entity) || world.selection.target == Some(entity);
-        if trace {
-            eprintln!(
-                "vplate-trace: viewport={viewport:?} screen=({:.2},{:.2}) plate=({:.1},{:.1})..({:.1},{:.1}) lit={lit}",
-                screen.x, screen.y, plate.min.x, plate.min.y, plate.max.x, plate.max.y
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, screen, anchor, rank, is_player, entity, guid, store) in cands {
+            plates.0.insert(entity);
+
+            let alpha = plate_alpha(&world.selection, guid.0);
+            let tint = plate_tint(rank, is_player);
+            // `WOW_VPLATE_TRACE=1` prints each plate rect in logical px.
+            static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let trace =
+                *TRACE.get_or_init(|| std::env::var("WOW_VPLATE_TRACE").as_deref() == Ok("1"));
+            // The seat (`0x509ec0`): the plate hangs from its top centre on the projected point, is
+            // solved off the plates already claimed, then clamped half a plate inside the screen.
+            let desired = Rect::new(
+                screen.x - pw * 0.5,
+                screen.y,
+                screen.x + pw * 0.5,
+                screen.y + ph,
             );
-        }
-        // ── The plate's state, handed to the widget layer ──
-        //
-        // The plates hang off `WorldFrame`, outside `UIParent`'s scale, so root units are their
-        // own. The raid-target index is 1-based here, 0-based for the atlas cell.
-        let mark = group.raid_target_index(guid.0);
-        let x_units = (plate.min.x + plate.max.x) * 0.5 / seam;
-        let y_units = (viewport.y - plate.min.y) / seam;
-        for click in &clicked {
-            if click.key == guid.0 {
-                match click.button.as_str() {
-                    "RightButton" => plate_clicks.right.push(entity),
-                    _ => plate_clicks.left.push(entity),
+            let solved = bucket.resolve(desired, viewport);
+            // Snap the left edge, not the centre, which an odd width would put between texels; the
+            // claim takes the snapped rect, so later plates dodge what is drawn.
+            let top = device_snap(solved.min.y, scale);
+            let left = device_snap(solved.min.x, scale);
+            let plate = Rect::new(left, top, left + pw, top + ph);
+            // Trace tag `vpl`, one line per plate per frame: anchor, camera, projected point, solve
+            // and snapped rect, so plate jitter can be attributed to one of them.
+            if benilla_assets::trace::enabled_for("vpl") {
+                let (cp, cf) = (cam_pose.translation, cam_pose.forward());
+                benilla_assets::trace::line(
+                    "vpl",
+                    &format!(
+                        "e={} vp=({:.0},{:.0}) anchor=[{:.4},{:.4},{:.4}] cam=[{:.4},{:.4},{:.4}] \
+                         fwd=[{:.4},{:.4},{:.4}] scr=({:.3},{:.3}) solved=({:.3},{:.3}) \
+                         plate=({:.1},{:.1})",
+                        entity.index(),
+                        viewport.x,
+                        viewport.y,
+                        anchor.x,
+                        anchor.y,
+                        anchor.z,
+                        cp.x,
+                        cp.y,
+                        cp.z,
+                        cf.x,
+                        cf.y,
+                        cf.z,
+                        screen.x,
+                        screen.y,
+                        solved.min.x,
+                        solved.min.y,
+                        plate.min.x,
+                        plate.min.y,
+                    ),
+                );
+            }
+            bucket.claim(plate);
+            let hover = hovered_key == Some(guid.0);
+            // The mouseover or the target lights the bar; `hover` joins directly so the brighten
+            // does not lag the yellow name by the frame the mouseover takes to publish.
+            let lit = hover
+                || world.hovered.target == Some(entity)
+                || world.selection.target == Some(entity);
+            if trace {
+                eprintln!(
+                    "vplate-trace: viewport={viewport:?} screen=({:.2},{:.2}) \
+                     plate=({:.1},{:.1})..({:.1},{:.1}) lit={lit}",
+                    screen.x, screen.y, plate.min.x, plate.min.y, plate.max.x, plate.max.y
+                );
+            }
+            // ── The plate's state, handed to the widget layer ──
+            //
+            // The plates hang off `WorldFrame`, outside `UIParent`'s scale, so root units are their
+            // own. The raid-target index is 1-based here, 0-based for the atlas cell.
+            let mark = group.raid_target_index(guid.0);
+            let x_units = (plate.min.x + plate.max.x) * 0.5 / seam;
+            let y_units = (viewport.y - plate.min.y) / seam;
+            for click in &clicked {
+                if click.key == guid.0 {
+                    match click.button.as_str() {
+                        "RightButton" => plate_clicks.right.push(entity),
+                        _ => plate_clicks.left.push(entity),
+                    }
                 }
             }
+            states.push(PlateState {
+                // A plate stays bound to its unit for its life, as the reference's `[unit+0xe60]`;
+                // addons cache per plate on it.
+                key: guid.0,
+                top_centre: (x_units, y_units),
+                // Raw health, not a fraction: `healthbar:GetValue()` is `[bar+0x320]` (`0x78f5d0`),
+                // and addons divide it by the max.
+                health: store.and_then(|s| s.0.unit_health()).unwrap_or(0) as f32,
+                max_health: store
+                    .and_then(|s| s.0.unit_max_health())
+                    .unwrap_or(1)
+                    .max(1) as f32,
+                bar_colour: [tint[0], tint[1], tint[2]],
+                // Read, never asked: this runs every frame; the unit's create asks.
+                name: names
+                    .resolve_unit(guid.0, store, Ask::Read)
+                    .map(str::to_owned)
+                    .unwrap_or_default(),
+                // The skull (`0x7cbb40`): rank 3 through `gated_rank` (so a charmed boss shows its
+                // level), or a hostile 10 or more levels up that is not grey (`0x5f0700`, vacuous
+                // there but transcribed). A unit with no level yet shows neither.
+                level: store.and_then(|s| s.0.unit_level()),
+                skull: store.and_then(|s| s.0.unit_level()).is_some_and(|level| {
+                    crate::names::gated_rank(
+                        store
+                            .and_then(|s| s.0.object_entry())
+                            .and_then(|e| names.creature_record(e)),
+                        store,
+                    ) == 3
+                        || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))
+                }),
+                level_colour: {
+                    let c = store
+                        .and_then(|s| s.0.unit_level())
+                        .map_or([1.0, 1.0, 1.0, 1.0], |level| con_color(my_level, level));
+                    [c[0], c[1], c[2]]
+                },
+                // 0-based for the atlas: `col = idx & 3`, `row = idx >> 2`.
+                raid_icon: (mark >= 1).then(|| mark - 1),
+                alpha,
+                lit,
+                hovered: hover,
+            });
         }
-        states.push(PlateState {
-            // A plate stays bound to its unit for its life, as the reference's `[unit+0xe60]`;
-            // addons cache per plate on it.
-            key: guid.0,
-            top_centre: (x_units, y_units),
-            // Raw health, not a fraction: `healthbar:GetValue()` is `[bar+0x320]` (`0x78f5d0`),
-            // and addons divide it by the max.
-            health: store.and_then(|s| s.0.unit_health()).unwrap_or(0) as f32,
-            max_health: store
-                .and_then(|s| s.0.unit_max_health())
-                .unwrap_or(1)
-                .max(1) as f32,
-            bar_colour: [tint[0], tint[1], tint[2]],
-            // Read, never asked: this runs every frame; the unit's create asks.
-            name: names
-                .resolve_unit(guid.0, store, Ask::Read)
-                .map(str::to_owned)
-                .unwrap_or_default(),
-            // The skull (`0x7cbb40`): rank 3 through `gated_rank` (so a charmed boss shows its
-            // level), or a hostile 10 or more levels up that is not grey (`0x5f0700`, vacuous
-            // there but transcribed). A unit with no level yet shows neither.
-            level: store.and_then(|s| s.0.unit_level()),
-            skull: store.and_then(|s| s.0.unit_level()).is_some_and(|level| {
-                crate::names::gated_rank(
-                    store
-                        .and_then(|s| s.0.object_entry())
-                        .and_then(|e| names.creature_record(e)),
-                    store,
-                ) == 3
-                    || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))
-            }),
-            level_colour: {
-                let c = store
-                    .and_then(|s| s.0.unit_level())
-                    .map_or([1.0, 1.0, 1.0, 1.0], |level| con_color(my_level, level));
-                [c[0], c[1], c[2]]
-            },
-            // 0-based for the atlas: `col = idx & 3`, `row = idx >> 2`.
-            raid_icon: (mark >= 1).then(|| mark - 1),
-            alpha,
-            lit,
-            hovered: hover,
-        });
-    }
 
-    // The widget layer rewrites the static anchors only when this moves, so an addon's own
-    // re-anchoring survives between resizes.
-    script.sync_nameplates(
-        PlateGeometry {
-            width: pw / seam,
-            height: ph / seam,
-            bar_off_x: gx(BAR_OFF_X) / seam,
-            bar_off_y: gx(BAR_OFF_Y) / seam,
-            bar_width: gx(BAR_W) / seam,
-            bar_height: gx(BAR_H) / seam,
-            level_off_x: gx(LEVEL_OFF_X) / seam,
-            level_off_y: gx(LEVEL_OFF_Y) / seam,
-            skull_size: gx(SKULL_SIZE) / seam,
-            raid_size: gx(RAID_ICON_SIZE) / seam,
-            name_height: text_px(NAME_H, basis) / seam,
-            level_height: text_px(LEVEL_H, basis) / seam,
-            // Deviation: a constant one-logical-pixel shadow, not the reference's 0.001 gx, which
-            // draws 2 px thick and too heavy at larger windows. Divided by the seam, which the
-            // shared text arm would otherwise scale it by.
-            shadow_offset: 1.0 / seam,
-        },
-        &states,
-    );
+        // The widget layer rewrites the static anchors only when this moves, so an addon's own
+        // re-anchoring survives between resizes.
+        PlateStep::Sync(
+            PlateGeometry {
+                width: pw / seam,
+                height: ph / seam,
+                bar_off_x: gx(BAR_OFF_X) / seam,
+                bar_off_y: gx(BAR_OFF_Y) / seam,
+                bar_width: gx(BAR_W) / seam,
+                bar_height: gx(BAR_H) / seam,
+                level_off_x: gx(LEVEL_OFF_X) / seam,
+                level_off_y: gx(LEVEL_OFF_Y) / seam,
+                skull_size: gx(SKULL_SIZE) / seam,
+                raid_size: gx(RAID_ICON_SIZE) / seam,
+                name_height: text_px(NAME_H, basis) / seam,
+                level_height: text_px(LEVEL_H, basis) / seam,
+                // Deviation: a constant one-logical-pixel shadow, not the reference's 0.001 gx,
+                // which draws 2 px thick and too heavy at larger windows. Divided by the seam,
+                // which the shared text arm would otherwise scale it by.
+                shadow_offset: 1.0 / seam,
+            },
+            states,
+        )
+    });
+    vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        match step {
+            PlateStep::Retire => script.retire_nameplates(),
+            PlateStep::Sync(geometry, states) => script.sync_nameplates(geometry, &states),
+        }
+    });
+}
+
+/// [`drive_vplates`] as a one-shot, for a test over the whole client.
+#[cfg(test)]
+pub(crate) fn drive_vplates_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(drive_vplates)
+        .expect("the plate driver runs as a one-shot system");
+}
+
+/// What [`drive_vplates`]'s turn leaves the widget layer to do.
+enum PlateStep {
+    /// Hide every live plate and return it to the pool.
+    Retire,
+    /// Seat these plates at this geometry.
+    Sync(PlateGeometry, Vec<PlateState>),
 }
 
 /// The plate driver's set; the overhead-name driver runs after it.
@@ -649,7 +681,7 @@ impl Plugin for VPlatesPlugin {
                 Update,
                 (
                     // A drain of the verbs the tick ran (a binding body, `UpdateNameplates`).
-                    apply_plate_verbs.after(crate::ui_script::UiInput),
+                    apply_plate_verbs.in_set(crate::ui_script::UiDrain),
                     // After the targeting chain, itself after `WorldStage::Input`, so this projects
                     // through this frame's camera; `ui_script::extract::paint_script` runs after
                     // it, so the plates paint the same frame.
@@ -660,6 +692,9 @@ impl Plugin for VPlatesPlugin {
             );
     }
 }
+
+#[cfg(test)]
+mod unheld_tests;
 
 #[cfg(test)]
 mod tests {
@@ -891,7 +926,7 @@ mod tests {
         );
 
         let s = benilla_ui::script::UiScript::new().unwrap();
-        // The saved-variables chunk said off; the CVar was the store, so it wins.
+        // The saved-variables file said off; the CVar was the store, so it wins.
         s.run("FRIENDNAMEPLATES_ON = nil NAMEPLATES_ON = 1")
             .unwrap();
         seat_legacy_settings(&s, &legacy);

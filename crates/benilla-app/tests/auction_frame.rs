@@ -2,8 +2,8 @@
 //! `AuctionState` and the app's own show and list events, and asserts what it paints and queues.
 
 use benilla_ui::script::{
-    AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionState,
-    AuctionSubCategory, UiScript, UnitState, BIDDER, LIST, OWNER,
+    AuctionCall, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState,
+    AuctionQuery, AuctionState, AuctionSubCategory, UiScript, UnitState, BIDDER, LIST, OWNER,
 };
 
 mod common;
@@ -80,10 +80,27 @@ fn row(name: &str, min_bid: u32, buyout: u32, bid: u32, owner: &str) -> AuctionI
         bid_amount: bid,
         high_bidder: AuctionHighBidder::Nil,
         owner: Some(owner.to_string()),
-        time_left: 4,
+        // A day out on `GetTime`'s clock: Very Long.
+        deadline: 24 * 60 * 60 * 1000,
+        bidder_rank: 0,
+        base_name: Some(name.to_string()),
         link: Some("|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r".into()),
         random_property_id: 0,
+        charges: 0,
+        owner_guid: 0,
+        named_bidder: 0,
     }
+}
+
+/// The browse queries the kept calls hold, in call order.
+fn queries(s: &mut UiScript) -> Vec<AuctionQuery> {
+    s.take_auction_calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            AuctionCall::Query(q) => Some(q),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A session snapshot: `rows` on the Browse list, nothing on the other two.
@@ -97,7 +114,7 @@ fn state(mut rows: Vec<AuctionItemRow>) -> AuctionState {
     lists[LIST] = AuctionListState {
         rows,
         total,
-        sort: vec![("bid".into(), true)],
+        ..Default::default()
     };
     lists[BIDDER] = AuctionListState::default();
     lists[OWNER] = AuctionListState::default();
@@ -125,6 +142,8 @@ fn seat_player(s: &mut UiScript, money: u64) {
 fn auction_frame_loads_and_key_regions_exist() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     for name in [
         // The window, its three panes and its three tabs.
@@ -171,6 +190,8 @@ fn auction_frame_loads_and_key_regions_exist() {
 fn the_window_is_registered_doublewide() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     assert_eq!(
         s.eval::<String>("return UIPanelWindows['AuctionFrame'].area")
@@ -183,15 +204,11 @@ fn the_window_is_registered_doublewide() {
 fn auction_house_show_opens_the_window_on_the_browse_tab() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 500_000);
-    s.set_auction(Some(state(vec![row(
-        "Linen Cloth",
-        1000,
-        5000,
-        0,
-        "Seller",
-    )])));
+    s.set_auction(state(vec![row("Linen Cloth", 1000, 5000, 0, "Seller")]));
 
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     assert!(
@@ -228,8 +245,11 @@ fn auction_house_show_opens_the_window_on_the_browse_tab() {
     );
     // Opening the Auctions tab asks the server for the owned list, once per window session.
     assert_eq!(
-        s.take_auction_owner_query(),
-        Some(0),
+        s.take_auction_calls()
+            .into_iter()
+            .filter(|c| matches!(c, AuctionCall::OwnerList { .. }))
+            .collect::<Vec<_>>(),
+        [AuctionCall::OwnerList { offset: 0 }],
         "the Auctions pane fetches the owned list on its first show"
     );
 
@@ -243,15 +263,11 @@ fn auction_house_show_opens_the_window_on_the_browse_tab() {
 fn the_auctions_tab_cannot_repaint_before_it_has_been_shown() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 500_000);
-    s.set_auction(Some(state(vec![row(
-        "Linen Cloth",
-        1000,
-        5000,
-        0,
-        "Seller",
-    )])));
+    s.set_auction(state(vec![row("Linen Cloth", 1000, 5000, 0, "Seller")]));
 
     // Open, and land a browse result: the whole of a search.
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
@@ -286,6 +302,8 @@ fn the_auctions_tab_cannot_repaint_before_it_has_been_shown() {
 fn the_auctions_tab_names_the_high_bidder() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 500_000);
     let mut bid_on = row("Linen Cloth", 1000, 5000, 2500, "Buyer");
@@ -297,9 +315,9 @@ fn the_auctions_tab_names_the_high_bidder() {
     snapshot.lists[OWNER] = AuctionListState {
         rows: vec![bid_on, unbid],
         total: 2,
-        sort: Vec::new(),
+        ..Default::default()
     };
-    s.set_auction(Some(snapshot));
+    s.set_auction(snapshot);
 
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.run("AuctionFrameTab_OnClick(3)").unwrap();
@@ -329,6 +347,8 @@ fn the_auctions_tab_names_the_high_bidder() {
 fn only_the_bids_pane_gets_its_page_without_being_opened() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
 
     let page = |s: &UiScript, pane: &str| {
@@ -348,13 +368,7 @@ fn only_the_bids_pane_gets_its_page_without_being_opened() {
     // Browse is shown by the tab click; Bid is shown with the window and hidden again, keeping
     // the page its OnShow assigned.
     seat_player(&mut s, 500_000);
-    s.set_auction(Some(state(vec![row(
-        "Linen Cloth",
-        1000,
-        5000,
-        0,
-        "Seller",
-    )])));
+    s.set_auction(state(vec![row("Linen Cloth", 1000, 5000, 0, "Seller")]));
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     assert_eq!(page(&s, "AuctionFrameBrowse"), "0");
     assert_eq!(
@@ -381,15 +395,11 @@ fn only_the_bids_pane_gets_its_page_without_being_opened() {
 fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 500_000);
-    s.set_auction(Some(state(vec![row(
-        "Linen Cloth",
-        1000,
-        5000,
-        0,
-        "Seller",
-    )])));
+    s.set_auction(state(vec![row("Linen Cloth", 1000, 5000, 0, "Seller")]));
 
     // Both `<OnShow>`s call their handler by global name, so wrapping the globals records the
     // order.
@@ -415,8 +425,8 @@ fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
          mis-aimed AUCTION_BIDDER_LIST_UPDATE off the nil-page path"
     );
     assert_eq!(
-        s.take_auction_bidder_query(),
-        Some(0),
+        s.take_auction_calls(),
+        [AuctionCall::BidderList { offset: 0 }],
         "and that OnShow is what asks for the bids list"
     );
 
@@ -431,8 +441,8 @@ fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
     );
     assert_eq!(page(&s), "0", "kept from the first open, not re-assigned");
     assert_eq!(
-        s.take_auction_bidder_query(),
-        None,
+        s.take_auction_calls(),
+        [],
         "and the reopen puts no second bids query on the wire"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
@@ -443,14 +453,16 @@ fn the_show_cascade_notifies_the_bids_pane_once_and_keeps_its_page() {
 fn the_browse_list_populates_from_the_fed_snapshot() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 500_000);
-    s.set_auction(Some(state(vec![
+    s.set_auction(state(vec![
         // No bids yet: the row shows the seller's opening price as the current bid.
         row("Linen Cloth", 1000, 5000, 0, "Seller"),
         // Bid on: the row shows the live bid instead.
         row("Wool Cloth", 1000, 0, 2500, "Someone"),
-    ])));
+    ]));
 
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
@@ -537,13 +549,15 @@ fn the_browse_list_populates_from_the_fed_snapshot() {
 fn the_bid_and_buyout_gates_read_the_purse() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     // 2 gold. Row 1 costs 10s to bid and 50s to buy out; row 2 wants 5 gold.
     seat_player(&mut s, 20_000);
-    s.set_auction(Some(state(vec![
+    s.set_auction(state(vec![
         row("Linen Cloth", 1000, 5000, 0, "Seller"),
         row("Arcanite Bar", 50_000, 60_000, 0, "Seller"),
-    ])));
+    ]));
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
 
@@ -599,12 +613,22 @@ fn the_bid_and_buyout_gates_read_the_purse() {
 
     // Back to row 1 and press Bid: the intent reaches the app with the seated amount.
     s.run("BrowseButton1:Click()").unwrap();
-    let _ = s.take_auction_bids();
+    let _ = s.take_auction_calls();
     s.run("BrowseBidButton:Click()").unwrap();
-    let bids = s.take_auction_bids();
-    assert_eq!(bids.len(), 1, "one bid queued, got {bids:?}");
+    let bids: Vec<_> = s
+        .take_auction_calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            AuctionCall::Bid(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bids.len(), 1, "one bid handed over, got {bids:?}");
     assert_eq!(bids[0].list, LIST);
-    assert_eq!(bids[0].index, 1);
+    assert_eq!(
+        bids[0].auction_id, 1,
+        "row 1's auction, read when the bid was placed"
+    );
     assert_eq!(bids[0].amount, 1000);
     assert!(
         !s.eval::<bool>("return BrowseBidButton:IsEnabled() ~= 0")
@@ -620,15 +644,11 @@ fn the_bid_and_buyout_gates_read_the_purse() {
 fn you_cannot_bid_on_your_own_auction() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 10_000_000);
-    s.set_auction(Some(state(vec![row(
-        "Linen Cloth",
-        1000,
-        5000,
-        0,
-        "Buyer",
-    )])));
+    s.set_auction(state(vec![row("Linen Cloth", 1000, 5000, 0, "Buyer")]));
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
 
@@ -650,12 +670,14 @@ fn you_cannot_bid_on_your_own_auction() {
 fn search_reads_the_filters_and_nothing_queries_before_it() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 0);
-    s.set_auction(Some(state(vec![])));
+    s.set_auction(state(vec![]));
     s.set_auction_can_query(true);
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
-    let _ = s.take_auction_query();
+    let _ = s.take_auction_calls();
 
     // The class tree paints from the pushed categories.
     s.run("AuctionFrameFilters_Update()").unwrap();
@@ -673,7 +695,7 @@ fn search_reads_the_filters_and_nothing_queries_before_it() {
         "the selected class expands its subclasses in place"
     );
     assert!(
-        s.take_auction_query().is_none(),
+        queries(&mut s).is_empty(),
         "a filter click must not query — the selection is read when Search is pressed"
     );
 
@@ -681,10 +703,10 @@ fn search_reads_the_filters_and_nothing_queries_before_it() {
     s.run("BrowseMinLevel:SetText('10')").unwrap();
     s.run("BrowseMaxLevel:SetText('20')").unwrap();
     s.run("IsUsableCheckButton:SetChecked(1)").unwrap();
-    assert!(s.take_auction_query().is_none(), "still nothing queued");
+    assert!(queries(&mut s).is_empty(), "still nothing queued");
 
     s.run("AuctionFrameBrowse_Search()").unwrap();
-    let query = s.take_auction_query().expect("Search queues one query");
+    let query = queries(&mut s).pop().expect("Search queues one query");
     assert_eq!(query.name, "linen");
     assert_eq!(query.min_level, 10);
     assert_eq!(query.max_level, 20);
@@ -695,7 +717,7 @@ fn search_reads_the_filters_and_nothing_queries_before_it() {
         "Armor is item class 4, not menu row 1"
     );
     assert!(query.usable_only);
-    assert_eq!(query.page, 0);
+    assert_eq!(query.list_from, 0);
     assert!(s.errors().is_empty(), "clean search: {:?}", s.errors());
 }
 
@@ -705,9 +727,11 @@ fn search_reads_the_filters_and_nothing_queries_before_it() {
 fn the_create_gate_and_the_deposit() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 100_000);
-    s.set_auction(Some(state(vec![])));
+    s.set_auction(state(vec![]));
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.run("AuctionFrameTab_OnClick(3)").unwrap();
 
@@ -754,7 +778,7 @@ fn the_create_gate_and_the_deposit() {
     s.set_container(
         0,
         Some(benilla_ui::script::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: std::collections::HashMap::from([(
                 1,
@@ -835,11 +859,15 @@ fn the_create_gate_and_the_deposit() {
             .unwrap(),
         2
     );
-    let _ = s.take_auction_starts();
+    let _ = s.take_auction_calls();
     s.run("AuctionsCreateAuctionButton:Click()").unwrap();
     let start = s
-        .take_auction_starts()
-        .pop()
+        .take_auction_calls()
+        .into_iter()
+        .find_map(|c| match c {
+            AuctionCall::Start(Ok(req)) => Some(req),
+            _ => None,
+        })
         .expect("Create queues one auction");
     assert_eq!(start.min_bid, 10000);
     assert_eq!(start.buyout, 0);
@@ -853,9 +881,11 @@ fn the_create_gate_and_the_deposit() {
 fn hiding_the_window_closes_the_session() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 0);
-    s.set_auction(Some(state(vec![])));
+    s.set_auction(state(vec![]));
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     let _ = s.take_auction_close();
 
@@ -881,6 +911,8 @@ fn hiding_the_window_closes_the_session() {
 fn paging_shows_the_turners_only_at_the_end_of_the_list() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
     seat_player(&mut s, 0);
     let mut rows = Vec::new();
@@ -889,7 +921,7 @@ fn paging_shows_the_turners_only_at_the_end_of_the_list() {
     }
     let mut st = state(rows);
     st.lists[LIST].total = 120;
-    s.set_auction(Some(st));
+    s.set_auction(st);
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
 
@@ -918,10 +950,13 @@ fn paging_shows_the_turners_only_at_the_end_of_the_list() {
 
     // Turning the page re-searches at the next offset rather than scrolling.
     s.set_auction_can_query(true);
-    let _ = s.take_auction_query();
+    let _ = s.take_auction_calls();
     s.run("BrowseNextPageButton:Click()").unwrap();
-    let query = s.take_auction_query().expect("the turner re-queries");
-    assert_eq!(query.page, 1, "the next page, 0-based");
+    let query = queries(&mut s).pop().expect("the turner re-queries");
+    assert_eq!(
+        query.list_from, 50,
+        "the next page, 0-based, as an item offset"
+    );
 
     assert!(s.errors().is_empty(), "clean paging: {:?}", s.errors());
 }
@@ -932,8 +967,10 @@ fn paging_shows_the_turners_only_at_the_end_of_the_list() {
 fn a_row_hover_goes_through_the_reference_tooltip_verb() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No engine behind it: the verbs' calls are kept for the asserts.
+    s.keep_calls();
     load_ui_with_classes(&mut s);
-    s.set_auction(Some(state(vec![row("Copper Bar", 100, 500, 0, "Someone")])));
+    s.set_auction(state(vec![row("Copper Bar", 100, 500, 0, "Someone")]));
     s.fire_event("AUCTION_HOUSE_SHOW", vec![]);
     s.fire_event("AUCTION_ITEM_LIST_UPDATE", vec![]);
 
@@ -961,4 +998,45 @@ fn a_row_hover_goes_through_the_reference_tooltip_verb() {
     // An empty sell slot is a no-op, not an error.
     s.run("GameTooltip:SetAuctionSellItem()").unwrap();
     assert!(s.take_errors().is_empty());
+}
+
+/// BrowseName's own `<FontString>` loads into the box's font over InputBoxTemplate's, which
+/// already linked it to ChatFontNormal, so 1.12.1 logs its override line (`0x879b3c`, `0x77a204`)
+/// once for it, and the child is no region of the box.
+#[test]
+fn browse_name_logs_the_references_font_override_line() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let s = UiScript::new().expect("VM");
+    let (auction, rest) = (FILES.len() - 2, FILES.len() - 1);
+    for file in &FILES[..auction] {
+        common::load_ui(&s, file);
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let chain =
+        benilla_formats::open_chain(&benilla_formats::wow_data().expect("data")).expect("chain");
+    let read = |req: &str| -> Option<Vec<u8>> {
+        if req.contains('\\') || req.contains('/') {
+            return chain.read(req).ok();
+        }
+        std::fs::read(dir.join(req)).ok()
+    };
+    let entry = FILES[auction];
+    let doc = benilla_ui::framexml::parse(&benilla_ui::source::decode(&read(entry).unwrap()))
+        .expect("parse");
+    let report = benilla_ui::loader::load_in(&s, &doc, &entry.replace('\\', "/"), &read);
+    assert!(report.errors.is_empty(), "{:#?}", report.errors);
+    let overrides: Vec<&String> = report
+        .status
+        .lines()
+        .iter()
+        .filter(|l| l.contains("FontString element overriding font"))
+        .collect();
+    assert_eq!(
+        overrides,
+        ["BrowseName: FontString element overriding font ChatFontNormal"]
+    );
+    common::load_ui(&s, FILES[rest]);
+    assert!(s
+        .eval::<bool>("return BrowseName:GetFontObject() == ChatFontNormal")
+        .unwrap());
 }

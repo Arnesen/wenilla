@@ -1,9 +1,33 @@
 use benilla_ui::script::{
-    DressUpIntent, ExtractedQuad, LootRow, LootState, MerchantItem, MerchantState, QuadContent,
-    SoundRequest, UiScript,
+    DressUpIntent, ExtractedQuad, LootCall, LootRow, LootState, MerchantItem, MerchantState,
+    QuadContent, SoundRequest, UiScript,
 };
 
 use super::test_ui::load_ui as load_xml;
+
+/// The rows the VM's row clicks took, from the loot calls it kept ([`UiScript::keep_calls`]);
+/// the other kept loot calls go with them.
+fn picks(s: &mut UiScript) -> Vec<u32> {
+    s.take_loot_calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            LootCall::Take(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `GiveMasterLoot(slot, candidate)` calls the VM kept, the other kept loot calls going with
+/// them.
+fn gives(s: &mut UiScript) -> Vec<(u32, u32)> {
+    s.take_loot_calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            LootCall::GiveMaster { slot, candidate } => Some((slot, candidate)),
+            _ => None,
+        })
+        .collect()
+}
 
 /// The rect of the `QuadContent::Frame` quad sized `w` by `h`: every frame emits one.
 fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Rect {
@@ -43,7 +67,7 @@ fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
 fn coin_and_two_items() -> LootState {
     LootState {
         source_unit: false,
-        fishing: false,
+        has_money: true,
         master_candidates: Vec::new(),
         rows: vec![
             Some(LootRow {
@@ -85,6 +109,7 @@ fn coin_and_two_items() -> LootState {
 fn shipped_loot_frame_drives_end_to_end() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in super::test_ui::LOOT_UI {
         load_xml(&s, f);
@@ -215,11 +240,10 @@ fn shipped_loot_frame_drives_end_to_end() {
     s.mouse_button(ix, iy, "LeftButton", true);
     s.mouse_button(ix, iy, "LeftButton", false);
     assert_eq!(
-        s.take_loot_picks(),
-        vec![1, 2],
-        "coin row is pick 1, the first item row is pick 2"
+        s.take_loot_calls(),
+        vec![LootCall::Take(1), LootCall::Take(2)],
+        "coin row is pick 1, the first item row is pick 2, and nothing closes"
     );
-    assert_eq!(s.take_loot_close(), None);
 
     // The looted coin row hides in place, off `LOOT_SLOT_CLEARED` alone, and the items keep their
     // rows.
@@ -244,8 +268,8 @@ fn shipped_loot_frame_drives_end_to_end() {
 
     s.run("LootCloseButton:Click()").unwrap();
     assert_eq!(
-        s.take_loot_close(),
-        Some(false),
+        s.take_loot_calls(),
+        vec![LootCall::Close { failed: false }],
         "closing the window releases the loot (OnHide → CloseLoot)"
     );
     assert!(!s.eval::<bool>("return LootFrame:IsVisible()").unwrap());
@@ -261,6 +285,7 @@ fn shipped_loot_frame_drives_end_to_end() {
 fn loot_empty_roll_plays_the_empty_open_kit() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -282,7 +307,7 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
 
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: Vec::new(),
         rows: vec![],
     }));
@@ -301,6 +326,7 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
 fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -314,9 +340,8 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
         })
     };
 
-    let mut fished = coin_and_two_items();
-    fished.fishing = true;
-    s.set_loot(Some(fished));
+    s.set_loot_type(3);
+    s.set_loot(Some(coin_and_two_items()));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -336,6 +361,7 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
 
     s.fire_event("LOOT_CLOSED", vec![]);
     let _ = s.take_sounds();
+    s.set_loot_type(1);
     s.set_loot(Some(coin_and_two_items()));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -353,6 +379,7 @@ fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
 fn shipped_loot_frame_pages_five_items() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -377,7 +404,7 @@ fn shipped_loot_frame_pages_five_items() {
         .collect();
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: Vec::new(),
         rows: rows.clone(),
     }));
@@ -418,7 +445,7 @@ fn shipped_loot_frame_pages_five_items() {
     cleared[2] = None;
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: Vec::new(),
         rows: cleared,
     }));
@@ -445,6 +472,7 @@ fn shipped_loot_frame_pages_five_items() {
 fn shipped_loot_pushed_to_center_by_merchant() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -512,6 +540,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
 fn the_loot_window_draws_over_the_party_frames() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -559,6 +588,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     benilla_formats::wow_data_or_skip!();
     const WOOL_LINK: &str = "|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r";
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -582,7 +612,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
 
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: true,
         master_candidates: Vec::new(),
         rows: vec![
             Some(LootRow {
@@ -616,7 +646,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     assert_eq!(
-        s.take_loot_picks(),
+        picks(&mut s),
         vec![2],
         "an unmodified click still loots the row"
     );
@@ -633,7 +663,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "the row's full escaped link landed in the chat box"
     );
     assert!(
-        s.take_loot_picks().is_empty(),
+        picks(&mut s).is_empty(),
         "a shift-click must not also loot the row"
     );
 
@@ -654,7 +684,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "and it must not disturb what is already typed"
     );
     assert!(
-        s.take_loot_picks().is_empty(),
+        picks(&mut s).is_empty(),
         "a shift-click on the coin row must not loot the money either"
     );
 
@@ -665,7 +695,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
     s.mouse_button(x, y, "LeftButton", false);
     s.set_modifiers(false, false, false);
     assert!(
-        s.take_loot_picks().is_empty(),
+        picks(&mut s).is_empty(),
         "an alt-click must not loot the row (the C gate's third modifier)"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -682,7 +712,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
         "re-dress first, then try the looted item on"
     );
     assert!(
-        s.take_loot_picks().is_empty(),
+        picks(&mut s).is_empty(),
         "a ctrl-click must not also loot the row"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -694,6 +724,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
 fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -716,13 +747,13 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
     };
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: vec![Some("Thrall".into()), Some("Cairne".into())],
         rows: vec![row("Wool Cloth", 2), row("Thunderfury", 4)],
     }));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    let _ = s.take_loot_picks();
+    let _ = s.take_loot_calls();
 
     // ── The row click stashes the selection the dropdown will read ────────────────────────────
     let click = |s: &mut UiScript, frame: &str| {
@@ -752,7 +783,7 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
         "the dropdown anchors on the clicked row, not the window"
     );
     // The pick still queues: the app chooses take or menu off the wire slot type, as 1.12 does.
-    assert_eq!(s.take_loot_picks(), vec![1]);
+    assert_eq!(picks(&mut s), vec![1]);
 
     // ── The app answers a MASTER row with the event; the menu lists the candidates ─────────────
     s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
@@ -776,11 +807,7 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
     // ── Below the threshold: straight out, no confirmation ────────────────────────────────────
     click(&mut s, "DropDownList1Button2");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert_eq!(
-        s.take_loot_master_gives(),
-        vec![(1, 2)],
-        "row 1 to candidate 2"
-    );
+    assert_eq!(gives(&mut s), vec![(1, 2)], "row 1 to candidate 2");
     assert!(
         !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "an uncommon item is under MASTER_LOOT_THREHOLD — no confirmation"
@@ -792,13 +819,13 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
         s.eval::<i64>("return LootFrame.selectedQuality").unwrap(),
         4
     );
-    let _ = s.take_loot_picks();
+    let _ = s.take_loot_calls();
     s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
     s.resolve();
     click(&mut s, "DropDownList1Button1");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.take_loot_master_gives().is_empty(),
+        gives(&mut s).is_empty(),
         "an epic asks first — nothing is sent on the dropdown click"
     );
     assert!(
@@ -808,7 +835,7 @@ fn shipped_loot_frame_hands_a_master_row_to_a_candidate() {
     s.run("StaticPopup1Button1:Click()").unwrap(); // Yes
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
-        s.take_loot_master_gives(),
+        gives(&mut s),
         vec![(2, 1)],
         "row 2 to candidate 1, only after the accept"
     );
@@ -833,6 +860,7 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
     use benilla_ui::script::{PartyState, RaidMemberInfo};
 
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -857,7 +885,7 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
     candidates[10] = Some("Sylvanas".to_string());
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: candidates,
         rows: vec![Some(LootRow {
             item_id: 17182,
@@ -877,7 +905,7 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
     s.mouse_button(x as f32, y as f32, "LeftButton", true);
     s.mouse_button(x as f32, y as f32, "LeftButton", false);
     s.resolve();
-    let _ = s.take_loot_picks();
+    let _ = s.take_loot_calls();
     s.fire_event("OPEN_MASTER_LOOT_LIST", vec![]);
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -913,6 +941,7 @@ fn the_master_loot_menu_groups_raid_candidates_by_subgroup() {
 fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -922,7 +951,7 @@ fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
     }
     s.set_loot(Some(coin_and_two_items()));
     s.fire_event("LOOT_OPENED", vec![]);
-    let _ = s.take_loot_picks();
+    let _ = s.take_loot_calls();
 
     // The app defers row 2 and says so.
     s.fire_event(
@@ -963,10 +992,9 @@ fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
     s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
     assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
     assert!(
-        s.take_loot_confirms().is_empty(),
-        "Cancel completes nothing"
+        s.take_loot_calls().is_empty(),
+        "Cancel completes nothing, and takes nothing either"
     );
-    assert!(s.take_loot_picks().is_empty(), "and takes nothing either");
 
     // Button 1, Okay: the row goes back out through `LootSlot`.
     s.fire_event(
@@ -975,9 +1003,9 @@ fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
     );
     s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
     assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
-    assert_eq!(s.take_loot_confirms(), vec![2]);
-    assert!(
-        s.take_loot_picks().is_empty(),
+    assert_eq!(
+        s.take_loot_calls(),
+        vec![LootCall::Confirm(2)],
         "the accept is a continuation, never a fresh take"
     );
 
@@ -1000,6 +1028,7 @@ fn the_loot_bind_confirm_raises_the_dialog_and_okay_calls_loot_slot() {
 fn a_row_click_takes_rather_than_continues() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -1014,10 +1043,10 @@ fn a_row_click_takes_rather_than_continues() {
     let (ix, iy) = icon_center(&quads, "INV_Fabric_Wool_01");
     s.mouse_button(ix, iy, "LeftButton", true);
     s.mouse_button(ix, iy, "LeftButton", false);
-    assert_eq!(s.take_loot_picks(), vec![2], "the click is a TAKE");
-    assert!(
-        s.take_loot_confirms().is_empty(),
-        "and never a continuation"
+    assert_eq!(
+        s.take_loot_calls(),
+        vec![LootCall::Take(2)],
+        "the click is a TAKE, never a continuation"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1028,6 +1057,7 @@ fn a_row_click_takes_rather_than_continues() {
 fn loot_row_awaiting_its_template_opens_clean() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,
@@ -1039,7 +1069,7 @@ fn loot_row_awaiting_its_template_opens_clean() {
     // One row in flight: the wire gives the icon (by display id) and the count, nothing else.
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: Vec::new(),
         rows: vec![Some(LootRow {
             item_id: 2582,
@@ -1089,9 +1119,9 @@ fn loot_row_awaiting_its_template_opens_clean() {
     assert_eq!(miss, (1.0, 1.0, 1.0), "the cache-miss row is Common/white");
     // f32 region storage against the binding's f64: compare within a tolerance.
     assert!(
-        (painted.0 - miss.0).abs() < 1e-6
-            && (painted.1 - miss.1).abs() < 1e-6
-            && (painted.2 - miss.2).abs() < 1e-6,
+        (painted.0 - miss.0).abs() < 1.0 / 255.0
+            && (painted.1 - miss.1).abs() < 1.0 / 255.0
+            && (painted.2 - miss.2).abs() < 1.0 / 255.0,
         "LootFrame_Update:85 must paint the -1 colour, got {painted:?} want {miss:?}"
     );
 
@@ -1100,7 +1130,7 @@ fn loot_row_awaiting_its_template_opens_clean() {
     s.fire_event("LOOT_CLOSED", vec![]);
     s.set_loot(Some(LootState {
         source_unit: false,
-        fishing: false,
+        has_money: false,
         master_candidates: Vec::new(),
         rows: vec![Some(LootRow {
             item_id: 2582,
@@ -1131,6 +1161,7 @@ fn loot_row_awaiting_its_template_opens_clean() {
 fn stock_loot_rows_wear_the_item_button_art_and_light_under_the_cursor() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,

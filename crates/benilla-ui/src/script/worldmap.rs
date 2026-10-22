@@ -17,6 +17,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi;
 use super::Model;
 
 /// One zone of a continent; its 1-based position is the Lua zone index.
@@ -137,6 +138,16 @@ pub struct WorldMapSheetRow {
     /// `OffsetX` and `OffsetY`, in sheet tiles.
     pub offset: (f32, f32),
     pub scale: f32,
+}
+
+/// The `(x, y)` of `ProcessMapClick` (`0x4a7f30`) and `UpdateMapHighlight` (`0x4a7fa0`): both
+/// `lua_isnumber`-gated (`0x4a7f3e`, `0x4a7f4e`; `0x4a7fb0`, `0x4a7fc4`) and read as floats
+/// (`0x6f3620`), else the binding's own usage text (`0x845438`, `0x845458`), no receiver named.
+fn map_point(lua: &Lua, x: Value, y: Value, usage: &str) -> mlua::Result<(f32, f32)> {
+    match (lua.coerce_number(x)?, lua.coerce_number(y)?) {
+        (Some(x), Some(y)) => Ok((x as f32, y as f32)),
+        _ => Err(mlua::Error::runtime(usage)),
+    }
 }
 
 /// The `0x4a6ec0` cell law: clamp the UV, un-lerp through the loc rect to world coordinates,
@@ -586,7 +597,7 @@ impl super::UiScript {
         while model.arena.frame(fh)?.name.as_deref() != Some("WorldMapButton") {
             fh = model.arena.frame(fh)?.parent?;
         }
-        let r = model.resolved.get(&fh)?;
+        let r = model.frame_rect(fh)?;
         let (w, h) = (r.right - r.left, r.top - r.bottom);
         (w > 0.0 && h > 0.0).then(|| ((x - r.left) / w, (r.top - y) / h))
     }
@@ -697,7 +708,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // what keeps `WorldMapZoneButton_OnClick` from calling `SetMapZoom(-1, id)`.
     g.set(
         "GetMapZones",
-        lua.create_function(|lua, c: i64| {
+        lua.create_function(|lua, c: Value| {
+            // `is-number` else `Usage: GetMapZones(continentIndex)` (`0x8453e4`, `0x4a7d28`).
+            let c = i64::from(binding_abi::number_arg(
+                lua,
+                c,
+                "Usage: GetMapZones(continentIndex)",
+            )?);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let zones = usize::try_from(c)
                 .ok()
@@ -735,11 +752,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "SetMapZoom",
-        lua.create_function(|lua, (c, z): (i64, Option<i64>)| {
+        lua.create_function(|lua, (c, z): (Value, Value)| {
+            // `is-number` else `Usage: SetMapZoom(continentIndex [,zoneIndex])` (`0x845408`,
+            // `0x4a7dc1`).
+            let c = i64::from(binding_abi::number_arg(
+                lua,
+                c,
+                "Usage: SetMapZoom(continentIndex [,zoneIndex])",
+            )?);
+            // The zone is 0 unless `is-number` passes (`0x4a7df0`-`0x4a7e08`), never raising.
+            let z = lua
+                .coerce_number(z)?
+                .map_or(0, |n| i64::from(binding_abi::ftol(n)));
             select(
                 &mut lua.app_data_mut::<Model>().expect("model app_data"),
                 c,
-                z.unwrap_or(0),
+                z,
             );
             fire_world_map_update(lua);
             Ok(())
@@ -861,7 +889,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // rect (`0x4a6ec0`), which it drills into.
     g.set(
         "ProcessMapClick",
-        lua.create_function(|lua, (x, y): (f32, f32)| {
+        lua.create_function(|lua, (x, y): (Value, Value)| {
+            let (x, y) = map_point(lua, x, y, "Usage: ProcessMapClick(x, y)")?;
             let target = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let wm = &model.worldmap;
@@ -892,7 +921,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // scrollChildX, scrollChildY (`0x4a7fa0`): eight values always, a nil fileName hiding the quad.
     g.set(
         "UpdateMapHighlight",
-        lua.create_function(|lua, (x, y): (f32, f32)| {
+        lua.create_function(|lua, (x, y): (Value, Value)| {
+            let (x, y) = map_point(lua, x, y, "Usage: UpdateMapHighlight(x, y)")?;
             let hit = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 hover(&model.worldmap, x, y)
@@ -934,7 +964,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // marker's packet Icon; an empty description is nil, as `0x6f3890` pushes for a NULL string.
     g.set(
         "GetMapLandmarkInfo",
-        lua.create_function(|lua, i: i64| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: GetMapLandmarkInfo(index)` (`0x8454a0`, `0x4a8757`).
+            let i = i64::from(binding_abi::number_arg(
+                lua,
+                i,
+                "Usage: GetMapLandmarkInfo(index)",
+            )?);
             let landmark = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 usize::try_from(i)
@@ -979,7 +1015,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // mapPointX, mapPointY; mapPointX and mapPointY are 0 on every 5875 row.
     g.set(
         "GetMapOverlayInfo",
-        lua.create_function(|lua, i: i64| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: GetMapOverlayInfo(index)` (`0x84552c`, `0x4a8a1b`).
+            let i = i64::from(binding_abi::number_arg(
+                lua,
+                i,
+                "Usage: GetMapOverlayInfo(index)",
+            )?);
             let overlay = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 usize::try_from(i)

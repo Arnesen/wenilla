@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use benilla_formats::{ChrClasses, ChrRaces};
+use benilla_formats::{ChrClasses, ChrRaces, Reaction};
 use benilla_protocol::messages::ObjectType;
 use benilla_ui::script::{
     parse_unit_token, ScriptValue, UiScript, UnitBase, UnitState, UnitTokenParse, WornDisplay,
@@ -16,12 +16,16 @@ use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::query_cache::Ask;
-use crate::target::{ring_reaction, Factions, Selection};
-use crate::ui_script::{gate, SweepApp, UiInput};
+use crate::target::{Factions, RelUnit, Relations, Selection};
+use crate::ui_script::{gate, SweepApp};
 
 pub(crate) mod control_gate;
 pub(crate) mod field_events;
 mod held;
+mod relations;
+pub(crate) mod tooltip_facts;
+
+pub(crate) use held::{traits_from_name_cache, unit_reach};
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
@@ -30,18 +34,31 @@ pub(crate) struct UnitFeed;
 
 /// The feeds that seat a new VM with what the reference's caches hold across a `/reload`, ahead of
 /// the world-enter cascade whose handlers read it: the quest log's records, slots and creature
-/// names, and the item records.
+/// names, the item records, and the reputation list the cascade's rebuild signals over.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct WorldEnterSeats;
+
+/// `feed_units`' pushes of the token snapshots, which an event fired after them reads: the party
+/// feed's `RAID_TARGET_UPDATE`, whose TargetFrame handler asks `GetRaidTargetIndex("target")`.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UnitSnapshots;
+
+/// [`fire_unit_events`]' signal, `PLAYER_TARGET_CHANGED`: a feed whose state its handlers read
+/// runs `.before(UnitEvents)`.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UnitEvents;
 
 /// One `UNIT_COMBAT` over a unit, the portrait hit indicator's feed. The emitter `0x494600` fires
 /// `(token, action, descriptor, amount, type)` once per token naming the unit, with no
 /// self-suppression and no CVar gate; `type` is the school on the melee and spell-damage paths, 0
-/// from the miss and heal wrappers, and the 1.12 binary never emits `ENERGIZE`. The melee victim
-/// event waits for the impact keyframe (`0x6243e0`, reached only from `0x624530`).
-#[derive(Message, Clone, Copy)]
+/// from the miss and heal wrappers, and the 1.12 binary never emits `ENERGIZE`. Each rides the chat
+/// drain's queue ([`crate::ui_chat::ChatLog::push_unit_combat`]), so it reaches Lua at its place
+/// among the combat-log lines raised beside it. A melee victim's comes from `0x6243e0`
+/// ([`melee_unit_combat`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct UnitCombatFeedback {
-    pub(crate) unit: Entity,
+    /// The unit, by the guid `0x494600` is handed.
+    pub(crate) guid: u64,
     /// `arg2`, the action word (`WOUND`, `MISS`, `DODGE`, `PARRY`, `BLOCK`, `HEAL`, …).
     pub(crate) action: &'static str,
     /// `arg3`, the descriptor: `CRITICAL`/`CRUSHING`/`GLANCING`/`ABSORB`/`BLOCK`/`RESIST`, or `""`.
@@ -50,17 +67,6 @@ pub(crate) struct UnitCombatFeedback {
     pub(crate) amount: u32,
     /// `arg5`, the school (0 physical); stock draws a `type > 0` number spell-yellow.
     pub(crate) school: u32,
-}
-
-/// One `COMBAT_TEXT_UPDATE` (event `0x21E`, via `0x703f50`), fired at packet parse by every
-/// producer, melee included (`0x6255b0` → `0x629d30`); `data`/`extra` are `arg2`/`arg3`. Fired only
-/// when the unit the line is about is the player: each emitter tests that unit's class (`0x5efea0`)
-/// for 0 before its helper (`0x629ef1`, `0x62d046`, `0x62834b`).
-#[derive(Message, Clone)]
-pub(crate) struct CombatTextEvent {
-    pub(crate) message_type: &'static str,
-    pub(crate) data: Option<String>,
-    pub(crate) extra: Option<String>,
 }
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
@@ -88,13 +94,21 @@ struct UnitFeedMemo {
     last_rest: Option<(u8, u32, u32)>,
     /// Our last level; the first sighting is the login descriptor, not a ding.
     last_level: Option<u32>,
-    /// `(count, banked target)`, diffed as a pair because the server writes them as one.
+    /// `(count, banked target)`, pushed as a pair because `GetComboPoints` reads both.
     last_combo: Option<(u8, u64)>,
     /// `(HIDE_HELM, HIDE_CLOAK)`, pushed on the edge only: the Options setter flips the VM's
     /// belief ahead of the server, and a per-frame push would snap it back.
     worn_hidden: Option<(bool, bool)>,
     /// `PLAYER_FIELD_BYTES` byte 2 (`GetActionBarToggles`, `0x4e7660`); no field watch, no event.
     action_bar_toggles: Option<u8>,
+    /// The events the pushes owe, which [`fire_unit_events`] signals after the action feed.
+    pending: PendingUnitEvents,
+}
+
+/// What [`feed_units`] pushed this frame that owes an event after the usable refresh.
+#[derive(Default)]
+struct PendingUnitEvents {
+    target_changed: bool,
 }
 
 /// Adds the per-frame unit feed; the `Unit*` bindings live in `benilla-ui`.
@@ -102,7 +116,7 @@ pub(crate) struct UiUnitPlugin;
 
 impl Plugin for UiUnitPlugin {
     fn build(&self, app: &mut App) {
-        field_events::add_notice_drop(app);
+        field_events::add_notice_lane(app);
         app.configure_sets(
             Update,
             UnitFeed
@@ -114,10 +128,8 @@ impl Plugin for UiUnitPlugin {
         // A UI-only harness has no sound or net stack, and a missing resource or message is a
         // system-validation panic; declaring twice is idempotent.
         .init_resource::<crate::sound::MessageSounds>()
-        .add_message::<UnitCombatFeedback>()
-        .add_message::<CombatTextEvent>()
+        .init_resource::<crate::ui_chat::ChatLog>()
         .add_message::<crate::net::WorldportMessage>()
-        .add_message::<crate::field_watch::FieldNotice>()
         .init_world_leave_sweep()
         // Ahead of the unit feed, so a worldport's leaving edge precedes the entering edge
         // `feed_units` raises for the same port, and outside its gate: the destructor sweeps
@@ -134,32 +146,53 @@ impl Plugin for UiUnitPlugin {
                 // After the seats the world-enter cascade's handlers read.
                 feed_units
                     .in_set(field_events::FieldEventPushes)
+                    .in_set(UnitSnapshots)
                     .after(WorldEnterSeats),
-                // After the aura feed, whose resolver inputs it measures.
+                // After the snapshots its handlers read, and ahead of the action feed's events:
+                // `SetPlayerControl` stores the flag (`0x4958ea`) and signals its event
+                // (`0x4958f7`, `0x49590b`) before the usable refresh (`0x4958fc`, `0x495910`).
+                feed_player_control
+                    .after(crate::player::ControlRestore)
+                    .before(crate::ui_action::CooldownEvents),
+                // After the aura feed, whose resolver inputs it measures, and ahead of the unit
+                // events, whose `PLAYER_TARGET_CHANGED` handlers ask the new target's range
+                // (`CanInspect`, `0x48a1b0`).
                 feed_unit_reach.after(crate::ui_aura::AuraEvents),
-                // After the same feed, whose guids it covers.
+                // After the action feed, whose usable refresh precedes these events.
+                fire_unit_events
+                    .in_set(UnitEvents)
+                    .after(crate::ui_action::CooldownEvents),
+                // After the aura feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
                 // After every snapshot above is pushed, so a handler reads the new reaction.
                 fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
-                // After the pushes its handlers read and the token seat it fans out over.
-                field_events::fire_field_notices
-                    .after(field_events::FieldEventPushes)
-                    .after(crate::ui_aura::AuraEvents),
                 held::feed_name_candidates,
-                feed_player_control.after(crate::player::ControlRestore),
                 // After the control edge, whose flag the exemption is asked for.
                 control_gate::feed_control_bypass,
                 feed_farsight_focus,
-                melee_unit_combat,
-                fire_unit_combat,
-                fire_combat_text,
             )
                 .chain()
                 .in_set(UnitFeed),
         )
-        .add_systems(Update, drain_pvp_toggles.after(UiInput))
-        .add_systems(Update, drain_worn_display_toggles.after(UiInput))
-        .add_systems(Update, drain_action_bar_toggles.after(UiInput))
+        // The relation functions the six relation verbs ask, ahead of every feed whose events a
+        // handler asks them in: the usable refresh's and `PLAYER_TARGET_CHANGED`, both after the
+        // unit snapshots, and the aura feed's.
+        .add_systems(
+            Update,
+            relations::feed_unit_relations
+                .in_set(UnitFeed)
+                .before(UnitSnapshots)
+                .before(crate::ui_aura::AuraEvents),
+        )
+        .add_systems(Update, drain_pvp_toggles.in_set(crate::ui_script::UiDrain))
+        .add_systems(
+            Update,
+            drain_worn_display_toggles.in_set(crate::ui_script::UiDrain),
+        )
+        .add_systems(
+            Update,
+            drain_action_bar_toggles.in_set(crate::ui_script::UiDrain),
+        )
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
         .add_systems(Update, feed_known_languages.in_set(UnitFeed))
         // `load_exhaustion_rows` pushes into the VM, so it runs per VM; the rest are one-shots.
@@ -229,7 +262,7 @@ pub(crate) fn known_languages(
 }
 
 fn feed_known_languages(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     actions: Option<Res<crate::ui_action::PlayerActions>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
@@ -237,42 +270,44 @@ fn feed_known_languages(
     self_q: Query<Ref<ObjectStore>, With<SelfPlayer>>,
     mut pushed: Local<crate::ui_script::VmMemo<Option<Vec<String>>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let (Some(actions), Some(spells), Some(languages)) = (actions, spells, languages) else {
-        return;
-    };
-    let pushed = pushed.get(&script);
-    let store = self_q.iter().next();
-    // With no input moved since this VM's push, a rebuild could only reproduce the memo.
-    let inputs_moved = store.as_ref().is_some_and(|s| s.is_changed())
-        || actions.is_changed()
-        || spells.is_changed()
-        || languages.is_changed()
-        || skill_lines.as_ref().is_some_and(|l| l.is_changed());
-    if pushed.is_some() && !inputs_moved {
-        return;
-    }
-    let store: Option<&ObjectStore> = store.as_deref();
-    let has_skill_line = |line: u32| {
-        store.is_some_and(|s| {
-            (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
-                .filter_map(|i| s.0.player_skill(i))
-                .any(|slot| u32::from(slot.skill_id) == line)
-        })
-    };
-    let names = known_languages(
-        actions.spells.iter().copied(),
-        &spells.catalog,
-        skill_lines.as_deref().map(|s| &s.catalog),
-        has_skill_line,
-        &languages.0,
-    );
-    if pushed.as_ref() != Some(&names) {
-        script.set_known_languages(names.clone());
-        *pushed = Some(names);
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let (Some(actions), Some(spells), Some(languages)) = (actions, spells, languages) else {
+            return;
+        };
+        let pushed = pushed.get(script);
+        let store = self_q.iter().next();
+        // With no input moved since this VM's push, a rebuild could only reproduce the memo.
+        let inputs_moved = store.as_ref().is_some_and(|s| s.is_changed())
+            || actions.is_changed()
+            || spells.is_changed()
+            || languages.is_changed()
+            || skill_lines.as_ref().is_some_and(|l| l.is_changed());
+        if pushed.is_some() && !inputs_moved {
+            return;
+        }
+        let store: Option<&ObjectStore> = store.as_deref();
+        let has_skill_line = |line: u32| {
+            store.is_some_and(|s| {
+                (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
+                    .filter_map(|i| s.0.player_skill(i))
+                    .any(|slot| u32::from(slot.skill_id) == line)
+            })
+        };
+        let names = known_languages(
+            actions.spells.iter().copied(),
+            &spells.catalog,
+            skill_lines.as_deref().map(|s| &s.catalog),
+            has_skill_line,
+            &languages.0,
+        );
+        if pushed.as_ref() != Some(&names) {
+            script.set_known_languages(names.clone());
+            *pushed = Some(names);
+        }
+    })
 }
 
 fn load_default_languages(
@@ -329,164 +364,142 @@ pub(crate) fn seed_language_table(world: &World, script: &mut UiScript) {
 /// Push `GetDefaultLanguage()`'s string on a change of race; `None` is the reference's zero value.
 /// The name is the install's locale column (`[0xc0e080]`).
 fn feed_default_language(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     langs: Option<Res<DefaultLanguagesRes>>,
     mut pushed: Local<crate::ui_script::VmMemo<Option<Option<String>>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let pushed = pushed.get(&script);
-    let name = self_q
-        .iter()
-        .next()
-        .and_then(|store| store.0.unit_race())
-        .zip(langs.as_ref())
-        .and_then(|(race, langs)| langs.0.name(u32::from(race)))
-        .map(str::to_string);
-    if pushed.as_ref() != Some(&name) {
-        script.set_default_language(name.clone());
-        *pushed = Some(name);
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let pushed = pushed.get(script);
+        let name = self_q
+            .iter()
+            .next()
+            .and_then(|store| store.0.unit_race())
+            .zip(langs.as_ref())
+            .and_then(|(race, langs)| langs.0.name(u32::from(race)))
+            .map(str::to_string);
+        if pushed.as_ref() != Some(&name) {
+            script.set_default_language(name.clone());
+            *pushed = Some(name);
+        }
+    })
 }
 
 /// Seed each VM's `Exhaustion.dbc` table; a failed load keeps the shipped-table fallback.
 fn load_exhaustion_rows(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     assets: Option<Res<benilla_assets::WorldAssets>>,
     mut seeded: Local<crate::ui_script::VmMemo<bool>>,
 ) {
-    let (Some(mut script), Some(assets)) = (script, assets) else {
-        return;
-    };
-    if !seeded.claim(&script) {
-        return;
-    }
-    let loaded = {
-        use benilla_assets::LockRecover;
-        let mut chain = assets.chain.lock_recover();
-        benilla_formats::load_exhaustion(&mut chain)
-    };
-    match loaded {
-        Ok(rows) => {
-            info!("ui_unit: {} Exhaustion.dbc rest states", rows.len());
-            script.set_exhaustion_rows(
-                rows.into_iter()
-                    .map(|r| (r.id as u8, r.name, f64::from(r.factor)))
-                    .collect(),
-            );
+    hosted_vm.run(|script| {
+        let (Some(script), Some(assets)) = (script, assets) else {
+            return;
+        };
+        if !seeded.claim(script) {
+            return;
         }
-        Err(e) => error!("ui_unit: Exhaustion.dbc failed — shipped-table fallback holds: {e:#}"),
-    }
-}
-
-/// Melee swing to the `UNIT_COMBAT` action (victim-state table `0x83de28`, `0x4946d0`) and
-/// descriptor, HitInfo keyed on the amount's sign: above zero CRITICAL `0x80`, GLANCING `0x4000`,
-/// CRUSHING `0x8000`; else ABSORB `0x20`, BLOCK `0x800`, RESIST `0x40`.
-fn melee_feedback(hit_info: u32, victim_state: u32, damage: u32) -> (&'static str, &'static str) {
-    match victim_state {
-        2 => ("DODGE", ""),
-        3 => ("PARRY", ""),
-        5 => ("BLOCK", ""),
-        6 => ("EVADE", ""),
-        7 => ("IMMUNE", ""),
-        8 => ("DEFLECT", ""),
-        // 0 UNAFFECTED / 1 NORMAL / 4 INTERRUPT: WOUND, descriptor by the amount-sign key.
-        _ => {
-            if damage > 0 {
-                if hit_info & 0x80 != 0 {
-                    ("WOUND", "CRITICAL")
-                } else if hit_info & 0x4000 != 0 {
-                    ("WOUND", "GLANCING")
-                } else if hit_info & 0x8000 != 0 {
-                    ("WOUND", "CRUSHING")
-                } else {
-                    ("WOUND", "")
-                }
-            } else if hit_info & 0x20 != 0 {
-                ("WOUND", "ABSORB")
-            } else if hit_info & 0x800 != 0 {
-                ("WOUND", "BLOCK") // a full block the parse did not already make state 5
-            } else if hit_info & 0x40 != 0 {
-                ("WOUND", "RESIST")
-            } else {
-                ("MISS", "")
+        let loaded = {
+            use benilla_assets::LockRecover;
+            let mut chain = assets.chain.lock_recover();
+            benilla_formats::load_exhaustion(&mut chain)
+        };
+        match loaded {
+            Ok(rows) => {
+                info!("ui_unit: {} Exhaustion.dbc rest states", rows.len());
+                script.set_exhaustion_rows(
+                    rows.into_iter()
+                        .map(|r| (r.id as u8, r.name, f64::from(r.factor)))
+                        .collect(),
+                );
+            }
+            Err(e) => {
+                error!("ui_unit: Exhaustion.dbc failed — shipped-table fallback holds: {e:#}")
             }
         }
-    }
+    })
 }
 
-/// The melee `UNIT_COMBAT` producer, on the swing's impact keyframe, `text_only` flushes included;
-/// the center combat text is not here, as the reference fires it at packet parse.
-fn melee_unit_combat(
-    mut impacts: MessageReader<crate::creature_anim::SwingImpact>,
-    mut out: MessageWriter<UnitCombatFeedback>,
+/// A swing's `UNIT_COMBAT` on its victim, as `FloatSwingResult 0x6243e0` raises it (`0x4946d0`, at
+/// `0x6244bf` and `0x624518`), queued in the chat drain where its caller stands: for a displayed
+/// swing only (`0x625e40`, which returns at `0x624414` past both the number and the event), on a
+/// victim held as a unit (each caller's `0x468460`, mask 8; `victim` is its guid and store). The
+/// callers are the impact key (`0x6249bb` → `0x624530`), an unheld attacker's swing at receive
+/// (`0x625a6d` → `0x624530`), and the flushes of a superseded (`0x625893`) or stopped (`0x624ea7`)
+/// record. The swing's `COMBAT_TEXT_UPDATE` rides its combat-log line instead.
+pub(crate) fn melee_unit_combat(
+    log: &crate::ui_chat::ChatLog,
+    s: &crate::creature_anim::SwingMessage,
+    victim: Option<(u64, &crate::net::ObjectStore)>,
 ) {
-    for crate::creature_anim::SwingImpact { swing: s, .. } in impacts.read() {
-        let Some(victim) = s.victim else { continue };
-        let (action, flags) = melee_feedback(s.hit_info, s.victim_state, s.damage);
-        out.write(UnitCombatFeedback {
-            unit: victim,
-            action,
-            flags,
-            amount: s.damage,
-            school: 0, // the reference passes sub-damage 0's school (`0x4946fc`), not carried here
-        });
+    if !s.displayed {
+        return;
     }
-}
-
-/// Drain [`CombatTextEvent`] into `COMBAT_TEXT_UPDATE(messageType, data, extra)`.
-fn fire_combat_text(
-    script: Option<NonSendMut<UiScript>>,
-    mut events: MessageReader<CombatTextEvent>,
-) {
-    let Some(mut script) = script else {
+    let Some((guid, _)) = victim.filter(|(_, store)| crate::ui_chat::combat::is_unit(store)) else {
         return;
     };
-    for ev in events.read() {
-        let arg = |v: &Option<String>| v.clone().map_or(ScriptValue::Nil, ScriptValue::Str);
+    crate::combat_log::feedback::swing(log, guid, s.victim_state, s.hit_info, s.damage);
+}
+
+/// `COMBAT_TEXT_UPDATE(messageType, data, extra)` (event `0x21e`, through the five helpers
+/// `0x626890`-`0x6269d0`): `data` and `extra` are `arg2` and `arg3`, nil when absent. Each combat-log
+/// formatter raises it right after its line, so the line's drain fires it; the usable refresh
+/// raises `SPELL_ACTIVE` (`0x4b3226`).
+pub(crate) fn fire_combat_text(
+    script: &mut UiScript,
+    message_type: &str,
+    data: Option<String>,
+    extra: Option<String>,
+) {
+    script.fire_event(
+        "COMBAT_TEXT_UPDATE",
+        combat_text_args(message_type, data, extra),
+    );
+}
+
+/// [`fire_combat_text`]'s arguments, for a feed that posts the event after its pushes.
+pub(crate) fn combat_text_args(
+    message_type: &str,
+    data: Option<String>,
+    extra: Option<String>,
+) -> Vec<ScriptValue> {
+    let arg = |v: Option<String>| v.map_or(ScriptValue::Nil, ScriptValue::Str);
+    vec![
+        ScriptValue::Str(message_type.to_string()),
+        arg(data),
+        arg(extra),
+    ]
+}
+
+/// Fire one [`UnitCombatFeedback`] as `UNIT_COMBAT` for `"player"` and `"target"` only, the tokens
+/// `is_self` and `is_target` say name its unit; the reference fires once per token naming the
+/// unit, and stock `PetFrame.lua:13` listens for `"pet"`. The chat drain calls it at the event's
+/// place in its queue.
+pub(crate) fn fire_unit_combat(
+    script: &mut UiScript,
+    ev: &UnitCombatFeedback,
+    is_self: bool,
+    is_target: bool,
+) {
+    let mut fire = |token: &str| {
         script.fire_event(
-            "COMBAT_TEXT_UPDATE",
+            "UNIT_COMBAT",
             vec![
-                ScriptValue::Str(ev.message_type.to_string()),
-                arg(&ev.data),
-                arg(&ev.extra),
+                ScriptValue::Str(token.to_string()),
+                ScriptValue::Str(ev.action.to_string()),
+                ScriptValue::Str(ev.flags.to_string()),
+                ScriptValue::Int(i64::from(ev.amount)),
+                ScriptValue::Int(i64::from(ev.school)),
             ],
         );
-    }
-}
-
-/// Drain [`UnitCombatFeedback`] into `UNIT_COMBAT` for `"player"` and `"target"` only; the
-/// reference fires once per token naming the unit, and stock `PetFrame.lua:13` listens for `"pet"`.
-fn fire_unit_combat(
-    script: Option<NonSendMut<UiScript>>,
-    mut events: MessageReader<UnitCombatFeedback>,
-    self_q: Query<(), With<SelfPlayer>>,
-    selection: Res<Selection>,
-) {
-    let Some(mut script) = script else {
-        return;
     };
-    for ev in events.read() {
-        let mut fire = |token: &str| {
-            script.fire_event(
-                "UNIT_COMBAT",
-                vec![
-                    ScriptValue::Str(token.to_string()),
-                    ScriptValue::Str(ev.action.to_string()),
-                    ScriptValue::Str(ev.flags.to_string()),
-                    ScriptValue::Int(i64::from(ev.amount)),
-                    ScriptValue::Int(i64::from(ev.school)),
-                ],
-            );
-        };
-        if self_q.contains(ev.unit) {
-            fire("player");
-        }
-        if selection.target == Some(ev.unit) {
-            fire("target");
-        }
+    if is_self {
+        fire("player");
+    }
+    if is_target {
+        fire("target");
     }
 }
 
@@ -709,55 +722,55 @@ impl UnitTokens<'_, '_> {
         Some((*self.index.as_ref()?.0.get(&guid)?, guid))
     }
 
-    /// Resolve `token` as `0x515970` does: its base, then a hop for each `target` after it. The
-    /// text is read by [`parse_unit_token`], which the VM's resolver shares, so both take the same
-    /// tokens; a token that names nobody, or a base or hop the object manager does not hold, is
-    /// `None`.
-    pub(crate) fn resolve(&self, token: &str, selection: &Selection) -> Option<(Entity, u64)> {
+    /// `0x515970` on `token`: the guid its base names, then each `target` hop off the unit it has
+    /// reached. The text is read by [`parse_unit_token`], which the VM's resolver shares, so both
+    /// take the same tokens. A base needs no object, as a slot's guid (`0x4e81a0`) or the target's
+    /// (`[0xb4e2d8]`) names a party member out of range, save `mouseover`, which names a held unit
+    /// alone (`0x515bd9`); a hop reads the held unit's `UNIT_FIELD_TARGET` (`0x515a0f`-`0x515a25`),
+    /// so a hop off a unit the object manager does not hold is nobody (`0x515a16`). `None` is
+    /// nobody.
+    pub(crate) fn guid(&self, token: &str, selection: &Selection) -> Option<u64> {
         let UnitTokenParse::Unit { base, hops } = parse_unit_token(token) else {
             return None;
         };
-        let mut unit = self.base(base, selection)?;
+        let mut guid = self.base(base, selection).filter(|&g| g != 0)?;
         for _ in 0..hops {
-            unit = self.target_of(unit.0)?;
+            let (entity, _) = self.held(guid)?;
+            let store = self.stores.get(entity).ok().filter(|s| s.is_unit())?;
+            guid = store.0.unit_target().filter(|&g| g != 0)?;
         }
-        Some(unit)
+        Some(guid)
     }
 
-    /// The held unit a token's base names, before any `target` hop.
-    fn base(&self, base: UnitBase, selection: &Selection) -> Option<(Entity, u64)> {
+    /// `GetUnitFromToken 0x515940`: the object of the guid `token` names ([`Self::guid`]), held.
+    pub(crate) fn resolve(&self, token: &str, selection: &Selection) -> Option<(Entity, u64)> {
+        self.held(self.guid(token, selection)?)
+    }
+
+    /// The guid a token's base names, before any `target` hop.
+    fn base(&self, base: UnitBase, selection: &Selection) -> Option<u64> {
         match base {
-            UnitBase::Player => self.me(),
-            UnitBase::Target => selection.target.zip(selection.guid),
+            UnitBase::Player => self.me().map(|(_, guid)| guid),
+            UnitBase::Target => selection.guid,
             // The same pick `ui_tooltip` pushes `"mouseover"` from.
             UnitBase::Mouseover => self
                 .hovered
                 .as_ref()?
-                .mouseover(&self.hovered_go.as_deref().copied().unwrap_or_default()),
+                .mouseover(&self.hovered_go.as_deref().copied().unwrap_or_default())
+                .map(|(_, guid)| guid),
             // Off the pet bar's cached guid, as the `"pet"` snapshot reads it.
-            UnitBase::Pet => {
-                let guid = self.pet.as_ref()?.spells.pet_guid;
-                (guid != 0).then(|| self.held(guid)).flatten()
-            }
+            UnitBase::Pet => Some(self.pet.as_ref()?.spells.pet_guid),
             UnitBase::PartyPet(row) => self
                 .party_member(row)
                 .and_then(|member| self.pet_of(member, false)),
             UnitBase::RaidPet(row) => self
                 .raid_member(row)
                 .and_then(|member| self.pet_of(member, true)),
-            UnitBase::Raid(row) => self.raid_member(row).and_then(|guid| self.held(guid)),
-            UnitBase::Party(row) => self.party_member(row).and_then(|guid| self.held(guid)),
+            UnitBase::Raid(row) => self.raid_member(row),
+            UnitBase::Party(row) => self.party_member(row),
             // The interaction NPC's guid, `[0xb4e2d0]` (`0x515c00`).
-            UnitBase::Npc => self.held(self.interact.as_ref()?.1?),
+            UnitBase::Npc => self.interact.as_ref()?.1,
         }
-    }
-
-    /// One `target` hop (`0x515a0f`-`0x515a25`): the held unit's `UNIT_FIELD_TARGET`, held in turn.
-    /// The lookup takes the unit typemask, so a hop off any other object, or off a unit with no
-    /// target, is nobody.
-    fn target_of(&self, unit: Entity) -> Option<(Entity, u64)> {
-        let store = self.stores.get(unit).ok().filter(|s| s.is_unit())?;
-        self.held(store.0.unit_target()?)
     }
 
     /// The guid in 0-based party slot `row`, the one `partyN` and `partypetN` share.
@@ -769,23 +782,21 @@ impl UnitTokens<'_, '_> {
     /// The guid on 0-based raid row `row`, the one `raidN` and `GetRaidRosterInfo` share.
     fn raid_member(&self, row: u32) -> Option<u64> {
         let index = usize::try_from(row).ok()?.checked_add(1)?;
-        crate::ui_party::raid_row_guid(&self.group, self.me().map(|(_, g)| g), index)
+        crate::ui_party::raid_row_guid(&self.group, index)
     }
 
-    /// A group member's pet, held: `CHARM`, else `SUMMON`, off the member's descriptor while it is
-    /// held, else off the roster record's pet guid (`partypetN` `0x4e81d0`, `raidpetN` `0x491960`).
-    /// A pet the object manager does not hold names no unit here, as any unheld unit.
-    fn pet_of(&self, member: u64, raid: bool) -> Option<(Entity, u64)> {
+    /// A group member's pet: `CHARM`, else `SUMMON`, off the member's descriptor while it is held,
+    /// else off the roster record's pet guid (`partypetN` `0x4e81d0`, `raidpetN` `0x491960`).
+    fn pet_of(&self, member: u64, raid: bool) -> Option<u64> {
         let live = self
             .held(member)
             .and_then(|(entity, _)| self.stores.get(entity).ok())
             .map(|store| &store.0);
-        let pet = if raid {
+        if raid {
             self.group.raid_pet_guid(member, live)
         } else {
             self.group.party_pet_guid(member, live)
-        };
-        self.held(pet?)
+        }
     }
 }
 
@@ -808,115 +819,109 @@ fn dist_sq(q: Vec3, p: Vec3) -> f64 {
 /// ([`UiScript::bound_unit_tokens`]), the fan-out `0x515c50` builds; the first sight of a VM only
 /// seats the count, since a table that landed before it signalled no interface that exists now.
 fn fire_faction_on_forced_table(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     reputations: Res<Reputations>,
     mut seen: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let arrivals = reputations.forced_arrivals();
-    let seen = seen.get(&script);
-    let arrived = seen.is_some_and(|last| last != arrivals);
-    *seen = Some(arrivals);
-    if !arrived {
-        return;
-    }
-    for token in script.bound_unit_tokens() {
-        script.fire_event("UNIT_FACTION", vec![ScriptValue::Str(token)]);
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let arrivals = reputations.forced_arrivals();
+        let seen = seen.get(script);
+        let arrived = seen.is_some_and(|last| last != arrivals);
+        *seen = Some(arrivals);
+        if !arrived {
+            return;
+        }
+        for token in script.bound_unit_tokens() {
+            script.fire_event("UNIT_FACTION", vec![ScriptValue::Str(token)]);
+        }
+    })
 }
 
 /// `PLAYER_CONTROL_LOST`/`GAINED` on a change of the flag `SMSG_CLIENT_CONTROL_UPDATE` writes
 /// (`0x4958e0`), for our own character only (`0x5fa6d0`); the boot value, and a fresh VM's memo, is in control (`0x48f626`).
 fn feed_player_control(
-    script: Option<NonSendMut<UiScript>>,
-    player: Option<Res<crate::player::Player>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
+    own_control: Option<Res<crate::player::OwnControlLost>>,
     mut lost: Local<crate::ui_script::VmMemo<bool>>,
 ) {
-    let (Some(mut script), Some(player)) = (script, player) else {
-        return;
-    };
-    let lost = lost.get(&script);
-    if *lost != player.own_control_lost {
-        *lost = player.own_control_lost;
-        // `HasFullControl`'s flag rides the same edge.
-        script.set_player_control(!player.own_control_lost);
-        let event = if player.own_control_lost {
-            "PLAYER_CONTROL_LOST"
-        } else {
-            "PLAYER_CONTROL_GAINED"
+    hosted_vm.run(|script| {
+        let (Some(script), Some(own_control)) = (script, own_control) else {
+            return;
         };
-        script.fire_event(event, vec![]);
-    }
+        let lost = lost.get(script);
+        if *lost != own_control.0 {
+            *lost = own_control.0;
+            // `HasFullControl`'s flag rides the same edge.
+            script.set_player_control(!own_control.0);
+            let event = if own_control.0 {
+                "PLAYER_CONTROL_LOST"
+            } else {
+                "PLAYER_CONTROL_GAINED"
+            };
+            script.fire_event(event, vec![]);
+        }
+    })
 }
 
 /// `PLAYER_FARSIGHT_FOCUS_CHANGED`: the `PLAYER_FARSIGHT` field callback (`0x5de0d0`) fires it on
 /// every change, whether or not the new guid resolves, so this diffs the field, never the pose.
 fn feed_farsight_focus(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut focus: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let Some(store) = self_q.iter().next() else {
-        return;
-    };
-    let anchor = store.0.player_farsight();
-    let focus = focus.get(&script);
-    if *focus != anchor {
-        *focus = anchor;
-        script.fire_event("PLAYER_FARSIGHT_FOCUS_CHANGED", vec![]);
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let Some(store) = self_q.iter().next() else {
+            return;
+        };
+        let anchor = store.0.player_farsight();
+        let focus = focus.get(script);
+        if *focus != anchor {
+            *focus = anchor;
+            script.fire_event("PLAYER_FARSIGHT_FOCUS_CHANGED", vec![]);
+        }
+    })
 }
 
-/// Feed the unit reach map: per held unit a token can name, its squared distance and whether it
-/// passes inspect's two other refusals, a non-player and an attackable one (vmangos
-/// `MiscHandler.cpp:945-956`; that the client checks them is inferred, `0x48a1b0` being partly
-/// undecoded). The guids are the resolver's own inputs, which the aura feed pushes each frame
+/// Feed the unit reach map: per held unit a token can name, its [`held::unit_reach`]. The guids
+/// are the resolver's own inputs, which the aura feed pushes each frame
 /// ([`UiScript::held_unit_guids`], so this runs after it): the bases and each unit a `target`
 /// chain reaches, and the VM resolves a verb's token to one of them or to a guid with no entry. Ungated: distances move every
 /// frame, and no event keys off the map.
 fn feed_unit_reach(
-    script: Option<NonSendMut<UiScript>>,
-    tokens: UnitTokens,
+    mut vm: crate::script_calls::VmWith<UnitTokens<'static, 'static>>,
     self_q: Query<(&Transform, &ObjectStore), With<SelfPlayer>>,
     transforms: Query<&Transform>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<Reputations>,
+    world: crate::target::RelationWorld,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let mut reach = HashMap::new();
-    if let Some((self_tf, self_store)) = self_q.iter().next() {
-        for guid in script.held_unit_guids() {
-            let Some((entity, _)) = tokens.held(guid) else {
-                continue;
-            };
-            let Ok(tf) = transforms.get(entity) else {
-                continue;
-            };
-            let store = tokens.stores.get(entity).ok();
-            let inspectable = benilla_protocol::guid::is_player(guid)
-                && !crate::target::can_attack(
-                    store,
-                    factions.as_deref(),
-                    &reputations,
-                    Some(self_store),
+    vm.turn(|script, tokens| {
+        let Some(script) = script else {
+            return;
+        };
+        let mut reach = HashMap::new();
+        if let Some((self_tf, _)) = self_q.iter().next() {
+            for guid in script.held_unit_guids() {
+                let Some((entity, _)) = tokens.held(guid) else {
+                    continue;
+                };
+                let Ok(tf) = transforms.get(entity) else {
+                    continue;
+                };
+                let store = tokens.stores.get(entity).ok();
+                reach.insert(
+                    guid,
+                    held::unit_reach(&world, guid, store, tf.translation, self_tf.translation),
                 );
-            reach.insert(
-                guid,
-                benilla_ui::script::UnitReach {
-                    dist_sq: dist_sq(tf.translation, self_tf.translation),
-                    inspectable,
-                },
-            );
+            }
         }
-    }
-    script.set_unit_reach(reach);
+        script.set_unit_reach(reach);
+    })
 }
 
 /// [`feed_units`]' stores and change tracking, grouped to stay under Bevy's 16-parameter limit.
@@ -938,6 +943,11 @@ pub(crate) struct SnapshotTables<'w> {
     names: NameTables<'w>,
     spells: Option<Res<'w, crate::ui_action::Spells>>,
     creature_types: Option<Res<'w, crate::target::CreatureTypes>>,
+    /// The object manager's index, which the tooltip's owner line finds the owner through.
+    index: Option<Res<'w, crate::net::GuidIndex>>,
+    /// What the tooltip's studied-creature block reads.
+    study: Option<Res<'w, tooltip_facts::StudyTables>>,
+    families: Option<Res<'w, crate::ui_pet_stats::PetFamilyTables>>,
 }
 
 impl SnapshotTables<'_> {
@@ -945,6 +955,24 @@ impl SnapshotTables<'_> {
     /// reference's bounds leg.
     pub(crate) fn unit_names(&self) -> UnitNames<'_> {
         self.names.get()
+    }
+
+    /// `Spell.dbc`, absent without game data.
+    pub(crate) fn catalog(&self) -> Option<&benilla_formats::SpellCatalog> {
+        self.spells.as_deref().map(|s| &s.catalog)
+    }
+
+    /// The studied-creature block's tables.
+    pub(crate) fn study(&self) -> tooltip_facts::StudySources<'_> {
+        tooltip_facts::StudySources {
+            tables: self.study.as_deref(),
+            families: self.families.as_deref(),
+        }
+    }
+
+    /// The entity the object manager holds under `guid`.
+    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+        self.index.as_deref()?.0.get(&guid).copied()
     }
 
     /// The creature-type resolver's sources: the name cache, the form table and the type words.
@@ -957,16 +985,19 @@ impl SnapshotTables<'_> {
     }
 }
 
-/// `UnitReaction(unit, "player")` (`0x5167e0`): [`ring_reaction`] plus one (`0x51683e`), so
-/// `1..=7`, Hated to Revered, and Exalted reads 7 too (`0x606439`). Stock `UnitReactionColor`
-/// has seven entries (`TargetFrame.lua:6-14`), one per value.
-pub(crate) fn unit_reaction(
-    factions: Option<&Factions>,
-    reputations: &Reputations,
-    store: &ObjectStore,
-    self_store: Option<&ObjectStore>,
-) -> u8 {
-    ring_reaction(factions, reputations, Some(store), self_store) + 1
+/// `UnitReaction(unit, "player")` (`0x5167e0`): the unit's reaction toward the player plus one
+/// (`0x51683e`), so `1..=7`, Hated to Revered, and Exalted reads 7 too (`0x606439`). Stock
+/// `UnitReactionColor` has seven entries (`TargetFrame.lua:6-14`), one per value. Before the
+/// player's object streams it reads neutral.
+pub(crate) fn unit_reaction(rel: &Relations, unit: &RelUnit, me: Option<&RelUnit>) -> u8 {
+    me.map_or(Reaction::Neutral as u8, |me| rel.reaction(unit, me)) + 1
+}
+
+/// The player's reaction toward the unit, `0x6061e0(player, unit)`, on the same scale as
+/// [`unit_reaction`]; 0 before the player's object, where the tooltip's creature-type gate shows
+/// no type (`0x52a2d0`).
+pub(crate) fn player_reaction(rel: &Relations, unit: &RelUnit, me: Option<&RelUnit>) -> u8 {
+    me.map_or(0, |me| rel.reaction(me, unit) + 1)
 }
 
 /// Build a unit snapshot from a streamed descriptor, its guid, its cached name and its
@@ -1073,6 +1104,20 @@ pub(crate) fn snapshot(
         } else {
             Default::default()
         },
+        // `PLAYER_GUILDID`, the cache key of `GetGuildInfo` (`0x4c93a9`).
+        guild_id: store.0.player_guild_id(),
+        // `PLAYER_BYTES_3` byte 1; a creature has no PLAYER block and reads 0.
+        drunk: store.0.player_drunk_byte().unwrap_or(0),
+        // What the stat getters read of any unit but the active player (`0x515940`, then the
+        // object's fields), and the SUMMONEDBY their summon gate compares (`0x519272`).
+        combat: crate::ui_char::unit_combat_stats(store),
+        summoned_by: store.0.unit_summoned_by().unwrap_or(0),
+        tooltip: benilla_ui::script::UnitTooltipFacts {
+            // The builder's raw read (`0x52a89f`), not `UnitHealth`'s feign-death zero. The facts
+            // that read beyond the descriptor are [`tooltip_facts`]'.
+            health: store.0.unit_health().unwrap_or(0),
+            ..Default::default()
+        },
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
     }
@@ -1126,40 +1171,52 @@ pub(crate) fn enrich_unit(
 }
 
 /// Drain `TogglePVP` into `CMSG_TOGGLE_PVP`; `/pvp` is the reference's only caller.
-fn drain_pvp_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for _ in 0..script.take_pvp_toggles() {
-        let _ = commands.0.send(crate::net::ClientCommand::TogglePvp);
-    }
+fn drain_pvp_toggles(mut hosted_vm: crate::script_calls::HostedVm, commands: Res<NetCommands>) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for _ in 0..script.take_pvp_toggles() {
+            let _ = commands.0.send(crate::net::ClientCommand::TogglePvp);
+        }
+    })
 }
 
 /// Drain the `ShowHelm`/`ShowCloak` flips into `CMSG_TOGGLE_HELM`/`CMSG_TOGGLE_CLOAK`; the VM,
 /// which alone knows what the Options row did, has already decided each is needed.
-fn drain_worn_display_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for which in script.take_worn_display_toggles() {
-        let _ = commands.0.send(match which {
-            WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
-            WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
-        });
-    }
+fn drain_worn_display_toggles(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    commands: Res<NetCommands>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for which in script.take_worn_display_toggles() {
+            let _ = commands.0.send(match which {
+                WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
+                WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
+            });
+        }
+    })
 }
 
 /// Drain `SetActionBarToggles` into `CMSG_SET_ACTIONBAR_TOGGLES` (sent at `0x4e771d`), one packet
 /// per call: the reference binding neither checks for a change nor coalesces.
-fn drain_action_bar_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for toggles in script.take_action_bar_toggle_sends() {
-        let _ = commands
-            .0
-            .send(crate::net::ClientCommand::SetActionBarToggles { toggles });
-    }
+fn drain_action_bar_toggles(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    commands: Res<NetCommands>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for toggles in script.take_action_bar_toggle_sends() {
+            let _ = commands
+                .0
+                .send(crate::net::ClientCommand::SetActionBarToggles { toggles });
+        }
+    })
 }
 
 /// Inside a rest area (vmangos `Player.h:320`), the bit `IsResting` (`0x516ea0`) tests.
@@ -1221,13 +1278,6 @@ pub(crate) fn faction_group_localized(
         .map(str::to_string)
 }
 
-/// `CanAssist` (`0x6066f0`) of the player toward itself, `UnitCanAssist("player", "player")`: one
-/// object toward itself is friendly (`0x606200`), so `UNIT_FLAG_NOT_SELECTABLE` is the only refusal
-/// left.
-fn self_can_assist(store: &ObjectStore) -> bool {
-    crate::target::is_selectable(Some(store), None)
-}
-
 /// `"player"`'s snapshot off our own descriptor: no reaction (the unit is ours), the raid icon,
 /// both faction-group spellings and the guild. One builder for [`feed_units`] and for the seat a
 /// `/reload`'s load runs under ([`live_player_seat`]).
@@ -1256,7 +1306,6 @@ fn player_snapshot(
         tables.types(names),
     );
     s.is_player = true;
-    s.can_assist = self_can_assist(store);
     s.raid_target = group.raid_target_index(guid);
     s.faction_group = faction_group(store, factions);
     s.faction_group_localized = faction_group_localized(store, factions);
@@ -1314,21 +1363,25 @@ pub(crate) fn live_player_seat(
     })
 }
 
-/// One pass of the unit feed, for a test that follows a selection change to its event.
+/// One pass of the unit feed and its events, for a test that follows a selection change to its
+/// event.
 #[cfg(test)]
 pub(crate) fn run_feed_units_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
     world
         .run_system_once(feed_units)
         .expect("the unit feed runs as a one-shot system");
+    world
+        .run_system_once(fire_unit_events)
+        .expect("the unit events run as a one-shot system");
 }
 
 fn feed_units(
-    script: Option<NonSendMut<UiScript>>,
+    // What the host also reaches, read before the VM runs with the host lent.
+    mut hosted: ParamSet<(Res<Selection>, crate::script_calls::HostedVm)>,
     tables: SnapshotTables,
 
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
-    selection: Res<Selection>,
     // `Option`, as `factions`, `interact` and `entered_world`: a UI-only harness lacks their
     // plugins, and a bare `Res` is a system-validation panic.
     index: Option<Res<crate::net::GuidIndex>>,
@@ -1336,374 +1389,410 @@ fn feed_units(
     mut feed: ResMut<UnitFeedState>,
     names: Res<NameCache>,
     commands: Res<NetCommands>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<Reputations>,
+    world: crate::target::RelationWorld,
     group: Res<crate::ui_party::GroupState>,
     // Chat and the message-sound queue, for the rest and PvP lines.
-    mut sink: crate::ui_action::MessageSink,
+    sink: crate::ui_action::MessageSink,
     // `ResMut` because the guild-identity cache is lazy: a miss sends `CMSG_GUILD_QUERY`.
     mut guild: ResMut<crate::ui_guild::GuildState>,
     interact: Option<Res<crate::ui_session::InteractNpc>>,
+    // Our player's create since this feed last ran: an arrival (`0x5dea50`), which a `/reload`'s
+    // cascade lacks. The feed runs only with an interface up, so an arrival before one waits.
+    arrivals: Query<(), Added<SelfPlayer>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let chr = tables.unit_names();
-    let types = tables.types(&names);
-    // One reborrow, so the memo and `warned_sideless` borrow disjointly rather than alias.
-    let feed = &mut *feed;
-    let (memo, vm_reset) = feed.vm.get_reset(&script);
+    let arrived = !arrivals.is_empty();
+    let p = hosted.p0();
+    let selection_changed = p.is_changed();
+    let selection = *p;
+    hosted.p1().run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let chr = tables.unit_names();
+        let types = tables.types(&names);
+        // One reborrow, so the memo and `warned_sideless` borrow disjointly rather than alias.
+        let feed = &mut *feed;
+        let (memo, vm_reset) = feed.vm.get_reset(script);
 
-    // The gate: every input read below, despawns included (invisible to `Changed`).
-    let names_moved = memo.names_generation.moved(names.generation());
-    let guild_moved = memo.guild_generation.moved(guild.identity_generation());
-    let selection_changed = selection.is_changed();
-    let stores_changed = !stores.changed.is_empty();
-    let stores_removed = !stores.removed.is_empty();
-    let group_changed = group.is_changed();
-    let reps_changed = reputations.is_changed();
-    let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
-    // The interaction NPC moves when nothing else does, and `MERCHANT_SHOW` reads `"npc"`.
-    let interact_changed = interact.as_ref().is_some_and(|r| r.is_changed());
-    // A selection call showed its pick as `"target"` inside its chunk, past this memo.
-    let target_view_moved = script.take_target_view_moved();
-    gate::trace(
-        "feed_units",
-        &[
-            ("vm_reset", vm_reset),
-            ("names", names_moved),
-            ("guild", guild_moved),
-            ("selection", selection_changed),
-            ("stores", stores_changed),
-            ("removed", stores_removed),
-            ("group", group_changed),
-            ("reputations", reps_changed),
-            ("factions", factions_changed),
-            ("interact", interact_changed),
-            ("target_view", target_view_moved),
-        ],
-    );
-    let gate = gate::Gate::new(
-        vm_reset
-            || names_moved
-            || guild_moved
-            || selection_changed
-            || stores_changed
-            || stores_removed
-            || group_changed
-            || reps_changed
-            || factions_changed
-            || interact_changed
-            || target_view_moved,
-    );
-    stores.removed.clear();
-    if gate.skip() {
-        return;
-    }
-
-    // A missing unit is `None`, which `set_unit` clears; a name miss lands on a later frame.
-    let self_pair = self_q.iter().next();
-    let player = self_pair.map(|(store, guid)| {
-        player_snapshot(
-            store,
-            guid.0,
-            &tables,
-            &names,
-            &commands,
-            &group,
-            factions.as_deref(),
-            &mut guild,
-        )
-    });
-    // Log once when our template names no side, almost always GM mode (vmangos forces template
-    // 35, group mask 0): every `UnitFactionGroup` surface loses its side, as in the reference.
-    if let Some(p) = &player {
-        let sideless = p.faction_group.is_none();
-        if sideless && !feed.warned_sideless {
-            warn!(
-                "faction: our own template names no side (usually GM mode — vmangos forces \
-                 template 35, group mask 0). Every UnitFactionGroup-derived surface loses its \
-                 side while this holds — the PvP flag icon stays hidden however flagged you are. \
-                 `.gm off` restores it. (The Honor tab's rank title is NOT one of these: its team \
-                 digit comes from your race, not your template.)"
-            );
+        // The gate: every input read below, despawns included (invisible to `Changed`).
+        let names_moved = memo.names_generation.moved(names.generation());
+        let guild_moved = memo.guild_generation.moved(guild.identity_generation());
+        let stores_changed = !stores.changed.is_empty();
+        let stores_removed = !stores.removed.is_empty();
+        let group_changed = group.is_changed();
+        let relations_changed = world.inputs_changed();
+        // The interaction NPC moves when nothing else does, and `MERCHANT_SHOW` reads `"npc"`.
+        let interact_changed = interact.as_ref().is_some_and(|r| r.is_changed());
+        // A selection call showed its pick as `"target"` inside its chunk, past this memo.
+        let target_view_moved = script.take_target_view_moved();
+        gate::trace(
+            "feed_units",
+            &[
+                ("vm_reset", vm_reset),
+                ("names", names_moved),
+                ("guild", guild_moved),
+                ("selection", selection_changed),
+                ("stores", stores_changed),
+                ("removed", stores_removed),
+                ("group", group_changed),
+                ("relations", relations_changed),
+                ("interact", interact_changed),
+                ("target_view", target_view_moved),
+            ],
+        );
+        let gate = gate::Gate::new(
+            vm_reset
+                || names_moved
+                || guild_moved
+                || selection_changed
+                || stores_changed
+                || stores_removed
+                || group_changed
+                || relations_changed
+                || interact_changed
+                || target_view_moved,
+        );
+        stores.removed.clear();
+        if gate.skip() {
+            return;
         }
-        feed.warned_sideless = sideless;
-    }
-    // What the three snapshots below (target, target-of-target, NPC) read besides a descriptor.
-    let by_guid = |guid: u64| -> Option<ObjectStore> {
-        stores.all.get(*index.as_ref()?.0.get(&guid)?).ok().cloned()
-    };
-    let held = held::HeldUnits {
-        names: &names,
-        commands: &commands,
-        factions: factions.as_deref(),
-        reputations: &reputations,
-        group: &group,
-        self_store: self_pair.map(|(s, _)| s),
-        unit_names: chr,
-        types,
-        by_guid: &by_guid,
-    };
-    let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
-        let store = stores.all.get(e).ok()?;
-        let mut s = held.state(store, guid);
-        s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
-        Some(s)
-    });
 
-    // `"targettarget"`: one hop off the target's `UNIT_FIELD_TARGET`, streamed guids only, for the
-    // stock frame's poll (`TargetofTarget_OnUpdate`, `TargetFrame.lua:494-538`): no unit event
-    // carries the hop, whose token is none of `0x515c50`'s. No guild leg: nothing asks it for one,
-    // and a lazy-cache miss sends a query.
-    let tot = selection
-        .target
-        .and_then(|e| stores.all.get(e).ok())
-        .and_then(|s| s.0.unit_target())
-        .filter(|guid| *guid != 0)
-        .and_then(|guid| Some((*index.as_ref()?.0.get(&guid)?, guid)))
-        .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
-
-    // `"player"` is pushed only while its descriptor exists: the roster seat stands in before
-    // arrival, and `PLAYER_LOGOUT` handlers still read `UnitName("player")`, as the reference's do.
-    // `"target"` pushes its absence too; both diff against the event loop's memo.
-    if let Some(cur) = &player {
-        if memo.last.get("player") != Some(cur) {
-            gate.audit("feed_units", "the player snapshot");
-            script.set_unit("player", player.clone());
+        // A missing unit is `None`, which `set_unit` clears; a name miss lands on a later frame.
+        let self_pair = self_q.iter().next();
+        let player = self_pair.map(|(store, guid)| {
+            player_snapshot(
+                store,
+                guid.0,
+                &tables,
+                &names,
+                &commands,
+                &group,
+                world.factions(),
+                &mut guild,
+            )
+        });
+        // Log once when our template names no side, almost always GM mode (vmangos forces template
+        // 35, group mask 0): every `UnitFactionGroup` surface loses its side, as in the reference.
+        if let Some(p) = &player {
+            let sideless = p.faction_group.is_none();
+            if sideless && !feed.warned_sideless {
+                warn!(
+                    "faction: our own template names no side (usually GM mode — vmangos forces \
+                     template 35, group mask 0). Every UnitFactionGroup-derived surface loses its \
+                     side while this holds — the PvP flag icon stays hidden however flagged you \
+                     are. `.gm off` restores it. (The Honor tab's rank title is NOT one of these: \
+                     its team digit comes from your race, not your template.)"
+                );
+            }
+            feed.warned_sideless = sideless;
         }
-    }
-    let target_dirty = target_view_moved
-        || match (&target, memo.last.get("target")) {
+        // What the three snapshots below (target, target-of-target, NPC) read besides a descriptor.
+        let object = |guid: u64| {
+            let entity = *index.as_ref()?.0.get(&guid)?;
+            stores.all.get(entity).ok()
+        };
+        let held = held::HeldUnits {
+            names: &names,
+            commands: &commands,
+            group: &group,
+            self_store: self_pair.map(|(s, _)| s),
+            unit_names: chr,
+            types,
+            rel: world.get(),
+            me: world.me(),
+            tooltip: tooltip_facts::TooltipSources {
+                names: &names,
+                catalog: tables.catalog(),
+                object: &object,
+                study: tables.study(),
+            },
+            guild: &guild,
+        };
+        let target = selection
+            .target
+            .zip(selection.guid)
+            .and_then(|(e, guid)| Some(held.state(stores.all.get(e).ok()?, guid)));
+
+        // `"targettarget"`: one hop off the target's `UNIT_FIELD_TARGET`, streamed guids only, for
+        // the stock frame's poll (`TargetofTarget_OnUpdate`, `TargetFrame.lua:494-538`): no unit
+        // event carries the hop, whose token is none of `0x515c50`'s.
+        let tot = selection
+            .target
+            .and_then(|e| stores.all.get(e).ok())
+            .and_then(|s| s.0.unit_target())
+            .filter(|guid| *guid != 0)
+            .and_then(|guid| Some((*index.as_ref()?.0.get(&guid)?, guid)))
+            .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
+
+        // `"player"` is pushed only while its descriptor exists: the roster seat stands in before
+        // arrival, and `PLAYER_LOGOUT` handlers still read `UnitName("player")`, as the reference's
+        // do. `"target"` pushes its absence too; both diff against the event loop's memo.
+        if let Some(cur) = &player {
+            if memo.last.get("player") != Some(cur) {
+                gate.audit("feed_units", "the player snapshot");
+                script.set_unit("player", player.clone());
+            }
+        }
+        let target_dirty = target_view_moved
+            || match (&target, memo.last.get("target")) {
+                (Some(cur), Some(prev)) => cur != prev,
+                (None, None) => false,
+                _ => true,
+            };
+        if target_dirty {
+            gate.audit("feed_units", "the target snapshot");
+            script.set_unit("target", target.clone());
+        }
+        // Absence is data here too: the target dropping its target clears the token. A seat
+        // replaced it past the memo, as it did `"target"`.
+        let tot_dirty = target_view_moved
+            || match (&tot, memo.last.get("targettarget")) {
+                (Some(cur), Some(prev)) => cur != prev,
+                (None, None) => false,
+                _ => true,
+            };
+        if tot_dirty {
+            gate.audit("feed_units", "the target-of-target snapshot");
+            script.set_unit("targettarget", tot.clone());
+        }
+
+        // `"npc"`: the interaction NPC, the reference's `[0xb4e2d0]` that
+        // `CGGameUI::SetInteractNPC` (`0x4930d0`) writes, which `InteractNpc` models.
+        let npc = interact
+            .as_deref()
+            .and_then(|i| Some((i.0?, i.1?)))
+            .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
+        // Closing the window must clear the token, so the memo is written here, not only read.
+        let npc_dirty = match (&npc, memo.last.get("npc")) {
             (Some(cur), Some(prev)) => cur != prev,
             (None, None) => false,
             _ => true,
         };
-    if target_dirty {
-        gate.audit("feed_units", "the target snapshot");
-        script.set_unit("target", target.clone());
-    }
-    // Absence is data here too: the target dropping its target clears the token.
-    let tot_dirty = match (&tot, memo.last.get("targettarget")) {
-        (Some(cur), Some(prev)) => cur != prev,
-        (None, None) => false,
-        _ => true,
-    };
-    if tot_dirty {
-        gate.audit("feed_units", "the target-of-target snapshot");
-        script.set_unit("targettarget", tot.clone());
-    }
-
-    // `"npc"`: the interaction NPC, the reference's `[0xb4e2d0]` that `CGGameUI::SetInteractNPC`
-    // (`0x4930d0`) writes, which `InteractNpc` models. No guild leg, as for `"targettarget"`.
-    let npc = interact
-        .as_deref()
-        .and_then(|i| Some((i.0?, i.1?)))
-        .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
-    // Closing the window must clear the token, so the memo is written here, not only read.
-    let npc_dirty = match (&npc, memo.last.get("npc")) {
-        (Some(cur), Some(prev)) => cur != prev,
-        (None, None) => false,
-        _ => true,
-    };
-    if npc_dirty {
-        gate.audit("feed_units", "the interaction-NPC snapshot");
-        script.set_unit("npc", npc.clone());
-        match &npc {
-            Some(cur) => {
-                memo.last.insert("npc".to_string(), cur.clone());
-            }
-            None => {
-                memo.last.remove("npc");
+        if npc_dirty {
+            gate.audit("feed_units", "the interaction-NPC snapshot");
+            script.set_unit("npc", npc.clone());
+            match &npc {
+                Some(cur) => {
+                    memo.last.insert("npc".to_string(), cur.clone());
+                }
+                None => {
+                    memo.last.remove("npc");
+                }
             }
         }
-    }
 
-    // The XP pair and the rest snapshot (rest-state byte, pool, `PLAYER_FLAGS`), pushed ahead of
-    // the world-enter events so `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD` handlers read real
-    // values. Pushing fires nothing: `PLAYER_XP_UPDATE` and `UPDATE_EXHAUSTION` are field watches
-    // (`0x5ddb24`-`0x5ddb72`, `0x5de4e0`), and so are the `PLAYER_FLAGS` arms
-    // (`crate::field_watch`), fired by `field_events` after this push.
-    if let Some((store, _)) = self_q.iter().next() {
-        let xp = xp_pair(store);
-        let rest = (
-            store.0.player_rest_state().unwrap_or(0),
-            store.0.player_rest_state_experience().unwrap_or(0),
-            store.0.player_flags(),
-        );
-        if memo.last_xp != Some(xp) {
-            gate.audit("feed_units", "the XP pair");
-            memo.last_xp = Some(xp);
-            script.set_player_xp(xp.0, xp.1);
-        }
-        if memo.last_rest != Some(rest) {
-            gate.audit("feed_units", "the rest snapshot");
-            memo.last_rest = Some(rest);
-            script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
-            // The play-time bits share the dword and the memo; only the events split by bit.
-            script.set_play_time(
-                rest.2 & PLAYER_FLAGS_PARTIAL_PLAY_TIME != 0,
-                rest.2 & PLAYER_FLAGS_NO_PLAY_TIME != 0,
+        // The XP pair and the rest snapshot (rest-state byte, pool, `PLAYER_FLAGS`), pushed ahead
+        // of the world-enter events so `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD` handlers read
+        // real values. Pushing fires nothing: `PLAYER_XP_UPDATE` and `UPDATE_EXHAUSTION` are field
+        // watches (`0x5ddb24`-`0x5ddb72`, `0x5de4e0`), and so are the `PLAYER_FLAGS` arms
+        // (`crate::field_watch`), fired by `field_events` after this push.
+        if let Some((store, _)) = self_q.iter().next() {
+            let xp = xp_pair(store);
+            let rest = (
+                store.0.player_rest_state().unwrap_or(0),
+                store.0.player_rest_state_experience().unwrap_or(0),
+                store.0.player_flags(),
             );
-        }
-    }
-
-    // `PLAYER_LEVEL_UP` on any level change off the descriptor, demotions included (vmangos
-    // `GiveLevel` sends `SMSG_LEVELUP_INFO` for those too); the reference's trigger is untraced.
-    if let Some((store, _)) = self_q.iter().next() {
-        if let Some(level) = store.0.unit_level() {
-            let prev = memo.last_level.replace(level);
-            if prev.is_some_and(|p| level != p) {
-                gate.audit("feed_units", "the level edge");
-                // All nine, as the reference formats them (`%d` nine times) and
-                // `ChatFrame.lua:1283-1320` reads them; missing gains are zeros, since stock's
-                // `if ( argN > 0 )` raises on nil.
-                let (info, talent_points) = sink.chat.take_level_up_gains(level).unzip();
-                let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> i32| {
-                    ScriptValue::Int(i64::from(info.as_ref().map_or(0, f)))
-                };
-                script.fire_event(
-                    "PLAYER_LEVEL_UP",
-                    vec![
-                        ScriptValue::Int(i64::from(level)),
-                        gain(|l| l.health),
-                        gain(|l| l.powers[0]),
-                        ScriptValue::Int(i64::from(talent_points.unwrap_or(0))),
-                        gain(|l| l.stats[0]),
-                        gain(|l| l.stats[1]),
-                        gain(|l| l.stats[2]),
-                        gain(|l| l.stats[3]),
-                        gain(|l| l.stats[4]),
-                    ],
+            if memo.last_xp != Some(xp) {
+                gate.audit("feed_units", "the XP pair");
+                memo.last_xp = Some(xp);
+                script.set_player_xp(xp.0, xp.1);
+            }
+            if memo.last_rest != Some(rest) {
+                gate.audit("feed_units", "the rest snapshot");
+                memo.last_rest = Some(rest);
+                script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
+                // The play-time bits share the dword and the memo; only the events split by bit.
+                script.set_play_time(
+                    rest.2 & PLAYER_FLAGS_PARTIAL_PLAY_TIME != 0,
+                    rest.2 & PLAYER_FLAGS_NO_PLAY_TIME != 0,
                 );
             }
         }
-    }
 
-    // `PLAYER_FIELD_BYTES` byte 2, the four extra bars, on the edge: the reference never writes the
-    // cell (its one access is the read at `0x4e768c`) or watches it (`0x468070`), and stock reads
-    // it once, at `PLAYER_ENTERING_WORLD` (`UIParent.lua:364`), so this goes ahead of that fire. No
-    // player and a zero byte share the four-nil branch (`0x4e7684`).
-    if let Some((store, _)) = self_q.iter().next() {
-        let toggles = store.0.player_action_bar_toggles().unwrap_or(0);
-        if memo.action_bar_toggles != Some(toggles) {
-            gate.audit("feed_units", "the action-bar toggle byte");
-            memo.action_bar_toggles = Some(toggles);
-            script.set_action_bar_toggles(toggles);
-        }
-    }
-
-    // The world-enter cascade's events once per world entry, after our descriptor lands and the
-    // pushes above seat it: the reference runs the cascade from the local player's own create
-    // (`0x5deb60 call 0x4908c0`) and, on a `/reload`, from `UI_Init` (`0x490168`), the player in
-    // the world both times. `PLAYER_LOGIN` only when this VM's load armed it, so a worldport's
-    // re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry and forget the
-    // player-global memos so the next character seeds them.
-    if let Some((_, me)) = self_pair {
-        if !memo.entered_world {
-            gate.audit("feed_units", "the world-enter events");
-            // `"player"` names us when the cascade runs, from our own create: the stock windows
-            // bind their model panes to it here (`PaperDollFrame.lua:39`), so it is seated ahead
-            // of the aura feed's full resolver push, which this feed is not ordered against.
-            script.seat_player_guid(me.0);
-            script.fire_world_enter();
-            memo.entered_world = true;
-        }
-    } else if memo.entered_world {
-        gate.audit("feed_units", "the world-exit disarm");
-        memo.entered_world = false;
-        memo.last_xp = None;
-        memo.last_rest = None;
-        memo.last_level = None;
-        memo.last_combo = None;
-        // Edge-only pushes: a stale memo would skip a new character whose values match it.
-        memo.worn_hidden = None;
-        memo.action_bar_toggles = None;
-    }
-
-    // The memo the pushes above diff against. Pushing fires nothing: a unit's events are its own
-    // changes' (`crate::field_watch`), and a token that comes to name another unit is announced by
-    // `PLAYER_TARGET_CHANGED` below alone (`0x493540` signals only that, `0x49389c`).
-    for (token, snap) in [
-        ("player", &player),
-        ("target", &target),
-        ("targettarget", &tot),
-    ] {
-        match snap {
-            Some(cur) => {
-                if memo.last.get(token) != Some(cur) {
-                    memo.last.insert(token.to_string(), cur.clone());
+        // `PLAYER_LEVEL_UP` on any level change off the descriptor, demotions included (vmangos
+        // `GiveLevel` sends `SMSG_LEVELUP_INFO` for those too); the reference's trigger is
+        // untraced.
+        if let Some((store, _)) = self_q.iter().next() {
+            if let Some(level) = store.0.unit_level() {
+                let prev = memo.last_level.replace(level);
+                if prev.is_some_and(|p| level != p) {
+                    gate.audit("feed_units", "the level edge");
+                    // All nine, as the reference formats them (`%d` nine times) and
+                    // `ChatFrame.lua:1283-1320` reads them; missing gains are zeros, since stock's
+                    // `if ( argN > 0 )` raises on nil.
+                    let (info, talent_points) = sink.chat.take_level_up_gains(level).unzip();
+                    let gain = |f: fn(&benilla_protocol::messages::LevelUpInfo) -> i32| {
+                        ScriptValue::Int(i64::from(info.as_ref().map_or(0, f)))
+                    };
+                    script.fire_event(
+                        "PLAYER_LEVEL_UP",
+                        vec![
+                            ScriptValue::Int(i64::from(level)),
+                            gain(|l| l.health),
+                            gain(|l| l.powers[0]),
+                            ScriptValue::Int(i64::from(talent_points.unwrap_or(0))),
+                            gain(|l| l.stats[0]),
+                            gain(|l| l.stats[1]),
+                            gain(|l| l.stats[2]),
+                            gain(|l| l.stats[3]),
+                            gain(|l| l.stats[4]),
+                        ],
+                    );
                 }
             }
-            None => {
-                memo.last.remove(token);
+        }
+
+        // `PLAYER_FIELD_BYTES` byte 2, the four extra bars, on the edge: the reference never writes
+        // the cell (its one access is the read at `0x4e768c`) or watches it (`0x468070`), and stock
+        // reads it once, at `PLAYER_ENTERING_WORLD` (`UIParent.lua:364`), so this goes ahead of
+        // that fire. No player and a zero byte share the four-nil branch (`0x4e7684`).
+        if let Some((store, _)) = self_q.iter().next() {
+            let toggles = store.0.player_action_bar_toggles().unwrap_or(0);
+            if memo.action_bar_toggles != Some(toggles) {
+                gate.audit("feed_units", "the action-bar toggle byte");
+                memo.action_bar_toggles = Some(toggles);
+                script.set_action_bar_toggles(toggles);
             }
         }
-    }
 
-    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes. A `/reload`'s fresh memo finds
-    // none: the shutdown dropped the target and told the dying VM (`0x490bdf`).
-    if selection.guid != memo.target_guid {
-        gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
-        memo.target_guid = selection.guid;
-        // The reference signals it inside `SetSelection`, so inside the key or click whose call
-        // moved the selection; a change that call made hears it under that call's input events.
-        let cause = script.take_selection_cause(selection.guid);
-        script.with_input_events(cause, |script| {
-            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-        });
-    }
-
-    // The hide bits for `ShowingHelm()`/`ShowingCloak()`, on the edge only: the setter flips the
-    // VM's belief on the click, and a stale push before the server answers would undo it.
-    if let Some((store, _)) = self_pair {
-        let hidden = (store.0.player_hides_helm(), store.0.player_hides_cloak());
-        if memo.worn_hidden != Some(hidden) {
-            gate.audit("feed_units", "the worn-display pair");
-            memo.worn_hidden = Some(hidden);
-            script.set_worn_display(!hidden.0, !hidden.1);
+        // The world-enter cascade's events once per world entry, after our descriptor lands and the
+        // pushes above seat it: the reference runs the cascade from the local player's own create
+        // (`0x5deb60 call 0x4908c0`) and, on a `/reload`, from `UI_Init` (`0x490168`), the player
+        // in the world both times. `PLAYER_LOGIN` only when this VM's load armed it, so a
+        // worldport's re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry
+        // and forget the player-global memos so the next character seeds them.
+        if let Some((store, me)) = self_pair {
+            if !memo.entered_world {
+                gate.audit("feed_units", "the world-enter events");
+                // `"player"` names us when the cascade runs, from our own create: the stock windows
+                // bind their model panes to it here (`PaperDollFrame.lua:39`), so it is seated
+                // ahead of the aura feed's full resolver push, which this feed is not ordered
+                // against.
+                script.seat_player_guid(me.0);
+                // The arrival's ghost state (`0x5deb2a` → `0x5de9c0`) runs ahead of its cascade
+                // (`0x5deb60`): alive, `PLAYER_UNGHOST` (`0x5dea2a`), with no gate before it; a
+                // ghost's leg is its tutorial (`crate::tutorial`).
+                if arrived && store.0.player_flags() & 0x10 == 0 {
+                    script.fire_event("PLAYER_UNGHOST", vec![]);
+                }
+                script.fire_world_enter();
+                memo.entered_world = true;
+            }
+        } else if memo.entered_world {
+            gate.audit("feed_units", "the world-exit disarm");
+            memo.entered_world = false;
+            memo.last_xp = None;
+            memo.last_rest = None;
+            memo.last_level = None;
+            memo.last_combo = None;
+            // Edge-only pushes: a stale memo would skip a new character whose values match it.
+            memo.worn_hidden = None;
+            memo.action_bar_toggles = None;
         }
-    }
 
-    // The combo count and its banked target, pushed as a pair since `GetComboPoints` reads both;
-    // only the count fires `PLAYER_COMBO_POINTS` (`0x5ddff0`).
-    if let Some((store, _)) = self_q.iter().next() {
-        let banked = (
-            store.0.player_combo_points().unwrap_or(0),
-            store.0.player_combo_target(),
-        );
-        if let Some(fire) = combo_edge(memo.last_combo, banked) {
-            gate.audit("feed_units", "the combo-point edge");
-            memo.last_combo = Some(banked);
-            script.set_combo_points(banked.0, banked.1);
-            if fire {
-                script.fire_event("PLAYER_COMBO_POINTS", vec![]);
+        // The memo the pushes above diff against. Pushing fires nothing: a unit's events are its
+        // own changes' (`crate::field_watch`), and a token that comes to name another unit is
+        // announced by `PLAYER_TARGET_CHANGED` below alone (`0x493540` signals only that,
+        // `0x49389c`).
+        for (token, snap) in [
+            ("player", &player),
+            ("target", &target),
+            ("targettarget", &tot),
+        ] {
+            match snap {
+                Some(cur) => {
+                    if memo.last.get(token) != Some(cur) {
+                        memo.last.insert(token.to_string(), cur.clone());
+                    }
+                }
+                None => {
+                    memo.last.remove(token);
+                }
             }
         }
-    }
+
+        // `PLAYER_TARGET_CHANGED`, argless, when the selection changes, owed to
+        // [`fire_unit_events`]. A `/reload`'s fresh memo finds none: the shutdown dropped the
+        // target and told the dying VM (`0x490bdf`).
+        if selection.guid != memo.target_guid {
+            gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
+            memo.target_guid = selection.guid;
+            memo.pending.target_changed = true;
+        }
+
+        // The hide bits for `ShowingHelm()`/`ShowingCloak()`, on the edge only: the setter flips
+        // the VM's belief on the click, and a stale push before the server answers would undo it.
+        if let Some((store, _)) = self_pair {
+            let hidden = (store.0.player_hides_helm(), store.0.player_hides_cloak());
+            if memo.worn_hidden != Some(hidden) {
+                gate.audit("feed_units", "the worn-display pair");
+                memo.worn_hidden = Some(hidden);
+                script.set_worn_display(!hidden.0, !hidden.1);
+            }
+        }
+
+        // The combo count and its banked target, pushed as a pair since `GetComboPoints` reads
+        // both. `PLAYER_COMBO_POINTS` is the count's watcher's (`0x5ddff0`), on the notice lane,
+        // which fires after this push.
+        if let Some((store, _)) = self_q.iter().next() {
+            let banked = (
+                store.0.player_combo_points().unwrap_or(0),
+                store.0.player_combo_target(),
+            );
+            if memo.last_combo != Some(banked) {
+                gate.audit("feed_units", "the combo-point push");
+                memo.last_combo = Some(banked);
+                script.set_combo_points(banked.0, banked.1);
+            }
+        }
+    })
 }
 
-/// The combo feed's edge: `None` when nothing moved, else whether `PLAYER_COMBO_POINTS` fires.
-/// Event 202 is a one-byte watch on the count (`+0x1029`, registered at `0x5dd9d9`) with no value
-/// test, so the drop to zero fires; the target has no watch, so a same-count re-bank is silent.
-fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
-    (last != Some(now)).then(|| last.map(|(count, _)| count) != Some(now.0))
+/// The event [`feed_units`]' pushes owe, signalled after the action feed's usable refresh as the
+/// reference orders them: `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`)
+/// before `PLAYER_TARGET_CHANGED` (`0x49389c`), and so does a release (`0x4939d3`, `0x493a69`,
+/// `0x493a73`). A usable handler reads the new target, and hears this after it.
+fn fire_unit_events(
+    // What the host also reaches, read before the VM runs with the host lent.
+    mut hosted: ParamSet<(Res<Selection>, crate::script_calls::HostedVm)>,
+    mut feed: ResMut<UnitFeedState>,
+) {
+    let selection = *hosted.p0();
+    hosted.p1().run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let pending = std::mem::take(&mut feed.vm.get(script).pending);
+        if pending.target_changed {
+            // The reference signals it inside `SetSelection`, so inside the key or click whose
+            // call moved the selection; a change that call made hears it under that call's input
+            // events.
+            let cause = script.take_selection_cause(selection.guid);
+            script.with_input_events(cause, |script| {
+                script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+            });
+        }
+    })
 }
 
 #[cfg(test)]
 pub(crate) use held::feed_name_candidates;
 
 /// The bare unit feed, for a test driving the stock unit frames off engine state: the pushes,
-/// then the field notices' events.
+/// the control edge, the unit events, then the field notices' events, under the plugin's sets so
+/// a test's action feed takes its place around them.
 #[cfg(test)]
 pub(crate) fn add_unit_feed(app: &mut App) {
     app.init_resource::<UnitFeedState>()
-        .add_message::<crate::field_watch::FieldNotice>()
-        .init_resource::<field_events::FieldNoticeCursor>()
+        .init_resource::<crate::field_watch::NoticeLane>()
         .add_systems(
             Update,
             (
-                feed_units,
+                relations::feed_unit_relations,
+                feed_units.in_set(UnitSnapshots),
+                feed_player_control.before(crate::ui_action::CooldownEvents),
+                fire_unit_events.after(crate::ui_action::CooldownEvents),
                 fire_faction_on_forced_table,
                 field_events::fire_field_notices,
             )
@@ -1714,6 +1803,41 @@ pub(crate) fn add_unit_feed(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x6243e0` raises `UNIT_COMBAT` for a displayed swing on a victim held as a unit, and
+    /// returns past it for a swing `0x625e40` hides (`0x624414`).
+    #[test]
+    fn a_swing_flashes_only_a_unit_and_only_when_displayed() {
+        let log = crate::ui_chat::ChatLog::default();
+        let swing = |displayed| crate::creature_anim::SwingMessage {
+            attacker: Entity::PLACEHOLDER,
+            victim: None,
+            hit_info: 0x80,
+            victim_state: 1,
+            damage: 40,
+            displayed,
+            seq: 0,
+        };
+        let store = |kind| {
+            crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, kind)]))
+        };
+        let (player, object) = (store(0x19), store(0x21));
+        melee_unit_combat(&log, &swing(false), Some((1, &player)));
+        melee_unit_combat(&log, &swing(true), Some((1, &object)));
+        melee_unit_combat(&log, &swing(true), None);
+        assert!(log.pending_unit_combat().is_empty());
+        melee_unit_combat(&log, &swing(true), Some((1, &player)));
+        assert_eq!(
+            log.pending_unit_combat(),
+            [UnitCombatFeedback {
+                guid: 1,
+                action: "WOUND",
+                flags: "CRITICAL",
+                amount: 40,
+                school: 0,
+            }]
+        );
+    }
 
     /// `"mouseover"` resolves through the pick the tooltip publishes: the hovered unit, until a
     /// nearer GameObject wins it and the resolver rejects the GameObject's guid (`0x515bd9 je`).
@@ -1727,6 +1851,7 @@ mod tests {
         app.init_resource::<crate::ui_party::GroupState>()
             .init_resource::<HoveredObject>();
         let wolf = app.world_mut().spawn_empty().id();
+        app.insert_resource(crate::net::GuidIndex([(WOLF, wolf)].into_iter().collect()));
         app.insert_resource(Hovered {
             target: Some(wolf),
             guid: Some(WOLF),
@@ -1948,7 +2073,7 @@ mod tests {
             assert_eq!(resolve(&mut app, "partypet1"), None, "an offline record");
         }
 
-        /// A raid of five: us (row 1), then the wire's members, the last in another subgroup.
+        /// A raid of five: the wire's members, the last in another subgroup, then us (row 5).
         fn raid() -> App {
             let (mut app, _) = app();
             let list = vec![
@@ -1972,7 +2097,7 @@ mod tests {
         #[test]
         fn raidpet_names_the_pet_of_the_row_raid_names() {
             let mut app = raid();
-            // Row 3 is `member(2)`, held with a pet; row 1 is us.
+            // Row 2 is `member(2)`, held with a pet; row 5 is us.
             let held_pet = stream(&mut app, pet(2), &[]);
             stream(&mut app, member(2), &guid_field(SUMMON, pet(2)));
             let mine = stream(&mut app, MY_PET, &[]);
@@ -1981,23 +2106,23 @@ mod tests {
                 .entity_mut(me)
                 .insert(store(&guid_field(SUMMON, MY_PET)));
 
-            assert_eq!(resolve(&mut app, "raidpet3"), Some((held_pet, pet(2))));
+            assert_eq!(resolve(&mut app, "raidpet2"), Some((held_pet, pet(2))));
             assert_eq!(
-                resolve(&mut app, "raidpet1"),
+                resolve(&mut app, "raidpet5"),
                 Some((mine, MY_PET)),
                 "our own row"
             );
             assert_eq!(
-                guid_of(&mut app, "raid3"),
+                guid_of(&mut app, "raid2"),
                 Some(member(2)),
                 "raidN is unchanged"
             );
-            assert_eq!(guid_of(&mut app, "raid1"), Some(ME));
-            assert_eq!(resolve(&mut app, "raidpet2"), None, "row 2 has no pet");
+            assert_eq!(guid_of(&mut app, "raid5"), Some(ME));
+            assert_eq!(resolve(&mut app, "raidpet1"), None, "row 1 has no pet");
             for token in ["raidpet0", "raidpet6", "raidpet", "raidpetX", "raidpet+3"] {
                 assert_eq!(resolve(&mut app, token), None, "{token}");
             }
-            assert_eq!(guid_of(&mut app, "RaidPet3"), Some(pet(2)), "case folds");
+            assert_eq!(guid_of(&mut app, "RaidPet2"), Some(pet(2)), "case folds");
         }
 
         /// `raidpetN`'s record leg has no online test (`0x4919ae`), where `partypetN`'s has one.
@@ -2013,8 +2138,8 @@ mod tests {
                 .resource_mut::<GroupState>()
                 .apply_stats(member(1), true, record);
             let held = stream(&mut app, pet(1), &[]);
-            // Row 2 and party slot 1 are the same member.
-            assert_eq!(resolve(&mut app, "raidpet2"), Some((held, pet(1))));
+            // Row 1 and party slot 1 are the same member.
+            assert_eq!(resolve(&mut app, "raidpet1"), Some((held, pet(1))));
             assert_eq!(resolve(&mut app, "partypet1"), None);
         }
 
@@ -2085,7 +2210,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
 
         const ME: u64 = 0x10;
-        /// party1 and raid2, party2 and raid3, party3 and raid4.
+        /// party1 and raid1, party2 and raid2, party3 and raid3; we are raid4.
         const A: u64 = 0x1001;
         const B: u64 = 0x1002;
         const C: u64 = 0x1003;
@@ -2208,12 +2333,12 @@ mod tests {
                 ("target", MOB),
                 ("targettarget", B),
                 ("targettargettarget", A),
+                ("raid4target", MOB),
                 ("raid1target", MOB),
-                ("raid2target", MOB),
-                ("raid3target", A),
-                ("raid2targettarget", B),
-                ("raidpet1target", MOB),
-                ("raidpet2target", B),
+                ("raid2target", A),
+                ("raid1targettarget", B),
+                ("raidpet4target", MOB),
+                ("raidpet1target", B),
                 ("mouseover", LONELY),
             ] {
                 assert_eq!(guid_of(&mut app, token), Some(want), "{token}");
@@ -2239,7 +2364,7 @@ mod tests {
                 "mouseovertargettarget",
                 // `C` targets a guid nobody holds.
                 "party3target",
-                "raid4target",
+                "raid3target",
                 // Nor does a further hop go past the break.
                 "party3targettarget",
                 // A base no one holds: party4 is nobody, raid5 is past the roster, a missing or
@@ -2249,7 +2374,7 @@ mod tests {
                 "raid0target",
                 "partytarget",
                 "partypet2target",
-                "raidpet3target",
+                "raidpet2target",
             ] {
                 assert_eq!(resolve(&mut app, token), None, "{token}");
             }
@@ -2315,7 +2440,11 @@ mod tests {
             }
             assert_eq!(guid_of(&mut app, "PlayerTarget"), Some(MOB));
             assert_eq!(guid_of(&mut app, "TargetTargetTarget"), Some(A));
-            assert_eq!(guid_of(&mut app, "RaidPet1Target"), Some(MOB));
+            assert_eq!(
+                guid_of(&mut app, "RaidPet4Target"),
+                Some(MOB),
+                "our own row's pet"
+            );
             for hops in [3, 30, 3000] {
                 let token = format!("party1{}", "target".repeat(hops));
                 assert_eq!(guid_of(&mut app, &token), Some(A), "{hops} hops round A");
@@ -2348,13 +2477,13 @@ mod tests {
         const B: u64 = 0x1002;
         const MOB: u64 = 0xF130_0000_0000_0001;
         const A_PET: u64 = 0xF140_0000_0000_1001;
-        /// `OBJECT_FIELD_TYPE`, `UNIT_FIELD_SUMMON`, `UNIT_FIELD_TARGET` and `UNIT_FIELD_FLAGS`.
+        /// `OBJECT_FIELD_TYPE`, `UNIT_FIELD_SUMMON`, `UNIT_FIELD_TARGET` and
+        /// `UNIT_FIELD_FACTIONTEMPLATE`.
         const OBJECT_TYPE: u16 = 2;
         const SUMMON: u16 = 8;
         const TARGET: u16 = 16;
-        const FLAGS: u16 = 46;
-        /// `UNIT_FIELD_FLAGS` bit 1 (NON_ATTACKABLE), which `can_attack` refuses.
-        const NON_ATTACKABLE: u32 = 1 << 1;
+        const TEMPLATE: u16 = 35;
+        use crate::target::relations::fixture::{factions, HUMAN};
 
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
@@ -2365,6 +2494,7 @@ mod tests {
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<Reputations>()
             .init_resource::<crate::ui_party::GroupState>()
+            .insert_resource(factions())
             .insert_resource(NetCommands(tx))
             .add_plugins(crate::ui_aura::UiAuraPlugin)
             .add_systems(Update, feed_unit_reach.after(crate::ui_aura::AuraEvents));
@@ -2372,9 +2502,9 @@ mod tests {
 
         // We at the origin, party1 (`A`) 5 yards off with a pet 15 yards off, the mob 20 yards
         // off, and `B` 3 yards off. We and `A` target the mob, the mob targets `B`, the pet
-        // targets `B`, and `B` targets nobody. The players are not attackable, so inspectable.
+        // targets `B`, and `B` targets nobody. All are Human, so the players cooperate with us.
         let mut spawn = |guid: u64, kind: u32, summon: u64, target: u64, yards: f32| {
-            let mut pairs = vec![(OBJECT_TYPE, kind), (FLAGS, NON_ATTACKABLE)];
+            let mut pairs = vec![(OBJECT_TYPE, kind), (TEMPLATE, HUMAN)];
             for (field, guid) in [(SUMMON, summon), (TARGET, target)] {
                 pairs.push((field, guid as u32));
                 pairs.push((field + 1, (guid >> 32) as u32));
@@ -2447,7 +2577,6 @@ mod tests {
             ("party1targettargettarget", 4, false),
             ("party2target", 4, false),
             ("party1foo", 4, false),
-            ("npctarget", 4, false),
         ] {
             assert_eq!(
                 answers(
@@ -2458,6 +2587,16 @@ mod tests {
                 "CheckInteractDistance({token}, {kind})"
             );
         }
+        // A token the resolver does not know raises (`0x515c14`): `npc` is one exact compare with
+        // no chain, so it knows no `npctarget`; a bad suffix after a known prefix is GUID 0.
+        let call = r#"CheckInteractDistance("npctarget", 4)"#;
+        assert!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .run(call)
+                .is_err(),
+            "{call}"
+        );
         // `CanInspect`: a player within 10 yards, so `B` and not the mob 20 yards off.
         for (token, want) in [
             ("party1targettarget", true),
@@ -2629,6 +2768,7 @@ mod tests {
             benilla_formats::load_languages(&mut chain).expect("Languages.dbc"),
         ));
         let mut script = UiScript::new().expect("VM");
+        script.keep_calls();
         // `SendChatMessage` needs a local player (`0x49f223`).
         script.set_unit(
             "player",
@@ -2688,6 +2828,7 @@ mod tests {
         const FIELD_PLAYER_FARSIGHT: u16 = 712;
         let mut app = App::new();
         app.init_resource::<crate::player::Player>()
+            .init_resource::<crate::player::OwnControlLost>()
             .add_systems(Update, (feed_player_control, feed_farsight_focus));
         let script = UiScript::new().unwrap();
         script
@@ -2725,13 +2866,13 @@ mod tests {
             "in control, no far sight: quiet"
         );
         app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .own_control_lost = true;
+            .resource_mut::<crate::player::OwnControlLost>()
+            .0 = true;
         assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_LOST".to_string()]);
         assert_eq!(seen(&mut app), Vec::<String>::new(), "held, not repeated");
         app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .own_control_lost = false;
+            .resource_mut::<crate::player::OwnControlLost>()
+            .0 = false;
         assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_GAINED".to_string()]);
 
         // A possessed creature stuck under fear or confusion is not our character losing control:
@@ -2939,59 +3080,66 @@ mod tests {
         );
     }
 
-    /// The player-only refusal rides in the entry, so a boar in interact range is not inspectable.
+    /// `CanInspect` answers by `0x4944a0` (`0x48a2a1`), whose player and cooperation legs ride in
+    /// the entry: a boar in interact range is not inspectable, nor an unflagged Orc, while a Human
+    /// duel or free-for-all opponent is, `CanCooperate 0x606ba0` reading the faction group alone.
+    /// You are, and a charmed Human is not (`0x606bab`). `CheckInteractDistance` is distance alone.
     #[test]
     fn a_creature_target_enters_the_reach_map_at_its_real_distance() {
-        use benilla_protocol::messages::ObjectFields;
+        use crate::target::relations::fixture::{
+            creature, duelling, factions, flagged, player, store_of, FFA, HUMAN, ORC,
+        };
+        use crate::target::RelUnit;
         use bevy::ecs::system::RunSystemOnce;
 
-        /// `UNIT_FIELD_FLAGS` bit 1 (NON_ATTACKABLE), which `can_attack` refuses.
-        const NON_ATTACKABLE: u32 = 1 << 1;
-        const FIELD_UNIT_FLAGS: u16 = 46;
         const ME: u64 = 0x0000_0000_0000_0001;
         const BOAR: u64 = 0xF130_0000_0000_0002;
-        const FRIEND: u64 = 0x0000_0000_0000_0003;
+        const OTHER: u64 = 0x0000_0000_0000_0003;
+        const ARBITER: u64 = 0xF110_0000_0000_0004;
 
-        /// Seat one target `yards` away and answer `expr` against it.
-        fn ask(guid: u64, flags: u32, yards: f32, expr: &str) -> bool {
+        /// Seat `me` and one target `yards` away and answer `expr` against them.
+        fn ask(me: RelUnit, target: RelUnit, yards: f32, expr: &str) -> bool {
             let mut app = App::new();
             app.init_resource::<crate::ui_party::GroupState>()
-                .init_resource::<Reputations>();
+                .init_resource::<Reputations>()
+                .insert_resource(factions());
             app.insert_non_send_resource(UiScript::new().unwrap());
 
-            let me = app
+            let me_entity = app
                 .world_mut()
                 .spawn((
                     SelfPlayer,
-                    Guid(ME),
-                    ObjectStore(ObjectFields::default()),
+                    Guid(me.guid),
+                    store_of(&me),
                     Transform::from_xyz(0.0, 0.0, 0.0),
                 ))
                 .id();
-            let target = app
+            let target_entity = app
                 .world_mut()
                 .spawn((
-                    Guid(guid),
-                    ObjectStore(ObjectFields::from_pairs(&[(FIELD_UNIT_FLAGS, flags)])),
+                    Guid(target.guid),
+                    store_of(&target),
                     // Along one axis, so d² is exactly yards².
                     Transform::from_xyz(yards, 0.0, 0.0),
                 ))
                 .id();
             app.insert_resource(crate::net::GuidIndex(
-                [(ME, me), (guid, target)].into_iter().collect(),
+                [(me.guid, me_entity), (target.guid, target_entity)]
+                    .into_iter()
+                    .collect(),
             ));
             app.insert_resource(Selection {
-                target: Some(target),
-                guid: Some(guid),
+                target: Some(target_entity),
+                guid: Some(target.guid),
                 ..Default::default()
             });
             // The resolver's inputs the aura feed would push: us and the target, both held.
             app.world_mut()
                 .non_send_resource_mut::<UiScript>()
                 .set_unit_guids(&benilla_ui::script::UnitGuids {
-                    player: ME,
-                    target: guid,
-                    held: HashMap::from([(ME, 0), (guid, 0)]),
+                    player: me.guid,
+                    target: target.guid,
+                    held: HashMap::from([(me.guid, 0), (target.guid, 0)]),
                     ..Default::default()
                 });
 
@@ -3002,10 +3150,12 @@ mod tests {
                 .unwrap()
         }
 
+        let me = player(ME, HUMAN);
+        let boar = creature(BOAR, ORC);
         assert!(
             ask(
-                BOAR,
-                0,
+                me,
+                boar,
                 40.0,
                 r#"return CheckInteractDistance("target", 4) == nil"#
             ),
@@ -3013,8 +3163,8 @@ mod tests {
         );
         assert!(
             ask(
-                BOAR,
-                0,
+                me,
+                boar,
                 15.0,
                 r#"return CheckInteractDistance("target", 4) ~= nil"#
             ),
@@ -3022,66 +3172,84 @@ mod tests {
         );
         assert!(
             ask(
-                BOAR,
-                0,
+                me,
+                boar,
                 15.0,
                 r#"return CheckInteractDistance("target", 1) == nil"#
             ),
             "…and outside the 10-yard one: the table is indexed, not a constant"
         );
-
         assert!(
             ask(
-                BOAR,
-                0,
+                me,
+                boar,
                 3.0,
                 r#"return CheckInteractDistance("target", 1) ~= nil"#
             ),
             "a creature 3 yards away is in interact range"
         );
         assert!(
-            ask(BOAR, 0, 3.0, r#"return CanInspect("target") == nil"#),
-            "…and is still not inspectable — the players-only leg rides in the entry"
+            ask(me, boar, 3.0, r#"return CanInspect("target") == nil"#),
+            "…and is still not inspectable: the player leg rides in the entry"
         );
-        // The control: a non-attackable player there is inspectable, so the refusal is the type.
+
+        let inspectable = |me: RelUnit, them: RelUnit, yards: f32| {
+            ask(me, them, yards, r#"return CanInspect("target") ~= nil"#)
+        };
+        let human = player(OTHER, HUMAN);
+        assert!(inspectable(me, human, 3.0), "a Human 3 yards away");
+        assert!(!inspectable(me, human, 15.0), "…not 15 yards away");
         assert!(
-            ask(
-                FRIEND,
-                NON_ATTACKABLE,
-                3.0,
-                r#"return CanInspect("target") ~= nil"#
-            ),
-            "a non-attackable player 3 yards away is inspectable"
+            !inspectable(me, player(OTHER, ORC), 3.0),
+            "an unflagged Orc: not attackable, and not one to cooperate with"
+        );
+        assert!(
+            inspectable(duelling(me, ARBITER, 1), duelling(human, ARBITER, 2), 3.0),
+            "a Human duel opponent: attackable, and still of our faction group"
+        );
+        assert!(
+            inspectable(flagged(me, FFA), flagged(human, FFA), 3.0),
+            "a Human free-for-all opponent"
+        );
+        let charmed = RelUnit {
+            charmed_by: BOAR,
+            ..human
+        };
+        assert!(!inspectable(me, charmed, 3.0), "a charmed Human");
+        assert!(
+            ask(me, boar, 3.0, r#"return CanInspect("player") ~= nil"#),
+            "yourself, ahead of the cooperation leg (`0x4944dd`)"
         );
     }
 
-    /// Either half moving pushes; only the count, the one byte the client watches, fires.
+    /// The two reaction fields run opposite ways: `UnitReaction`'s is the unit's toward the player,
+    /// the tooltip's creature-type gate the player's toward the unit (`0x52a2d9`). The Cenarion
+    /// Circle, template 996, not at war, reads neutral toward the player and friendly from him, so
+    /// its tooltip shows no creature type. No active player reads 0, which shows none.
     #[test]
-    fn only_the_count_fires_the_combo_event() {
-        const A: u64 = 0xF130_0000_0000_0001;
-        const B: u64 = 0xF130_0000_0000_0002;
+    fn the_player_reaction_is_the_players_toward_the_unit() {
+        use crate::target::relations::fixture::{creature, human_warrior, Scene};
 
-        assert_eq!(combo_edge(Some((1, A)), (1, A)), None, "nothing moved");
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let factions = crate::target::Factions::from_catalog(
+            benilla_formats::load_faction_catalog(&mut chain).expect("faction tables"),
+        );
+        let me = human_warrior(0x10);
+        let mut scene = Scene::new(me, Some(factions));
+        let druid = scene.hold(creature(0xF130_0000_0000_0011, 996));
+        let rel = scene.rel();
         assert_eq!(
-            combo_edge(Some((1, A)), (2, A)),
-            Some(true),
-            "a builder lands: push and speak"
+            unit_reaction(&rel, &druid, Some(&me)),
+            4,
+            "neutral toward us"
         );
         assert_eq!(
-            combo_edge(Some((5, A)), (0, 0)),
-            Some(true),
-            "the clear speaks too — the falling edge is what hides the dots"
+            player_reaction(&rel, &druid, Some(&me)),
+            5,
+            "friendly from us"
         );
-        assert_eq!(
-            combo_edge(Some((1, A)), (1, B)),
-            Some(false),
-            "re-banked onto another unit at the same count: pushed, but silent like the client"
-        );
-        assert_eq!(
-            combo_edge(None, (0, 0)),
-            Some(true),
-            "first sight announces once, as the descriptor block's first write does"
-        );
+        assert_eq!(player_reaction(&rel, &druid, None), 0);
     }
 
     /// `UNIT_DYNFLAG_DEAD` alone makes empty bars over real maxima, through `snapshot`'s wiring.
@@ -3186,25 +3354,6 @@ mod tests {
         );
     }
 
-    /// The player can assist itself unless its descriptor says `UNIT_FLAG_NOT_SELECTABLE`
-    /// (`0x6066f0`'s first refusal; the reaction of one object toward itself is friendly,
-    /// `0x606200`).
-    #[test]
-    fn the_player_assists_itself_unless_it_is_unselectable() {
-        use benilla_protocol::messages::ObjectFields;
-
-        const OBJECT_TYPE: u16 = 2;
-        const FLAGS: u16 = 46;
-        let me = |flags: u32| {
-            ObjectStore(ObjectFields::from_pairs(&[
-                (OBJECT_TYPE, 0x19),
-                (FLAGS, flags),
-            ]))
-        };
-        assert!(self_can_assist(&me(0x8)));
-        assert!(!self_can_assist(&me(0x8 | (1 << 25))));
-    }
-
     /// The rank getter's two gates (`0x605620`), through `enrich_unit`'s wiring.
     #[test]
     fn the_rank_gate_zeroes_a_pet_or_charm() {
@@ -3228,6 +3377,7 @@ mod tests {
                 pet_family: 4, // Bear, a real tameable family
                 rank: 1,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -3326,6 +3476,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,
@@ -3492,11 +3643,13 @@ mod tests {
         );
     }
 
-    /// A selection call shows its pick as `"target"` to the rest of its chunk (`TargetByName`,
-    /// `0x489d60`); when the commit does not follow (here the call is dropped), the next frame
-    /// re-pushes `"target"` from the committed selection, though nothing the feed diffs moved.
+    /// The host seats each selection a call commits as `"target"` for the rest of its chunk
+    /// ([`UiScript::seat_selection`]), from its by-name candidate's snapshot, and its
+    /// `"targettarget"`; the next frame re-pushes both from the committed selection, though
+    /// nothing the feed diffs moved, as when a chunk selects a unit and goes back to the one it
+    /// started on.
     #[test]
-    fn a_target_view_the_commit_did_not_follow_is_re_pushed_the_next_frame() {
+    fn a_seated_target_view_is_re_pushed_from_the_selection_the_next_frame() {
         use crate::names::CreatureRecord;
         use benilla_protocol::messages::ObjectType;
         use benilla_protocol::ObjectFields;
@@ -3528,6 +3681,7 @@ mod tests {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -3575,24 +3729,37 @@ mod tests {
                     name: Some("Druid".into()),
                     ..Default::default()
                 },
-                selectable: true,
+                assistable_alive: true,
             }),
         );
+        // The druid targets the player, so the seat shows a target of target too.
+        script.seat_selection(Some(benilla_ui::script::SeatedSelection {
+            guid: DRUID,
+            held: true,
+            target: 0x77,
+            target_held: true,
+        }));
+        let tot_exists = |app: &mut App| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<bool>("return UnitExists('targettarget') == 1")
+                .unwrap()
+        };
         assert_eq!(
-            target_name(&mut app, "TargetByName('Druid')").as_deref(),
+            target_name(&mut app, "").as_deref(),
             Some("Druid"),
-            "the chunk reads its pick"
+            "the chunk reads the seat"
         );
-        let dropped = app
-            .world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .take_script_calls();
-        assert_eq!(dropped.len(), 1, "the call queued for the commit");
+        assert!(tot_exists(&mut app), "and the seat's target of target");
         app.update();
         assert_eq!(
             target_name(&mut app, "").as_deref(),
             Some("Wolf"),
             "the committed selection is shown again"
+        );
+        assert!(
+            !tot_exists(&mut app),
+            "the wolf targets nobody, so its target of target is nobody"
         );
     }
 
@@ -3627,6 +3794,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags: 0,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,

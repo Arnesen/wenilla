@@ -88,6 +88,8 @@ fn survey_together_once(root: &Path) -> Vec<(String, Vec<String>)> {
     let Ok(mut script) = UiScript::new() else {
         return Vec::new();
     };
+    // A fixed `rand` seed, so two survey runs of an addon that draws at load agree.
+    script.lua().srand(1);
     script.set_screen_size(1024.0, 768.0);
     script.register_addons(registry.clone(), Some(root.to_path_buf()), None, None);
     super::seat_a_session(&mut script);
@@ -112,12 +114,7 @@ fn survey_together_once(root: &Path) -> Vec<(String, Vec<String>)> {
         .map(|l| (l.name, l.files.errors))
         .collect();
     script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
-    for event in ["VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD"] {
-        script.fire_event(event, Vec::new());
-    }
-    for _ in 0..10 {
-        script.tick(0.1);
-    }
+    super::enter_world(&mut script);
 
     // Attribution by the raising chunk, matched as `\<Folder>\` rather than a prefix: Lua
     // truncates a long chunk name from the left (`...Ons\FuBar_DakSmak\Libs\…`).

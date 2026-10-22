@@ -56,6 +56,32 @@ fn index(mask_bit: u8, op: u8) -> usize {
     usize::from(mask_bit) * OPS + usize::from(op)
 }
 
+/// Whom `0x6e2b60` adjusts a category recovery for: its active-player lookup (`0x6e2b96`) and its
+/// `skip` argument, which a pet's list passes set (`0x6e9544`, `0x6e2d77`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CategoryPad {
+    /// No active player object: the value is left as it is.
+    NoPlayer,
+    /// `skip` set: op 11 alone.
+    Skip,
+    /// The player's list: the active player's `UNIT_FIELD_RANGEDATTACKTIME` (descriptor
+    /// `+0x1e8`), added for a ranged-speed spell, then op 11.
+    Player { ranged_attack_time_ms: u32 },
+}
+
+impl CategoryPad {
+    /// The pad for a list, given the active player's object when it is streamed.
+    pub(crate) fn for_list(pet: bool, player: Option<&ObjectStore>) -> Self {
+        match player {
+            None => Self::NoPlayer,
+            Some(_) if pet => Self::Skip,
+            Some(store) => Self::Player {
+                ranged_attack_time_ms: store.0.unit_ranged_attack_time().unwrap_or(0),
+            },
+        }
+    }
+}
+
 /// What a talent does to one number, `(value + flat) * pct / 100`; spent only through
 /// [`Self::apply`]. [`Default`] is the identity `(0, 100)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +228,23 @@ impl SpellModifiers {
         self.modifiers(d, op).map_or(value, |m| m.apply(value))
     }
 
+    /// `0x6e2b60(&value, spell, skip)`, a category recovery adjusted for the active player: with
+    /// none it is left as it is (`0x6e2b9f`); `skip` goes straight to op 11 (`0x6e2baa`); else
+    /// the ranged pad (`0x6e2c2c`-`0x6e2c47`), then op 11 (`0x6e2c50`). Its main-hand speed scale
+    /// for a `SpellCategory` row of flags `0x1` (`0x6e2bcf`) is left out: 1.12.1's one such row,
+    /// 170, is no spell's category.
+    pub(crate) fn category_recovery(&self, d: &SpellDisplay, value: i32, pad: CategoryPad) -> i32 {
+        let padded = match pad {
+            CategoryPad::NoPlayer => return value,
+            CategoryPad::Skip => value,
+            CategoryPad::Player {
+                ranged_attack_time_ms,
+            } if d.ranged_speed_cooldown() => value.wrapping_add(ranged_attack_time_ms as i32),
+            CategoryPad::Player { .. } => value,
+        };
+        self.apply(d, OP_COOLDOWN, padded)
+    }
+
     /// The reference applies op 11 separately to RecoveryTime and to CategoryRecoveryTime
     /// after `0x6e2b60` adds the ranged attack time to the latter.
     pub(crate) fn spell_cooldowns(&self, d: &SpellDisplay, ranged_ms: u32) -> (u32, u32) {
@@ -270,13 +313,6 @@ impl benilla_formats::SpellMods for SpellModifiers {
     }
 }
 
-/// Entering the world clears the tables and class family: `Spell_C::SystemInitialize 0x6e7150`,
-/// run once per world entry from `CGlueMgr::Update 0x46b930`. The teardown `0x6e99e0` leaves
-/// them, and there is no talent-change clear.
-pub(super) fn clear_on_world_enter(mut mods: ResMut<SpellModifiers>) {
-    mods.clear();
-}
-
 /// Keep the class family in step with the avatar (`0x6e6ca0`, called from `0x5debcc`: byte 1, the
 /// class, of `UNIT_FIELD_BYTES_0` into `ChrClasses` field 15). An absent avatar keeps the last
 /// value, as a cross-map worldport drops the entity mid-session; only world-enter zeroes it.
@@ -299,7 +335,6 @@ pub(super) fn track_class_family(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client_state::ClientState;
 
     /// A mage spell (family 3) with the given bits set, against a mage player.
     fn mage(bits: &[u8]) -> SpellDisplay {
@@ -428,32 +463,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn world_enter_clears_both_tables_and_the_family() {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(ClientState::Login)
-            .init_resource::<SpellModifiers>()
-            .add_systems(OnEnter(ClientState::InWorld), clear_on_world_enter);
-
-        {
-            let mut mods = app.world_mut().resource_mut::<SpellModifiers>();
-            mods.set_class_family(3);
-            mods.set(true, 5, OP_COST, -30);
-            mods.set(false, 35, OP_COST, -50);
-            assert_eq!(mods.apply(&mage(&[5]), OP_COST, 100), 70);
-        }
-
-        app.world_mut()
-            .resource_mut::<NextState<ClientState>>()
-            .set(ClientState::InWorld);
-        app.update();
-
-        let mods = app.world().resource::<SpellModifiers>();
-        assert_eq!(mods.class_family, 0);
-        assert!(mods.flat.iter().chain(mods.pct.iter()).all(|&v| v == 0));
-    }
-
     /// Real `Spell.dbc` family masks; Cleanse 4987 sets bits 12 and 33, across both dwords.
     #[test]
     fn real_spells_sum_their_own_family_bits() {
@@ -506,10 +515,84 @@ mod tests {
             benilla_formats::load_spell_cast_times(&mut chain).expect("load SpellCastTimes.dbc");
         let frostbolt = catalog.get(116).expect("Frostbolt");
         let mut mods = mage_tables();
-        let base = spells.cast_time_ms(frostbolt, 60, &mods);
+        let level = crate::spell::SpellLevel::Known(60);
+        let base = spells.cast_time_ms(frostbolt, None, level, &mods);
         assert!(base > 0);
         mods.set(false, 5, OP_CAST_TIME, -100);
-        assert_eq!(spells.cast_time_ms(frostbolt, 60, &mods), 0);
+        assert_eq!(spells.cast_time_ms(frostbolt, None, level, &mods), 0);
+    }
+
+    /// `GetCastTime` scales a positive time by the caster's `UNIT_MOD_CAST_SPEED` after op 10
+    /// (`0x6e3422`-`0x6e3456`): a 3 s cast reads 4.5 s at Curse of Tongues' 1.5, `fistp` rounds a
+    /// half to even, a factor within 2^-22 of 1 keeps the time, and an ability, a trade skill, a
+    /// time at or below zero and a caster not streamed are not scaled. A field never sent is the
+    /// descriptor's 0. The level and the speed are reported where they are read.
+    #[test]
+    fn the_cast_time_takes_the_casters_cast_speed() {
+        use crate::spell::{SpellReads, UnitField};
+        #[derive(Default)]
+        struct Log(Vec<UnitField>);
+        impl SpellReads for Log {
+            fn unit(&mut self, field: UnitField) {
+                self.0.push(field);
+            }
+            fn item_search(&mut self, _: u32) {}
+            fn skill_line(&mut self, _: u32) {}
+        }
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        let row = |base_ms, per_level_ms| benilla_formats::SpellCastTime {
+            base_ms,
+            per_level_ms,
+            minimum_ms: i32::MIN,
+        };
+        spells.cast_times = benilla_formats::SpellCastTimeCatalog::from_rows([
+            (1, row(3000, 0)),
+            (2, row(1001, 0)),
+            (3, row(-1_000_000, 0)),
+            (4, row(1000, 100)),
+        ]);
+        let mods = SpellModifiers::default();
+        let spell = |index, attributes| SpellDisplay {
+            casting_time_index: index,
+            attributes,
+            ..Default::default()
+        };
+        let unit = |speed: Option<f32>| {
+            let mut pairs = vec![(34u16, 60u32)];
+            pairs.extend(speed.map(|v| (145u16, v.to_bits())));
+            benilla_protocol::ObjectFields::from_pairs(&pairs)
+        };
+        let time = |d: &SpellDisplay, speed: Option<f32>| {
+            let caster = unit(speed);
+            let mut log = Log::default();
+            let level = crate::spell::SpellLevel::Known(1);
+            let t = spells.cast_time_unclamped_ms(d, Some(&caster), level, &mods, &mut log);
+            (t, log.0)
+        };
+        let three = spell(1, 0);
+        assert_eq!(time(&three, Some(1.5)), (4500, vec![UnitField::CastSpeed]));
+        assert_eq!(time(&three, Some(1.0)).0, 3000);
+        assert_eq!(
+            time(&three, Some(1.0 + 1.0e-7)).0,
+            3000,
+            "within the epsilon"
+        );
+        assert_eq!(time(&three, None).0, 0, "the descriptor's 0");
+        // 1001 × 0.5 = 500.5, to even.
+        assert_eq!(time(&spell(2, 0), Some(0.5)).0, 500);
+        assert_eq!(time(&spell(2, 0), Some(1.5)).0, 1502);
+        for attributes in [0x10, 0x20] {
+            assert_eq!(time(&spell(1, attributes), Some(1.5)), (3000, vec![]));
+        }
+        assert_eq!(time(&spell(3, 0), Some(1.5)), (-1_000_000, vec![]));
+        assert_eq!(
+            time(&spell(4, 0), Some(1.0)),
+            (1100, vec![UnitField::CastSpeed])
+        );
+        let mut log = Log::default();
+        let level = crate::spell::SpellLevel::Known(60);
+        let unseen = spells.cast_time_unclamped_ms(&three, None, level, &mods, &mut log);
+        assert_eq!((unseen, log.0), (3000, vec![]), "no caster to read");
     }
 
     #[test]

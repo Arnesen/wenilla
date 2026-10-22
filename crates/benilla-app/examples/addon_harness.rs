@@ -3,8 +3,13 @@
 //! ```text
 //! cargo run -q -p benilla-app --example addon_harness -- <folder> [--verbose] [--why <substr>]
 //!     [--deep [n]] [--status <file>] [--diff <file>]
-//!   or: ... -- <folder> --probe <Name> [--eval <lua> | --mouse <x>,<y> | --tick <secs>]...
+//!   or: ... -- <folder> --probe <Name> [<step>]...
 //!     (one addon, then ask its VM; the steps run in the order given)
+//!   or: ... -- --probe-ui [<step>]...
+//!     (the default interface with no addon, then ask its VM)
+//!
+//!   a step: --eval <lua> | --event <NAME> [<arg>]... | --mouse <x>,<y>
+//!         | --click <x>,<y>[,<Button>] | --tick <secs>
 //! ```
 //!
 //! Measures which addons work, as a number that can be re-read any day; what the numbers are
@@ -186,16 +191,82 @@ fn surface_report(deep: bool, dump_path: Option<String>) {
     }
 }
 
+/// The probe's steps, one ordered list run in the order typed. `--event` takes every argument up
+/// to the next `--` flag as the event's arguments.
+fn probe_steps(rest: &[String]) -> Vec<addon_harness::probe::Step> {
+    use addon_harness::probe::Step;
+    let point = |arg: &String| -> Option<(f32, f32, Option<String>)> {
+        let mut parts = arg.split(',').map(str::trim);
+        let x = parts.next()?.parse().ok()?;
+        let y = parts.next()?.parse().ok()?;
+        Some((x, y, parts.next().map(str::to_string)))
+    };
+    rest.iter()
+        .enumerate()
+        .filter_map(|(i, a)| match a.as_str() {
+            "--eval" => Some(Step::Eval(rest.get(i + 1)?.clone())),
+            "--tick" => Some(Step::Tick(rest.get(i + 1)?.parse().ok()?)),
+            "--mouse" => {
+                let (x, y, _) = point(rest.get(i + 1)?)?;
+                Some(Step::Mouse(x, y))
+            }
+            "--click" => {
+                let (x, y, button) = point(rest.get(i + 1)?)?;
+                Some(Step::Click(
+                    x,
+                    y,
+                    button.unwrap_or_else(|| "LeftButton".into()),
+                ))
+            }
+            "--event" => {
+                let name = rest.get(i + 1)?.clone();
+                let args = rest[i + 2..]
+                    .iter()
+                    .take_while(|a| !a.starts_with("--"))
+                    .cloned()
+                    .collect();
+                Some(Step::Event(name, args))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A probe's two error lists, then each step and its answer.
+fn print_probe(out: &addon_harness::probe::ProbeOutcome) {
+    report_lines("load errors", &out.load_errors);
+    report_lines("session errors", &out.session_errors);
+    if out.answers.is_empty() {
+        println!("  (no steps given — load and session errors only)");
+    }
+    for (chunk, answer) in &out.answers {
+        println!("\n  {chunk}");
+        println!("    {answer}");
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(root) = args.next() else {
         eprintln!(
             "usage: addon_harness <folder of addons> [--verbose] [--why <blocker substring>]\n   \
-             or: addon_harness --surface   (our _G vs the captured 1.12 surface; takes no corpus)"
+             or: addon_harness --surface   (our _G vs the captured 1.12 surface; takes no corpus)\n   \
+             or: addon_harness <folder> --probe <Name> [<step>]...   (one addon, then asked)\n   \
+             or: addon_harness --probe-ui [<step>]...   (the default interface, then asked)\n   \
+             a step: --eval <lua> | --event <NAME> [<arg>]... | --mouse <x>,<y> | \
+             --click <x>,<y>[,<Button>] | --tick <secs>"
         );
         std::process::exit(2);
     };
     let rest: Vec<String> = args.collect();
+
+    // `--probe-ui` needs no corpus either: the default interface alone, then asked.
+    if root == "--probe-ui" {
+        let out = addon_harness::probe::probe_ui(&probe_steps(&rest));
+        println!("\n{} — probed", out.name);
+        print_probe(&out);
+        return;
+    }
 
     // `--surface` needs no corpus, so it is handled before the root is used.
     if root == "--surface" || rest.iter().any(|a| a == "--surface") {
@@ -329,26 +400,7 @@ fn main() {
         .position(|a| a == "--probe")
         .and_then(|i| rest.get(i + 1))
     {
-        // `--eval`, `--tick` and `--mouse` are one ordered list, run in the order typed.
-        let steps: Vec<addon_harness::probe::Step> = rest
-            .iter()
-            .enumerate()
-            .filter_map(|(i, a)| match a.as_str() {
-                "--eval" => Some(addon_harness::probe::Step::Eval(rest.get(i + 1)?.clone())),
-                "--tick" => Some(addon_harness::probe::Step::Tick(
-                    rest.get(i + 1)?.parse().ok()?,
-                )),
-                "--mouse" => {
-                    let (x, y) = rest.get(i + 1)?.split_once(',')?;
-                    Some(addon_harness::probe::Step::Mouse(
-                        x.trim().parse().ok()?,
-                        y.trim().parse().ok()?,
-                    ))
-                }
-                _ => None,
-            })
-            .collect();
-        let Some(out) = addon_harness::probe::probe(&root, name, &steps) else {
+        let Some(out) = addon_harness::probe::probe(&root, name, &probe_steps(&rest)) else {
             eprintln!(
                 "no manifest under {}/{name} — is that an addon folder?",
                 root.display()
@@ -356,15 +408,7 @@ fn main() {
             std::process::exit(1);
         };
         println!("\n{} — probed under {}", out.name, root.display());
-        report_lines("load errors", &out.load_errors);
-        report_lines("session errors", &out.session_errors);
-        if out.answers.is_empty() {
-            println!("  (no --eval/--mouse given — load and session errors only)");
-        }
-        for (chunk, answer) in &out.answers {
-            println!("\n  {chunk}");
-            println!("    {answer}");
-        }
+        print_probe(&out);
         return;
     }
 

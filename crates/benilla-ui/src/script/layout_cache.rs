@@ -94,11 +94,11 @@ impl super::UiScript {
         candidates.sort_unstable_by_key(|c| c.0);
         let mut out = Vec::with_capacity(candidates.len());
         for (_, h, name) in candidates {
-            if !self.model_ref().resolved.contains_key(&h) {
+            if !self.model_ref().frame_rects.contains_key(&h) {
                 settle_frame(self.lua(), h);
             }
             let model = self.model_ref();
-            let Some(r) = model.resolved.get(&h).copied() else {
+            let Some(&r) = model.frame_rects.get(&h) else {
                 continue;
             };
             let Some((movable, resizable, level)) = model
@@ -108,21 +108,26 @@ impl super::UiScript {
             else {
                 continue; // the resolve's script destroyed it
             };
-            let root = model.screen;
-            let scale = f64::from(eff_scale(&model, h));
-            let own = |v: f32| f64::from(v) / scale;
+            // Each leg is the getter steps on the layout rect over the frame's layout scale
+            // (`0x490fb3`..`0x490fbf`): the left edge alone, the top less the root's top, and the
+            // two spans, each difference at 53 bits.
+            let units = model.layout_units();
+            let root_top = f64::from(model.layout_space().extent().1);
+            let scale = eff_scale(&model, h);
+            let own = |v: f64| units.edge_wide(v, scale);
+            let wide = f64::from;
             let (x, y) = if movable {
                 (
-                    Some(round_offset(own(r.left - root.left))),
-                    Some(round_offset(own(r.top - root.top))),
+                    Some(round_offset(own(wide(r.left)))),
+                    Some(round_offset(own(wide(r.top) - root_top))),
                 )
             } else {
                 (None, None)
             };
             let (width, height) = if resizable {
                 (
-                    Some(round_extent(own(r.right - r.left))),
-                    Some(round_extent(own(r.top - r.bottom))),
+                    Some(round_extent(own(wide(r.right) - wide(r.left)))),
+                    Some(round_extent(own(wide(r.top) - wide(r.bottom)))),
                 )
             } else {
                 (None, None)
@@ -186,12 +191,12 @@ impl super::UiScript {
             input.anchors = pin;
         }
         if seat_size && w != 0 {
-            changed |= input.width.to_bits() != (w as f32).to_bits();
-            input.width = w as f32;
+            changed |= input.width.bits() != crate::layout::Len::Script(w as f32).bits();
+            input.width = crate::layout::Len::Script(w as f32);
         }
         if seat_size && ht != 0 {
-            changed |= input.height.to_bits() != (ht as f32).to_bits();
-            input.height = ht as f32;
+            changed |= input.height.bits() != crate::layout::Len::Script(ht as f32).bits();
+            input.height = crate::layout::Len::Script(ht as f32);
         }
         if seat_size {
             model.note_authored_size(h);
@@ -256,16 +261,41 @@ impl super::UiScript {
                 input.anchors = anchors;
             }
             if seat_size {
-                changed |= input.width.to_bits() != l.width.to_bits()
-                    || input.height.to_bits() != l.height.to_bits();
-                input.width = l.width;
-                input.height = l.height;
+                changed |= input.width.bits() != crate::layout::Len::Script(l.width).bits()
+                    || input.height.bits() != crate::layout::Len::Script(l.height).bits();
+                input.width = crate::layout::Len::Script(l.width);
+                input.height = crate::layout::Len::Script(l.height);
             }
             if let Some(f) = model.arena.frame_mut(h) {
                 f.user_placed = true;
             }
             model.invalidate_frame(h, changed);
         }
+    }
+
+    /// New cells under a live interface, as the reload that is 1.12.1's only cell change: each
+    /// frame with a row gets back what the scripts last set ([`crate::script::Model::drag_authored`]), as the
+    /// rebuild re-creates it, a `<Rel…>` length still in layout units; then the rows seat it under the new
+    /// cells (`0x4905e0`), as the reload's build does. The rows were written under the old cells
+    /// ([`Self::user_placed_layouts`]), rounded, so a seated frame lands on whole units.
+    pub(super) fn reseat_user_placed(&mut self, rows: Vec<FrameLayout>) {
+        {
+            let mut model = self.model_mut();
+            for row in &rows {
+                let Some(h) = model.arena.lookup(&row.name) else {
+                    continue;
+                };
+                let Some(&(anchors, width, height)) = model.drag_authored.get(&h) else {
+                    continue;
+                };
+                let input = model.layout_inputs.entry(h).or_default();
+                input.anchors = anchors;
+                input.width = width;
+                input.height = height;
+                model.invalidate_frame(h, true);
+            }
+        }
+        self.restore_user_placed_layouts(rows);
     }
 
     /// Whether a user-placed frame moved or resized since the last call: the host's cue to persist.

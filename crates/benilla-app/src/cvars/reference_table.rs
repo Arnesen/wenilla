@@ -10,23 +10,14 @@ use super::table::{all_rows, Reference};
 
 /// `same` rows whose shipped default is not yet the registered string, each with the issue that
 /// fixes it. The test fails on any other, and on a listed row that has come right.
-const KNOWN: &[(&str, &str)] = &[
-    ("MasterVolume", "#1278"),
-    ("SoundVolume", "#1278"),
-    ("cameraYawMoveSpeed", "#1278"),
-    ("cameraPitchMoveSpeed", "#1278"),
-    ("cameraDistanceMaxFactor", "#1278"),
-    ("cameraYawSmoothSpeed", "#1278"),
-    ("cameraPivotDYMin", "#1278"),
-    ("cameraTargetSmoothSpeed", "#1278"),
-    ("cameraTerrainTiltTimeMin", "#1278"),
-    ("cameraTerrainTiltTimeMax", "#1278"),
-    ("cameraBobbingLRAmplitude", "#1278"),
-    ("cameraBobbingUDAmplitude", "#1278"),
-    ("WorldDetail", "#1279"),
-    ("Sound_EnableSoundWhenGameIsInBG", "#545"),
-    ("gamma", "#1281"),
-];
+const KNOWN: &[(&str, &str)] = &[("Sound_EnableSoundWhenGameIsInBG", "#545")];
+
+/// A default the client computes at registration (`?` in the table), and the string it computes on
+/// a current x86 host. `SoundBufferSize` (`0x457520`) picks "50" (`0x835e10`) when the processor
+/// frequency is above 1500 MHz (`0x6414c0`) and "100" below. The power-information call that reads
+/// it (`0x42c0e0`, room for 4 processors) fails on a host with more logical CPUs, and the
+/// calibrated counter rate (`0x884060`) it falls back to is above 1500 MHz on a current part.
+const COMPUTED_ON_A_CURRENT_HOST: &[(&str, &str)] = &[("SoundBufferSize", "50")];
 
 /// Every registered name, lower-cased, with the defaults the client registers it with (a
 /// conditional default lists each arm).
@@ -72,6 +63,37 @@ fn the_reference_columns_hold_against_the_registered_cvars() {
             continue;
         };
         if defaults.iter().any(|d| d == "?") {
+            // A computed default has no string to compare, except the one a current x86 host
+            // computes: a `same` row ships it, and a `deviates` row names it.
+            if let Some((_, computed)) = COMPUTED_ON_A_CURRENT_HOST
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            {
+                match &row.reference {
+                    Reference::Same(_) => {
+                        let right = row.default == *computed;
+                        match (right, known) {
+                            (false, None) => differs.push(format!(
+                                "{name}: ships {:?}, a current machine registers {computed:?}",
+                                row.default
+                            )),
+                            (true, Some((_, issue))) => differs.push(format!(
+                                "{name}: listed under {issue} but now ships what a current \
+                                 machine registers; take it off KNOWN"
+                            )),
+                            (false, Some(_)) => known_hit.push(name),
+                            (true, None) => {}
+                        }
+                    }
+                    Reference::Deviates { value, .. } if value != computed => {
+                        differs.push(format!(
+                            "{name}: the row says the reference registers {value:?}, a current \
+                         machine registers {computed:?}"
+                        ))
+                    }
+                    _ => {}
+                }
+            }
             continue;
         }
         // What an `overridden` row says the client registers, and what a `deviates` row says it

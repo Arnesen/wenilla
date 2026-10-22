@@ -3,8 +3,8 @@
 //! the timers, the popup sound and the trigger sites.
 //!
 //! Both banks (`0xb711b8`, `0xb711e4`) are filled from the same `SMSG_TUTORIAL_FLAGS`; until it
-//! lands nothing fires. Bank A is fire-once: [`Tutorials::trigger`] tests and sets it and raises
-//! `TUTORIAL_TRIGGER(id + 1)`, never sending. Bank B is acknowledged: [`Tutorials::acknowledge`]
+//! lands nothing fires. Bank A is fire-once: [`TutorialState::trigger`] tests and sets it and raises
+//! `TUTORIAL_TRIGGER(id + 1)`, never sending. Bank B is acknowledged: [`TutorialState::acknowledge`]
 //! tests it, sets both banks, cancels the id's timer and sends `CMSG_TUTORIAL_FLAG`. So A ⊇ B, and
 //! doing the thing suppresses its tutorial, account-wide.
 //!
@@ -14,7 +14,9 @@
 //!
 //! The reference has fifty-one trigger sites and seven acknowledge sites (the callers of
 //! `0x4b5390` and `0x4b54c0`); the ones this app can produce reach here through
-//! [`TutorialEvent`] or the self-descriptor edges below.
+//! [`TutorialEvent`], the polled edges below, or a field watcher's
+//! [`crate::field_watch::FieldNotice::Tutorial`], fired in the watcher's place
+//! ([`TutorialState::fire_now`]).
 
 use std::time::Duration;
 
@@ -30,7 +32,7 @@ use crate::client_state::ClientState;
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::player::Player;
 use crate::query_cache::Ask;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 /// The popup cue `0x4b5390` plays on both legs (`0x846b68`).
 const TUTORIAL_POPUP_SOUND: &str = "TutorialPopup";
@@ -88,6 +90,11 @@ pub(crate) const TARGETING_DELAY_MS: u32 = 10_000;
 /// after world enter with no movement input; what the stamp (`0x5143e0`) holds is untraced.
 const MOVEMENT_SILENCE: Duration = Duration::from_millis(90_000);
 
+/// The banks' frame: the world-entry bring-up, then the sites' triggers fired. A field watcher's
+/// tutorial tests the same fire-once bank after it ([`TutorialState::fire_now`]).
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TutorialFeed;
+
 /// A site's ask of the tutorial system, written from wherever the reference's site lives.
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TutorialEvent {
@@ -123,9 +130,33 @@ fn set_bank_bit(bank: &mut [u8], id: u32) {
     }
 }
 
-/// The two banks, the timers, and what the frame owes the VM and the wire.
+/// The tutorial state, shared through `&self` ([`Self::lock`]): the call host acknowledges inside
+/// a script call (`InviteToParty`'s `SetTutorialFlag` at `0x5e949c`) while systems that lend the
+/// host hold it too.
 #[derive(Resource, Default)]
-pub(crate) struct Tutorials {
+pub(crate) struct Tutorials(std::sync::Mutex<TutorialState>);
+
+impl Tutorials {
+    /// The state, held for one step; never across Lua, which may acknowledge in a call.
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, TutorialState> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `SetTutorialFlag(id)` (`0x4b54c0`) inside a script call: the acknowledge, and its
+    /// `CMSG_TUTORIAL_FLAG` sent at once, with any send owed before it, so it leaves ahead of the
+    /// call's own packet.
+    pub(crate) fn acknowledge_now(&self, id: u32, commands: &NetCommands) {
+        let mut state = self.lock();
+        state.acknowledge(id);
+        state.flush(commands);
+    }
+}
+
+/// The two banks, the timers, and what the frame owes the VM and the wire.
+#[derive(Default)]
+pub(crate) struct TutorialState {
     /// Bank A (`0xb711b8`…): fire-once. `None` until the packet lands.
     fire_once: Option<Vec<u8>>,
     /// Bank B (`0xb711e4`…): acknowledged.
@@ -139,7 +170,19 @@ pub(crate) struct Tutorials {
     pushes: Vec<(u32, u8, u32)>,
 }
 
-impl Tutorials {
+impl TutorialState {
+    /// Send what is owed, in order.
+    fn flush(&mut self, commands: &NetCommands) {
+        for send in std::mem::take(&mut self.sends) {
+            let command = match send {
+                TutorialSend::Flag(id) => ClientCommand::TutorialFlag { id },
+                TutorialSend::Clear => ClientCommand::TutorialClear,
+                TutorialSend::Reset => ClientCommand::TutorialReset,
+            };
+            let _ = commands.0.send(command);
+        }
+    }
+
     /// `SMSG_TUTORIAL_FLAGS`: both banks copied from the payload.
     pub(crate) fn apply_flags(&mut self, bytes: &[u8]) {
         self.fire_once = Some(bytes.to_vec());
@@ -163,19 +206,26 @@ impl Tutorials {
 
     /// `TriggerTutorial(id, delayMs)` (`0x4b5390`).
     pub(crate) fn trigger(&mut self, id: u32, delay_ms: u32, now: Instant) {
-        let Some(bank) = self.fire_once.as_mut() else {
-            return; // no bank yet: silent
+        let Some(published) = self.fire_now(id) else {
+            return;
         };
-        match bank_bit(bank, id) {
-            Some(false) => set_bank_bit(bank, id),
-            _ => return, // already set, or past the bank (the reference would overrun)
-        }
         if delay_ms == 0 {
-            self.fired.push(id + 1);
+            self.fired.push(published);
         } else {
             self.timers
                 .push((id, now + Duration::from_millis(u64::from(delay_ms))));
         }
+    }
+
+    /// `0x4b5390`'s fire-once test: bank A's bit for `id` tested and set, and the published id
+    /// (`id + 1`) for the caller to fire, at once with no delay ([`fire_published`]). `None` with
+    /// no bank yet, the bit already set, or an id past the bank (the reference would overrun).
+    pub(crate) fn fire_now(&mut self, id: u32) -> Option<u32> {
+        let bank = self.fire_once.as_mut()?;
+        (bank_bit(bank, id) == Some(false)).then(|| {
+            set_bank_bit(bank, id);
+            id + 1
+        })
     }
 
     /// `SetTutorialFlag(id)` (`0x4b54c0`): bank B's bit gates, both banks set, the id's timer
@@ -245,20 +295,14 @@ impl Tutorials {
     }
 }
 
-/// The self descriptor's last-seen fields, for the edge-triggered `0x4b5390` sites: the level-up
-/// arm, the ghost flag, the resting flag, the PvP flag, the rest state.
+/// The last-seen level and swimming state, for the edge-triggered `0x4b5390` sites polled here.
+/// The ghost, resting, PvP and rested tutorials ride their field watchers
+/// ([`crate::field_watch`]), the ghost's arrival leg the cascade ([`run_world_enter_cascade`]).
 #[derive(Default)]
 struct SelfWatch {
     level: Option<u32>,
-    player_flags: Option<u32>,
-    unit_flags: Option<u32>,
-    rest_state: Option<u8>,
     swimming: Option<bool>,
 }
-
-const PLAYER_FLAGS_GHOST: u32 = 0x10;
-const PLAYER_FLAGS_RESTING: u32 = 0x20;
-const UNIT_FLAG_PVP_ATTACKABLE: u32 = 0x1000;
 
 /// The hearthstone's item entry (`0x1b24`).
 const HEARTHSTONE: u32 = 6948;
@@ -271,76 +315,90 @@ const KEYRING_SLOTS: std::ops::RangeInclusive<u32> = 0x51..=0x70;
 /// Before the script tick: the sites' asks, the descriptor edges, the timers, the cue and the
 /// event, and the acknowledged bank's push to whichever VM is live.
 fn feed_tutorials(
-    mut script: Option<NonSendMut<UiScript>>,
-    mut tutorials: ResMut<Tutorials>,
+    mut hosted_vm: crate::script_calls::HostedVm,
+    tutorials: Res<Tutorials>,
     mut asks: MessageReader<TutorialEvent>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     items: Res<crate::items::Items>,
-    mut sounds: ResMut<crate::sound::MessageSounds>,
+    sounds: Res<crate::sound::MessageSounds>,
     mut told: Local<crate::ui_script::VmMemo<Option<Vec<u8>>>>,
 ) {
-    let now = Instant::now();
-    for ask in asks.read() {
-        match *ask {
-            TutorialEvent::Trigger { id, delay_ms } => tutorials.trigger(id, delay_ms, now),
-            TutorialEvent::Acknowledge { id } => tutorials.acknowledge(id),
-        }
-    }
-    // The engine's sites: Quest Completion, a turn-in test that passed (`0x4df792`).
-    if let Some(script) = script.as_mut() {
-        for id in script.take_tutorial_triggers() {
-            tutorials.trigger(id, 0, now);
-        }
-    }
-
-    // The item-received sites: Backpack always; Equippable Items for any non-zero inventory type
-    // (the reference's 23-bit mask `0x809200` is not decoded); Hearthstones by entry; Ranged
-    // Weapons for a ranged type on a non-hunter; Keyrings by the slot band.
-    let pushes = std::mem::take(&mut tutorials.pushes);
-    let class = self_q.single().ok().and_then(|s| s.0.unit_class());
-    for (entry, bag, slot) in pushes {
-        tutorials.trigger(id::BACKPACK, 0, now);
-        if let Some(info) = items.template(entry, 0, Ask::Read) {
-            if info.inventory_type != 0 {
-                tutorials.trigger(id::EQUIPPABLE_ITEMS, 0, now);
-            }
-            if info.inventory_type == INVTYPE_RANGED && class != Some(CLASS_HUNTER) {
-                tutorials.trigger(id::RANGED_WEAPONS, 0, now);
+    hosted_vm.run(|mut script| {
+        let now = Instant::now();
+        let mut tutorials = tutorials.lock();
+        for ask in asks.read() {
+            match *ask {
+                TutorialEvent::Trigger { id, delay_ms } => tutorials.trigger(id, delay_ms, now),
+                TutorialEvent::Acknowledge { id } => tutorials.acknowledge(id),
             }
         }
-        if entry == HEARTHSTONE {
-            tutorials.trigger(id::HEARTHSTONES, 0, now);
+        // The engine's sites: Quest Completion, a turn-in test that passed (`0x4df792`).
+        if let Some(script) = script.as_mut() {
+            for id in script.take_tutorial_triggers() {
+                tutorials.trigger(id, 0, now);
+            }
         }
-        if bag == KEYRING_BAG && KEYRING_SLOTS.contains(&slot) {
-            tutorials.trigger(id::KEYRINGS, 0, now);
+
+        // The item-received sites: Backpack always; Equippable Items for any non-zero inventory
+        // type (the reference's 23-bit mask `0x809200` is not decoded); Hearthstones by entry;
+        // Ranged Weapons for a ranged type on a non-hunter; Keyrings by the slot band.
+        let pushes = std::mem::take(&mut tutorials.pushes);
+        let class = self_q.single().ok().and_then(|s| s.0.unit_class());
+        for (entry, bag, slot) in pushes {
+            tutorials.trigger(id::BACKPACK, 0, now);
+            if let Some(info) = items.template(entry, 0, Ask::Read) {
+                if info.inventory_type != 0 {
+                    tutorials.trigger(id::EQUIPPABLE_ITEMS, 0, now);
+                }
+                if info.inventory_type == INVTYPE_RANGED && class != Some(CLASS_HUNTER) {
+                    tutorials.trigger(id::RANGED_WEAPONS, 0, now);
+                }
+            }
+            if entry == HEARTHSTONE {
+                tutorials.trigger(id::HEARTHSTONES, 0, now);
+            }
+            if bag == KEYRING_BAG && KEYRING_SLOTS.contains(&slot) {
+                tutorials.trigger(id::KEYRINGS, 0, now);
+            }
         }
-    }
 
-    tutorials.tick(now);
+        tutorials.tick(now);
 
-    let Some(mut script) = script else {
-        return;
-    };
-    for published in std::mem::take(&mut tutorials.fired) {
-        sounds.push_cue(TUTORIAL_POPUP_SOUND);
-        script.fire_event(
-            "TUTORIAL_TRIGGER",
-            vec![ScriptValue::Int(i64::from(published))],
-        );
-    }
-    // The bank is owed to every VM: what it has been told is per VM, so a `/reload`'s fresh VM
-    // is told again.
-    let told = told.get(&script);
-    if *told != tutorials.acknowledged {
-        told.clone_from(&tutorials.acknowledged);
-        script.set_tutorial_bank(tutorials.acknowledged.clone());
-    }
+        let Some(script) = script else {
+            return;
+        };
+        let fired = std::mem::take(&mut tutorials.fired);
+        // The bank is owed to every VM: what it has been told is per VM, so a `/reload`'s fresh VM
+        // is told again.
+        let told = told.get(script);
+        if *told != tutorials.acknowledged {
+            told.clone_from(&tutorials.acknowledged);
+            script.set_tutorial_bank(tutorials.acknowledged.clone());
+        }
+        // Free before any handler runs: one may acknowledge inside a call.
+        drop(tutorials);
+        for published in fired {
+            fire_published(script, &sounds, published);
+        }
+    })
 }
 
-/// The self descriptor's `0x4b5390` edge sites: the `SMSG_LEVELUP_INFO` arm on the level rising,
-/// the ghost and resting flags, the PvP flag, the rested table's one live row, and the mover
-/// entering water. Each fires on a change, never on the login descriptor; the bring-up resets the
-/// memory.
+/// `0x4b5390`'s firing of a published id: the `TutorialPopup` cue, then `TUTORIAL_TRIGGER`.
+pub(crate) fn fire_published(
+    script: &mut UiScript,
+    sounds: &crate::sound::MessageSounds,
+    published: u32,
+) {
+    sounds.push_cue(TUTORIAL_POPUP_SOUND);
+    script.fire_event(
+        "TUTORIAL_TRIGGER",
+        vec![ScriptValue::Int(i64::from(published))],
+    );
+}
+
+/// The polled `0x4b5390` edge sites: the `SMSG_LEVELUP_INFO` arm on the level rising, and the
+/// mover entering water. Each fires on a change, never on the login descriptor; the bring-up
+/// resets the memory.
 fn watch_self(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     player: Res<Player>,
@@ -354,9 +412,6 @@ fn watch_self(
     // The first sight of each field arms silently.
     if let Ok(store) = self_q.single() {
         let level = store.0.unit_level();
-        let player_flags = store.0.player_flags();
-        let unit_flags = store.0.unit_flags();
-        let rest_state = store.0.player_rest_state();
         if let (Some(prev), Some(new)) = (watch.level, level) {
             if new > prev {
                 for (threshold, id) in LEVEL_TRIGGERS {
@@ -366,30 +421,7 @@ fn watch_self(
                 }
             }
         }
-        if let Some(prev) = watch.player_flags {
-            let rose = |bit: u32| prev & bit == 0 && player_flags & bit != 0;
-            if rose(PLAYER_FLAGS_GHOST) {
-                asks.write(TutorialEvent::trigger(id::DEATH));
-            }
-            if rose(PLAYER_FLAGS_RESTING) {
-                asks.write(TutorialEvent::trigger(id::RESTING));
-            }
-        }
-        if let Some(prev) = watch.unit_flags {
-            if prev & UNIT_FLAG_PVP_ATTACKABLE == 0 && unit_flags & UNIT_FLAG_PVP_ATTACKABLE != 0 {
-                asks.write(TutorialEvent::trigger(id::PVP_COMBAT));
-            }
-        }
-        if let (Some(prev), Some(new)) = (watch.rest_state, rest_state) {
-            // Only rest state 1 names a tutorial; the other rows carry the sentinel.
-            if new != prev && new == 1 {
-                asks.write(TutorialEvent::trigger(id::RESTED));
-            }
-        }
         watch.level = level;
-        watch.player_flags = Some(player_flags);
-        watch.unit_flags = Some(unit_flags);
-        watch.rest_state = rest_state;
     }
     if let Some(prev) = watch.swimming {
         if !prev && player.swimming {
@@ -400,39 +432,36 @@ fn watch_self(
 }
 
 /// After the script tick: the four verbs' writes, then every send.
-fn drain_tutorials(
-    script: Option<NonSendMut<UiScript>>,
-    mut tutorials: ResMut<Tutorials>,
+pub(crate) fn drain_tutorials(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    tutorials: Res<Tutorials>,
     commands: Res<NetCommands>,
 ) {
-    if let Some(mut script) = script {
-        for id in script.take_tutorial_flag_requests() {
-            tutorials.acknowledge(id);
+    hosted_vm.run(|script| {
+        let mut tutorials = tutorials.lock();
+        if let Some(script) = script {
+            for id in script.take_tutorial_flag_requests() {
+                tutorials.acknowledge(id);
+            }
+            for _ in 0..script.take_tutorial_clears() {
+                tutorials.clear();
+            }
+            for _ in 0..script.take_tutorial_resets() {
+                tutorials.reset();
+            }
         }
-        for _ in 0..script.take_tutorial_clears() {
-            tutorials.clear();
-        }
-        for _ in 0..script.take_tutorial_resets() {
-            tutorials.reset();
-        }
-    }
-    for send in std::mem::take(&mut tutorials.sends) {
-        let command = match send {
-            TutorialSend::Flag(id) => ClientCommand::TutorialFlag { id },
-            TutorialSend::Clear => ClientCommand::TutorialClear,
-            TutorialSend::Reset => ClientCommand::TutorialReset,
-        };
-        let _ = commands.0.send(command);
-    }
+        tutorials.flush(&commands);
+    })
 }
 
 /// The world-enter bring-up: the banks zeroed, then the bank captured during the login handshake
 /// applied if there was one.
 fn on_world_enter(
     mut entered: MessageReader<EnteredWorldMessage>,
-    mut tutorials: ResMut<Tutorials>,
+    tutorials: Res<Tutorials>,
     mut cascade: ResMut<WorldEnterCascade>,
 ) {
+    let mut tutorials = tutorials.lock();
     for e in entered.read() {
         tutorials.world_enter();
         if let Some(bytes) = &e.tutorial_flags {
@@ -446,8 +475,9 @@ fn on_world_enter(
 }
 
 /// The enter-world cascade `0x4908c0`'s two unconditional triggers, Welcome (`0x490a48`) then
-/// Questgivers (`0x490a51`), once per world session when the local player exists; and the
-/// Movement popup's silence window.
+/// Questgivers (`0x490a51`), once per world session when the local player exists, each arrival's
+/// ghost tutorial ahead of them ([`run_world_enter_cascade`]); and the Movement popup's silence
+/// window.
 #[derive(Resource, Default)]
 pub(crate) struct WorldEnterCascade {
     armed: bool,
@@ -458,12 +488,23 @@ pub(crate) struct WorldEnterCascade {
     reset_watch: bool,
 }
 
+/// The arrival's tutorial and the cascade's. Our player's create (`0x5dea50`) runs its ghost state
+/// (`0x5deb2a` → `0x5de9c0`) before the cascade (`0x5deb60`): arriving with `PLAYER_FLAGS` bit
+/// 0x10 triggers Death (`0x5de9eb`-`0x5de9f0`), at login and at every cross-map port, so it comes
+/// ahead of Welcome.
 fn run_world_enter_cascade(
     mut cascade: ResMut<WorldEnterCascade>,
-    mut tutorials: ResMut<Tutorials>,
+    tutorials: Res<Tutorials>,
     self_q: Query<(), With<SelfPlayer>>,
+    arrivals: Query<&ObjectStore, Added<SelfPlayer>>,
 ) {
+    let mut tutorials = tutorials.lock();
     let now = Instant::now();
+    for store in &arrivals {
+        if store.0.player_flags() & 0x10 != 0 {
+            tutorials.trigger(id::DEATH, 0, now);
+        }
+    }
     if cascade.armed && !self_q.is_empty() {
         cascade.armed = false;
         tutorials.trigger(id::WELCOME, 0, now);
@@ -510,21 +551,19 @@ impl InputHooks<'_> {
 }
 
 /// The window edges the reference's handlers fire from: the trainer list (Trainers acknowledged,
-/// `0x4d74ae`), the vendor list (Vendors, `0x4fad32`), the taxi map (Travel, `0x4dbaa2`), and the
-/// group turning raid (Raid Groups, `0x4ba60d`, taken as the raid-type edge).
+/// `0x4d74ae`), the vendor list (Vendors, `0x4fad32`) and the taxi map (Travel, `0x4dbaa2`). Raid
+/// Groups fires from the group list itself (`ui_party::net`).
 #[derive(Default)]
 struct WindowWatch {
     trainer: Option<u64>,
     vendor: Option<u64>,
     taxi: bool,
-    raid: Option<bool>,
 }
 
 fn watch_windows(
     trainer: Res<crate::ui_trainer::TrainerOpen>,
     merchant: Res<crate::ui_merchant::MerchantOpen>,
     taxi: Res<crate::ui_taxi::TaxiState>,
-    group: Res<crate::ui_party::GroupState>,
     mut watch: Local<WindowWatch>,
     mut asks: MessageWriter<TutorialEvent>,
 ) {
@@ -541,15 +580,10 @@ fn watch_windows(
         asks.write(TutorialEvent::trigger(id::TRAVEL));
     }
     watch.taxi = taxi_open;
-    let raid = group.in_group && group.group_type == crate::ui_party::GROUPTYPE_RAID;
-    if raid && watch.raid == Some(false) {
-        asks.write(TutorialEvent::trigger(id::RAID_GROUPS));
-    }
-    watch.raid = Some(raid);
 }
 
-fn on_world_leave(mut tutorials: ResMut<Tutorials>, mut cascade: ResMut<WorldEnterCascade>) {
-    tutorials.world_leave();
+fn on_world_leave(tutorials: Res<Tutorials>, mut cascade: ResMut<WorldEnterCascade>) {
+    tutorials.lock().world_leave();
     cascade.armed = false;
     cascade.entered_at = None;
 }
@@ -578,8 +612,9 @@ impl Plugin for TutorialPlugin {
                     // simply waits for the first frame with an interface.
                     feed_tutorials
                         .in_set(UiFeed)
+                        .in_set(TutorialFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
-                    drain_tutorials.after(UiInput),
+                    drain_tutorials.in_set(crate::ui_script::UiDrain),
                 ),
             )
             .add_systems(OnExit(ClientState::InWorld), on_world_leave);
@@ -599,9 +634,9 @@ mod net {
         app.net_handler(SessionEventKind::TutorialFlags, on_flags);
     }
 
-    fn on_flags(In(ev): In<SessionEvent>, mut tutorials: ResMut<Tutorials>) {
+    fn on_flags(In(ev): In<SessionEvent>, tutorials: Res<Tutorials>) {
         if let SessionEvent::TutorialFlags(bytes) = ev {
-            tutorials.apply_flags(&bytes);
+            tutorials.lock().apply_flags(&bytes);
         }
     }
 }
@@ -610,8 +645,8 @@ mod net {
 mod tests {
     use super::*;
 
-    fn banked() -> Tutorials {
-        let mut t = Tutorials::default();
+    fn banked() -> TutorialState {
+        let mut t = TutorialState::default();
         t.apply_flags(&[0u8; 32]);
         t
     }
@@ -620,7 +655,7 @@ mod tests {
     #[test]
     fn the_trigger_fires_once_per_bank_a_and_never_sends() {
         let now = Instant::now();
-        let mut t = Tutorials::default();
+        let mut t = TutorialState::default();
         t.trigger(id::WELCOME, 0, now);
         assert!(t.fired.is_empty(), "no bank yet: silent");
         let mut t = banked();
@@ -663,7 +698,7 @@ mod tests {
     /// B is a no-op.
     #[test]
     fn the_acknowledge_sets_both_banks_and_sends_once() {
-        let mut t = Tutorials::default();
+        let mut t = TutorialState::default();
         t.acknowledge(id::CHATTING);
         assert!(t.sends.is_empty(), "no bank: nothing");
         let mut t = banked();
@@ -712,7 +747,7 @@ mod tests {
     /// World enter zeroes present banks and keeps their size; the packet fills both.
     #[test]
     fn world_enter_zeroes_and_the_packet_fills() {
-        let mut t = Tutorials::default();
+        let mut t = TutorialState::default();
         t.world_enter();
         assert!(t.fire_once.is_none(), "no bank: nothing to zero");
         t.apply_flags(&[0xFFu8; 4]);
@@ -753,7 +788,8 @@ mod tests {
         let mut bank = vec![0xFFu8; 32];
         bank[0] = 0xFE;
         app.world_mut()
-            .resource_mut::<Tutorials>()
+            .resource::<Tutorials>()
+            .lock()
             .apply_flags(&bank);
 
         app.insert_non_send_resource(UiScript::new().expect("VM"));
@@ -778,7 +814,8 @@ mod tests {
     fn an_unchanged_bank_is_not_re_pushed_every_frame() {
         let mut app = feeder();
         app.world_mut()
-            .resource_mut::<Tutorials>()
+            .resource::<Tutorials>()
+            .lock()
             .apply_flags(&[0u8; 32]);
         app.insert_non_send_resource(UiScript::new().expect("VM"));
         app.update();
@@ -790,10 +827,42 @@ mod tests {
         assert!(!enabled(&mut app), "unchanged ⇒ nothing pushed");
         // A real change is still pushed, on the same VM.
         app.world_mut()
-            .resource_mut::<Tutorials>()
+            .resource::<Tutorials>()
+            .lock()
             .acknowledge(id::CHATTING);
         app.update();
         assert!(enabled(&mut app), "a moved bank reaches the live VM");
+    }
+
+    /// The flag tutorials are field watchers' (`crate::field_watch`), which a first create skips:
+    /// the self descriptor's poll raises none, whatever its flags became since it last looked.
+    #[test]
+    fn the_self_poll_raises_no_flag_tutorial() {
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        let mut app = App::new();
+        app.init_resource::<Player>()
+            .init_resource::<WorldEnterCascade>()
+            .add_message::<TutorialEvent>()
+            .add_systems(Update, watch_self);
+        let store = |pairs: &[(u16, u32)]| {
+            ObjectStore(ObjectFields::from_pairs(pairs).into_created(ObjectType::Player))
+        };
+        let me = app.world_mut().spawn((SelfPlayer, store(&[(34, 10)]))).id();
+        app.update();
+        app.world_mut().entity_mut(me).insert(store(&[
+            (34, 10),
+            (190, 0x30),
+            (46, 0x1000),
+            (194, 1 << 24),
+        ]));
+        app.update();
+        let asked: Vec<TutorialEvent> = app
+            .world_mut()
+            .resource_mut::<Messages<TutorialEvent>>()
+            .drain()
+            .collect();
+        assert!(asked.is_empty(), "{asked:?}");
     }
 
     /// The login's own tutorials wait for an interface, on the real plugin's registration:
@@ -826,7 +895,8 @@ mod tests {
             .unwrap();
         app.insert_non_send_resource(script);
         app.world_mut()
-            .resource_mut::<Tutorials>()
+            .resource::<Tutorials>()
+            .lock()
             .apply_flags(&[0u8; 32]);
         app.update();
         let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
@@ -850,7 +920,6 @@ mod tests {
             .init_resource::<crate::ui_trainer::TrainerOpen>()
             .init_resource::<crate::ui_merchant::MerchantOpen>()
             .init_resource::<crate::ui_taxi::TaxiState>()
-            .init_resource::<crate::ui_party::GroupState>()
             .init_resource::<Player>()
             .add_message::<EnteredWorldMessage>();
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -863,14 +932,15 @@ mod tests {
         app.insert_non_send_resource(UiScript::new().expect("a frameless VM"));
 
         {
-            let mut t = app.world_mut().resource_mut::<Tutorials>();
+            let t = app.world().resource::<Tutorials>();
+            let mut t = t.lock();
             t.apply_flags(&[0u8; 32]);
             t.trigger(id::WELCOME, 0, Instant::now());
         }
 
         app.update();
         assert_eq!(
-            app.world().resource::<Tutorials>().fired,
+            app.world().resource::<Tutorials>().lock().fired,
             vec![id::WELCOME + 1],
             "the window must not publish: there is no frame registered for TUTORIAL_TRIGGER, and \
              the take is one-way"
@@ -881,8 +951,58 @@ mod tests {
             .remove_resource::<crate::ui_script::PendingEntryUiLoad>();
         app.update();
         assert!(
-            app.world().resource::<Tutorials>().fired.is_empty(),
+            app.world().resource::<Tutorials>().lock().fired.is_empty(),
             "…and once there is an interface, it is published exactly once"
         );
+    }
+
+    /// The active player's arrival runs its ghost state (`0x5dea50` → `0x5deb2a` → `0x5de9c0`)
+    /// before the world-enter cascade (`0x5deb60` → `0x4908c0`): arriving with `PLAYER_FLAGS`
+    /// bit 0x10 set fires Death (0x18, `0x5de9eb`-`0x5de9f0`) ahead of Welcome and Questgivers,
+    /// published as their number plus one; arriving alive fires no Death.
+    #[test]
+    fn a_ghost_arrival_fires_death_ahead_of_the_cascades_tutorials() {
+        const PLAYER_FLAGS: u16 = 190;
+        for (flags, published) in [(0x10, vec![0x19, 0x2a, 0x01]), (0, vec![0x2a, 0x01])] {
+            let mut app = App::new();
+            app.add_plugins(TutorialPlugin)
+                .init_resource::<crate::items::Items>()
+                .init_resource::<crate::sound::MessageSounds>()
+                .init_resource::<crate::ui_trainer::TrainerOpen>()
+                .init_resource::<crate::ui_merchant::MerchantOpen>()
+                .init_resource::<crate::ui_taxi::TaxiState>()
+                .init_resource::<Player>()
+                .add_message::<EnteredWorldMessage>();
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            app.insert_resource(crate::net::NetCommands(tx));
+            app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+            let script = UiScript::new().expect("a VM");
+            script
+                .run(
+                    "SEEN = {} local f = CreateFrame('Frame') \
+                     f:RegisterEvent('TUTORIAL_TRIGGER') \
+                     f:SetScript('OnEvent', function() table.insert(SEEN, arg1) end)",
+                )
+                .unwrap();
+            app.insert_non_send_resource(script);
+            app.world_mut().write_message(EnteredWorldMessage {
+                tutorial_flags: Some(vec![0u8; 32]),
+            });
+            app.world_mut().spawn((
+                SelfPlayer,
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                    PLAYER_FLAGS,
+                    flags,
+                )])),
+            ));
+            app.update();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            assert_eq!(
+                s.eval::<Vec<i64>>("return SEEN").unwrap(),
+                published,
+                "flags {flags:#x}"
+            );
+        }
     }
 }

@@ -22,6 +22,7 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::DefenseMessage, on_broadcast)
         .net_handler(K::ServerMessage, on_broadcast)
         .net_handler(K::ChatRestricted, on_broadcast)
+        .net_handler(K::TransferAborted, on_broadcast)
         .net_handler(K::Notification, on_toast)
         .net_handler(K::AreaTriggerMessage, on_toast)
         .net_handler(K::PlayedTime, on_played_time)
@@ -32,35 +33,36 @@ pub(super) fn register(app: &mut App) {
 
 fn on_chat(
     In(ev): In<SessionEvent>,
-    mut chat_log: ResMut<ChatLog>,
+    chat_log: Res<ChatLog>,
     social: Res<SocialState>,
     commands: Res<NetCommands>,
     mut server_said: MessageWriter<ServerSaidMessage>,
 ) {
     if let SessionEvent::Chat(m) = ev {
-        chat(m, &mut chat_log, &social, &commands, &mut server_said);
+        chat(m, &chat_log, &social, &commands, &mut server_said);
     }
 }
 
-fn on_channel_list(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+fn on_channel_list(In(ev): In<SessionEvent>, chat_log: Res<ChatLog>) {
     if let SessionEvent::ChannelList {
         channel, members, ..
     } = ev
     {
-        channel_list(channel, &members, &mut chat_log);
+        channel_list(channel, &members, &chat_log);
     }
 }
 
-fn on_whisper_refusal(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+fn on_whisper_refusal(In(ev): In<SessionEvent>, errors: Res<UiErrorKeys>) {
     match ev {
-        SessionEvent::ChatPlayerNotFound { name } => chat_player_not_found(&name, &mut errors),
-        SessionEvent::ChatWrongFaction => chat_wrong_faction(&mut errors),
+        SessionEvent::ChatPlayerNotFound { name } => chat_player_not_found(&name, &errors),
+        SessionEvent::ChatWrongFaction => chat_wrong_faction(&errors),
         _ => {}
     }
 }
 
-/// The four world broadcasts, parked for [`super::broadcast`]'s resolve pass.
-fn on_broadcast(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+/// The four world broadcasts and a transfer abort's line, parked for [`super::broadcast`]'s
+/// resolve pass.
+fn on_broadcast(In(ev): In<SessionEvent>, chat_log: Res<ChatLog>) {
     let b = match ev {
         SessionEvent::ZoneUnderAttack { area_id } => Broadcast::ZoneUnderAttack { area_id },
         SessionEvent::DefenseMessage { zone_id, text } => Broadcast::Defense { zone_id, text },
@@ -68,9 +70,10 @@ fn on_broadcast(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
             Broadcast::Server { message_type, text }
         }
         SessionEvent::ChatRestricted => Broadcast::ChatRestricted,
+        SessionEvent::TransferAborted { reason } => Broadcast::TransferAborted { reason },
         _ => return,
     };
-    broadcast(b, &mut chat_log);
+    broadcast(b, &chat_log);
 }
 
 fn on_toast(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorTexts>) {
@@ -86,15 +89,15 @@ fn on_toast(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorTexts>) {
 fn on_played_time(
     In(ev): In<SessionEvent>,
     mut answer: ResMut<PlayedTimeAnswer>,
-    mut chat_log: ResMut<ChatLog>,
+    chat_log: Res<ChatLog>,
 ) {
     if let SessionEvent::PlayedTime { total, level } = ev {
         answer.0 = Some((total, level));
-        played_time(total, level, &mut chat_log);
+        played_time(total, level, &chat_log);
     }
 }
 
-fn on_channel_notify(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+fn on_channel_notify(In(ev): In<SessionEvent>, chat_log: Res<ChatLog>) {
     if let SessionEvent::ChannelNotify {
         notice,
         channel,
@@ -105,7 +108,7 @@ fn on_channel_notify(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
     }
 }
 
-fn on_random_roll(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+fn on_random_roll(In(ev): In<SessionEvent>, chat_log: Res<ChatLog>) {
     if let SessionEvent::RandomRoll {
         min,
         max,
@@ -118,7 +121,7 @@ fn on_random_roll(In(ev): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
 }
 
 /// Clear the chat log's session state when the session ends.
-fn on_session_end(In(_): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
+fn on_session_end(In(_): In<SessionEvent>, chat_log: Res<ChatLog>) {
     chat_log.clear_session();
 }
 
@@ -126,7 +129,7 @@ fn on_session_end(In(_): In<SessionEvent>, mut chat_log: ResMut<ChatLog>) {
 /// commands, log at `info!` and go out as [`ServerSaidMessage`]; other chat logs at `debug!`.
 fn chat(
     m: ChatMessage,
-    chat_log: &mut ChatLog,
+    chat_log: &ChatLog,
     social: &SocialState,
     net_commands: &NetCommands,
     server_said: &mut MessageWriter<ServerSaidMessage>,
@@ -185,7 +188,7 @@ fn chat(
 
 /// The `/chatlist` roster (`SMSG_CHANNEL_LIST`). Members arrive as guids and are not resolved,
 /// so the line gives their count where the reference lists their names (`0x49c690`).
-fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &mut ChatLog) {
+fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &ChatLog) {
     let mut ev = ChatEvent::text_only(
         ChatEventKind::ChannelList,
         format!("{} member(s)", members.len()),
@@ -196,18 +199,16 @@ fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &mut ChatLog) 
 
 /// A whisper target is offline: message 241, `ERR_CHAT_PLAYER_NOT_FOUND_S`, with the server's
 /// name. The key travels, since there is no VM here; its row routes it to chat.
-fn chat_player_not_found(name: &str, errors: &mut crate::ui_action::UiErrorKeys) {
-    errors.0.push(crate::ui_action::UiError::s(
+fn chat_player_not_found(name: &str, errors: &crate::ui_action::UiErrorKeys) {
+    errors.push(crate::ui_action::UiError::s(
         "ERR_CHAT_PLAYER_NOT_FOUND_S",
         name,
     ));
 }
 
 /// A cross-faction whisper was refused: message 240, `ERR_CHAT_WRONG_FACTION`.
-fn chat_wrong_faction(errors: &mut crate::ui_action::UiErrorKeys) {
-    errors
-        .0
-        .push(crate::ui_action::UiError::key("ERR_CHAT_WRONG_FACTION"));
+fn chat_wrong_faction(errors: &crate::ui_action::UiErrorKeys) {
+    errors.push(crate::ui_action::UiError::key("ERR_CHAT_WRONG_FACTION"));
 }
 
 /// `SMSG_NOTIFICATION` (`0x1cb`, handler `0x401800`): the red `UIErrorsFrame` line,
@@ -228,14 +229,14 @@ fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
 
 /// Park a world broadcast for `ui_chat::broadcast`'s resolve pass, logged: a defense broadcast
 /// outside the defense channels prints nothing, so the log is its only trace.
-fn broadcast(b: Broadcast, chat_log: &mut ChatLog) {
+fn broadcast(b: Broadcast, chat_log: &ChatLog) {
     info!("net: world broadcast — {b:?}");
     chat_log.push_broadcast(b);
 }
 
 /// The `/played` answer as two system lines, in English, shaped like `TIME_PLAYED_TOTAL` and
 /// `TIME_PLAYED_LEVEL` over `TIME_DAYHOURMINUTESECOND` (`GlobalStrings.lua:4243-4247`).
-fn played_time(total: u32, level: u32, chat_log: &mut ChatLog) {
+fn played_time(total: u32, level: u32, chat_log: &ChatLog) {
     for (label, secs) in [
         ("Total time played", total),
         ("Time played this level", level),
@@ -285,13 +286,13 @@ mod tests {
         world.insert_resource(ChatLog::default());
         world
             .run_system_once(
-                move |mut chat_log: ResMut<ChatLog>,
+                move |chat_log: Res<ChatLog>,
                       social: Res<SocialState>,
                       net_commands: Res<NetCommands>,
                       mut server_said: MessageWriter<ServerSaidMessage>| {
                     chat(
                         m.clone(),
-                        &mut chat_log,
+                        &chat_log,
                         &social,
                         &net_commands,
                         &mut server_said,
@@ -300,6 +301,21 @@ mod tests {
             )
             .unwrap();
         world.resource::<ChatLog>().pending_len()
+    }
+
+    /// `SMSG_TRANSFER_ABORTED` reaches chat: its reason is parked for the line the resolve pass
+    /// reads from the VM (`0x4019a0`).
+    #[test]
+    fn a_transfer_abort_is_parked_for_its_line() {
+        let mut world = World::new();
+        world.insert_resource(ChatLog::default());
+        world
+            .run_system_once_with(on_broadcast, SessionEvent::TransferAborted { reason: 5 })
+            .unwrap();
+        assert_eq!(
+            world.resource_mut::<ChatLog>().take_broadcasts(),
+            [Broadcast::TransferAborted { reason: 5 }]
+        );
     }
 
     /// An addon line rides an ordinary lane; only its `language` keeps it out of the window.
@@ -329,13 +345,13 @@ mod tests {
         let m = a_party_line(LANGUAGE_ADDON, "Quiver\tVERSION:3.1.4");
         world
             .run_system_once(
-                move |mut chat_log: ResMut<ChatLog>,
+                move |chat_log: Res<ChatLog>,
                       social: Res<SocialState>,
                       net_commands: Res<NetCommands>,
                       mut server_said: MessageWriter<ServerSaidMessage>| {
                     chat(
                         m.clone(),
-                        &mut chat_log,
+                        &chat_log,
                         &social,
                         &net_commands,
                         &mut server_said,

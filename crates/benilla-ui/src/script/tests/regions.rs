@@ -45,7 +45,7 @@ fn region_texture_anchored_topleft_resolves_exact_rect() {
     .unwrap();
     s.resolve();
     // TOPLEFT +(4,-4), 24×24 in the owner: left 4, top 46, right 28, bottom 22.
-    assert_eq!(
+    crate::assert_near!(
         region_tex_rect(&s, "Interface\\Icon"),
         Rect::new(22.0, 4.0, 46.0, 28.0)
     );
@@ -71,7 +71,7 @@ fn region_fontstring_span_floors_at_one_unit_until_measured() {
     .unwrap();
     s.resolve();
     // Unmeasured: x runs 5..6 from the pinned left; LEFT pins the y centre (25), so y is ±0.5.
-    assert_eq!(
+    crate::assert_near!(
         region_text_rect(&s, "Name"),
         Rect::new(24.5, 5.0, 25.5, 6.0)
     );
@@ -83,7 +83,7 @@ fn region_fontstring_span_floors_at_one_unit_until_measured() {
         .collect();
     s.set_measured_text_unwrapped(&answers);
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         region_text_rect(&s, "Name"),
         Rect::new(19.0, 5.0, 31.0, 45.0)
     );
@@ -114,9 +114,11 @@ fn a_zero_width_solid_spans_eight_units_and_its_artless_twin_gets_no_rect() {
     s.resolve();
     s.run(
         r#"
-        assert(Fill:GetLeft() == 0 and Fill:GetRight() == 8,
+        local function near(a, b) return math.abs(a - b) < 1e-3 end -- edges through the law
+        assert(Fill:GetLeft() == 0 and near(Fill:GetRight(), 8),
                "the solid spans its 8 texels, got " .. tostring(Fill:GetRight()))
-        assert(Fill:GetTop() == 50 and Fill:GetBottom() == 37, "and its authored 13 of height")
+        assert(near(Fill:GetTop(), 50) and near(Fill:GetBottom(), 37),
+               "and its authored 13 of height")
         assert(Bare:GetLeft() == nil, "no art, no span, no rect — not the owner's width")
     "#,
     )
@@ -168,7 +170,7 @@ fn region_set_all_points_fills_owner() {
     )
     .unwrap();
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         region_tex_rect(&s, "Interface\\Fill"),
         Rect::new(0.0, 0.0, 50.0, 100.0)
     );
@@ -212,7 +214,7 @@ fn region_anchors_to_sibling_region_by_name() {
     };
     // The row's TOPLEFT (100, 144) plus (-13, 13): the slot spans 87..151 by 93..157.
     let slot = rect("RowSlot");
-    assert_eq!(
+    crate::assert_near!(
         (slot.left, slot.top),
         (87.0, 157.0),
         "slot at row TOPLEFT (-13,13)"
@@ -226,7 +228,7 @@ fn region_anchors_to_sibling_region_by_name() {
         "plate spans its 128 width from the slot edge"
     );
     // A LEFT point centres the plate vertically: the slot's centre 125, -18 = 107, ±39.
-    assert_eq!((plate.bottom, plate.top), (68.0, 146.0));
+    crate::assert_near!((plate.bottom, plate.top), (68.0, 146.0));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -312,7 +314,7 @@ fn long_region_chain_resolves_and_a_frame_binds_to_its_tail() {
     // Screen top 600; Line1 top = 600−5 = 595; each link steps 12 (10 height + 2 gap).
     for i in 1..=12u32 {
         let top = 595.0 - 12.0 * (i as f32 - 1.0);
-        assert_eq!(
+        crate::assert_near!(
             region_tex_rect(&s, &format!("Interface\\Line{i}")),
             Rect::new(top - 10.0, 5.0, top, 305.0),
             "link {i} must resolve at its true chain position, not an owner-edge fallback"
@@ -327,7 +329,7 @@ fn long_region_chain_resolves_and_a_frame_binds_to_its_tail() {
             _ => None,
         })
         .expect("the tail-anchored button resolved a rect (not dropped to origin)");
-    assert_eq!(
+    crate::assert_near!(
         button,
         Rect::new(406.0, 5.0, 447.0, 152.0),
         "the frame binds to the CHAIN TAIL's resolved rect"
@@ -407,17 +409,23 @@ fn region_alpha_is_its_own_and_multiplies_the_owner_frames() {
     };
     assert_eq!(quad_alpha(&s), 1.0);
 
+    // `Texture:SetAlpha(0.5)` stores the byte 127 (`0x79b638`), read times the double 1/255.
+    let half = 127.0 / 255.0;
     s.run("tex:SetAlpha(0.5)").unwrap();
-    assert_eq!(s.eval::<f32>("return tex:GetAlpha()").unwrap(), 0.5);
-    assert_eq!(quad_alpha(&s), 0.5);
+    assert_eq!(s.eval::<f64>("return tex:GetAlpha()").unwrap(), half);
+    assert_eq!(quad_alpha(&s), half as f32);
 
     s.run("f:SetAlpha(0.5)").unwrap();
     assert_eq!(
-        s.eval::<f32>("return tex:GetAlpha()").unwrap(),
-        0.5,
+        s.eval::<f64>("return tex:GetAlpha()").unwrap(),
+        half,
         "the frame's SetAlpha leaves the region's own alpha alone"
     );
-    assert_eq!(quad_alpha(&s), 0.25, "0.5 region × 0.5 frame");
+    assert_eq!(
+        quad_alpha(&s),
+        (127.0 / 255.0) * (127.0 / 255.0),
+        "the region's byte 127 × the frame's byte 127"
+    );
 
     s.run("tex:SetAlpha(1); tex:Hide()").unwrap();
     assert!(
@@ -465,16 +473,24 @@ fn a_solid_colour_texel_multiplies_with_the_vertex_colour() {
     );
 
     s.run("trough:SetVertexColor(0, 0, 0.75, 0.5)").unwrap();
+    // Each a byte: 0.75 is 191, 0.5 is 128 and the texel's 0.2 is 51.
+    let tint = crate::color::quant::drawn([0.0, 0.0, 0.75, 0.5]);
+    let texel_a = crate::color::quant::drawn([1.0, 1.0, 1.0, 0.2])[3];
     assert_eq!(
         solid(&s),
-        Some([0.0, 0.0, 0.75, 0.1]),
+        Some([0.0, 0.0, tint[2], texel_a * tint[3]]),
         "texel x vertex, alpha included: 0.2 x 0.5 = 0.1, NOT 0.5"
     );
     // `GetVertexColor` reads the vertex slot, not the product.
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return trough:GetVertexColor()")
             .unwrap(),
-        (0.0, 0.0, 0.75, 0.5)
+        (
+            0.0,
+            0.0,
+            crate::color::quant::read32(0.75),
+            crate::color::quant::read32(0.5)
+        )
     );
 
     // Art and a solid colour share `+0xcc`: a path releases the texel and leaves the tint.
@@ -493,7 +509,7 @@ fn a_solid_colour_texel_multiplies_with_the_vertex_colour() {
         .expect("art quad");
     assert_eq!(
         tinted,
-        Some([0.0, 0.0, 0.75, 0.5]),
+        Some(tint),
         "the vertex colour outlives the texel it was multiplying"
     );
 }
@@ -544,8 +560,8 @@ fn desaturation_rides_the_extract_for_art_and_never_for_a_solid() {
     assert!(!grey(&s, true), "clearing the flag restores full colour");
 }
 
-/// A Texture region's desaturation state, read off the model by name: `IsDesaturated`
-/// (`0x79c2c0`) is not built, and a cleared texture emits no quad to read it from.
+/// A Texture region's desaturation state, read off the model by name: a cleared texture emits no
+/// quad to read it from.
 fn desaturated(s: &UiScript, name: &str) -> bool {
     let lua = s.lua();
     let model = lua.app_data_ref::<crate::script::Model>().expect("model");
@@ -554,40 +570,96 @@ fn desaturated(s: &UiScript, name: &str) -> bool {
     model.region_data.get(&h).is_some_and(|d| d.desaturated)
 }
 
-/// The desaturation is the shader slot `+0x128`, which `CSimpleTexture::SetTexture` rewrites with
-/// the binding's always-NULL slot 0, except that the same path returns early (`0x770225`).
+/// The desaturation is the shader slot `+0x128`, which `0x770200` writes only for a file that
+/// loads (`0x7702c0`): the file the texture shows returns first (`0x770225`), a null or empty name
+/// skips the write (`0x77022f`, `0x770238`), a failed load returns before it (`0x7702ac`), and the
+/// colour form (`0x770360`) never writes it. `IsDesaturated` (`0x79c2c0`) reads it back.
 #[test]
-fn set_texture_clears_desaturation_unless_the_path_is_unchanged() {
-    let s = script();
+fn only_a_file_that_loads_clears_the_desaturation() {
+    let mut s = script();
+    s.set_texture_probe(Box::new(|path: &str| !path.contains("Missing")));
     s.run(
         r#"
         local f = CreateFrame("Frame", "ClrOwner")
         icon = f:CreateTexture("ClrIcon", "ARTWORK")
         icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep")
-        icon:SetDesaturated(1)
     "#,
     )
     .unwrap();
-    let grey = |s: &UiScript| desaturated(s, "ClrIcon");
+    let grey = |s: &UiScript| {
+        let read = s.eval::<bool>("return icon:IsDesaturated() == 1").unwrap();
+        assert_eq!(
+            read,
+            desaturated(s, "ClrIcon"),
+            "IsDesaturated reads the flag"
+        );
+        read
+    };
+    assert!(
+        s.eval::<bool>("return icon:IsDesaturated() == nil")
+            .unwrap(),
+        "a fresh texture answers nil"
+    );
+    s.run("icon:SetDesaturated(1)").unwrap();
+    assert!(grey(&s));
 
     s.run(r#"icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep")"#)
         .unwrap();
-    assert!(grey(&s), "re-setting the SAME art keeps the grey");
+    assert!(grey(&s), "the same art returns before the write");
+
+    assert!(s
+        .eval::<bool>(r#"return icon:SetTexture("Interface\\Missing") == nil"#)
+        .unwrap());
+    assert!(grey(&s), "a failed load returns before the write");
+    assert_eq!(
+        s.eval::<String>("return icon:GetTexture()").unwrap(),
+        "Interface\\Icons\\Spell_Nature_Sleep",
+        "and keeps the art"
+    );
+
+    for clear in [
+        "icon:SetTexture(nil)",
+        "icon:SetTexture('')",
+        "icon:SetTexture(true)",
+    ] {
+        s.run(&format!(
+            "icon:SetTexture('Interface\\\\Art') icon:SetDesaturated(1) {clear}"
+        ))
+        .unwrap();
+        assert!(grey(&s), "{clear}: a null name skips the write");
+    }
+
+    s.run("icon:SetTexture(1, 0, 0)").unwrap();
+    assert!(grey(&s), "the colour form does not touch the shader slot");
 
     s.run(r#"icon:SetTexture("Interface\\Icons\\Spell_Fire_Fireball")"#)
         .unwrap();
-    assert!(!grey(&s), "a texture CHANGE clears the desaturation");
-
-    // nil takes the same leg (`test esi,esi` falls through to the write).
-    s.run("icon:SetDesaturated(1) icon:SetTexture(nil)")
+    assert!(!grey(&s), "a file that loads clears it");
+    s.run("icon:SetDesaturated(1) icon:SetDesaturated(nil)")
         .unwrap();
-    assert!(!grey(&s), "SetTexture(nil) clears it too");
+    assert!(!grey(&s), "SetDesaturated(nil) clears it");
+}
 
-    // The colour form (`0x770360`) does not write the shader slot.
-    s.run(r#"icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep") icon:SetDesaturated(1)"#)
+/// Every name but a string goes to `0x770200` as a null one (`0x79bdc8`), and so does `""`
+/// (`0x770235`): the image is dropped and the binding answers 1 (`0x79bdae`).
+#[test]
+fn set_texture_with_an_empty_or_non_string_name_clears_and_answers_one() {
+    let mut s = script();
+    s.set_texture_probe(Box::new(|_: &str| true));
+    s.run(r#"f = CreateFrame("Frame") t = f:CreateTexture()"#)
         .unwrap();
-    s.run("icon:SetTexture(1, 0, 0)").unwrap();
-    assert!(grey(&s), "the colour form does not touch the shader slot");
+    for arg in ["''", "true", "{}", "nil", ""] {
+        let answer = s
+            .eval::<Option<f64>>(&format!(
+                r#"t:SetTexture("Interface\\Art") return t:SetTexture({arg})"#
+            ))
+            .unwrap();
+        assert_eq!(answer, Some(1.0), "SetTexture({arg}) answers 1");
+        assert!(
+            s.eval::<bool>("return t:GetTexture() == nil").unwrap(),
+            "SetTexture({arg}) drops the image"
+        );
+    }
 }
 
 /// `SetDesaturated` reads its flag with `0x6f1c10(L, 2, default=1)`: no argument (`LUA_TNONE`)
@@ -653,7 +725,12 @@ fn a_vertex_colour_without_a_texture_draws_nothing() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return icon:GetVertexColor()")
             .unwrap(),
-        (1.0, 1.0, 1.0, 1.0),
+        (
+            crate::color::quant::read32(1.0),
+            crate::color::quant::read32(1.0),
+            crate::color::quant::read32(1.0),
+            crate::color::quant::read32(1.0)
+        ),
         "the tint survives the clear"
     );
     assert_eq!(
@@ -726,7 +803,10 @@ fn a_gradient_tints_each_vertex_over_the_texture_and_alone_draws_nothing() {
         "a gradient alone fills no texture slot, so nothing draws"
     );
 
-    let (min, max) = ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.05]);
+    let (min, max) = (
+        [0.0, 0.0, 0.0, 0.0],
+        crate::color::quant::drawn([1.0, 1.0, 1.0, 0.05]),
+    );
     s.run("t:SetTexture(1, 1, 1, 1)").unwrap();
     assert_eq!(
         gradient_probe(&mut s).unwrap(),
@@ -757,7 +837,7 @@ fn a_gradient_tints_each_vertex_over_the_texture_and_alone_draws_nothing() {
     s.run("t:SetVertexColor(0.5, 0.5, 0.5)").unwrap();
     assert_eq!(
         gradient_probe(&mut s).unwrap().1,
-        Some([0.5, 0.5, 0.5, 1.0]),
+        Some(crate::color::quant::drawn([0.5, 0.5, 0.5, 1.0])),
         "SetVertexColor collapses the four colours to one (`0x77f87f`), its alpha unlent"
     );
     assert_eq!(gradient_probe(&mut s).unwrap().2, None);
@@ -772,7 +852,12 @@ fn a_gradient_tints_each_vertex_over_the_texture_and_alone_draws_nothing() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return t:GetVertexColor()")
             .unwrap(),
-        (1.0, 1.0, 1.0, 1.0),
+        (
+            crate::color::quant::read32(1.0),
+            crate::color::quant::read32(1.0),
+            crate::color::quant::read32(1.0),
+            crate::color::quant::read32(1.0)
+        ),
         "GetVertexColor answers white under four colours (`0x77f8c0`)"
     );
     let (red, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
@@ -804,10 +889,10 @@ fn a_gradient_rejects_an_unknown_orientation_and_clamps_its_channels() {
     assert_eq!(
         kept,
         Some([
-            [1.0, 0.0, 0.5, 1.0],
+            crate::color::quant::drawn([1.0, 0.0, 0.5, 1.0]),
             [0.0, 0.0, 0.0, 1.0],
             [0.0, 0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.5, 1.0]
+            crate::color::quant::drawn([1.0, 0.0, 0.5, 1.0])
         ]),
         "each channel clamps to 0..=1"
     );
@@ -977,11 +1062,12 @@ fn the_size_getters_take_the_author_first_then_the_natural_width_and_wrapped_hei
     s.set_measured_text(&answers);
     s.run(
         r#"
-        assert(Sized:GetWidth() == 300, "the AUTHORED width wins, got " .. tostring(Sized:GetWidth()))
-        assert(Sized:GetHeight() == 24, "and the un-authored height is the measure, got " .. tostring(Sized:GetHeight()))
-        assert(Auto:GetWidth() == 90, "no author ⇒ the NATURAL width, got " .. tostring(Auto:GetWidth()))
+        -- Each through the law at 4:3: `G(S(300))`, `G(S(24))`, `G(S(90))`.
+        assert(Sized:GetWidth() == 299.9999955296517, "the AUTHORED width wins, got " .. tostring(Sized:GetWidth()))
+        assert(Sized:GetHeight() == 24.00000059604644, "and the un-authored height is the measure, got " .. tostring(Sized:GetHeight()))
+        assert(Auto:GetWidth() == 89.9999986588955, "no author ⇒ the NATURAL width, got " .. tostring(Auto:GetWidth()))
         assert(Auto:GetWidth() == Auto:GetStringWidth(), "which is GetStringWidth's own cell")
-        assert(Auto:GetHeight() == 24, "and the WRAPPED height, got " .. tostring(Auto:GetHeight()))
+        assert(Auto:GetHeight() == 24.00000059604644, "and the WRAPPED height, got " .. tostring(Auto:GetHeight()))
     "#,
     )
     .unwrap();
@@ -1028,8 +1114,9 @@ fn a_textures_getters_report_its_texel_span_on_an_unsized_axis() {
         Half:SetTexture("Interface\\Crest"); Half:SetPoint("TOPLEFT", 0, 0); Half:SetHeight(13)
         Bare = f:CreateTexture("Bare", "ARTWORK")
         Bare:SetPoint("TOPLEFT", 0, 0)
-        assert(Art:GetWidth() == 128 and Art:GetHeight() == 96, "the art's own texels")
-        assert(Half:GetWidth() == 128 and Half:GetHeight() == 13, "per AXIS: authored 13 wins, width still derived")
+        -- Each through the law at 4:3: `G(S(128))` is 128, `G(S(96))` and `G(S(13))` are not whole.
+        assert(Art:GetWidth() == 128 and Art:GetHeight() == 96.00000238418576, "the art's own texels")
+        assert(Half:GetWidth() == 128 and Half:GetHeight() == 13.000000521540635, "per AXIS: authored 13 wins, width still derived")
         assert(Bare:GetWidth() == 0, "no art, no span — and no floor on a texture")
     "#,
     )
@@ -1261,6 +1348,83 @@ fn an_unresolvable_set_texture_keeps_the_art_the_region_had() {
     assert!(s.eval::<bool>("return t:GetTexture() == nil").unwrap());
 }
 
+/// The blend each texture record draws with (`0x76fb00`): its own mode, except that `DISABLE` and
+/// `ALPHAKEY` under a colour array draw as `BLEND` (`0x76fb93`). The array survives the frame-alpha
+/// fold (`0x77fac0`) when the frame's alpha byte is below `0xfe` or an entry is not opaque white;
+/// a solid fill is the texel and no entry (`0x770360`).
+#[test]
+fn disable_and_alphakey_draw_as_blend_under_a_vertex_colour() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        DrawHost = CreateFrame("Frame", "DrawHost")
+        DrawHost:SetPoint("CENTER", 0, 0)
+        DrawHost:SetWidth(10) DrawHost:SetHeight(10)
+        DrawTex = DrawHost:CreateTexture("DrawTex", "ARTWORK")
+        DrawTex:SetAllPoints(DrawHost)
+        "#,
+    )
+    .unwrap();
+    let drawn = |s: &mut UiScript, setup: &str| {
+        s.run(&format!(
+            "DrawHost:SetAlpha(1) DrawTex:SetAlpha(1) DrawTex:SetVertexColor(1, 1, 1, 1) \
+             DrawTex:SetTexture('Interface\\\\Art') {setup}"
+        ))
+        .unwrap();
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Texture { blend, .. } => Some(blend),
+                _ => None,
+            })
+            .expect("the texture draws")
+    };
+    for (setup, want) in [
+        ("DrawTex:SetBlendMode('DISABLE')", BlendMode::Disable),
+        ("DrawTex:SetBlendMode('ALPHAKEY')", BlendMode::AlphaKey),
+        (
+            "DrawTex:SetBlendMode('DISABLE') DrawTex:SetVertexColor(1, 1, 1)",
+            BlendMode::Disable,
+        ),
+        (
+            "DrawTex:SetBlendMode('DISABLE') DrawTex:SetTexture(1, 0, 0, 0.5)",
+            BlendMode::Disable,
+        ),
+        (
+            "DrawTex:SetBlendMode('DISABLE') DrawTex:SetVertexColor(1, 0, 0)",
+            BlendMode::Blend,
+        ),
+        (
+            "DrawTex:SetBlendMode('ALPHAKEY') DrawTex:SetVertexColor(1, 1, 1, 0.5)",
+            BlendMode::Blend,
+        ),
+        (
+            "DrawTex:SetBlendMode('DISABLE') DrawTex:SetAlpha(0.5)",
+            BlendMode::Blend,
+        ),
+        (
+            "DrawTex:SetBlendMode('ALPHAKEY') DrawHost:SetAlpha(0.5)",
+            BlendMode::Blend,
+        ),
+        (
+            "DrawTex:SetBlendMode('DISABLE') DrawTex:SetGradient('VERTICAL', 1, 1, 1, 0, 0, 0)",
+            BlendMode::Blend,
+        ),
+        (
+            "DrawTex:SetBlendMode('MOD') DrawTex:SetVertexColor(1, 0, 0)",
+            BlendMode::Mod,
+        ),
+        (
+            "DrawTex:SetBlendMode('ADD') DrawHost:SetAlpha(0.5)",
+            BlendMode::Add,
+        ),
+    ] {
+        assert_eq!(drawn(&mut s, setup), want, "{setup}");
+    }
+}
+
 /// `Texture:GetBlendMode` (`0x79a890`, table `0x87c128`) answers one string, the mode
 /// `SetBlendMode` (`0x79a950`) set, `"BLEND"` by default (the ctor's `[+0xd0] = 2`, `0x76fc64`).
 #[test]
@@ -1301,12 +1465,23 @@ fn get_blend_mode_answers_one_string_and_defaults_to_the_ctors_blend() {
         s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
         "ADD"
     );
-    s.run(r#"BTex:SetBlendMode("NOT_A_MODE")"#).unwrap();
-    assert_eq!(
-        s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
-        "ADD",
-        "an unknown name changes nothing"
-    );
+    // A name off the enum, or a value that is no string or number, raises the usage
+    // (`0x79aa20`, `0x87c44c`) and stores nothing.
+    for bad in [r#""ADDITIVE""#, "nil", "true", "3", ""] {
+        let err = s
+            .run(&format!("BTex:SetBlendMode({bad})"))
+            .expect_err(bad)
+            .to_string();
+        assert!(
+            err.contains(r#"Usage: BTex:SetBlendMode("mode")"#),
+            "{bad}: {err}"
+        );
+        assert_eq!(
+            s.eval::<String>("return BTex:GetBlendMode()").unwrap(),
+            "ADD",
+            "{bad} changes nothing"
+        );
+    }
 
     assert!(s
         .eval::<bool>(
@@ -1316,10 +1491,10 @@ fn get_blend_mode_answers_one_string_and_defaults_to_the_ctors_blend() {
         .unwrap());
 }
 
-/// `Texture:GetTexCoordModifiesRect` (`0x79c120`, table `0x87c128`) answers `1` or nil. The flag is
-/// stored, not applied: on the reference it makes `SetTexCoord` re-derive the rect (`0x770462`).
+/// `Texture:GetTexCoordModifiesRect` (`0x79c120`, table `0x87c128`) answers `1` or nil. A set flag
+/// scales the drawn rect from its bottom-left by the coordinates' spans (`0x770570`).
 #[test]
-fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
+fn tex_coord_modifies_rect_is_one_slash_nil_and_scales_the_rect() {
     let mut s = crate::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run(
@@ -1361,13 +1536,18 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
         "kind number, never boolean"
     );
 
-    // The assertion that changes when the rect re-derivation is built.
     s.run("TCMTex:SetTexCoord(0, 0.25, 0, 0.5)").unwrap();
     s.resolve();
-    assert_eq!(
-        region_tex_rect(&s, "TcmArt"),
-        before,
-        "the flag does not (yet) let SetTexCoord re-derive the region's rect"
+    let r = region_tex_rect(&s, "TcmArt");
+    crate::assert_near!(
+        (r.left, r.right, r.bottom, r.top),
+        (
+            before.left,
+            before.left + before.width() * 0.25,
+            before.bottom,
+            before.bottom + before.height() * 0.5
+        ),
+        "a quarter across, half down, from the bottom-left"
     );
 
     s.run("TCMTex:SetTexCoordModifiesRect(nil)").unwrap();
@@ -1375,6 +1555,11 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
         s.eval::<bool>("return TCMTex:GetTexCoordModifiesRect() == nil")
             .unwrap(),
         "cleared back to nil"
+    );
+    assert_eq!(
+        region_tex_rect(&s, "TcmArt"),
+        before,
+        "unflagged: the whole rect"
     );
 }
 

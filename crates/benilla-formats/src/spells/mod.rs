@@ -37,7 +37,10 @@ pub use ranges::{
     MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE,
 };
 pub use soft_float::modify as soft_modify;
-pub use tokens::{substitute, SpellMods, TokenContext, TokenNumber};
+pub use tokens::{
+    resolve_parts, substitute, substitute_parts, ExpandAt, SpellMods, TokenContext, TokenNumber,
+    TokenPart,
+};
 
 use std::collections::HashMap;
 
@@ -67,6 +70,7 @@ const COL_MANA_COST: usize = 32;
 const COL_MANA_COST_PCT: usize = 156;
 const COL_MANA_COST_PER_LEVEL: usize = 33;
 const COL_MANA_PER_SECOND: usize = 34;
+const COL_MANA_PER_SECOND_PER_LEVEL: usize = 35;
 /// `rangeIndex` (`+0x90`), resolved by `GetMinMaxRange` (`0x6e3480`).
 const COL_RANGE_INDEX: usize = 36;
 /// `modalNextSpell` (`+0x98`): 52 of its 57 nonzero rows are hunter shots naming Auto Shot.
@@ -171,6 +175,8 @@ const COL_PROC_CHARGES: usize = 26;
 const COL_STACK_AMOUNT: usize = 39;
 const COL_MAX_TARGET_LEVEL: usize = 159;
 const COL_MAX_AFFECTED_TARGETS: usize = 163;
+const COL_MIN_FACTION_ID: usize = 170;
+const COL_MIN_REPUTATION: usize = 171;
 const COL_DAMAGE_MULTIPLIER_1: usize = 167;
 const COL_EFFECT_POINTS_PER_COMBO_POINT_1: usize = 112;
 
@@ -240,6 +246,12 @@ const ATTR_EX_CHANNELED: u32 = 0x44;
 /// `SPELL_ATTR_EX2_INITIATE_COMBAT_POST_CAST`: auto-attack starts at the spell's `SMSG_SPELL_GO`
 /// (`0x6e83c0`), not at the send: the stealth openers, positional strikes and Judgement.
 const ATTR_EX2_INITIATE_COMBAT_POST_CAST: u32 = 0x0010_0000;
+
+/// `SPELL_ATTR_EX2_ACTIVE_THREAT`: `0x6e4870` answers 1 for it ahead of every other test.
+const ATTR_EX2_ACTIVE_THREAT: u32 = 0x4000_0000;
+/// `SPELL_ATTR_EX_NO_THREAT` and `SPELL_ATTR_EX2_NOT_AN_ACTION`: `0x6e4870` answers 0 for either.
+const ATTR_EX_NO_THREAT: u32 = 0x400;
+const ATTR_EX2_NOT_AN_ACTION: u32 = 0x1000_0000;
 
 /// `SPELL_ATTR_COOLDOWN_ON_EVENT`: held by the `SMSG_SPELL_COOLDOWN` handler (`0x6e9460`).
 const ATTR_COOLDOWN_ON_EVENT: u32 = 0x0200_0000;
@@ -328,10 +340,17 @@ impl SpellCatalog {
         self.spells.get(&id)
     }
 
-    /// The dispel class's name, for the aura tooltip and the debuff border's `debuffType`; `None`
-    /// when `SpellDispelType.dbc`'s `[+0x28]` gate withholds it.
+    /// The dispel class's key, the `debuffType` `UnitDebuff` returns (`0x519a89`) and the debuff
+    /// border keys `DebuffTypeColor` on: `SpellDispelType.dbc` column 11, English on every locale.
+    /// `None` when the `[+0x28]` gate withholds it.
     pub fn dispel_name(&self, display: &SpellDisplay) -> Option<&str> {
         self.dispel_types.name(display.dispel)
+    }
+
+    /// The dispel class's word at the client's locale slot, the aura tooltip's right column
+    /// (`0x52f880`); `None` as for [`Self::dispel_name`].
+    pub fn dispel_label(&self, display: &SpellDisplay) -> Option<&str> {
+        self.dispel_types.label(display.dispel)
     }
 
     /// Every loaded spell, unordered.
@@ -561,6 +580,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 mana_cost_pct: u32_at(r, COL_MANA_COST_PCT).unwrap_or(0),
                 mana_cost_per_level: u32_at(r, COL_MANA_COST_PER_LEVEL).unwrap_or(0),
                 mana_per_second: u32_at(r, COL_MANA_PER_SECOND).unwrap_or(0),
+                mana_per_second_per_level: u32_at(r, COL_MANA_PER_SECOND_PER_LEVEL).unwrap_or(0),
                 range_index: u32_at(r, COL_RANGE_INDEX).unwrap_or(0),
                 modal_next_spell: u32_at(r, COL_MODAL_NEXT_SPELL).unwrap_or(0),
                 targets: u32_at(r, COL_TARGETS).unwrap_or(0),
@@ -609,6 +629,8 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 stack_amount: u32_at(r, COL_STACK_AMOUNT).unwrap_or(0),
                 max_target_level: u32_at(r, COL_MAX_TARGET_LEVEL).unwrap_or(0),
                 max_affected_targets: u32_at(r, COL_MAX_AFFECTED_TARGETS).unwrap_or(0),
+                min_faction_id: u32_at(r, COL_MIN_FACTION_ID).unwrap_or(0),
+                min_reputation: u32_at(r, COL_MIN_REPUTATION).unwrap_or(0),
                 effect_base_points: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
                 }),

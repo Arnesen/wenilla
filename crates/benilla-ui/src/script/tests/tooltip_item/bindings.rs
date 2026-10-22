@@ -67,6 +67,7 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
             occupied_seats: None,
@@ -92,12 +93,13 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             flags: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         },
     );
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 4,
             slots,
         }),
@@ -216,6 +218,16 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
 #[test]
 fn set_inventory_item_name_only_is_the_trimmed_build() {
     let mut s = script();
+    // 255 read back times the float at `0x81c6b4`; `FontString:GetTextColor` rounds green and
+    // blue to `f32`s (`0x79d958`).
+    s.lua()
+        .globals()
+        .set("ONE", crate::color::channel(255))
+        .unwrap();
+    s.lua()
+        .globals()
+        .set("ONE32", f64::from(crate::color::channel(255) as f32))
+        .unwrap();
     s.set_screen_size(800.0, 600.0);
     let mut inv: InventorySlots = Default::default();
     inv[16] = Some(InvSlotView {
@@ -243,7 +255,12 @@ fn set_inventory_item_name_only_is_the_trimmed_build() {
             armor: 100,
             max_durability: 90,
             required_level: 40,
-            spell_triggers: vec![(1, 100, "Zap".into())],
+            spell_lines: vec![ItemSpellLine {
+                trigger: 1,
+                spell_id: 100,
+                text: "Zap".into(),
+                ..Default::default()
+            }],
             description: "Sealed.".into(),
             ..Default::default()
         },
@@ -279,7 +296,7 @@ fn set_inventory_item_name_only_is_the_trimmed_build() {
         assert(tt:SetInventoryItem("player", 16, 1) == 1, "nameOnly still answers 1")
         assert(TTTextLeft1:GetText() == "Sealed Blade")
         local r2, g2, b2 = TTTextLeft1:GetTextColor()
-        assert(r2 == 1 and g2 == 1 and b2 == 1, "nameOnly: the NAME goes white (0x52b8b3)")
+        assert(r2 == ONE and g2 == ONE32 and b2 == ONE32, "nameOnly: the NAME goes white (0x52b8b3)")
         assert(not has("[ITEM_CONJURED]") and not has("[ITEM_BIND_ON_PICKUP]")
                and not has("[ITEM_UNIQUE]") and not has("[LOCKED]"),
                "nameOnly: the bind/lock region is cut (0x52bac3)")
@@ -685,11 +702,20 @@ fn item_bindings_return_the_pushed_repair_cost() {
         ..Default::default()
     });
     s.set_inventory_slots(inv.clone());
-    s.set_inspect(Some(InspectView {
-        unit: "target".into(),
-        guid: 0x42,
-        slots: inv,
-    }));
+    // A cooperative player 4 yards off, whose visible items `"target"` reads (`0x53306a`).
+    s.set_visible_equipment(0x42, Some(inv));
+    s.set_unit_guids(&UnitGuids {
+        target: 0x42,
+        held: HashMap::from([(0x42, 0)]),
+        ..Default::default()
+    });
+    s.set_unit_reach(HashMap::from([(
+        0x42,
+        UnitReach {
+            dist_sq: 16.0,
+            inspectable: true,
+        },
+    )]));
     let mut slots = HashMap::new();
     for (slot, id, name) in [(1, 8201, "Worn Helm"), (2, 8202, "Whole Helm")] {
         slots.insert(
@@ -789,7 +815,7 @@ fn locked_is_drawn_for_a_locked_object_and_sets_the_builder_flag() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 24,
             slots: HashMap::from([(1, slot(0)), (2, slot(0x4))]),
         }),
@@ -931,7 +957,7 @@ fn item_bindings_push_has_cooldown_as_one_or_nil() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 24,
             slots: HashMap::from([
                 (1, slot(Some((1000, 30_000, true)), None)),

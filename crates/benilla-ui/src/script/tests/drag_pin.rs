@@ -56,25 +56,25 @@ fn pinned_at(x: f32, y: f32) -> (i64, String, bool, String, f32, f32) {
 fn a_move_pins_one_topleft_anchor_against_the_screen() {
     let mut s = centred_box();
     s.run("Box:StartMoving()").unwrap();
-    assert_eq!(
+    crate::assert_near!(
         anchor(&s),
         pinned_at(300.0, -250.0),
         "the drag entry pins before any cursor move: top 350 on a 600 screen is y -250"
     );
     s.mouse_move(430.0, 280.0);
-    assert_eq!(edges(&mut s), (330.0, 530.0, 230.0, 330.0));
-    assert_eq!(
+    crate::assert_near!(edges(&mut s), (330.0, 530.0, 230.0, 330.0));
+    crate::assert_near!(
         anchor(&s),
         pinned_at(330.0, -270.0),
         "the move rides that anchor"
     );
     s.run("Box:StopMovingOrSizing()").unwrap();
-    assert_eq!(
+    crate::assert_near!(
         anchor(&s),
         pinned_at(330.0, -270.0),
         "the stop writes nothing"
     );
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<(f64, f64)>("return Box:GetWidth(), Box:GetHeight()")
             .unwrap(),
         (200.0, 100.0),
@@ -83,7 +83,7 @@ fn a_move_pins_one_topleft_anchor_against_the_screen() {
 
     // The old target no longer carries it.
     s.run("Holder:SetPoint(\"BOTTOMLEFT\", 50, 0)").unwrap();
-    assert_eq!(edges(&mut s), (330.0, 530.0, 230.0, 330.0));
+    crate::assert_near!(edges(&mut s), (330.0, 530.0, 230.0, 330.0));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -104,8 +104,10 @@ fn a_bare_start_and_stop_pins_a_stretched_frame_at_its_rect() {
         "#,
     )
     .unwrap();
-    assert_eq!(anchor(&s), pinned_at(100.0, -400.0));
-    assert_eq!(
+    // The pin's top is `S(200) − K2·RN24(600/768)` in layout units, which `GetPoint` answers as
+    // `G` of it: -399.99995589 at 4:3, -399.99997 as a float.
+    assert_eq!(anchor(&s), pinned_at(100.0, -399.99997));
+    crate::assert_near!(
         s.eval::<(f64, f64)>("return Box:GetWidth(), Box:GetHeight()")
             .unwrap(),
         (200.0, 100.0)
@@ -142,8 +144,8 @@ fn each_grip_moves_only_its_own_edges() {
             _ => (0.0, 0.0),
         };
         let want = (300.0 + dl, 500.0 + dr, 250.0 + db, 350.0 + dt);
-        assert_eq!(edges(&mut s), want, "{grip}");
-        assert_eq!(
+        crate::assert_near!(edges(&mut s), want, "{grip}");
+        crate::assert_near!(
             anchor(&s),
             pinned_at(want.0, want.3 - 600.0),
             "{grip} leaves the one TOPLEFT pin"
@@ -169,13 +171,13 @@ fn the_bounds_clamp_and_the_anchored_edge_stops_on_them() {
     let mut s = bounded();
     s.run("Box:StartSizing(\"LEFT\")").unwrap();
     s.mouse_move(480.0, 300.0);
-    assert_eq!(
+    crate::assert_near!(
         edges(&mut s),
         (350.0, 500.0, 250.0, 350.0),
         "LEFT at the min"
     );
     s.mouse_move(460.0, 300.0);
-    assert_eq!(
+    crate::assert_near!(
         edges(&mut s),
         (330.0, 500.0, 250.0, 350.0),
         "and back at once"
@@ -223,12 +225,12 @@ fn a_missing_or_unknown_grip_is_bottomright() {
         let mut s = centred_box();
         s.run(call).unwrap();
         s.mouse_move(420.0, 290.0);
-        assert_eq!(edges(&mut s), (300.0, 520.0, 240.0, 350.0), "{call}");
+        crate::assert_near!(edges(&mut s), (300.0, 520.0, 240.0, 350.0), "{call}");
     }
     let mut s = centred_box();
     s.run("Box:StartSizing(\"left\")").unwrap();
     s.mouse_move(420.0, 290.0);
-    assert_eq!(
+    crate::assert_near!(
         edges(&mut s),
         (320.0, 500.0, 250.0, 350.0),
         "a lower-case name"
@@ -253,7 +255,7 @@ fn a_frame_with_no_rect_starts_no_drag() {
     assert_eq!(s.eval::<i64>("return Lost:GetNumPoints()").unwrap(), 0);
     s.run("Box:StartMoving()").unwrap();
     s.mouse_move(410.0, 300.0);
-    assert_eq!(
+    crate::assert_near!(
         edges(&mut s),
         (310.0, 510.0, 250.0, 350.0),
         "the slot was free"
@@ -284,7 +286,7 @@ fn the_layout_cache_round_trips_the_pin() {
 
     let mut fresh = centred_box();
     fresh.restore_user_placed_layouts(saved);
-    assert_eq!(edges(&mut fresh), (330.0, 530.0, 230.0, 330.0));
+    crate::assert_near!(edges(&mut fresh), (330.0, 530.0, 230.0, 330.0));
     assert_eq!(anchor(&fresh), pinned_at(330.0, -270.0));
     assert_eq!(
         fresh.eval::<i64>("return Box:GetFrameLevel()").unwrap(),
@@ -295,8 +297,10 @@ fn the_layout_cache_round_trips_the_pin() {
     assert!(fresh.errors().is_empty(), "{:?}", fresh.errors());
 }
 
-/// A drag that leaves the frame off the unit grid saves whole units: `X:`/`Y:` round half away
-/// from zero (`0x490fc4`–`0x490fdf`), and the apply seats the rounded spot.
+/// A drag that leaves the frame off the unit grid saves whole units: `X:`/`Y:` round to the
+/// nearest, a half away from zero (`0x490fc4`–`0x490fdf`), and the apply seats the rounded spot.
+/// The cursor travels -20.5 script units, but the pin moves by its layout delta, which `GetPoint`
+/// reads as -270.49995019286945 at 4:3, so the row rounds to -270, short of the half.
 #[test]
 fn a_sub_unit_drag_saves_and_restores_rounded() {
     let mut s = centred_box();
@@ -304,21 +308,22 @@ fn a_sub_unit_drag_saves_and_restores_rounded() {
     s.mouse_move(430.25, 279.5);
     s.run("Box:StopMovingOrSizing()").unwrap();
     assert_eq!(
-        anchor(&s),
-        pinned_at(330.25, -270.5),
-        "the live pin is exact"
+        s.eval::<(f64, f64)>("local _, _, _, x, y = Box:GetPoint(1) return x, y")
+            .unwrap(),
+        (330.249_972_190_708_3, -270.499_950_192_869_45),
+        "the live pin is the law's"
     );
     s.resolve();
     let saved = s.user_placed_layouts();
     assert_eq!(
         (saved[0].x, saved[0].y),
-        (Some(330), Some(-271)),
-        "330.25 rounds down, -270.5 away from zero"
+        (Some(330), Some(-270)),
+        "both round to the nearest"
     );
 
     let mut fresh = centred_box();
     fresh.restore_user_placed_layouts(saved);
-    assert_eq!(anchor(&fresh), pinned_at(330.0, -271.0));
+    assert_eq!(anchor(&fresh), pinned_at(330.0, -270.0));
 }
 
 /// A frame set user-placed without a drag keeps its authored anchors while it lives, but its row
@@ -421,11 +426,14 @@ fn the_restore_resolves_each_frame_at_once_even_hidden() {
         height: Some(80),
         ..FrameLayout::default()
     }]);
+    // The fired size is the layout rect's (`0x76b623`), in root units over one root unit's store.
+    let per = f64::from(s.model_ref().layout_units().store(1.0));
+    let (fires, last_w) = s.eval::<(i64, f64)>("return fires, last_w").unwrap();
     assert_eq!(
-        s.eval::<(i64, f64)>("return fires, last_w").unwrap(),
-        (1, 120.0),
+        fires, 1,
         "fired inside the restore, though the frame is hidden"
     );
+    crate::assert_near!(last_w / per, 120.0);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -477,5 +485,150 @@ fn the_save_reads_the_flags_after_the_rect() {
         (Some(40), Some(-60), Some(70), Some(30)),
         "resized by its own OnSizeChanged inside the save, so W and H are written"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The pin and the pump write layout units themselves (`0x768430`, `0x7655b0`): the cursor's layout
+/// delta goes into the pinned offset and size, so `GetPoint` and `GetWidth` answer `G` of what the
+/// drag stored, not the script numbers the cursor travelled. The answers are the law's at 4:3,
+/// derived from the cells `0x41ad10` writes.
+#[test]
+fn a_drag_answers_the_layout_offsets_and_size_it_stored() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Box = CreateFrame("Frame", "Box")
+        Box:SetPoint("BOTTOMLEFT", 100, 100); Box:SetWidth(200); Box:SetHeight(100)
+        Box:SetMovable(true); Box:SetResizable(true)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_move(400.0, 300.0);
+    s.run("Box:StartMoving()").unwrap();
+    s.mouse_move(437.25, 289.5);
+    s.run("Box:StopMovingOrSizing()").unwrap();
+    let point = "local _, _, _, x, y = Box:GetPoint(1) return x, y";
+    let moved = (137.249_982_696_026_82, -410.499_948_106_706_94);
+    assert_eq!(s.eval::<(f64, f64)>(point).unwrap(), moved);
+
+    s.run("Box:StartSizing(\"BOTTOMRIGHT\")").unwrap();
+    s.mouse_move(450.75, 282.25);
+    s.run("Box:StopMovingOrSizing()").unwrap();
+    assert_eq!(
+        s.eval::<(f64, f64)>("return Box:GetWidth(), Box:GetHeight()")
+            .unwrap(),
+        (213.500_019_706_785_4, 107.249_983_143_061_66)
+    );
+    assert_eq!(
+        s.eval::<(f64, f64)>(point).unwrap(),
+        moved,
+        "a far grip keeps the pin"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// New cells are a reload: its teardown writes the layout cache under the old cells (`0x490e60`)
+/// and its build seats the user-placed frames from it under the new (`0x4905e0`). A frame dragged
+/// at 4:3 reads, after the window turns 16:9, as a fresh 16:9 build seated from that cache does,
+/// not its layout pin scaled by the new cells.
+#[test]
+fn an_aspect_change_reseats_a_dragged_frame_from_the_cache() {
+    let build = |w: f32| {
+        let mut s = script();
+        s.set_window_size(w, 768.0);
+        s.run(
+            r#"
+            Box = CreateFrame("Frame", "Box")
+            Box:SetPoint("BOTTOMLEFT", 300, 200); Box:SetWidth(200); Box:SetHeight(100)
+            Box:SetMovable(true); Box:SetResizable(true)
+            "#,
+        )
+        .unwrap();
+        s.resolve();
+        s
+    };
+    let read = |s: &mut UiScript| {
+        s.resolve();
+        s.eval::<(f64, f64, f64, f64)>(
+            "local _, _, _, x, y = Box:GetPoint(1) return x, y, Box:GetWidth(), Box:GetHeight()",
+        )
+        .unwrap()
+    };
+    let mut s = build(1024.0);
+    s.mouse_move(400.0, 300.0);
+    s.run("Box:StartMoving()").unwrap();
+    s.mouse_move(437.25, 289.5);
+    s.run("Box:StopMovingOrSizing()").unwrap();
+    s.resolve();
+    let rows = s.user_placed_layouts();
+    // The rect reads 337.2500178627667 by -478.49993946403356 under the 4:3 cells.
+    assert_eq!((rows[0].x, rows[0].y), (Some(337), Some(-478)));
+    s.set_window_size(1366.0, 768.0);
+
+    let mut fresh = build(1366.0);
+    fresh.restore_user_placed_layouts(rows);
+    let want = read(&mut fresh);
+    assert_eq!(read(&mut s), want);
+    crate::assert_near!(want, (337.0, -478.0, 200.0, 100.0));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// What a rebuild reproduces is what the scripts last set: a script `SetWidth` on a dragged frame
+/// that is not resizable, and a script `ClearAllPoints`/`SetPoint` on a sized frame that is not
+/// movable, both come back after 4:3 turns 16:9 as a fresh 16:9 build with the same scripts,
+/// seated from the same cache, reads them, not as they stood before the drag.
+#[test]
+fn an_aspect_change_reseats_what_the_scripts_last_set() {
+    let setup = r#"
+        Mover = CreateFrame("Frame", "Mover")
+        Mover:SetPoint("BOTTOMLEFT", 300, 200); Mover:SetWidth(200); Mover:SetHeight(100)
+        Mover:SetMovable(true)
+        Sizer = CreateFrame("Frame", "Sizer")
+        Sizer:SetPoint("BOTTOMLEFT", 100, 400); Sizer:SetWidth(120); Sizer:SetHeight(80)
+        Sizer:SetResizable(true)
+    "#;
+    let after = r#"
+        Mover:SetWidth(250)
+        Sizer:ClearAllPoints(); Sizer:SetPoint("CENTER", 40, 30)
+    "#;
+    let build = |w: f32| {
+        let mut s = script();
+        s.set_window_size(w, 768.0);
+        s.run(setup).unwrap();
+        s.resolve();
+        s
+    };
+    let read = |s: &mut UiScript| {
+        s.resolve();
+        s.eval::<(f64, f64, f64, String, f64, f64, f64, f64)>(
+            "local _, _, _, mx, my = Mover:GetPoint(1) \
+             local sp, _, _, sx, sy = Sizer:GetPoint(1) \
+             return mx, my, Mover:GetWidth(), sp, sx, sy, Sizer:GetWidth(), Sizer:GetHeight()",
+        )
+        .unwrap()
+    };
+    let mut s = build(1024.0);
+    s.mouse_move(400.0, 300.0);
+    s.run("Mover:StartMoving()").unwrap();
+    s.mouse_move(437.25, 289.5);
+    s.run("Mover:StopMovingOrSizing()").unwrap();
+    s.mouse_move(220.0, 400.0);
+    s.run("Sizer:StartSizing(\"BOTTOMRIGHT\")").unwrap();
+    s.mouse_move(250.5, 380.25);
+    s.run("Sizer:StopMovingOrSizing()").unwrap();
+    s.run(after).unwrap();
+    s.resolve();
+    let rows = s.user_placed_layouts();
+    s.set_window_size(1366.0, 768.0);
+
+    let mut fresh = build(1366.0);
+    fresh.run(after).unwrap();
+    fresh.restore_user_placed_layouts(rows);
+    let want = read(&mut fresh);
+    assert_eq!(read(&mut s), want);
+    assert_eq!(want.3, "CENTER", "the script's anchor, not the size pin");
+    crate::assert_near!(want.2, 250.0);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

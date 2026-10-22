@@ -744,10 +744,12 @@ dependencies = [
  "half",
  "image",
  "include_dir",
+ "indexmap",
  "js-sys",
  "kira",
  "libc",
  "mint",
+ "naga",
  "num-bigint",
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
@@ -772,6 +774,7 @@ dependencies = [
  "wgpu",
  "windows-sys 0.59.0",
  "winit",
+ "zeno",
 ]
 
 [[package]]
@@ -841,6 +844,7 @@ version = "0.2.0"
 dependencies = [
  "benilla-formats",
  "roxmltree",
+ "web-time",
 ]
 
 [[package]]

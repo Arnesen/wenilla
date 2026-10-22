@@ -17,11 +17,11 @@
 //! in the reference's call order. The calls benilla has nothing for: the field-watch
 //! unregistrations (`0x490aad`, `0x490ab7`, `0x490acb`, `0x490ae4`, `0x490af3`, and the tail of
 //! `0x490ada`'s leg), frees of caches it does not hold (the minimap's points of interest
-//! `0x490a99`, the durability alert `0x490aa8`, the taxi nodes at the head of `0x490ad0`'s leg,
-//! the trade skill's item callbacks `0x490ae9`, the battlefield list `0x490b20`, the minigame
-//! `0x490b34`), the sound band's reset (`0x490b3e` → `0x72a450`, `[0xcf06e4]`), the pending-chat
-//! latch (`0x490a9e`), an empty stub (`0x490b43`), six bare `ret`s, and past the event the
-//! camera's detach (`0x490b52`-`0x490b5a`, `0x4841a0` → `0x50d0f0(0)`).
+//! `0x490a99`, the durability alert `0x490aa8`, the trade skill's item callbacks `0x490ae9`, the
+//! battlefield list `0x490b20`, the minigame `0x490b34`), the sound band's reset (`0x490b3e` →
+//! `0x72a450`, `[0xcf06e4]`), the pending-chat latch (`0x490a9e`), an empty stub (`0x490b43`), six
+//! bare `ret`s, and past the event the camera's detach (`0x490b52`-`0x490b5a`, `0x4841a0` →
+//! `0x50d0f0(0)`).
 
 use bevy::ecs::schedule::{ExecutorKind, ScheduleConfigs, ScheduleLabel};
 use bevy::ecs::system::ScheduleSystem;
@@ -77,7 +77,7 @@ pub(crate) enum SweepLeg {
     Gossip,
     /// `0x490ac6` → `0x500bc0` → `0x501130(0, 1)`.
     Quest,
-    /// `0x490ad0` → `0x4db700` → `0x4dc0f0`.
+    /// `0x490ad0` → `0x4db700`: the free `0x4db630`, then `0x4dc0f0`.
     Taxi,
     /// `0x490ad5` → `0x4d7400` → `0x4d7440(0)`.
     Trainer,
@@ -150,10 +150,12 @@ fn unsilence(script: Option<NonSend<UiScript>>) {
 /// Deviation: on a worldport it fires with our descriptor present, so `UnitExists("player")`
 /// answers true where the reference's (`0x515970`) misses, because matching it breaks
 /// `UnitExists` for no stock reader.
-fn fire_player_leaving_world(script: Option<NonSendMut<UiScript>>) {
-    if let Some(mut script) = script {
-        script.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
-    }
+fn fire_player_leaving_world(mut hosted_vm: crate::script_calls::HostedVm) {
+    hosted_vm.run(|script| {
+        if let Some(script) = script {
+            script.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
+        }
+    })
 }
 
 /// Registering the sweep's legs.

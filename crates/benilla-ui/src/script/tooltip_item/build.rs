@@ -37,7 +37,8 @@ pub(crate) struct ItemBuild {
     pub(in crate::script) inst: Option<ItemInstance>,
     /// What shows while the template is in flight.
     pub(in crate::script) in_flight: InFlight,
-    /// `SetBagItem`'s stack, priced at an open merchant out of repair mode.
+    /// The stack of an item object the merchant may price, at an open merchant out of repair
+    /// mode: one held in a bag, or by the player at slot index 23 or more (`0x52e376`..`0x52e40f`).
     pub(in crate::script) sell_count: Option<u32>,
 }
 
@@ -119,12 +120,15 @@ fn name_of(model: &Model, guid: u64) -> Option<String> {
         .iter()
         .flat_map(|t| t.player.slots.iter().chain(t.target.slots.iter()))
         .flatten()
-        .filter_map(|s| of(s.gift_creator_guid, &s.gift_creator));
+        .filter_map(|s| {
+            of(s.creator_guid, &s.creator).or_else(|| of(s.gift_creator_guid, &s.gift_creator))
+        });
     held.chain(worn).chain(traded).next()
 }
 
-/// The bag slot that holds the item object `guid`, wherever it moved.
-fn container_object(model: &Model, guid: u64) -> Option<&crate::script::ContainerSlot> {
+/// The bag slot that holds the item object `guid`, wherever it moved; none for guid 0.
+pub(super) fn container_object(model: &Model, guid: u64) -> Option<&crate::script::ContainerSlot> {
+    (guid != 0).then_some(())?;
     model
         .containers
         .values()
@@ -132,43 +136,71 @@ fn container_object(model: &Model, guid: u64) -> Option<&crate::script::Containe
         .find(|s| s.guid == guid)
 }
 
-/// The item object `guid` as the builder reads it live (`0x52b777` finds it by guid), and its
-/// stack, wherever it is held: a bag slot or a worn one.
-fn live_object(model: &Model, guid: u64) -> Option<(ItemInstance, u32)> {
+/// An item object the player holds, as the builder reads it live.
+pub(super) struct HeldObject {
+    pub(super) item_id: u32,
+    /// `None` while the template is in flight.
+    pub(super) quality: Option<u32>,
+    pub(super) count: u32,
+    /// The object with the fields not valid; a setter that sets them says so.
+    pub(super) inst: ItemInstance,
+}
+
+/// The item object `guid` (`0x52b777` finds it by guid) wherever it is held, a bag slot or a worn
+/// one; none for guid 0.
+pub(super) fn live_object(model: &Model, guid: u64) -> Option<HeldObject> {
     if let Some(s) = container_object(model, guid) {
-        return Some((super::slot_instance(s, false), s.count.max(1)));
+        return Some(HeldObject {
+            item_id: s.item_id,
+            quality: s.quality,
+            count: s.count.max(1),
+            inst: super::slot_instance(s, true),
+        });
     }
     model
         .inventory_slots
         .iter()
         .flatten()
-        .find(|s| s.guid == guid)
-        .map(|s| (super::worn_instance(s, true), s.count.max(1)))
+        .find(|s| guid != 0 && s.guid == guid)
+        .map(|s| HeldObject {
+            item_id: s.item_id,
+            quality: u32::try_from(s.quality).ok(),
+            count: s.count.max(1),
+            inst: ItemInstance {
+                openable_source: true,
+                ..super::worn_instance(s, true)
+            },
+        })
 }
 
 impl ItemBuild {
     /// The inputs a rebuild runs with. The builder reads the item object live by its kept guid
     /// (p3, `0x52e560`), and the block fields as they were kept (`+0x3d0`..`+0x440`): the open
-    /// gate's p6 and the cooldown. A name the build lacked is read as it is now.
+    /// gate's p6, the cooldown, the lock id, the wrapped word, the proposed enchant, the charges
+    /// and the durability. A name the build lacked is read as it is now.
     ///
-    /// Deviation: an object no longer held, or a source that keeps no guid (the player's own
-    /// trade slot), rebuilds from the instance the build read, where the reference's lookup finds
-    /// no object and builds from the record and the block alone; benilla's views carry no object
-    /// to read once it is gone, and the kept instance is what the plate showed.
+    /// Deviation: an object no longer held rebuilds from the instance the build read, where the
+    /// reference's lookup finds no object and builds from the record and the block alone;
+    /// benilla's views carry no object to read once it is gone, and the kept instance is what the
+    /// plate showed.
     fn refreshed(mut self, model: &Model) -> Self {
         let Some(kept) = self.inst.take() else {
             return self;
         };
-        let live = (kept.object && kept.guid != 0)
-            .then(|| live_object(model, kept.guid))
-            .flatten();
+        let live = kept.object.then(|| live_object(model, kept.guid)).flatten();
         let mut inst = match live {
-            Some((mut inst, count)) => {
-                inst.openable_source = kept.openable_source;
-                inst.cooldown_ms = kept.cooldown_ms;
-                inst.block_lock_id = kept.block_lock_id;
-                inst.block_wrapped = kept.block_wrapped;
-                self.sell_count = self.sell_count.map(|_| count);
+            Some(held) => {
+                let inst = ItemInstance {
+                    openable_source: kept.openable_source,
+                    cooldown_ms: kept.cooldown_ms,
+                    block_lock_id: kept.block_lock_id,
+                    block_wrapped: kept.block_wrapped,
+                    proposed_enchant: kept.proposed_enchant,
+                    block_charges: kept.block_charges,
+                    block_durability: kept.block_durability,
+                    ..held.inst
+                };
+                self.sell_count = self.sell_count.map(|_| held.count);
                 inst
             }
             None => kept,
@@ -223,7 +255,19 @@ pub(in crate::script) fn build_item(
         .clear();
     let view = view_of(lua, build.item_id);
     let live = match &view {
-        Some(v) => render::render_view_flagged(lua, this, v, build.flags, build.inst.as_ref())?,
+        Some(v) => {
+            match render::render_view_flagged(lua, this, v, build.flags, build.inst.as_ref())? {
+                Some(live) => live,
+                // A petition miss returns before the sell price and the show (`0x52b94e`); the
+                // build is kept for the answer's rebuild.
+                None => {
+                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    keep_misses(&mut model, h, true);
+                    model.item_builds.insert(h, build);
+                    return Ok(false);
+                }
+            }
+        }
         None => {
             match &build.in_flight {
                 InFlight::Nothing => {}
@@ -243,22 +287,33 @@ pub(in crate::script) fn build_item(
             false
         }
     };
-    let sell = build.sell_count.zip(view.as_ref().map(|v| v.sell_price));
+    let sell = build.sell_count.zip(view.as_ref()).map(|(count, v)| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        // An item object's charges and repair cost (`0x52e426` tests the object).
+        let object = build.inst.as_ref().filter(|i| i.object);
+        let charges = object.map(|i| i.object_charges[0]);
+        let cost = object
+            .and_then(|i| model.repair_costs.own.get(&i.guid))
+            .copied()
+            .unwrap_or(0);
+        let amount = sell_amount(v.sell_price, v.spell_charges_0, charges, cost, count);
+        (v.sell_price, amount)
+    });
     {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         keep_misses(&mut model, h, true);
         model.item_builds.insert(h, build);
     }
-    // The sell price, after the lines (`0x52e376`): `OnTooltipAddMoney` with the stack's price,
-    // or ITEM_UNSELLABLE at price 0 (`0x854a74`, pushed at `0x52e4a3`).
-    if let Some((count, price)) = sell {
+    // The sell price, after the lines (`0x52e376`): `OnTooltipAddMoney` with the amount, or
+    // ITEM_UNSELLABLE at price 0 (`0x854a74`, pushed at `0x52e4a3`).
+    if let Some((price, amount)) = sell {
         let (merchant_open, repairing) = {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             (model.merchant.is_some(), model.repair_mode)
         };
         if merchant_open && !repairing {
             if price > 0 {
-                fire_add_money(lua, h, u64::from(price) * u64::from(count));
+                fire_add_money(lua, h, amount);
             } else if let Some(t) = crate::strings::global(lua, "ITEM_UNSELLABLE") {
                 append_line(lua, this, (t, WHITE), None, false)?;
             }
@@ -266,6 +321,37 @@ pub(in crate::script) fn build_item(
     }
     show_or_hide_empty(lua, h);
     Ok(live)
+}
+
+/// What the merchant pays (`0x52e418`..`0x52e473`), in copper, the `"%d"` the money handler
+/// gets: the record's sell price, which for an item object scales by its block-0 charges over the
+/// template's when those are below -1 (`imul`, `idiv`, `0x52e432`..`0x52e446`), drops to 1 when
+/// the repair cost (`0x5da330`) reaches it or else loses the cost (`0x52e451`..`0x52e45e`), and
+/// multiplies by a stack above 1 (`0x52e466`..`0x52e471`). Without an object it is the price.
+pub(super) fn sell_amount(
+    price: u32,
+    template_charges: i32,
+    object_charges: Option<i32>,
+    repair_cost: u32,
+    count: u32,
+) -> i64 {
+    let Some(charges) = object_charges else {
+        return i64::from(price);
+    };
+    let mut amount = price as i32;
+    if template_charges < -1 {
+        amount = charges.wrapping_mul(amount) / template_charges;
+    }
+    let cost = repair_cost as i32;
+    if cost >= amount {
+        amount = 1;
+    } else if cost != 0 {
+        amount -= cost;
+    }
+    if count as i32 > 1 {
+        amount = (count as i32).wrapping_mul(amount);
+    }
+    i64::from(amount)
 }
 
 /// `CGTooltip::OnCacheAnswer` (`0x52e530`) for every answer pushed since the last tick: each
@@ -313,7 +399,25 @@ pub(in crate::script) fn answer_item_caches(lua: &Lua) -> Vec<mlua::Error> {
             if let Err(e) = rebuilt {
                 errors.push(e);
             }
+            // The callback sizes the plate after its builder's show (`0x52e5ae`), so lines an
+            // `OnShow` added count.
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            crate::script::tooltip::size_tooltip(&mut model, h);
         }
     }
     errors
+}
+
+#[cfg(test)]
+mod tests {
+    /// The charge scale truncates toward zero (`idiv`, `0x52e444`), a pool of -1 or more is no
+    /// scale (`0x52e435`), a spent item still fetches 1 (`0x52e453`), and a source with no object
+    /// takes the price alone (`0x52e42b`).
+    #[test]
+    fn the_charge_scale_truncates_and_no_object_takes_the_price() {
+        assert_eq!(super::sell_amount(7, -3, Some(-2), 0, 1), 4);
+        assert_eq!(super::sell_amount(7, -1, Some(0), 0, 1), 7);
+        assert_eq!(super::sell_amount(7, -3, Some(0), 0, 1), 1);
+        assert_eq!(super::sell_amount(7, -3, None, 9, 5), 7);
+    }
 }

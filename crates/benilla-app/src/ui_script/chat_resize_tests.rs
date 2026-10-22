@@ -184,14 +184,14 @@ fn a_locked_window_refuses_a_grip_drag() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = chat_ui();
     let before = width(&mut s);
-    assert_eq!(before, 430.0, "the authored width");
+    benilla_ui::assert_near!(before, 430.0, "the authored width");
     // The grips take the mouse whatever the lock; `FCF_Resize`'s `isLocked` gate refuses.
     assert!(s
         .eval::<bool>("return ChatFrame1ResizeBottomRight:IsMouseEnabled()")
         .unwrap());
     let (x, y) = grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
     s.mouse_move(x + 60.0, y - 40.0);
-    assert_eq!(width(&mut s), before, "a locked window does not resize");
+    benilla_ui::assert_near!(width(&mut s), before, "a locked window does not resize");
     assert!(
         s.eval::<Option<i64>>("return ChatFrame1.resizing")
             .unwrap()
@@ -224,8 +224,8 @@ fn an_unlocked_bottom_right_grip_resizes_and_clamps_at_the_bounds() {
     grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
     // Right and down: the `BOTTOMRIGHT` corner follows the cursor, so both grow.
     s.mouse_move(x + 50.0, y - 30.0);
-    assert_eq!(width(&mut s), 480.0, "the right edge followed the cursor");
-    assert_eq!(height(&mut s), 150.0, "and the bottom edge with it");
+    benilla_ui::assert_near!(width(&mut s), 480.0, "the right edge followed the cursor");
+    benilla_ui::assert_near!(height(&mut s), 150.0, "and the bottom edge with it");
     let bottom_after: f64 = s.eval("return ChatFrame1:GetBottom()").unwrap();
     assert!(
         (bottom_after - (bottom_before - 30.0)).abs() < 1e-3,
@@ -233,11 +233,11 @@ fn an_unlocked_bottom_right_grip_resizes_and_clamps_at_the_bounds() {
     );
 
     s.mouse_move(x + 900.0, y - 900.0);
-    assert_eq!(width(&mut s), 608.0, "maxResize x");
-    assert_eq!(height(&mut s), 400.0, "maxResize y");
+    benilla_ui::assert_near!(width(&mut s), 608.0, "maxResize x");
+    benilla_ui::assert_near!(height(&mut s), 400.0, "maxResize y");
     s.mouse_move(x - 900.0, y + 900.0);
-    assert_eq!(width(&mut s), 296.0, "minResize x");
-    assert_eq!(height(&mut s), 75.0, "minResize y");
+    benilla_ui::assert_near!(width(&mut s), 296.0, "minResize x");
+    benilla_ui::assert_near!(height(&mut s), 75.0, "minResize y");
 
     s.run("ChatFrame1:StopMovingOrSizing()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -252,7 +252,7 @@ fn the_release_ends_the_resize_from_anywhere_on_screen() {
     let (x, y) = grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
 
     s.mouse_move(x + 900.0, y);
-    assert_eq!(width(&mut s), 608.0, "held against the maximum");
+    benilla_ui::assert_near!(width(&mut s), 608.0, "held against the maximum");
     s.mouse_button(x + 900.0, y, "LeftButton", false);
     s.resolve();
     assert!(
@@ -264,7 +264,7 @@ fn the_release_ends_the_resize_from_anywhere_on_screen() {
 
     // With the drag still live, walking back would shrink the window.
     s.mouse_move(x - 200.0, y);
-    assert_eq!(
+    benilla_ui::assert_near!(
         width(&mut s),
         608.0,
         "the drag is over; the window is not moving"
@@ -358,7 +358,7 @@ fn the_geometry_round_trips_through_the_save_file() {
     assert_ne!(want.2, 32.0, "the move happened");
 
     let saved = s.user_placed_layouts();
-    assert_eq!(saved.len(), 1, "one window was placed: {saved:?}");
+    benilla_ui::assert_near!(saved.len(), 1, "one window was placed: {saved:?}");
     assert_eq!(saved[0].name, "ChatFrame1");
     let text = crate::ui_layout::render(&saved);
     let crate::ui_layout::Layout::Rect(read_back) = crate::ui_layout::parse(&text) else {
@@ -371,10 +371,10 @@ fn the_geometry_round_trips_through_the_save_file() {
 
     // A fresh VM is the relog: every window starts on its authored anchors.
     let mut fresh = chat_ui();
-    assert_eq!(width(&mut fresh), 430.0);
+    benilla_ui::assert_near!(width(&mut fresh), 430.0);
     fresh.restore_user_placed_layouts(read_back);
     fresh.resolve();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (
             width(&mut fresh),
             height(&mut fresh),
@@ -421,7 +421,7 @@ fn the_grip_art_follows_the_windows_reveal_and_tint() {
             .eval(&format!("return ChatFrame1{piece}:GetAlpha()"))
             .unwrap();
         assert!(
-            (alpha - 0.25).abs() < 1e-6,
+            alpha == benilla_ui::color::alpha_f64(benilla_ui::color::wrap_alpha_byte(0.25)),
             "{piece} reveals with the box (DEFAULT_CHATFRAME_ALPHA): {alpha}"
         );
     }
@@ -429,7 +429,7 @@ fn the_grip_art_follows_the_windows_reveal_and_tint() {
     let (r, g, b): (f64, f64, f64) = s
         .eval("return ChatFrame1ResizeTopTexture:GetVertexColor()")
         .unwrap();
-    assert_eq!((r, g, b), (1.0, 0.0, 0.0));
+    assert_eq!((r, g, b), (benilla_ui::color::quant::read(1.0), 0.0, 0.0));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -453,7 +453,7 @@ fn a_drag_in_flight_holds_the_chrome_visible() {
     }
     let alpha: f64 = s.eval("return ChatFrame1Background:GetAlpha()").unwrap();
     assert!(
-        (alpha - 0.25).abs() < 1e-6,
+        alpha == benilla_ui::color::alpha_f64(benilla_ui::color::wrap_alpha_byte(0.25)),
         "the resize holds the reveal open with the cursor off the window (`or chatFrame.resizing`): {alpha}"
     );
     s.mouse_button(1500.0, 820.0, "LeftButton", false);
@@ -485,7 +485,7 @@ fn the_chat_locked_global_overrides_the_per_window_lock() {
     assert_eq!(s.eval::<String>("return CHAT_LOCKED").unwrap(), "1");
     let (x, y) = grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
     s.mouse_move(x + 50.0, y - 30.0);
-    assert_eq!(
+    benilla_ui::assert_near!(
         width(&mut s),
         before,
         "the blanket switch wins over an unlocked window — FCF_Resize's first gate"
@@ -494,7 +494,7 @@ fn the_chat_locked_global_overrides_the_per_window_lock() {
     s.run("FCF_Set_ChatLocked(nil)").unwrap();
     let (x, y) = grab_grip(&mut s, "ChatFrame1ResizeBottomRight");
     s.mouse_move(x + 50.0, y - 30.0);
-    assert_eq!(width(&mut s), before + 50.0, "and lets go when cleared");
+    benilla_ui::assert_near!(width(&mut s), before + 50.0, "and lets go when cleared");
     s.mouse_button(x + 50.0, y - 30.0, "LeftButton", false);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -569,7 +569,8 @@ fn an_undocked_tab_drags_again_and_a_plain_click_drops_the_window() {
     let first = centre(&mut s, "ChatFrame2");
     drag_named_tab(&mut s, "ChatFrame2", 0.0, 120.0);
     let second = centre(&mut s, "ChatFrame2");
-    assert_eq!(
+    // The drag moves by the cursor's travel in layout units (`0x7655c4`), read back by `G`.
+    benilla_ui::assert_near!(
         second.1,
         first.1 + 120.0,
         "the second drag of the undocked tab moved the window"
@@ -623,7 +624,7 @@ fn an_unlocked_centred_window_resizes_from_the_grabbed_edge_only() {
         .eval::<bool>("return DropDownList1Button1:GetText() == UNLOCK_WINDOW")
         .unwrap());
     left_click(&mut s, "DropDownList1Button1");
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(String, i64)>("return (ChatFrame2:GetPoint(1)), ChatFrame2:GetNumPoints()")
             .unwrap(),
         ("CENTER".to_string(), 1),
@@ -640,7 +641,7 @@ fn an_unlocked_centred_window_resizes_from_the_grabbed_edge_only() {
         s.mouse_move(x + dx, y + dy);
         s.mouse_button(x + dx, y + dy, "LeftButton", false);
         let after = edges(&mut s, "ChatFrame2");
-        assert_eq!(
+        benilla_ui::assert_near!(
             after,
             (before.0, before.1 + dx, before.2, before.3 + dy),
             "the {grip} grip moved its own edge and no other"
@@ -670,7 +671,9 @@ fn a_tab_dropped_off_screen_puts_the_window_back_whole() {
         (1, "TOPLEFT", "UIParent", "TOPLEFT"),
         "the validate's anchor is the only one"
     );
-    assert_eq!((width(&mut s), height(&mut s)), (w, h), "at its own size");
+    // The drag's pin sizes from the rect (`0x7684f1`, `0x768518`), its edges' difference in layout
+    // units, which can read an ulp off the script size.
+    benilla_ui::assert_near!((width(&mut s), height(&mut s)), (w, h), "at its own size");
     let want_top: f64 = s
         .eval("return MainMenuBar:GetHeight() + ChatFrame1Tab:GetHeight()")
         .unwrap();
@@ -678,6 +681,36 @@ fn a_tab_dropped_off_screen_puts_the_window_back_whole() {
     assert!(
         (top - want_top).abs() < 1e-3,
         "back on screen: {top} vs {want_top}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The same drop at the interface's own 4:3 root, against the reference's rounding:
+/// `FCF_ValidateChatFramePosition`'s `MainMenuBar:GetHeight() + chatTab:GetHeight() -
+/// GetScreenHeight()` (`FloatingChatFrame.lua:1315`) reads the screen as 767.9999427795418, and the
+/// window's top, `UIParent`'s `K2` plus `S` of that offset, reads back through the edge getter as
+/// 84.99999873340131, a hair under the 85.00000111758708 the two heights sum to.
+#[test]
+fn a_tab_dropped_off_screen_lands_where_the_reference_rounds_it() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = chat_ui();
+    s.set_window_size(1024.0, 768.0);
+    s.resolve();
+    s.run("FCF_SetLocked(ChatFrame1, nil)").unwrap();
+    drag_tab(&mut s, 0.0, -600.0);
+    let (bar, tab, screen, top) = s
+        .eval::<(f64, f64, f64, f64)>(
+            "return MainMenuBar:GetHeight(), ChatFrame1Tab:GetHeight(), GetScreenHeight(), \
+             ChatFrame1:GetTop()",
+        )
+        .unwrap();
+    assert_eq!(
+        (bar, tab, screen),
+        (53.000001117587075, 32.0, 767.9999427795418)
+    );
+    assert_eq!(
+        top, 84.99999873340131,
+        "the validate's seat, as 1.12.1 rounds it"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

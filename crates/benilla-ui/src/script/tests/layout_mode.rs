@@ -70,10 +70,10 @@ fn an_alt_press_in_layout_mode_moves_the_toplevel_window() {
     s.run("SetLayoutMode(1)").unwrap();
     assert!(!s.eval::<bool>("return Win:IsUserPlaced()").unwrap());
     modifier_drag(&mut s, (200.0, 150.0), (60.0, 20.0), (false, true));
-    assert_eq!(rect(&mut s, "Win"), (160.0, 120.0, 200.0, 100.0));
+    crate::assert_near!(rect(&mut s, "Win"), (160.0, 120.0, 200.0, 100.0));
     assert!(s.eval::<bool>("return Win:IsUserPlaced()").unwrap());
     s.mouse_move(400.0, 400.0);
-    assert_eq!(
+    crate::assert_near!(
         rect(&mut s, "Win"),
         (160.0, 120.0, 200.0, 100.0),
         "the release ended it"
@@ -87,27 +87,42 @@ fn an_alt_press_in_layout_mode_moves_the_toplevel_window() {
 }
 
 /// Control sizes from the cell of a 3×3 grid the press falls in, the rect cut at a quarter and
-/// three quarters per axis (`0x765384`–`0x765464`); the middle cell moves. A cut belongs to the
-/// cell past it: x at exactly a quarter is the middle column.
+/// three quarters per axis (`0x765384`–`0x765464`), in layout units; the middle cell moves. A
+/// script-exact quarter is no layout cut: 147.5 here lands a hair short of it, in the left column.
 #[test]
 fn a_control_press_sizes_from_the_grid_cell_and_the_middle_moves() {
     let mut s = window();
     s.run("SetLayoutMode(1)").unwrap();
+    // Each rect is the law's at 4:3, the pins and sizes moved by the cursor's layout deltas: 100
+    // reads 99.99999850988391, 110 reads 109.9999983608723, and so on.
+    let (b100, h110) = (99.999_998_509_883_91, 109.999_998_360_872_3);
     // Top-right cell: right of 250, above 175.
     modifier_drag(&mut s, (290.0, 195.0), (20.0, 10.0), (true, false));
     assert_eq!(
         rect(&mut s, "Win"),
-        (100.0, 100.0, 220.0, 110.0),
+        (b100, b100, 219.999_996_721_744_6, h110),
         "TOPRIGHT"
     );
     // Now 220×110 from (100, 100): the left column is x < 155, the middle row 127.5..182.5.
     modifier_drag(&mut s, (154.0, 150.0), (-10.0, 0.0), (true, false));
-    assert_eq!(rect(&mut s, "Win"), (90.0, 100.0, 230.0, 110.0), "LEFT");
-    // Now 230×110 from (90, 100): x 147.5 is exactly a quarter in.
-    modifier_drag(&mut s, (147.5, 150.0), (10.0, 10.0), (true, false));
     assert_eq!(
         rect(&mut s, "Win"),
-        (100.0, 110.0, 230.0, 110.0),
+        (90.000_008_195_638_53, b100, 229.999_996_572_732_98, h110),
+        "LEFT"
+    );
+    // Now 230×110 from (90, 100): x 147.5 is a quarter in by script numbers, but in layout units
+    // the press is 5.6e-9 short of the cut, so it still sizes from the left.
+    modifier_drag(&mut s, (147.5, 150.0), (-10.0, 0.0), (true, false));
+    assert_eq!(
+        rect(&mut s, "Win"),
+        (80.000_008_344_650_14, b100, 239.999_996_423_721_37, h110),
+        "LEFT at 147.5"
+    );
+    // Now 240×110 from (80, 100): x 150 is the middle column.
+    modifier_drag(&mut s, (150.0, 150.0), (10.0, 10.0), (true, false));
+    assert_eq!(
+        rect(&mut s, "Win"),
+        (90.000_008_195_638_53, h110, 239.999_996_423_721_37, h110),
         "the middle cell moves"
     );
     assert_eq!(log_of(&s), "");
@@ -121,7 +136,7 @@ fn a_window_without_the_flag_does_not_move_and_still_eats_the_press() {
     let mut s = window();
     s.run("SetLayoutMode(1) Win:SetResizable(false)").unwrap();
     modifier_drag(&mut s, (290.0, 195.0), (20.0, 10.0), (true, false));
-    assert_eq!(
+    crate::assert_near!(
         rect(&mut s, "Win"),
         (100.0, 100.0, 200.0, 100.0),
         "Control needs resizable"
@@ -129,7 +144,7 @@ fn a_window_without_the_flag_does_not_move_and_still_eats_the_press() {
     s.run("Win:SetResizable(true) Win:SetMovable(false)")
         .unwrap();
     modifier_drag(&mut s, (200.0, 150.0), (60.0, 20.0), (false, true));
-    assert_eq!(
+    crate::assert_near!(
         rect(&mut s, "Win"),
         (100.0, 100.0, 200.0, 100.0),
         "Alt needs movable"
@@ -153,9 +168,9 @@ fn mode_zero_or_no_modifier_passes_the_press_through() {
     s.run("log = {} SetLayoutMode('x')").unwrap();
     modifier_drag(&mut s, (200.0, 150.0), (60.0, 20.0), (false, false));
     assert_eq!(log_of(&s), "Kid:down Kid:up", "no modifier held");
-    assert_eq!(rect(&mut s, "Win"), (100.0, 100.0, 200.0, 100.0));
+    crate::assert_near!(rect(&mut s, "Win"), (100.0, 100.0, 200.0, 100.0));
     modifier_drag(&mut s, (200.0, 150.0), (60.0, 20.0), (false, true));
-    assert_eq!(
+    crate::assert_near!(
         rect(&mut s, "Win"),
         (160.0, 120.0, 200.0, 100.0),
         "a non-number stored 1"
@@ -192,14 +207,14 @@ fn the_walk_skips_tooltip_and_a_stratum_whose_hit_has_no_toplevel() {
     .unwrap();
     s.resolve();
     modifier_drag(&mut s, (200.0, 150.0), (60.0, 20.0), (false, true));
-    assert_eq!(rect(&mut s, "Win"), (160.0, 120.0, 200.0, 100.0));
-    assert_eq!(rect(&mut s, "Tip"), (150.0, 120.0, 100.0, 60.0));
-    assert_eq!(
+    crate::assert_near!(rect(&mut s, "Win"), (160.0, 120.0, 200.0, 100.0));
+    crate::assert_near!(rect(&mut s, "Tip"), (150.0, 120.0, 100.0, 60.0));
+    crate::assert_near!(
         rect(&mut s, "Under"),
         (150.0, 120.0, 100.0, 60.0),
         "below Cover in HIGH"
     );
-    assert_eq!(rect(&mut s, "Cover"), (0.0, 0.0, 800.0, 600.0));
+    crate::assert_near!(rect(&mut s, "Cover"), (0.0, 0.0, 800.0, 600.0));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -221,7 +236,7 @@ fn a_release_that_ends_a_layout_drag_reaches_no_script() {
         "the right release reached no script"
     );
     s.mouse_move(220.0, 110.0);
-    assert_eq!(rect(&mut s, "Win").0, 100.0, "and ended the drag");
+    crate::assert_near!(rect(&mut s, "Win").0, 100.0, "and ended the drag");
     // The capture is still Win: the left release, the drag over, goes to it (`0x766498`–
     // `0x7664a4`) and, with no button held, clears it (`0x7664bb`).
     s.run("Win:SetScript('OnMouseUp', function() table.insert(log, 'Win:up:'..arg1) end)")

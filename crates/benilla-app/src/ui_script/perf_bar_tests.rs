@@ -66,13 +66,13 @@ fn the_meter_sits_in_the_bar_recess_the_reference_leaves_for_it() {
              MainMenuBarPerformanceBarFrame:GetWidth(), MainMenuBarPerformanceBarFrame:GetHeight()",
         )
         .unwrap();
-    assert_eq!((w, h), (16.0, 64.0), "frame size");
-    assert_eq!(left, 781.0, "1024 − 227 − 16");
-    assert_eq!(bottom, -10.0, "hangs 10 below the bar's bottom");
+    benilla_ui::assert_near!((w, h), (16.0, 64.0), "frame size");
+    benilla_ui::assert_near!(left, 781.0, "1024 − 227 − 16");
+    benilla_ui::assert_near!(bottom, -10.0, "hangs 10 below the bar's bottom");
 
     // 20x66 off the frame's TOPRIGHT (797, 54): 4 past its left edge, 2 below its bottom.
     let (_, rect, _) = bar_quad(&mut s);
-    assert_eq!(
+    benilla_ui::assert_near!(
         rect,
         [777.0, -12.0, 797.0, 54.0],
         "[left, bottom, right, top]"
@@ -180,7 +180,7 @@ fn poll_beat(s: &mut UiScript) {
     s.tick(11.0);
 }
 
-/// The app pushes the averaged RTT; both bandwidth returns stay 0, as benilla counts no throughput.
+/// The app pushes the averaged RTT as the third return; the two rates stay 0 until it pushes them.
 #[test]
 fn get_net_stats_reports_the_pushed_latency() {
     benilla_formats::wow_data_or_skip!();
@@ -248,7 +248,7 @@ fn hovering_the_meter_shows_the_live_latency() {
     // The explanation line is `NORMAL_FONT_COLOR` (`GameTooltip.lua:112`).
     assert_eq!(
         newbie_line_color(&mut s),
-        Some([1.0, 0.82, 0.0, 1.0]),
+        Some(benilla_ui::color::quant::drawn([1.0, 0.82, 0.0, 1.0])),
         "NORMAL_FONT_COLOR (Fonts.xml l.15)"
     );
 

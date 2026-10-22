@@ -7,10 +7,11 @@
 //!
 //! Only a change of membership or order fires `UPDATE_SHAPESHIFT_FORMS`, the reference's
 //! learn/unlearn edge (`0x4b28ff`, `0x4b2e43`), because the stock `ShapeshiftBar_Update` rebuilds
-//! the shelf on every fire. A castability change fires `SPELL_UPDATE_USABLE`, as `0x4b31c0` does.
-//! Active form, texture and cooldown push silently and repaint on `PLAYER_AURAS_CHANGED` (a form's
-//! aura holds a slot, warrior stances included) and `SPELL_UPDATE_COOLDOWN`, so the feed runs
-//! before both; a cooldown's expiry fires nothing.
+//! the shelf on every fire. Castability, active form, texture and cooldown push silently: the
+//! castable flags refresh inside the usable refresh `0x4b31c0`, whose callers signal
+//! `SPELL_UPDATE_USABLE` (`crate::ui_action`), and the rest repaint on `PLAYER_AURAS_CHANGED` (a
+//! form's aura holds a slot, warrior stances included) and `SPELL_UPDATE_COOLDOWN`, so the feed
+//! runs before all three; a cooldown's expiry fires nothing.
 
 // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
 use bevy::platform::time::Instant;
@@ -20,7 +21,7 @@ use bevy::prelude::*;
 use benilla_ui::script::{ShapeshiftFormView, UiScript};
 
 use crate::items::Items;
-use crate::net::{ClientCommand, ObjectStore, Objects, Reputations, SelfPlayer};
+use crate::net::{ClientCommand, ObjectStore, Objects, SelfPlayer};
 use crate::spell::Cooldowns;
 use crate::spell::{usable, CastCommit};
 use crate::target::Selection;
@@ -75,9 +76,7 @@ pub(crate) enum FormsEdge {
     Unchanged,
     /// Membership or order: `UPDATE_SHAPESHIFT_FORMS`.
     List,
-    /// Castability: `SPELL_UPDATE_USABLE`.
-    Usable,
-    /// Active form, texture or cooldown: pushed, announced by other feeds' events.
+    /// Castability, active form, texture or cooldown: pushed, announced by other feeds' events.
     Silent,
 }
 
@@ -97,12 +96,6 @@ pub(crate) fn push_forms(
             .any(|(o, n)| o.spell_id != n.spell_id)
     {
         FormsEdge::List
-    } else if old
-        .iter()
-        .zip(&fresh)
-        .any(|(o, n)| o.castable != n.castable)
-    {
-        FormsEdge::Usable
     } else {
         FormsEdge::Silent
     };
@@ -113,7 +106,6 @@ pub(crate) fn push_forms(
     script.set_shapeshift_forms(fresh);
     match edge {
         FormsEdge::List => script.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]),
-        FormsEdge::Usable => script.fire_event("SPELL_UPDATE_USABLE", vec![]),
         FormsEdge::Silent | FormsEdge::Unchanged => {}
     }
     edge
@@ -139,106 +131,117 @@ impl Plugin for UiShapeshiftPlugin {
 /// Build the bar from the known spells and the catalog (module doc), and diff-push it.
 #[allow(clippy::type_complexity)] // a Bevy system's full input set
 fn feed_shapeshift_bar(
-    script: Option<NonSendMut<UiScript>>,
+    mut vm: crate::script_calls::VmWith<(Res<'static, Cooldowns>, Res<'static, Selection>)>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
-    cooldowns: Res<Cooldowns>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    selection: Res<Selection>,
     // The selection's guid index, and the bag walk behind each form's reagent leg.
     objects: Objects,
     units: Query<&ObjectStore, Without<SelfPlayer>>,
-    factions: Option<Res<crate::target::Factions>>,
-    reputations: Res<Reputations>,
+    relations: crate::target::RelationWorld,
     items: Res<Items>,
     clock: Res<crate::ui_script::UiClock>,
     spell_mods: Res<crate::spell::SpellModifiers>,
-    player: Option<Res<crate::player::Player>>,
+    own_control: Option<Res<crate::player::OwnControlLost>>,
+    // The skill lines the walk's cost finds its level through.
+    skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    // `ItemSubClass.dbc`, whose flags the walk's ammo leg reads.
+    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
     mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let memory = memory.get(&script);
-    let Some(spells) = spells else {
-        return;
-    };
-    let store = self_q.iter().next();
-    let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
-    let now = Instant::now();
-    // The frame's clock pair: a local `Instant::now()` would wobble the derived start.
-    let (anchor, ui_now) = (clock.anchor, clock.ui_now);
-    // The usable walk's target leg (Execute) reads the current target.
-    let target_store = selection
-        .guid
-        .and_then(|g| objects.entity(g))
-        .and_then(|e| units.get(e).ok());
+    // The forms, read off the host's cooldowns and selection; their push signals, so it runs
+    // with the host lent.
+    let Some((fresh, form_byte)) = vm.turn(|script, (cooldowns, selection)| {
+        // No VM, no bar.
+        script?;
+        let spells = spells?;
+        let store = self_q.iter().next();
+        let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
+        let now = Instant::now();
+        // The frame's clock pair: a local `Instant::now()` would wobble the derived start.
+        let (anchor, ui_now) = (clock.anchor, clock.ui_now);
+        // The usable walk's target leg (Execute) reads the current target.
+        let target_store = selection
+            .guid
+            .and_then(|g| objects.entity(g))
+            .and_then(|e| units.get(e).ok());
 
-    // Admission and order (module doc).
-    let mut rows: Vec<(u32, &benilla_formats::SpellDisplay)> = actions
-        .spells
-        .iter()
-        .filter_map(|&id| {
-            let d = spells.catalog.get(id)?;
-            let admitted = d.attributes_ex2 & ATTR_EX2_STANCE_BAR_EXCLUDE == 0
-                && (d.shapeshift_form.is_some()
-                    || d.attributes_ex2 & ATTR_EX2_STANCE_BAR_FORCE != 0);
-            admitted.then_some((id, d))
-        })
-        .collect();
-    rows.sort_by_key(|&(id, d)| {
-        let order = if d.stance_bar_order < 0 {
-            i64::MAX
-        } else {
-            i64::from(d.stance_bar_order)
+        // Admission and order (module doc).
+        let mut rows: Vec<(u32, &benilla_formats::SpellDisplay)> = actions
+            .spells
+            .iter()
+            .filter_map(|&id| {
+                let d = spells.catalog.get(id)?;
+                let admitted = d.attributes_ex2 & ATTR_EX2_STANCE_BAR_EXCLUDE == 0
+                    && (d.shapeshift_form.is_some()
+                        || d.attributes_ex2 & ATTR_EX2_STANCE_BAR_FORCE != 0);
+                admitted.then_some((id, d))
+            })
+            .collect();
+        rows.sort_by_key(|&(id, d)| {
+            let order = if d.stance_bar_order < 0 {
+                i64::MAX
+            } else {
+                i64::from(d.stance_bar_order)
+            };
+            (order, id)
+        });
+
+        // The bags, walked once for every form's reagent leg.
+        let stacks = store
+            .map(|s| crate::ui_items::stack_counts(&s.0, &objects))
+            .unwrap_or_default();
+        let fresh: Vec<ShapeshiftFormView> = rows
+            .into_iter()
+            .map(|(id, d)| {
+                let active = form_active(id, d, form_byte, store);
+                // `isCastable`: true for the active form, else the `0x6e3d60` walk the action bar's
+                // `IsUsableAction` runs.
+                let castable = active
+                    || store.is_none_or(|s| {
+                        let ctx = usable::UsableCtx {
+                            store: s,
+                            target: selection.guid.zip(target_store),
+                            rel: relations.get(),
+                            cooldowns: &cooldowns,
+                            stacks: &stacks,
+                            spell_mods: &spell_mods,
+                            control_lost: own_control.as_ref().is_some_and(|c| c.0),
+                            skill_lines: skill_lines.as_deref().map(|s| &s.catalog),
+                            sub_classes: sub_classes.as_deref().map(|s| &s.0),
+                        };
+                        usable::spell_usable(id, d, &spells, &ctx, &objects, &items).0
+                    });
+                let texture = form_texture(d, active);
+                let cooldown = cooldowns
+                    .info(id, 0, Some(d), now)
+                    .ui_triple(anchor, ui_now);
+                ShapeshiftFormView {
+                    spell_id: id,
+                    texture,
+                    name: d.name.clone(),
+                    active,
+                    castable,
+                    cooldown,
+                }
+            })
+            .collect();
+
+        Some((fresh, form_byte))
+    }) else {
+        return;
+    };
+    vm.run(|script| {
+        let Some(script) = script else {
+            return;
         };
-        (order, id)
-    });
-
-    // The bags, walked once for every form's reagent leg.
-    let stacks = store
-        .map(|s| crate::ui_items::stack_counts(&s.0, &objects))
-        .unwrap_or_default();
-    let fresh: Vec<ShapeshiftFormView> = rows
-        .into_iter()
-        .map(|(id, d)| {
-            let active = form_active(id, d, form_byte, store);
-            // `isCastable`: true for the active form, else the `0x6e3d60` walk the action bar's
-            // `IsUsableAction` runs.
-            let castable = active
-                || store.is_none_or(|s| {
-                    let ctx = usable::UsableCtx {
-                        store: s,
-                        target_store,
-                        factions: factions.as_deref(),
-                        reputations: &reputations,
-                        cooldowns: &cooldowns,
-                        stacks: &stacks,
-                        spell_mods: &spell_mods,
-                        control_lost: player.as_ref().is_some_and(|p| p.own_control_lost),
-                    };
-                    usable::spell_usable(id, d, &spells, &ctx, &objects, &items).0
-                });
-            let texture = form_texture(d, active);
-            let cooldown = cooldowns
-                .info(id, 0, Some(d), now)
-                .ui_triple(anchor, ui_now);
-            ShapeshiftFormView {
-                spell_id: id,
-                texture,
-                name: d.name.clone(),
-                active,
-                castable,
-                cooldown,
-            }
-        })
-        .collect();
-
-    let count = fresh.len();
-    let edge = push_forms(&mut script, memory, fresh);
-    if edge != FormsEdge::Unchanged {
-        debug!("ui_shapeshift: {count} form(s), active form byte {form_byte}, {edge:?} edge");
-    }
+        let memory = memory.get(script);
+        let count = fresh.len();
+        let edge = push_forms(script, memory, fresh);
+        if edge != FormsEdge::Unchanged {
+            debug!("ui_shapeshift: {count} form(s), active form byte {form_byte}, {edge:?} edge");
+        }
+    })
 }
 
 /// `CastShapeshiftForm` (`0x4b4810`), forked on the form id like the info call: the active form
@@ -284,6 +287,7 @@ pub(crate) fn cast_form(cast: &mut crate::spell::ScriptCast, spell_id: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::Reputations;
     use benilla_formats::SpellDisplay;
     use benilla_protocol::ObjectFields;
 
@@ -452,6 +456,7 @@ mod tests {
                 ..Spells::empty_for_tests()
             })
             .init_resource::<crate::player::Player>()
+            .init_resource::<crate::player::OwnControlLost>()
             .init_resource::<Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
@@ -492,15 +497,15 @@ mod tests {
         assert!(castable(&app, 1) && castable(&app, 2), "in control");
 
         app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .own_control_lost = true;
+            .resource_mut::<crate::player::OwnControlLost>()
+            .0 = true;
         app.update();
         assert!(!castable(&app, 1), "the plain form greys");
         assert!(castable(&app, 2), "the fear immunity passes the scan");
 
         app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .own_control_lost = false;
+            .resource_mut::<crate::player::OwnControlLost>()
+            .0 = false;
         app.update();
         assert!(castable(&app, 1) && castable(&app, 2), "control back");
     }

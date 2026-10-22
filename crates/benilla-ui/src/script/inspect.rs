@@ -1,19 +1,20 @@
 //! The inspect bindings: `NotifyInspect` and `ClearInspectPlayer` queue intents, the app pushes
-//! the inspected unit's equipment ([`UiScript::set_inspect`]) for the unit-keyed
+//! each held player's visible items by guid ([`UiScript::set_visible_equipment`]) for the
 //! `GetInventoryItem*` verbs, and `CanInspect` and `CheckInteractDistance` read a per-guid
 //! distance map ([`UiScript::set_unit_reach`]) through the token resolver ([`super::UnitGuids`]).
 //!
 //! Worn gear is public descriptor state (`PLAYER_VISIBLE_ITEM_<n>_0`), so the window paints from
-//! what the client holds: `SMSG_INSPECT` echoes only the guid, `InspectFrame_Show` calls
-//! `NotifyInspect` and `ShowUIPanel` together (`Blizzard_InspectUI.lua:6-13`), and the paper doll
-//! reads all 19 slots on show (`InspectPaperDollFrame.lua:57-79`). The view is keyed by unit token,
-//! as the reference keeps `InspectFrame.unit`, so it follows a re-target.
+//! what the client holds: `SMSG_INSPECT` echoes only the guid (`0x5e7d70`), `InspectFrame_Show`
+//! calls `NotifyInspect` and `ShowUIPanel` together (`Blizzard_InspectUI.lua:6-13`), and the paper
+//! doll reads all 19 slots on show, inside that call (`InspectPaperDollFrame.lua:57-79`), through
+//! `InspectFrame.unit`, so it follows a re-target.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use mlua::{Lua, Value};
 
+use super::binding_abi;
 use super::char_stats::InventorySlots;
 use super::Model;
 
@@ -21,8 +22,8 @@ use super::Model;
 /// (`0x48ba00`, from the `.rdata` at `0x804498`, `0x804490`, `0x80448c`, `0x8044a4`).
 pub const INTERACT_DIST_SQ: [f64; 4] = [100.0, 123.45678, 100.0, 900.0];
 
-/// `CanInspect`'s threshold squared (`0xb4d918`, the `.rdata` 10.0 at `0x804498` squared by
-/// `0x48a1b0`); vmangos checks the same 10 yards (`INSPECT_DISTANCE`, `ObjectDefines.h:26`).
+/// `CanInspect`'s threshold squared (`0xb4d918`, the `.rdata` 10.0 at `0x804498` squared by the
+/// initialiser `0x48cc80`); vmangos checks the same 10 yards (`INSPECT_DISTANCE`, `ObjectDefines.h:26`).
 pub const CAN_INSPECT_DIST_SQ: f64 = 100.0;
 
 /// One unit this frame, as the two range verbs read it. An entry exists only for a live unit
@@ -33,23 +34,11 @@ pub const CAN_INSPECT_DIST_SQ: f64 = 100.0;
 pub struct UnitReach {
     /// Squared distance from the player.
     pub dist_sq: f64,
-    /// A player, and not a valid attack target: vmangos's inspect refusals besides distance
-    /// (`MiscHandler.cpp:945-956`). Only `CanInspect` reads it: `CheckInteractDistance` is a pure
-    /// distance test, so a creature or an enemy player still answers it.
+    /// `0x4944a0`'s legs besides distance: a player unit that is the active player or one it can
+    /// cooperate with (`CanCooperate 0x606ba0`, `0x4944e4`). Only `CanInspect` reads it:
+    /// `CheckInteractDistance` is a pure distance test, so a creature or an enemy player still
+    /// answers it.
     pub inspectable: bool,
-}
-
-/// What the app has resolved for the unit currently being inspected.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InspectView {
-    /// The inspected unit token, the reference's `InspectFrame.unit`; the inventory verbs match
-    /// their `unit` argument against it.
-    pub unit: String,
-    /// The player the token resolved to, so the app can tell a new player behind the same token.
-    pub guid: u64,
-    /// Equipment by inventory slot id 1..=19, like the self feed; ammo (0) and bags (20..=23) stay
-    /// `None`, since another player's are not visible.
-    pub slots: InventorySlots,
 }
 
 impl super::UiScript {
@@ -61,6 +50,12 @@ impl super::UiScript {
     /// fire `UNIT_*` events.
     pub fn set_unit_reach(&mut self, reach: HashMap<u64, UnitReach>) {
         self.model_mut().unit_reach = reach;
+    }
+
+    /// Push one unit's reach ahead of the next whole map: a unit seated between two pushes, as
+    /// the world mouseover is ([`Self::seat_world_mouseover_unit`]).
+    pub fn set_unit_reach_of(&mut self, guid: u64, reach: UnitReach) {
+        self.model_mut().unit_reach.insert(guid, reach);
     }
 
     /// The guids of the held units the resolver's inputs reach ([`Self::set_unit_guids`]): every
@@ -88,10 +83,16 @@ impl super::UiScript {
         self.model_ref().unit_guids.has_field_watchers(guid)
     }
 
-    /// Push (or clear, with `None`) the inspected unit's equipment. It fires nothing: the app fires
-    /// `UNIT_INVENTORY_CHANGED` for the token, which the stock slot buttons listen for.
-    pub fn set_inspect(&mut self, view: Option<InspectView>) {
-        self.model_mut().inspect = view;
+    /// Push, or clear with `None`, the visible items of the player `guid` by slot id 1..=19:
+    /// what the slot getters read through a token naming another player they may read
+    /// (`0x4944a0`). It fires nothing: a change of them is the visible-item bridge's
+    /// `UNIT_INVENTORY_CHANGED` (`0x51bd70`).
+    pub fn set_visible_equipment(&mut self, guid: u64, slots: Option<InventorySlots>) {
+        let mut model = self.model_mut();
+        match slots {
+            Some(slots) => model.visible_equipment.insert(guid, slots),
+            None => model.visible_equipment.remove(&guid),
+        };
     }
 
     /// Drain the tokens `NotifyInspect` queued; the app sends `CMSG_INSPECT` for each, which also
@@ -108,58 +109,74 @@ impl super::UiScript {
 
 /// The reach of the unit `token` names, through the resolver (`0x515970`, which both verbs call via
 /// `0x515940`): the guid it answers, then that guid's entry. A token the resolver does not
-/// recognise answers nobody here.
-fn reach(lua: &Lua, token: &Option<String>) -> Option<UnitReach> {
-    let token = token.as_deref()?;
+/// recognise raises `Unknown unit name` (`0x515c14`).
+fn reach(lua: &Lua, token: &str) -> mlua::Result<Option<UnitReach>> {
+    super::unit::check_unit_token(&Some(token.to_string()))?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let guid = model.unit_guids.resolve(token).ok().flatten()?;
-    model.unit_reach.get(&guid).copied()
+    let guid = model.unit_guids.resolve(token).ok().flatten();
+    Ok(guid.and_then(|guid| model.unit_reach.get(&guid).copied()))
+}
+
+/// Whether `0x4944a0`'s distance leg passes: in range unless `100.0 < d²`, since `test ah,0x41`
+/// after the compare counts an unordered one as in range, so a NaN distance passes (`0x494531`),
+/// as `CanInspect`'s own test before it does (`0x48a28b`).
+pub(super) fn in_inspect_range(r: &UnitReach) -> bool {
+    matches!(
+        r.dist_sq.partial_cmp(&CAN_INSPECT_DIST_SQ),
+        Some(Ordering::Less | Ordering::Equal) | None
+    )
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
     // CanInspect(unit) → 1/nil (`0x48a1b0`), the gate of `InspectFrame_Show`
-    // (`Blizzard_InspectUI.lua:8`): in range unless `100.0 < d²`, and `test ah,0x41; jne` counts an
-    // unordered compare as in range, so a NaN distance passes. The player and attackability legs
-    // ride in [`UnitReach::inspectable`].
+    // (`Blizzard_InspectUI.lua:8`). `Usage:` unless the argument is a string or a number
+    // (`0x48a1ca`); the resolver raises for an unknown token. Each refusal shows its error through
+    // `0x496720` before the answer, which is `0x4944a0`'s (`0x48a2a1`): no object
+    // `ERR_UNIT_NOT_FOUND`, or `ERR_GENERIC_NO_TARGET` for an empty token (`0x48a2d6`-`0x48a2f3`);
+    // no active player, a unit that is no player, or another one the player cannot cooperate with
+    // `ERR_INVALID_INSPECT_TARGET` (`0x48a21f`, `0x48a231`, `0x48a245` → `0x48a2c7`); beyond 10
+    // yards `ERR_OUT_OF_RANGE` (`0x48a292`). Those legs ride in [`UnitReach::inspectable`].
     g.set(
         "CanInspect",
-        lua.create_function(|lua, unit: Option<String>| {
-            let ok = match reach(lua, &unit) {
-                Some(r) => {
-                    r.inspectable
-                        && matches!(
-                            r.dist_sq.partial_cmp(&CAN_INSPECT_DIST_SQ),
-                            Some(Ordering::Less | Ordering::Equal) | None
-                        )
-                }
-                // No live unit: nil, through `0x4944a0`'s null-`this` guard.
-                None => false,
+        lua.create_function(|lua, unit: Value| {
+            let unit = binding_abi::string_arg(lua, unit, "Usage: CanInspect(unit)")?;
+            let reach = reach(lua, &unit)?;
+            let refusal = match &reach {
+                None if unit.starts_with('\0') || unit.is_empty() => Some("ERR_GENERIC_NO_TARGET"),
+                None => Some("ERR_UNIT_NOT_FOUND"),
+                Some(r) if !r.inspectable => Some("ERR_INVALID_INSPECT_TARGET"),
+                Some(r) if !in_inspect_range(r) => Some("ERR_OUT_OF_RANGE"),
+                Some(_) => None,
             };
+            if let Some(key) = refusal {
+                lua.app_data_mut::<Model>()
+                    .expect("model app_data")
+                    .push_ui_error(key);
+            }
+            let ok = reach.is_some_and(|r| r.inspectable && in_inspect_range(&r));
             Ok(if ok { Value::Integer(1) } else { Value::Nil })
         })?,
     )?;
 
     // CheckInteractDistance(unit, type) → 1/nil (`0x48ba00`): in range only when
-    // `d² < table[type-1]`, strictly, unlike `CanInspect` (`test ah,0x5; jp`). A token with no unit
-    // answers nil (`0x48babe`), as does a `type` outside 1..=4 once truncated toward zero, the
-    // compare being unsigned (`0x48bac5`); a missing or non-number `type` raises (`0x48bb48`).
-    // The reference also raises for a missing unit (`0x48ba18`) or an unknown token (`0x515c14`),
-    // where this answers nil.
+    // `d² < table[type-1]`, strictly, unlike `CanInspect` (`test ah,0x5; jp`). `is-number-or-string`
+    // on the unit and `is-number` on `type` gate both, else
+    // `Usage: CheckInteractDistance("unit", distIndex)` (`0x842900`, `0x48bb42`); then the resolver
+    // raises for an unknown token (`0x48ba7e`). A token with no unit answers nil (`0x48babe`), as
+    // does a `type` outside 1..=4 once truncated toward zero, the compare being unsigned
+    // (`0x48bac5`); no arm shows an error.
     g.set(
         "CheckInteractDistance",
-        lua.create_function(|lua, (unit, kind): (Option<String>, Option<f64>)| {
-            let Some(kind) = kind else {
-                return Err(mlua::Error::RuntimeError(
-                    "Usage: CheckInteractDistance(\"unit\", distIndex)".into(),
-                ));
-            };
-            let thr = usize::try_from(kind.trunc() as i64)
-                .ok()
-                .and_then(|k| k.checked_sub(1))
+        lua.create_function(|lua, (unit, kind): (Value, Value)| {
+            const USAGE: &str = r#"Usage: CheckInteractDistance("unit", distIndex)"#;
+            let unit = binding_abi::string_arg(lua, unit, USAGE)?;
+            let kind = binding_abi::index_arg(lua, kind, USAGE)?;
+            let thr = kind
+                .checked_sub(1)
                 .and_then(|i| INTERACT_DIST_SQ.get(i).copied());
-            let ok = match (reach(lua, &unit), thr) {
+            let ok = match (reach(lua, &unit)?, thr) {
                 (Some(r), Some(thr)) => r.dist_sq < thr,
                 _ => false,
             };
@@ -288,8 +305,8 @@ mod tests {
         assert!(!answers(&s, r#"CanInspect("party1targettarget")"#));
     }
 
-    /// A chain that ends at nobody, a unit with no object, text after the chain and a token the
-    /// resolver does not read as a chain each answer nil, and the compares fold case.
+    /// A chain that ends at nobody, a unit with no object and text after the chain each answer
+    /// nil, a token the resolver does not know raises, and the compares fold case.
     #[test]
     fn a_chain_that_names_nobody_answers_nil_and_case_folds() {
         let s = seeded();
@@ -303,9 +320,6 @@ mod tests {
             "party3target",
             "party1foo",
             "party1targetfoo",
-            // `npc` is an exact compare with no chain.
-            "npctarget",
-            "bogus",
             "",
         ] {
             let call = format!(r#"CheckInteractDistance("{token}", 4)"#);
@@ -313,7 +327,72 @@ mod tests {
             let call = format!(r#"CanInspect("{token}")"#);
             assert!(!answers(&s, &call), "{call}");
         }
+        // `npc` is one exact compare with no chain, so the resolver knows no `npctarget`.
+        for call in [
+            r#"CheckInteractDistance("npctarget", 4)"#,
+            r#"CanInspect("npctarget")"#,
+        ] {
+            assert!(s.run(call).is_err(), "{call}");
+        }
         assert!(answers(&s, r#"CheckInteractDistance("PARTY1TARGET", 1)"#));
         assert!(answers(&s, r#"CanInspect("Party1Target")"#));
+    }
+
+    /// `CanInspect` (`0x48a1b0`) raises `Usage: CanInspect(unit)` unless its argument is a string
+    /// or a number (`0x48a1ca`), and the resolver raises for a token it does not know (`0x515940`
+    /// through `0x515970`). Before it answers by `0x4944a0` (`0x48a2a1`), each refusal shows its
+    /// error through `0x496720`: no object `ERR_UNIT_NOT_FOUND` (`0x48a2df`), or
+    /// `ERR_GENERIC_NO_TARGET` for an empty token (`0x48a2ee`); a unit that is no player, or
+    /// another one the player cannot cooperate with, `ERR_INVALID_INSPECT_TARGET` (`0x48a2c7`); one
+    /// beyond 10 yards `ERR_OUT_OF_RANGE` (`0x48a292`). An inspectable unit in range shows none.
+    #[test]
+    fn can_inspect_raises_and_shows_each_refusal_before_it_answers() {
+        let mut s = seeded();
+        for chunk in ["CanInspect()", "CanInspect({})", "CanInspect(nil)"] {
+            let err = s.run(chunk).expect_err(chunk).to_string();
+            assert!(err.contains("Usage: CanInspect(unit)"), "{chunk}: {err}");
+        }
+        for chunk in ["CanInspect(\"bogus\")", "CanInspect(5)"] {
+            let err = s.run(chunk).expect_err(chunk).to_string();
+            assert!(err.contains("Unknown unit name"), "{chunk}: {err}");
+        }
+        assert!(s.take_ui_errors().is_empty(), "a raise shows nothing");
+        for (token, shown) in [
+            ("party1", None),
+            ("party2", Some("ERR_UNIT_NOT_FOUND")),
+            ("party3", Some("ERR_UNIT_NOT_FOUND")),
+            ("", Some("ERR_GENERIC_NO_TARGET")),
+            ("target", Some("ERR_INVALID_INSPECT_TARGET")),
+            ("partypet1", Some("ERR_INVALID_INSPECT_TARGET")),
+        ] {
+            let call = format!(r#"CanInspect("{token}")"#);
+            assert_eq!(answers(&s, &call), shown.is_none(), "{call}");
+            assert_eq!(s.take_ui_errors(), Vec::from_iter(shown), "{call}");
+        }
+        // party1 20 yards off: inspectable, out of range.
+        s.set_unit_reach(HashMap::from([(P1, reach(400.0, true))]));
+        assert!(!answers(&s, r#"CanInspect("party1")"#));
+        assert_eq!(s.take_ui_errors(), vec!["ERR_OUT_OF_RANGE"]);
+    }
+
+    /// `CheckInteractDistance` (`0x48ba00`) checks both arguments first (`0x48ba11`-`0x48ba2c`),
+    /// then the resolver raises for a token it does not know (`0x48ba7e` → `0x515940`); it shows
+    /// no error on any arm.
+    #[test]
+    fn check_interact_distance_raises_for_an_unknown_token_and_shows_nothing() {
+        let mut s = seeded();
+        let err = s
+            .run(r#"CheckInteractDistance("bogus", 1)"#)
+            .expect_err("an unknown token")
+            .to_string();
+        assert!(err.contains("Unknown unit name"), "{err}");
+        let err = s
+            .run(r#"CheckInteractDistance("bogus", {})"#)
+            .expect_err("a bad index")
+            .to_string();
+        assert!(err.contains("Usage: CheckInteractDistance"), "{err}");
+        assert!(!answers(&s, r#"CheckInteractDistance("party2", 4)"#));
+        assert!(!answers(&s, r#"CheckInteractDistance("", 4)"#));
+        assert!(s.take_ui_errors().is_empty());
     }
 }

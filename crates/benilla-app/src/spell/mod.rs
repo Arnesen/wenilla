@@ -7,10 +7,8 @@
 
 use bevy::prelude::*;
 
-use crate::client_state::ClientState;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 use crate::ui_unit::UnitFeed;
-use benilla_world::schedule::WorldStage;
 
 mod bind_gates;
 mod cast_send;
@@ -20,7 +18,10 @@ pub(crate) mod group_relation;
 mod inflight;
 mod mods;
 pub(crate) mod net;
+pub(crate) mod range_check;
 mod range_units;
+pub(crate) mod reads;
+mod report;
 pub(crate) mod targeting;
 pub(crate) mod usable;
 pub(crate) mod validator;
@@ -28,18 +29,25 @@ pub(crate) mod validator;
 // The one cast path: every caster takes [`CastLadder`] and commits through [`CastCommit`];
 // `send_spell_cast` is private to `cast_send`, so no second send path can exist.
 pub(crate) use cast_send::{
-    CastCommit, CastLadder, HeldCast, HeldForPick, ScriptCastPermit, TargetedBind,
+    CastCommit, CastLadder, HeldCast, HeldForPick, PetGcdsOwed, ScriptCastPermit, TargetedBind,
+    UnitAttackOwed, UnitPress,
 };
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use cooldowns::Cooldowns;
 pub(crate) use inflight::{
-    inflight, ActiveChannel, AutoRepeatActive, LocalMoveStart, PendingCast, QueuedMeleeSpell,
+    ActiveChannel, AutoRepeatActive, CastState, LocalMoveStart, PendingCast, QueuedMeleeSpell,
     SelfCancel, SPELL_INTERRUPT_MOVEMENT,
 };
-pub(crate) use mods::{ModsDiff, SpellModifiers, OP_CAST_TIME, OP_COST, OP_GCD, OP_RADIUS};
+pub(crate) use mods::{
+    CategoryPad, ModsDiff, SpellModifiers, OP_CAST_TIME, OP_COST, OP_GCD, OP_RADIUS,
+};
 #[cfg(test)]
 pub(crate) use mods::{OP_COOLDOWN, OP_RANGE};
 pub(crate) use range_units::{RangeUnits, DEFAULT_REACH};
+pub(crate) use reads::{SpellLevel, SpellReads, UnitField, Unrecorded};
+pub(crate) use report::{
+    CastCore, CastSlots, CursorCancel, Held, REASON_ERROR, REASON_TARGETS_DEAD,
+};
 // `TargetingWants` is exported for the ground reticle, which draws for the location word alone.
 pub(crate) use targeting::{
     ground_cast_radius, CorpsePick, CursorPicks, PicksSelf, ScriptCursor, SpellTargeting,
@@ -73,6 +81,8 @@ impl Plugin for SpellPlugin {
             .init_resource::<AutoSelfCast>()
             .init_resource::<SpellTargeting>()
             .init_resource::<HeldForPick>()
+            .init_resource::<PetGcdsOwed>()
+            .init_resource::<UnitAttackOwed>()
             .init_resource::<ScriptCastPermit>()
             .init_resource::<CursorPicks>()
             .init_resource::<targeting::EnchantConfirmItem>()
@@ -88,35 +98,33 @@ impl Plugin for SpellPlugin {
                         .in_set(UnitFeed)
                         .in_set(LocalCancel),
                     mods::track_class_family
-                        .after(WorldStage::Net)
+                        .in_set(crate::ui_script::UiFeed)
                         .before(UnitFeed),
                     // The state push runs before the input pass's `ToggleGameMenu`, whose
-                    // `SpellStopTargeting` lands with the script calls after it. After the
+                    // `SpellStopTargeting` applies inside its call. After the
                     // old-target clear, the pet bar's writer in the feed: `"pet"` resolves off
                     // the bar. After the aura feed, whose resolver inputs list the units the
                     // hover verdict is asked for.
                     targeting::feed_targeting_to_vm
                         .in_set(UnitFeed)
+                        .after(LocalCancel)
                         .after(crate::ui_pet::pet_stop_on_old_target_clear)
                         .after(crate::ui_aura::AuraEvents),
+                    // Readers of the word, which the local cancel can clear.
                     (
                         targeting::publish_picks_self,
                         targeting::publish_corpse_pick,
                         targeting::publish_unit_pick,
                     )
-                        .in_set(UiFeed),
+                        .in_set(UiFeed)
+                        .after(LocalCancel),
                     // The party slots and raid roster the party and raid words read, before
                     // the feed's targeting push asks them.
                     group_relation::publish_group_roster
                         .in_set(UiFeed)
                         .before(UnitFeed),
-                    // The item-target commit (`0x495d60`): after the input pass so a bag click
-                    // binds the same frame; outside the target chain, as its clicks never reach
-                    // the world.
-                    targeting::commit_item_cast_on_pick.after(UiInput),
                 ),
-            )
-            .add_systems(OnEnter(ClientState::InWorld), mods::clear_on_world_enter);
+            );
         net::register(app);
     }
 }

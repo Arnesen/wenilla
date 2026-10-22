@@ -1,6 +1,16 @@
 //! The 1.12.1 world opcode numbers (vmangos `Opcodes_1_12_1.h`). A client packet's header holds
 //! the opcode in 4 bytes, but every value fits `u16`; the senders widen it.
 
+/// `worldport`'s send (`0x404fc8`): `u32` clock, `u32` map, then x, y, z and the facing as floats.
+pub const CMSG_WORLD_TELEPORT: u16 = 0x0008;
+/// `port <name>`'s send (`0x404b31`): the argument text as a cstring.
+pub const CMSG_TELEPORT_TO_UNIT: u16 = 0x0009;
+/// `whois`'s send (`0x5adf1f`): the argument text as a cstring.
+pub const CMSG_WHOIS: u16 = 0x0064;
+/// `port <x y>`'s send (`0x404cdc`): x, y, z and the facing as floats.
+pub const MSG_MOVE_TELEPORT_CHEAT: u16 = 0x00C6;
+/// `setrawpos`'s send (`0x4051e4`): x, y, z and the facing as floats.
+pub const CMSG_MOVE_SET_RAW_POSITION: u16 = 0x00E1;
 pub const SMSG_CHAR_CREATE: u16 = 0x003A;
 pub const SMSG_CHAR_ENUM: u16 = 0x003B;
 // Character delete: CMSG a full u64 guid, SMSG one result byte (`CHAR_DELETE_SUCCESS` = 0x39).
@@ -33,6 +43,11 @@ pub const SMSG_NEW_WORLD: u16 = 0x003E;
 pub const SMSG_TRANSFER_PENDING: u16 = 0x003F;
 pub const SMSG_TRANSFER_ABORTED: u16 = 0x0040;
 pub const SMSG_LOGIN_SETTIMESPEED: u16 = 0x0042;
+// The game-clock messages (`gametime/messages` in benilla-re): a date to sync to, a date to set,
+// and a rate.
+pub const SMSG_GAMETIME_UPDATE: u16 = 0x0043;
+pub const SMSG_GAMETIME_SET: u16 = 0x0045;
+pub const SMSG_GAMESPEED_SET: u16 = 0x0047;
 pub const SMSG_BINDPOINTUPDATE: u16 = 0x0155;
 /// The proficiency mask for one item class (vmangos `Skill.h`).
 pub const SMSG_SET_PROFICIENCY: u16 = 0x0127;
@@ -95,6 +110,8 @@ pub const SMSG_PLAY_OBJECT_SOUND: u16 = 0x0278;
 pub const SMSG_PLAY_SOUND: u16 = 0x02D2;
 /// The zone's weather, pushed by the server.
 pub const SMSG_WEATHER: u16 = 0x02F4;
+/// One `u32` emote, the placed bid's wave (`0x4cc5dd`).
+pub const CMSG_EMOTE: u16 = 0x0102;
 pub const SMSG_EMOTE: u16 = 0x0103;
 pub const CMSG_TEXT_EMOTE: u16 = 0x0104;
 pub const SMSG_TEXT_EMOTE: u16 = 0x0105;
@@ -297,6 +314,9 @@ pub const CMSG_PET_NAME_QUERY: u16 = 0x0052; // 82
 
 /// A pet bar press: the slot's packed word and a target guid, dispatched on its type byte.
 pub const CMSG_PET_ACTION: u16 = 0x0175; // 373
+/// A cast whose caster is the pet or a possessed unit (`SendCast`, `0x6e5816`): the caster's guid,
+/// the spell and the targets block.
+pub const CMSG_PET_CAST_SPELL: u16 = 0x01F0; // 496
 /// A pet bar drag: one or two `(position, packed)` pairs, told apart by body size alone.
 pub const CMSG_PET_SET_ACTION: u16 = 0x0174; // 372
 /// Set a pet spell's autocast bit to a given value (the right-click).
@@ -785,6 +805,9 @@ pub const SMSG_CORPSE_RECLAIM_DELAY: u16 = 0x0269; // 617
 /// `UseSoulstone()`: empty body; the server casts our `PLAYER_SELF_RES_SPELL` and zeroes it
 /// (`SpellHandler.cpp:461`). No answer packet, only descriptor deltas.
 pub const CMSG_SELF_RES: u16 = 0x02B3; // 691
+/// An enemy took our insignia in a battleground: one byte, `freeRepop`, which vmangos sends as 0
+/// (`Player.cpp:7653-7654`).
+pub const SMSG_PLAYER_SKINNED: u16 = 0x02BC; // 700
 /// A non-PvP death's 10% durability loss: empty body, a red error line (`Unit.cpp:1170-1182`).
 pub const SMSG_DURABILITY_DAMAGE_DEATH: u16 = 0x02BD; // 701
 

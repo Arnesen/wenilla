@@ -30,6 +30,11 @@ fn exp_bar_harness() -> UiScript {
     }
     // The stock default, detailed tips on (`UIOptionsFrame.lua:100`); no options file loads here.
     s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
+    // The load's `MainMenuExpBar_Update` stores a first value with `UnitXPMax` 0, whose
+    // `OnValueChanged` hides the strip (`TextStatusBar_UpdateTextString`); the world-enter
+    // rebuild's `UPDATE_FACTION` (`0x4909d3`) then runs `ReputationWatchBar_Update`, which shows
+    // it again.
+    s.fire_event("UPDATE_FACTION", vec![]);
     s
 }
 
@@ -120,7 +125,7 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
             return tick:IsVisible() and fill:IsShown()
                and math.abs((x - MainMenuExpBar:GetLeft()) - expected) < 0.5
                and math.abs((fill:GetRight() - fill:GetLeft()) - expected) < 0.5
-               and r == 0.0 and math.abs(g - 0.39) < 0.001 and math.abs(b - 0.88) < 0.001
+               and r == 0.0 and math.abs(g - 0.39) < 1/255 and math.abs(b - 0.88) < 1/255
         "#,
         )
         .unwrap();
@@ -176,7 +181,7 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
             local r, g, b = MainMenuExpBar:GetStatusBarColor()
             return not ExhaustionTick:IsShown()
                and not ExhaustionLevelFillBar:IsShown()
-               and math.abs(g - 0.39) < 0.001
+               and math.abs(g - 0.39) < 1/255
         "#,
         )
         .unwrap();

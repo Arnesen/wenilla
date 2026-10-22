@@ -141,7 +141,8 @@ pub struct Templates {
 
 #[derive(Debug, Clone)]
 struct Template {
-    element: Element,
+    /// Shared, so a load's per-level reads hold the node without copying it.
+    element: std::rc::Rc<Element>,
     /// The context word at registration (`[entry+0x1c]`, `0x6ee6be`); `None` is the reference's 0.
     context: Option<String>,
 }
@@ -169,7 +170,7 @@ impl Templates {
         context: Option<&str>,
     ) -> Registration {
         let template = Template {
-            element,
+            element: std::rc::Rc::new(element),
             context: context.map(str::to_owned),
         };
         match self.entries.entry(name.to_ascii_lowercase()) {
@@ -192,7 +193,47 @@ impl Templates {
     pub fn get(&self, name: &str) -> Option<&Element> {
         self.entries
             .get(&name.to_ascii_lowercase())
-            .map(|t| &t.element)
+            .map(|t| &*t.element)
+    }
+
+    /// The templates `element`'s load runs before its own body, in the order the reference runs
+    /// them: each level's `inherits` template is loaded through its own recursive load first
+    /// (`0x76fe5b`), the most distant first. [`expand`] flattens the same chain into one element,
+    /// losing the boundaries that per-level state (a texture's wrap flag, `0x76fec6`) follows. A
+    /// cycle stops at the repeated name.
+    pub fn inherited_levels(&self, element: &Element) -> Vec<std::rc::Rc<Element>> {
+        self.inherited_levels_until(element, |_| false)
+    }
+
+    /// [`Self::inherited_levels`], the walk stopping at the first `inherits` that `is_font` claims:
+    /// a FontString looks the name up as a font first and loads no template once one answers
+    /// (`0x770f69` → `0x770fb7`), so a template of the same name, and what it inherits, is never a
+    /// level.
+    pub fn inherited_levels_until(
+        &self,
+        element: &Element,
+        is_font: impl Fn(&str) -> bool,
+    ) -> Vec<std::rc::Rc<Element>> {
+        let mut out: Vec<std::rc::Rc<Element>> = Vec::new();
+        let mut active: Vec<String> = Vec::new();
+        let mut name = element.attr("inherits").map(str::to_string);
+        while let Some(n) = name.filter(|n| !n.is_empty()) {
+            if is_font(&n) {
+                break;
+            }
+            let key = n.to_ascii_lowercase();
+            if active.contains(&key) {
+                break;
+            }
+            let Some(t) = self.entries.get(&key) else {
+                break;
+            };
+            active.push(key);
+            name = t.element.attr("inherits").map(str::to_string);
+            out.push(t.element.clone());
+        }
+        out.reverse();
+        out
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -431,25 +472,25 @@ pub fn expand(
     templates: &dyn Inheritable,
     warnings: &mut Vec<String>,
 ) -> Element {
-    expand_known(element, templates, &HashSet::new(), warnings)
+    expand_known(element, templates, &|_| false, warnings)
 }
 
-/// [`expand`], skipping without a warning an `inherits` that names a font object: a
+/// [`expand`], skipping without a warning an `inherits` that `is_font` claims: a
 /// `<FontString inherits="GameFontNormalSmall">` takes a font, applied later, not a template.
 pub fn expand_known(
     element: &Element,
     templates: &dyn Inheritable,
-    fonts: &HashSet<&str>,
+    is_font: &dyn Fn(&str) -> bool,
     warnings: &mut Vec<String>,
 ) -> Element {
     let mut active = HashSet::new();
-    expand_inner(element, templates, fonts, warnings, &mut active)
+    expand_inner(element, templates, is_font, warnings, &mut active)
 }
 
 fn expand_inner(
     element: &Element,
     templates: &dyn Inheritable,
-    fonts: &HashSet<&str>,
+    is_font: &dyn Fn(&str) -> bool,
     warnings: &mut Vec<String>,
     active: &mut HashSet<String>,
 ) -> Element {
@@ -471,7 +512,7 @@ fn expand_inner(
         }
         let Some(template) = templates.find(name) else {
             // A font object is not an unknown template; it is applied after this.
-            if !fonts.contains(name) {
+            if !is_font(name) {
                 warnings.push(format!(
                     "unknown template '{name}' referenced by inherits; skipping"
                 ));
@@ -479,7 +520,7 @@ fn expand_inner(
             active.remove(name);
             continue;
         };
-        let expanded_template = expand_inner(template, templates, fonts, warnings, active);
+        let expanded_template = expand_inner(template, templates, is_font, warnings, active);
         active.remove(name);
         base = Some(match base {
             None => expanded_template,
@@ -491,34 +532,6 @@ fn expand_inner(
         Some(base) => merge(&base, element),
         None => element.clone(),
     }
-}
-
-/// The elements `element`'s load runs, in the order the reference runs them: each level's
-/// `inherits` template is loaded through its own recursive load first (`0x76fe5b`), then the
-/// level's own body. [`expand`] flattens the same chain into one element, losing the boundaries
-/// that per-level state (a texture's wrap flag, `0x76fec6`) follows.
-pub fn inherit_chain<'a>(element: &'a Element, templates: &'a dyn Inheritable) -> Vec<&'a Element> {
-    fn walk<'a>(
-        el: &'a Element,
-        templates: &'a dyn Inheritable,
-        active: &mut Vec<String>,
-        out: &mut Vec<&'a Element>,
-    ) {
-        if let Some(name) = el.attr("inherits").filter(|n| !n.is_empty()) {
-            let key = name.to_ascii_lowercase();
-            if !active.contains(&key) {
-                if let Some(template) = templates.find(name) {
-                    active.push(key);
-                    walk(template, templates, active, out);
-                    active.pop();
-                }
-            }
-        }
-        out.push(el);
-    }
-    let mut out = Vec::new();
-    walk(element, templates, &mut Vec::new(), &mut out);
-    out
 }
 
 /// [`expand`]'s merge; `over`'s tag wins, and its body when it has one. `base`'s `name` and `id`
@@ -582,44 +595,6 @@ pub fn resolve_name(raw: &str, parent_name: &str) -> String {
         }
         _ => raw.to_string(),
     }
-}
-
-/// C's `atof` (`0x64aaa0`), which the reference reads numeric attributes with (SimpleHTML's
-/// `width=` and `height=`, `spacing=`): the longest numeric prefix after leading whitespace, 0 when
-/// there is none, so `"12px"` is 12.
-pub(crate) fn atof(s: &str) -> f32 {
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() && (b[i] as char).is_ascii_whitespace() {
-        i += 1;
-    }
-    let start = i;
-    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
-        i += 1;
-    }
-    while i < b.len() && b[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i < b.len() && b[i] == b'.' {
-        i += 1;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-    }
-    // An exponent counts only when complete: `"1e"` is 1, as `strtod` backtracks.
-    if i < b.len() && (b[i] | 0x20) == b'e' {
-        let mut j = i + 1;
-        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
-            j += 1;
-        }
-        if j < b.len() && b[j].is_ascii_digit() {
-            while j < b.len() && b[j].is_ascii_digit() {
-                j += 1;
-            }
-            i = j;
-        }
-    }
-    s[start..i].parse::<f32>().unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -965,21 +940,5 @@ print(x)</Script>
         assert_eq!(child_name, "PlayerFrameHealthBar");
         let grandchild_name = resolve_name("$parentText", &child_name);
         assert_eq!(grandchild_name, "PlayerFrameHealthBarText");
-    }
-}
-
-#[cfg(test)]
-mod atof_tests {
-    use super::atof;
-
-    #[test]
-    fn atof_takes_the_numeric_prefix() {
-        assert_eq!(atof("64"), 64.0);
-        assert_eq!(atof(" 12.5px"), 12.5);
-        assert_eq!(atof("-3"), -3.0);
-        assert_eq!(atof("px"), 0.0);
-        assert_eq!(atof(""), 0.0);
-        assert_eq!(atof("1e2"), 100.0);
-        assert_eq!(atof("1e"), 1.0);
     }
 }

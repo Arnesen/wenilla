@@ -53,9 +53,85 @@ pub struct TokenContext<'a> {
     pub printf: &'a dyn Fn(&str, &[TokenNumber]) -> String,
 }
 
-/// A `GlobalStrings` template, filled.
-fn keyed(ctx: &TokenContext, key: &str, args: &[TokenNumber]) -> Option<String> {
-    Some((ctx.printf)(&(ctx.global)(key)?, args))
+/// One piece of an expanded text: literal text, or a `GlobalStrings` template a token names,
+/// read and filled when the text is read (`GetText 0x703bf0`, then `SStrPrintf 0x64a7f0`), as the
+/// tooltip builders read `_G` at each call.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenPart {
+    Text(String),
+    Keyed {
+        key: String,
+        /// `GetText`'s plural ordinal: other than 1, the `_P1` twin when the strings hold one.
+        ordinal: Option<i64>,
+        args: Vec<TokenNumber>,
+        /// The token as written, which stands in for a missing template.
+        raw: String,
+    },
+}
+
+/// What `0x5075f0`'s caller passes beside the text: the level, 0 for the expanded spell's own
+/// (`507632`-`50764a`), and the count the effect points multiply by (`5078d1`-`5078e4`). Only the
+/// aura tooltip builder `0x52f880` passes other than 0 and 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpandAt {
+    pub level: u32,
+    pub stack: u32,
+}
+
+impl Default for ExpandAt {
+    fn default() -> Self {
+        Self { level: 0, stack: 1 }
+    }
+}
+
+/// A token's text before the template read: literal, or a key with its arguments.
+enum Piece {
+    Text(String),
+    Keyed {
+        key: String,
+        ordinal: Option<i64>,
+        args: Vec<TokenNumber>,
+    },
+}
+
+/// A `GlobalStrings` template by key, filled at the read.
+fn keyed(key: impl Into<String>, args: Vec<TokenNumber>) -> Piece {
+    Piece::Keyed {
+        key: key.into(),
+        ordinal: None,
+        args,
+    }
+}
+
+/// The text of `parts` with each template read through `global` and filled through `printf`; a
+/// missing template leaves its token as written.
+pub fn resolve_parts(
+    parts: &[TokenPart],
+    global: &dyn Fn(&str) -> Option<String>,
+    printf: &dyn Fn(&str, &[TokenNumber]) -> String,
+) -> String {
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            TokenPart::Text(t) => out.push_str(t),
+            TokenPart::Keyed {
+                key,
+                ordinal,
+                args,
+                raw,
+            } => {
+                let template = ordinal
+                    .filter(|&n| n != 1)
+                    .and_then(|_| global(&format!("{key}_P1")))
+                    .or_else(|| global(key));
+                match template {
+                    Some(t) => out.push_str(&printf(&t, args)),
+                    None => out.push_str(raw),
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `"%.1f"` (`0x84f398`).
@@ -180,9 +256,9 @@ fn duration_ms(d: &SpellDisplay, ctx: &TokenContext) -> i64 {
 /// The `$d` text: no positive duration is `SPELL_DURATION_UNTIL_CANCELLED` (`507cda`); else the
 /// formatter at `0x52f980` selects the integer ladder (`0x52fa50`) for whole units and the
 /// floating ladder (`0x52fbd0`) for fractional units. Both use the largest unit.
-fn duration_text(ms: i64, ctx: &TokenContext) -> Option<String> {
+fn duration_text(ms: i64) -> Piece {
     if ms <= 0 {
-        return keyed(ctx, "SPELL_DURATION_UNTIL_CANCELLED", &[]);
+        return keyed("SPELL_DURATION_UNTIL_CANCELLED", Vec::new());
     }
     let (unit, unit_ms) = if ms < 60_000 {
         ("SEC", 1_000)
@@ -196,17 +272,16 @@ fn duration_text(ms: i64, ctx: &TokenContext) -> Option<String> {
     let amount = ms as f64 / unit_ms as f64;
     if (amount - amount.trunc()).abs() >= 0.01 {
         return keyed(
-            ctx,
-            &format!("SPELL_DURATION_{unit}"),
-            &[TokenNumber::Float(amount)],
+            format!("SPELL_DURATION_{unit}"),
+            vec![TokenNumber::Float(amount)],
         );
     }
     let n = ms / unit_ms;
-    let key = format!("INT_SPELL_DURATION_{unit}");
-    (n != 1)
-        .then(|| keyed(ctx, &format!("{key}_P1"), &[TokenNumber::Int(n)]))
-        .flatten()
-        .or_else(|| keyed(ctx, &key, &[TokenNumber::Int(n)]))
+    Piece::Keyed {
+        key: format!("INT_SPELL_DURATION_{unit}"),
+        ordinal: Some(n),
+        args: vec![TokenNumber::Int(n)],
+    }
 }
 
 /// The expander's integer read of a scaled bound (`5079cc`-`507b04`): the bound truncated, and
@@ -235,11 +310,13 @@ fn points_text(
     d: &SpellDisplay,
     ctx: &TokenContext,
     scale: f32,
-    level: u32,
-) -> Option<(String, f64)> {
-    // The expander multiplies both by its integer argument here (`5078d1`), which is 1 but in
-    // the aura tooltip's stack count; no caller passes a count.
-    let (mut min, mut max) = effect_points(d, slot, ctx, level);
+    at: ExpandAt,
+) -> (Piece, f64) {
+    // The expander multiplies both by its count here (`5078d1`-`5078e4`), the x87 product of the
+    // single and the integer stored back as a single.
+    let (min, max) = effect_points(d, slot, ctx, at.level);
+    let stacked = |v: f32| (f64::from(v) * f64::from(at.stack)) as f32;
+    let (mut min, mut max) = (stacked(min), stacked(max));
     if letter.eq_ignore_ascii_case(&'o') {
         let amplitude = d.effect_amplitude[slot] as i32;
         let period = if amplitude == 0 { 5000 } else { amplitude };
@@ -261,39 +338,37 @@ fn points_text(
         _ => 2,
     };
     let int = |n: i32| TokenNumber::Int(i64::from(n));
-    let text = match letter {
-        'm' if lo_whole => lo_int.to_string(),
-        'm' => tenths(ctx, lo),
-        'M' if hi_whole => hi_int.to_string(),
-        'M' => tenths(ctx, hi),
+    let text = |t: String| Piece::Text(t);
+    let piece = match letter {
+        'm' if lo_whole => text(lo_int.to_string()),
+        'm' => text(tenths(ctx, lo)),
+        'M' if hi_whole => text(hi_int.to_string()),
+        'M' => text(tenths(ctx, hi)),
         // Equal bounds print one number, `%d` unless `$S` holds a fraction (`507ba3`).
-        _ if min == max && (lo_whole || letter != 'S') => lo_int.to_string(),
-        _ if min == max => tenths(ctx, lo),
+        _ if min == max && (lo_whole || letter != 'S') => text(lo_int.to_string()),
+        _ if min == max => text(tenths(ctx, lo)),
         _ if lo_whole && hi_whole => keyed(
-            ctx,
             "INT_SPELL_POINTS_SPREAD_TEMPLATE",
-            &[int(lo_int), int(hi_int)],
-        )?,
+            vec![int(lo_int), int(hi_int)],
+        ),
         'S' => keyed(
-            ctx,
             "SPELL_POINTS_SPREAD_TEMPLATE",
-            &[
+            vec![
                 TokenNumber::Float(f64::from(lo)),
                 TokenNumber::Float(f64::from(hi)),
             ],
-        )?,
+        ),
         // A fractional spread under `s`/`o`/`O`: the minimum truncated, a fractional maximum
         // truncated plus one (`507c2a`-`507c4a`).
         _ => {
             let top = if hi_whole { hi_int } else { hi as i32 + 1 };
             keyed(
-                ctx,
                 "INT_SPELL_POINTS_SPREAD_TEMPLATE",
-                &[int(lo as i32), int(top)],
-            )?
+                vec![int(lo as i32), int(top)],
+            )
         }
     };
-    Some((text, f64::from(plural)))
+    (piece, f64::from(plural))
 }
 
 /// One token's text and the numeric value the `$l` plural picker keys on.
@@ -303,14 +378,15 @@ fn token_value(
     d: &SpellDisplay,
     ctx: &TokenContext,
     scale: f32,
-    level: u32,
-) -> Option<(String, f64)> {
+    at: ExpandAt,
+) -> Option<(Piece, f64)> {
+    let text = |t: String, v: f64| Some((Piece::Text(t), v));
     match letter.to_ascii_lowercase() {
-        's' | 'm' | 'o' => points_text(letter, slot, d, ctx, scale, level),
+        's' | 'm' | 'o' => Some(points_text(letter, slot, d, ctx, scale, at)),
         'b' => {
             // `507ed4`: `EffectPointsPerComboPoint`, truncated toward zero by `0x40a2b0`.
             let v = d.effect_points_per_combo_point[slot].trunc() as i32;
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'f' => {
             // `507ff7` / `508025`: the scale times `DmgMultiplier`, exact at the x87's PC_53.
@@ -318,35 +394,35 @@ fn token_value(
             if letter == 'F' {
                 // ±0.5 by the sign, then chopped by `0x40a2b0` (`50802f`-`50804a`).
                 let n = v.round() as i32;
-                Some((n.to_string(), f64::from(n)))
+                text(n.to_string(), f64::from(n))
             } else {
-                Some((tenths(ctx, v), v))
+                text(tenths(ctx, v), v)
             }
         }
         'i' => {
             // `507fc3`: `MaxAffectedTargets` through `"%d"`.
             let v = d.max_affected_targets as i32;
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'q' => {
             // `50806e`: the slot's `EffectMiscValue` through `"%d"`.
             let v = d.effect_misc_value[slot];
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'u' => {
             // `507ef1`: `StackAmount` through `"%d"`.
             let v = d.stack_amount as i32;
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'v' => {
             // `507f4f`: `MaxTargetLevel` through `"%d"`.
             let v = d.max_target_level as i32;
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'd' => {
             let ms = duration_ms(d, ctx);
             let v = if ms < 0 { 0.0 } else { ms as f64 / 1000.0 };
-            Some((duration_text(ms, ctx)?, v))
+            Some((duration_text(ms), v))
         }
         't' => {
             // `507e3c`: ProcFlags bit 0 is five seconds unmodified, else the amplitude through
@@ -357,43 +433,43 @@ fn token_value(
                 modify_int(ctx, d, 19, d.effect_amplitude[slot] as i32)
             };
             let secs = ms / 1000;
-            Some((secs.to_string(), f64::from(secs)))
+            text(secs.to_string(), f64::from(secs))
         }
         'a' => {
             // `507c74`: the SpellRadius row's radius truncated, then op 6; no row is 0.
             let r = ctx.radii.get(d.effect_radius_index[slot]);
             let v = r.map_or(0, |r| modify_int(ctx, d, 6, r.radius as i32));
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'h' => {
             let v = modify_int(ctx, d, 18, d.proc_chance as i32);
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'x' => {
             let v = *d.effect_chain_targets.get(slot).unwrap_or(&0);
             let v = modify_int(ctx, d, 17, v as i32);
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'e' => {
             // `507f83`: EffectMultipleValue through op 27, always one decimal.
             let v = modify_float(ctx, d, 27, d.effect_multiple_value[slot]);
-            Some((tenths(ctx, v), f64::from(v)))
+            text(tenths(ctx, v), f64::from(v))
         }
         'n' => {
             let v = modify_int(ctx, d, 4, d.proc_charges as i32);
-            Some((v.to_string(), f64::from(v)))
+            text(v.to_string(), f64::from(v))
         }
         'z' => {
             // Player state, not spell data: the home-bind area name.
             let name = (ctx.home_area)()?;
-            Some((name.to_string(), 0.0))
+            text(name.to_string(), 0.0)
         }
         'r' => {
             // `507d5b`: RangeIndex at or below 1 reads row 1, its maximum through op 5; no row is
             // 0.0. One decimal, and the plural keys on the ceiling (`507dbd`).
             let row = ctx.ranges?.get(d.range_index.max(1));
             let v = row.map_or(0.0, |r| modify_float(ctx, d, 5, r.max));
-            Some((tenths(ctx, v), f64::from(v).ceil()))
+            text(tenths(ctx, v), f64::from(v).ceil())
         }
         _ => None,
     }
@@ -419,10 +495,38 @@ fn scale_prefix(text: &str, at: usize) -> Option<(f32, usize)> {
     Some((scale, semi + 1))
 }
 
-/// `0x5081c8`-`0x5081d7` and `0x50822a`-`0x50823b`: a `$g`/`$G` branch arm's leading spaces are
-/// skipped, and `0x508267`-`0x508280` trims its trailing spaces — both forms alike.
-fn trim_spaces(arm: &str) -> &str {
-    arm.trim_matches(' ')
+/// The form a `$g`/`$G` (`0x508180`) or `$l`/`$L` (`0x5082a0`) selector takes, and the index past
+/// the token; `at` is just past its letter and `second` says whether the second form is wanted,
+/// asked only once a form is to be taken. The helpers share one parse: the leading spaces go
+/// (`0x5081c8`-`0x5081d7`), the `:` is the first one to the end of the text and the `;` the first
+/// after it (`0x5081eb`-`0x508200`, `$l`: `0x5082e5`-`0x5082f6`), the second form's leading
+/// spaces go (`0x50822a`-`0x50823b`) and the chosen form's trailing spaces are trimmed
+/// (`0x508267`-`0x508280`). A token with no `:` or no `;` after it, or none of the text left,
+/// takes nothing and leaves the index past the spaces (`0x5081f6 je 0x50828c`).
+fn selector_form(text: &str, at: usize, second: impl FnOnce() -> bool) -> (&str, usize) {
+    let bytes = text.as_bytes();
+    let mut first = at;
+    while bytes.get(first) == Some(&b' ') {
+        first += 1;
+    }
+    let Some(colon) = text.get(first..).and_then(|rest| rest.find(':')) else {
+        return ("", first);
+    };
+    let colon = first + colon;
+    let Some(semi) = text[colon..].find(';') else {
+        return ("", first);
+    };
+    let semi = colon + semi;
+    let form = if second() {
+        let mut start = colon + 1;
+        while bytes.get(start) == Some(&b' ') {
+            start += 1;
+        }
+        &text[start..semi]
+    } else {
+        &text[first..colon]
+    };
+    (form.trim_end_matches(' '), semi + 1)
 }
 
 /// The CRT's `atoi`: leading whitespace, an optional sign, then decimal digits up to the first
@@ -454,12 +558,32 @@ fn atoi(bytes: &[u8]) -> i32 {
     }
 }
 
-/// Substitute every `$`-token in `text` against `spell`.
+/// Substitute every `$`-token in `text` against `spell`, each template read through the context.
 pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> String {
-    // `0x5075f0`'s level: its caller's, which only the player-buff tooltip passes (the aura's
-    // `AURALEVELS` byte, `0x532bc3`, not built), else the expanded spell's own (`50764a`).
-    let level = skill_level(ctx, spell);
+    resolve_parts(
+        &substitute_parts(text, spell, ctx, ExpandAt::default()),
+        ctx.global,
+        ctx.printf,
+    )
+}
+
+/// Substitute every `$`-token in `text` against `spell` as `0x5075f0` does for a caller passing
+/// `at`, leaving each template a token names to be read where the text is shown.
+pub fn substitute_parts(
+    text: &str,
+    spell: &SpellDisplay,
+    ctx: &TokenContext,
+    at: ExpandAt,
+) -> Vec<TokenPart> {
+    // `0x5075f0`'s level: its caller's when nonzero (`507635`-`50763e`), else the expanded spell's
+    // own (`50764a`).
+    let level = if at.level != 0 {
+        at.level
+    } else {
+        skill_level(ctx, spell)
+    };
     let bytes = text.as_bytes();
+    let mut parts = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let mut last_value: f64 = 0.0;
@@ -488,31 +612,17 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
             None
         };
         // The plural / gender selectors.
-        if i < bytes.len()
-            && (bytes[i] == b'l' || bytes[i] == b'L' || bytes[i] == b'g' || bytes[i] == b'G')
-        {
-            let selector = bytes[i].to_ascii_lowercase();
-            if let Some(end) = text[i + 1..].find(';') {
-                let body = &text[i + 1..i + 1 + end];
-                if let Some((a, b)) = body.split_once(':') {
-                    let pick = match selector {
-                        b'l' => {
-                            if (last_value - 1.0).abs() < 1e-9 {
-                                a
-                            } else {
-                                b
-                            }
-                        }
-                        // `$g`/`$G` (`0x508180`): the first form on gender 0, else the second.
-                        _ => trim_spaces(if (ctx.gender)() == 0 { a } else { b }),
-                    };
-                    out.push_str(pick);
-                    i = i + 1 + end + 1;
-                    continue;
-                }
-            }
+        if let Some(&letter @ (b'l' | b'L' | b'g' | b'G')) = bytes.get(i) {
+            let (form, next) = selector_form(text, i + 1, || match letter {
+                b'l' | b'L' => (last_value - 1.0).abs() >= 1e-9,
+                // `$g`/`$G`: the first form on gender 0, else the second (`0x508214`).
+                _ => (ctx.gender)() != 0,
+            });
+            out.push_str(form);
+            i = next;
+            continue;
         }
-        // The token letter and its optional 1-based slot digit.
+        // The token letter and its optional effect digit.
         let Some(&letter_b) = bytes.get(i) else {
             out.push('$');
             continue;
@@ -526,13 +636,19 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
             continue;
         }
         i += 1;
-        let slot = if i < bytes.len() && bytes[i].is_ascii_digit() {
-            // `$s0` is a 1-based slot below 1: saturate to slot 0 rather than wrap.
-            let s = bytes[i].saturating_sub(b'1') as usize;
-            i += 1;
-            s.min(2)
-        } else {
-            0
+        // Only `1`-`9` is an effect digit, taken with the letter, and an index of 3 or more reads
+        // effect 0 (`0x50782f`-`0x50784c`, `0x5080ae`-`0x5080c1`); a `0` stays text.
+        let slot = match bytes.get(i) {
+            Some(&digit @ b'1'..=b'9') => {
+                i += 1;
+                let index = usize::from(digit - b'1');
+                if index < 3 {
+                    index
+                } else {
+                    0
+                }
+            }
+            _ => 0,
         };
         // A cross-spell token caps the level at its row's positive `maxLevel` (`507805`-`507817`).
         let (target, level): (&SpellDisplay, u32) = match ref_spell {
@@ -546,7 +662,11 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
             },
             None => (spell, level),
         };
-        match token_value(letter, slot, target, ctx, scale, level) {
+        let at = ExpandAt {
+            level,
+            stack: at.stack,
+        };
+        match token_value(letter, slot, target, ctx, scale, at) {
             Some((sub, val)) => {
                 // Deviation: every token keys the `$l` plural. The reference's `$a`, `$d`, `$t`,
                 // `$e`, `$c`, `$p`, `$f`, `$F` and `$z` arms never write `[0xbe0b84]`, so its `$l`
@@ -554,12 +674,28 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
                 // $lsecond:seconds;" reads "every 1 seconds" in 1.12.1. We print the grammar the
                 // text means.
                 last_value = val;
-                out.push_str(&sub);
+                match sub {
+                    Piece::Text(t) => out.push_str(&t),
+                    Piece::Keyed { key, ordinal, args } => {
+                        if !out.is_empty() {
+                            parts.push(TokenPart::Text(std::mem::take(&mut out)));
+                        }
+                        parts.push(TokenPart::Keyed {
+                            key,
+                            ordinal,
+                            args,
+                            raw: text[start..i].to_string(),
+                        });
+                    }
+                }
             }
             None => out.push_str(&text[start..i]), // unknown token: keep raw
         }
     }
-    out
+    if !out.is_empty() {
+        parts.push(TokenPart::Text(out));
+    }
+    parts
 }
 
 fn utf8_len(b: u8) -> usize {
@@ -790,6 +926,102 @@ mod tests {
             substitute("damage to $ghimself:herself;", &d, &c),
             "damage to himself"
         );
+    }
+
+    /// Three effects whose `$s` values are 10, 20 and 30.
+    fn three_effects() -> SpellDisplay {
+        SpellDisplay {
+            effect_base_points: [9, 19, 29],
+            effect_base_dice: [1, 1, 1],
+            effect_die_sides: [1, 1, 1],
+            ..Default::default()
+        }
+    }
+
+    /// `0x507827`-`0x50784c`: only `'1'`-`'9'` is a slot digit, and an index of 3 or more reads
+    /// slot 0. The digit is consumed only in that range (`0x507843`, `0x5080ae`-`0x5080c1`), so
+    /// a `0` prints after the value.
+    #[test]
+    fn a_slot_digit_is_one_to_nine_and_four_or_more_reads_slot_zero() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let c = ctx(&durations, &radii, &none_lookup);
+        let d = three_effects();
+        for (text, want) in [
+            ("$s1", "10"),
+            ("$s2", "20"),
+            ("$s3", "30"),
+            // Slot index 3 and up becomes slot 0 (`0x50784c`).
+            ("$s4", "10"),
+            ("$s7", "10"),
+            ("$s9", "10"),
+            // Not a digit of the token: it stays text.
+            ("$s0", "100"),
+            ("$s00", "1000"),
+            ("$s20", "200"),
+            ("$m4", "10"),
+            ("$m0", "100"),
+            // No digit reads effect 0.
+            ("$s", "10"),
+        ] {
+            assert_eq!(substitute(text, &d, &c), want, "{text}");
+        }
+    }
+
+    /// `0x508180` and `0x5082a0` share one parse: the `:` is searched to the end of the text, not
+    /// to the next `;` (`0x5081eb`-`0x5081f6`, `0x5082e5`-`0x508306`), and the chosen form is
+    /// trimmed of spaces at both ends (`0x5081c8`-`0x5081d7`, `0x50822a`-`0x508239`,
+    /// `0x508267`-`0x508280`; `$l`: `0x5082c0`-`0x5082cf`, `0x508327`-`0x508339`,
+    /// `0x508367`-`0x508380`).
+    #[test]
+    fn the_selectors_search_the_colon_to_the_end_and_trim_their_form() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let gender = std::cell::Cell::new(0u8);
+        let c = TokenContext {
+            gender: &|| gender.get(),
+            ..ctx(&durations, &radii, &none_lookup)
+        };
+        let one = points(1);
+        let two = points(2);
+
+        // The first `;` before the `:` does not end the search: the first form runs to the `:`
+        // and the second to the next `;` after it.
+        gender.set(0);
+        assert_eq!(substitute("$gA;B:C;", &one, &c), "A;B");
+        gender.set(1);
+        assert_eq!(substitute("$gA;B:C;", &one, &c), "C");
+        assert_eq!(substitute("$s1 $lA;B:C;", &one, &c), "1 A;B");
+        assert_eq!(substitute("$s1 $lA;B:C;", &two, &c), "2 C");
+
+        // `$l` trims its form like `$g`: leading spaces first, trailing ones after the copy.
+        assert_eq!(substitute("$s1 $l  a b : c d  ;!", &one, &c), "1 a b!");
+        assert_eq!(substitute("$s1 $l  a b : c d  ;!", &two, &c), "2 c d!");
+        // Interior spaces stay, and a form of spaces alone is empty.
+        assert_eq!(substitute("$s1 $l   :   ;!", &two, &c), "2 !");
+    }
+
+    /// A selector that finds no `:` or no `;` after it is consumed, its leading spaces with it,
+    /// and prints nothing; the text after the letter is copied as it stands (`0x5081f6 je
+    /// 0x50828c`, `0x50820c`, `0x5082f0`, `0x508306`), and an ending text is no failure.
+    #[test]
+    fn a_selector_without_its_colon_or_semicolon_prints_nothing() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let c = ctx(&durations, &radii, &none_lookup);
+        let d = points(1);
+        for (text, want) in [
+            ("$ghis;", "his;"),
+            ("$g  his;", "his;"),
+            ("a$gb:c", "ab:c"),
+            ("a$g", "a"),
+            ("a$g   ", "a"),
+            ("$lfoo", "foo"),
+            ("$s1 $l  foo;", "1 foo;"),
+            ("$s1 $lfoo:bar", "1 foo:bar"),
+        ] {
+            assert_eq!(substitute(text, &d, &c), want, "{text}");
+        }
     }
 
     #[test]
@@ -1608,6 +1840,68 @@ mod tests {
         );
     }
 
+    /// The shipped `Spell.dbc` text never reaches a place where the reference's parse differs
+    /// from a plain one: every slot digit is 1 to 3, and every `$g`/`$l` selector has its `:`
+    /// before its `;` and arms with no space at either end.
+    #[test]
+    fn shipped_spell_text_uses_slots_one_to_three_and_whole_selectors() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let spells = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+        let (mut slots, mut selectors) = (0usize, 0usize);
+        for (id, spell) in spells.iter() {
+            for text in [
+                spell.description.as_deref(),
+                spell.aura_description.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let bytes = text.as_bytes();
+                for dollar in (0..bytes.len()).filter(|&i| bytes[i] == b'$') {
+                    let mut at = dollar + 1;
+                    if matches!(bytes.get(at), Some(b'*' | b'/')) {
+                        let Some(semi) = text[at..].find(';') else {
+                            continue;
+                        };
+                        at += semi + 1;
+                    }
+                    while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+                        at += 1;
+                    }
+                    let Some(&letter) = bytes.get(at) else {
+                        continue;
+                    };
+                    let after = &text[at + 1..];
+                    if matches!(letter, b'g' | b'G' | b'l' | b'L') {
+                        let colon = after.find(':');
+                        let semi = after.find(';');
+                        let (Some(colon), Some(semi)) = (colon, semi) else {
+                            panic!("spell {id}: selector without both marks in {text:?}");
+                        };
+                        assert!(colon < semi, "spell {id}: {text:?}");
+                        let (first, second) = (&after[..colon], &after[colon + 1..semi]);
+                        for arm in [first, second] {
+                            assert_eq!(arm, arm.trim_matches(' '), "spell {id}: {text:?}");
+                        }
+                        selectors += 1;
+                    } else if letter.is_ascii_alphabetic() {
+                        if let Some(&digit) =
+                            after.as_bytes().first().filter(|d| d.is_ascii_digit())
+                        {
+                            assert!((b'1'..=b'3').contains(&digit), "spell {id}: {text:?}");
+                            slots += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            slots > 1000 && selectors > 50,
+            "{slots} slots, {selectors} selectors"
+        );
+    }
+
     /// Isolate spell-data tokens, including a scale prefix, cross-spell id and one slot digit,
     /// bounded as `substitute` bounds them. `$l`, `$g` and `$z` need other context.
     fn spell_data_tokens_in(text: &str) -> Vec<(usize, &str)> {
@@ -1634,7 +1928,7 @@ mod tests {
                 continue;
             }
             end += 1;
-            if bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            if bytes.get(end).is_some_and(|d| (b'1'..=b'9').contains(d)) {
                 end += 1;
             }
             found.push((usize::from(letter - b'a'), &text[start..end]));
@@ -1716,6 +2010,73 @@ mod tests {
         let c = ctx(&durations, &radii, &none_lookup);
         assert_eq!(substitute("coûte $é or $…!", &d, &c), "coûte $é or $…!");
         assert_eq!(substitute("$é", &d, &c), "$é");
-        assert_eq!(substitute("$s0", &d, &c), "<14..22>");
+        // `0` is no slot digit (`0x50782f`), so it stays text after the value.
+        assert_eq!(substitute("$s0", &d, &c), "<14..22>0");
+    }
+
+    /// A template a token names is left to the read (`0x703bf0` at the call): the parts hold the
+    /// key, so a rewrite after the expansion reaches the text, and a key missing at the read
+    /// leaves the token as written.
+    #[test]
+    fn a_tokens_template_is_read_where_the_text_is_shown() {
+        let mut durations = SpellDurationCatalog::default();
+        durations.insert_for_tests(1, 30_000);
+        let radii = SpellRadiusCatalog::default();
+        let c = ctx(&durations, &radii, &none_lookup);
+        let d = SpellDisplay {
+            duration_index: 1,
+            ..Default::default()
+        };
+        let parts = substitute_parts("for $d.", &d, &c, ExpandAt::default());
+        assert_eq!(
+            parts,
+            [
+                TokenPart::Text("for ".into()),
+                TokenPart::Keyed {
+                    key: "INT_SPELL_DURATION_SEC".into(),
+                    ordinal: Some(30),
+                    args: vec![TokenNumber::Int(30)],
+                    raw: "$d".into(),
+                },
+                TokenPart::Text(".".into()),
+            ]
+        );
+        let rewritten =
+            |key: &str| (key == "INT_SPELL_DURATION_SEC_P1").then(|| "%d seconds".to_string());
+        assert_eq!(
+            resolve_parts(&parts, &rewritten, &printf),
+            "for 30 seconds."
+        );
+        assert_eq!(resolve_parts(&parts, &|_| None, &printf), "for $d.");
+    }
+
+    /// The aura tooltip's caller arguments (`0x52f880` into `0x5075f0`): a nonzero level replaces
+    /// the spell's own for the per-level terms (`507635`-`50763e`), and the points multiply by the
+    /// count (`5078d1`-`5078e4`) before the spread and the scale.
+    #[test]
+    fn the_callers_level_and_count_scale_the_points() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let c = ctx(&durations, &radii, &none_lookup);
+        let text = |d: &SpellDisplay, t: &str, at: ExpandAt| {
+            resolve_parts(&substitute_parts(t, d, &c, at), &global, &printf)
+        };
+        // Rend Flesh (3147): a periodic-damage aura, 1 point plus 1.3 a level over level 1.
+        let rend = SpellDisplay {
+            effects: [6, 0, 0],
+            effect_apply_aura: [3, 0, 0],
+            effect_real_points_per_level: [1.3, 0.0, 0.0],
+            base_level: 1,
+            ..points(1)
+        };
+        assert_eq!(text(&rend, "$s1", ExpandAt::default()), "1");
+        let caster_25 = ExpandAt {
+            level: 25,
+            stack: 1,
+        };
+        assert_eq!(text(&rend, "$s1", caster_25), "<32..33>");
+        let three = ExpandAt { level: 0, stack: 3 };
+        assert_eq!(text(&points(10), "$s1%", three), "30%");
+        assert_eq!(text(&spread(14, 22), "$s1", three), "<42..66>");
     }
 }

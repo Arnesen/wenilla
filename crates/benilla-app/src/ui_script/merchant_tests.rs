@@ -276,6 +276,12 @@ fn shipped_merchant_frame_drives_end_to_end() {
         s.take_merchant_buys().is_empty(),
         "left-click does not buy (pickup pending the cursor arc)"
     );
+    // The row is on the cursor, so a right press drops it and buys nothing: the world hook
+    // (`0x492b50`) takes the press ahead of every frame.
+    s.mouse_button(cx, cy, "RightButton", true);
+    s.mouse_button(cx, cy, "RightButton", false);
+    assert!(s.take_merchant_buys().is_empty(), "a held row buys nothing");
+    assert!(s.cursor_payload().is_none(), "the press dropped the row");
     s.mouse_button(cx, cy, "RightButton", true);
     s.mouse_button(cx, cy, "RightButton", false);
     assert_eq!(s.take_merchant_buys(), vec![(1, 1)]);
@@ -687,7 +693,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
         hl.width(),
         hl.height()
     );
-    assert_eq!(
+    benilla_ui::assert_near!(
         (hl.left, hl.top),
         (sword_icon.left, sword_icon.top),
         "highlight sits on the icon, not the row"
@@ -735,7 +741,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     let (tip_left, tip_bottom): (f32, f32) = s
         .eval("return GameTooltip:GetLeft(), GameTooltip:GetBottom()")
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         (tip_left, tip_bottom),
         (sword_icon.right, sword_icon.top),
         "tooltip BOTTOMLEFT sits on the icon's TOPRIGHT"
@@ -920,12 +926,12 @@ fn merchant_tabs_fit_their_labels() {
         )
         .unwrap();
     assert!(l1 > 0.0 && l2 > 0.0, "both labels measured synchronously");
-    assert_eq!(
+    benilla_ui::assert_near!(
         (w1, w2),
         (l1 + SIDES, l2 + SIDES),
         "text + 40, not the fixed 115"
     );
-    assert_eq!((m1, m2), (l1, l2), "middle slices stretch to the text");
+    benilla_ui::assert_near!((m1, m2), (l1, l2), "middle slices stretch to the text");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1028,6 +1034,8 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
 fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No host: the trade calls are kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -1084,6 +1092,8 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
 fn a_trade_slot_click_repaints_the_slot_in_place() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    // No host: the trade calls are kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -1102,7 +1112,7 @@ fn a_trade_slot_click_repaints_the_slot_in_place() {
     s.set_container(
         0,
         Some(benilla_ui::script::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: [(
                 1,

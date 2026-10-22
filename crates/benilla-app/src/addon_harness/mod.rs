@@ -143,6 +143,8 @@ fn stock_vm(root: &Path, registry: &[benilla_ui::script::AddOnInfo]) -> Result<U
     // A time bound, so one non-terminating addon cannot stall the survey: about 50x the heaviest
     // corpus addon (Enchantrix, 4M instructions), so a runaway reports in about a second.
     script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
+    // A fixed `rand` seed, so two survey runs of an addon that draws at load agree.
+    script.lua().srand(1);
     script.set_screen_size(1024.0, 768.0);
     // The saved-variable roots are `None`, so a survey never reads or writes a player's; the
     // AddOns root is passed, so `LoadAddOn("<folder addon>")` does not answer `MISSING`.
@@ -605,17 +607,50 @@ fn drive_session_start(
             script.load_addon_row(&mut host, dependent, false, false);
         }
     }
-    for event in ["VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD"] {
-        script.fire_event(event, Vec::new());
-    }
-    for _ in 0..10 {
-        script.tick(0.1);
-    }
+    enter_world(script);
     let raised = script.errors().split_off(before);
     raised
         .into_iter()
         .filter(|e| !raised_inside_another_addons_own_file(e, name, installed))
         .collect()
+}
+
+/// The session start after the addons' own `ADDON_LOADED`: the load's tail, `VARIABLES_LOADED` and
+/// the `PLAYER_LOGIN` arm (`finish_ui_load_with`'s order, with no saved file), then the live
+/// client's world-enter cascade ([`UiScript::fire_world_enter`]: `PLAYER_LOGIN`,
+/// `PLAYER_ENTERING_WORLD`, the minimap and quest-log steps and their events, in its sound
+/// bracket), a target, then ten ticks of 0.1 s ([`drive_session_start`] says why). `"player"`
+/// already names guid 1 ([`seat_a_session`]), as the live feed seats it before the cascade.
+///
+/// The target comes after `PLAYER_ENTERING_WORLD`, with the argless `PLAYER_TARGET_CHANGED` that
+/// selecting one signals (`0x493540`): the interface is built (`0x48fbf0`) before the enter cascade
+/// (`0x4908c0`), and a selection needs its object in the world, so no load sees a target. Seated
+/// earlier, `TargetFrame_OnLoad`'s `TargetFrame_Update()` (`TargetFrame.lua:20`) indexes
+/// `TargetofTargetFrame`, which `TargetFrame.xml` declares later, before its `RegisterEvent` calls.
+fn enter_world(script: &mut UiScript) {
+    script.fire_event("VARIABLES_LOADED", Vec::new());
+    script.arm_player_login();
+    script.fire_world_enter();
+    script.set_unit(
+        "target",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Target Dummy".into()),
+            health: 80,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 50,
+            max_power: 100,
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        }),
+    );
+    script.fire_event("PLAYER_TARGET_CHANGED", Vec::new());
+    for _ in 0..10 {
+        script.tick(0.1);
+    }
 }
 
 /// Does this raise belong to another installed addon's file? A library that fails is its own row;
@@ -1064,6 +1099,9 @@ fn global_strings() -> Option<&'static str> {
 /// Every seat below is a state an in-world character is always in, kept minimal and ordinary: a VM
 /// answering nil or zero there would fail addons on a state the 1.12 client cannot be in.
 fn seat_a_session(script: &mut UiScript) {
+    // No engine behind it: a verb's call is kept, not refused (stock `RaidFrame_OnEvent` asks
+    // `RequestRaidInfo()` on `PLAYER_ENTERING_WORLD`, `RaidFrame.lua:28-29`).
+    script.keep_calls();
     // The 1.12 client boots FrameXML with this file first; so does our app.
     if let Some(src) = global_strings() {
         let _ = script.run(src);
@@ -1129,13 +1167,13 @@ fn seat_a_session(script: &mut UiScript) {
     //
     // One buff, one target and one action with a running cooldown, so an addon that only draws when
     // there is content (a buff bar, a target frame, cooldown text) is separated from one that
-    // failed.
+    // failed. The target is seated at world entry ([`enter_world`]).
     // The player's guid, which a token resolves to before its aura list is read.
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: 1,
         ..Default::default()
     });
-    script.set_player_auras(vec![benilla_ui::script::AuraState {
+    let fortitude = vec![benilla_ui::script::AuraState {
         spell_id: 1243,
         name: Some("Power Word: Fortitude".into()),
         icon: Some("Interface\\Icons\\Spell_Holy_WordFortitude".into()),
@@ -1143,23 +1181,10 @@ fn seat_a_session(script: &mut UiScript) {
         helpful: true,
         cancelable: true,
         ..Default::default()
-    }]);
-    script.set_unit(
-        "target",
-        Some(benilla_ui::script::UnitState {
-            exists: true,
-            name: Some("Target Dummy".into()),
-            health: 80,
-            max_health: 100,
-            level: 60,
-            power_type: 0,
-            power: 50,
-            max_power: 100,
-            class: Some("Warrior".into()),
-            class_file: Some("WARRIOR".into()),
-            ..Default::default()
-        }),
-    );
+    }];
+    // Both of the player's lists: the buff cache and the slots `UnitBuff("player")` reads.
+    script.set_unit_auras(1, Some(fortitude.clone().into()));
+    script.set_player_auras(fortitude);
     script.set_action(
         1,
         Some(benilla_ui::script::ActionSlot {
@@ -1249,7 +1274,7 @@ fn seat_a_session(script: &mut UiScript) {
         script.set_container(
             0,
             Some(benilla_ui::script::ContainerState {
-                name: Some("Backpack".into()),
+                name: None,
                 num_slots: 16,
                 slots,
             }),
@@ -1367,6 +1392,8 @@ fn equip_slot(item_id: u32, name: &str) -> benilla_ui::script::InvSlotView {
         icon: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
         count: 1,
         quality: 2,
+        // A cached record of a wearable type.
+        inventory_type: Some(1),
         name: Some(name.to_string()),
         // Full durability: the setter fires `UPDATE_INVENTORY_ALERTS`, and a worn item would light
         // DurabilityFrame.
@@ -3678,6 +3705,80 @@ mod dependency_tests {
         script
     }
 
+    /// The stock interface loads clean with no target, as 1.12 loads it before world entry, and
+    /// the target frame shows the target seated at world entry.
+    #[test]
+    fn the_target_is_seated_after_the_interface_loads() {
+        benilla_formats::wow_data_or_skip!();
+        let mut s = seated_vm_reporting_failures();
+        assert!(
+            s.eval::<bool>("return UnitExists('target') == nil")
+                .unwrap(),
+            "1.12 loads the interface before world entry, with no target"
+        );
+        assert!(!s.frame_visible("TargetFrame"));
+
+        enter_world(&mut s);
+        assert!(s.errors().is_empty(), "{:#?}", s.errors());
+        assert_eq!(
+            s.eval::<String>("return UnitName('target')").unwrap(),
+            "Target Dummy"
+        );
+        assert!(
+            s.frame_visible("TargetFrame"),
+            "the target frame registered its events at load, so world entry shows the target"
+        );
+    }
+
+    /// The harness enters the world through the client's cascade (`0x4908c0`), not a list of its
+    /// own: `PLAYER_LOGIN` once, then `PLAYER_ENTERING_WORLD`, then the quest log's rebuild and its
+    /// `QUEST_LOG_UPDATE` (`0x4909a1`), every handler inside the sound bracket (`0x4908d5`).
+    #[test]
+    fn the_world_entry_is_the_clients_cascade() {
+        let mut s = UiScript::new().unwrap();
+        seat_a_session(&mut s);
+        s.run(
+            r#"
+            Seen = {}
+            local f = CreateFrame("Frame")
+            for _, e in ipairs({ "VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD",
+                                 "QUEST_LOG_UPDATE" }) do
+                f:RegisterEvent(e)
+            end
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, event)
+                if event == "PLAYER_ENTERING_WORLD" then PlaySound("igMainMenuOpen") end
+            end)
+            "#,
+        )
+        .unwrap();
+        s.take_sounds();
+        enter_world(&mut s);
+        assert!(s.errors().is_empty(), "{:#?}", s.errors());
+        let seen = s.eval::<String>("return table.concat(Seen, ' ')").unwrap();
+        assert!(
+            seen.starts_with(
+                "VARIABLES_LOADED PLAYER_LOGIN PLAYER_ENTERING_WORLD QUEST_LOG_UPDATE"
+            ),
+            "{seen}"
+        );
+        assert_eq!(seen.matches("PLAYER_LOGIN").count(), 1, "{seen}");
+        assert!(
+            s.take_sounds().is_empty(),
+            "the cascade's handlers are silent"
+        );
+    }
+
+    /// [`seated_vm`], failing on any load failure of the stock interface.
+    fn seated_vm_reporting_failures() -> UiScript {
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        seat_a_session(&mut script);
+        let failures = crate::ui_script::load_default_ui(&script);
+        assert!(failures.is_empty(), "{failures:#?}");
+        script
+    }
+
     /// The seated session is visible through the Lua surface an addon sees, so a seat that silently
     /// fails to take is caught.
     #[test]
@@ -3686,10 +3787,10 @@ mod dependency_tests {
 
         // The backpack: 16 slots, two filled.
         assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 16);
-        assert_eq!(
-            s.eval::<String>("return GetBagName(0)").unwrap(),
-            "Backpack"
-        );
+        // Named by the stock global, empty where no interface defines it (`0x703bf0`).
+        assert!(s
+            .eval::<bool>("return GetBagName(0) == (BACKPACK_TOOLTIP or '')")
+            .unwrap());
         assert_eq!(
             s.eval::<i64>("local _, c = GetContainerItemInfo(0, 5) return c")
                 .unwrap(),

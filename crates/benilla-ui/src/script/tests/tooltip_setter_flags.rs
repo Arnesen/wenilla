@@ -18,7 +18,7 @@ fn view(recovery_ms: u32, chance: Option<&str>) -> SpellTooltipView {
         name: "Shield Wall".into(),
         cast_time: Some("Instant".into()),
         recovery_ms,
-        chance: chance.map(str::to_string),
+        chance: chance.map(Into::into),
         ..Default::default()
     }
 }
@@ -191,13 +191,13 @@ fn set_action_answers_the_builders_flag_by_kind() {
             ..Default::default()
         },
     );
-    s.set_macros(MacroState {
-        account: vec![MacroView {
+    s.set_macros(MacroState::from_scopes(
+        vec![MacroView {
             name: "spawn".into(),
             ..Default::default()
         }],
-        character: Vec::new(),
-    });
+        Vec::new(),
+    ));
     let put = |s: &mut UiScript, id: u32, kind: u8, action: u32, cooldown| {
         s.set_action(
             id,
@@ -222,7 +222,7 @@ fn set_action_answers_the_builders_flag_by_kind() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: std::collections::HashMap::from([(
                 1,
@@ -300,7 +300,7 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
         name: Some("Linen Cloth".into()),
         ..Default::default()
     });
-    s.set_auction(Some(auction));
+    s.set_auction(auction);
     {
         let mut model = s.model_mut();
         let item = CursorItem {
@@ -337,6 +337,7 @@ fn the_mail_and_auction_item_setters_answer_one_value() {
 #[test]
 fn live_objects_and_blocks_reach_the_flag() {
     let mut s = fixture();
+    s.keep_calls();
     s.run(r#"ITEM_DURATION_HOURS = "[DURATION %d h]" LOCKED = "[LOCKED]""#)
         .unwrap();
     s.set_lock_rows(std::collections::HashMap::from([
@@ -358,8 +359,9 @@ fn live_objects_and_blocks_reach_the_flag() {
             ..Default::default()
         },
     );
-    let held = |item_id, flags, duration_ms| ContainerSlot {
+    let held = |item_id, guid, flags, duration_ms| ContainerSlot {
         item_id,
+        guid,
         count: 1,
         flags,
         duration_ms,
@@ -368,13 +370,13 @@ fn live_objects_and_blocks_reach_the_flag() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: std::collections::HashMap::from([
-                (1, held(8300, 0, None)),
-                (2, held(8300, 0x4, None)),
-                (3, held(8301, 0, Some(3_600_000))),
-                (4, held(8301, 0, None)),
+                (1, held(8300, 0x831, 0, None)),
+                (2, held(8300, 0x832, 0x4, None)),
+                (3, held(8301, 0x833, 0, Some(3_600_000))),
+                (4, held(8301, 0x834, 0, None)),
             ]),
         }),
     );
@@ -442,18 +444,12 @@ fn live_objects_and_blocks_reach_the_flag() {
             ..Default::default()
         });
     }
-    // The player's slots are live item objects: the flags decide LOCKED (`0x5342ed`), and the
-    // block's lock id is zeroed (`0x534341`).
-    for (i, flags) in [(0, Some(0)), (1, Some(0x4)), (2, None)] {
-        st.player.slots[i] = Some(TradeSlotItem {
-            item_id: 8300,
-            name: Some("Strongbox".into()),
-            count: 1,
-            object_flags: flags,
-            ..Default::default()
-        });
-    }
+    // The player's slots are the live item objects their guids name (`0x5342ed`): the flags
+    // decide LOCKED, and the block's lock id is zeroed (`0x534341`).
+    s.open_trade_window();
     s.set_trade(Some(st));
+    s.run("PickupContainerItem(0, 1) ClickTradeButton(1) PickupContainerItem(0, 2) ClickTradeButton(2)")
+        .unwrap();
     let locked = |s: &UiScript, call: &str| {
         s.eval::<bool>(&format!(
             "TT:SetOwner(FL, 'ANCHOR_RIGHT') {call} \
@@ -472,7 +468,7 @@ fn live_objects_and_blocks_reach_the_flag() {
     assert!(!locked(&s, "TT:SetTradePlayerItem(2)"), "UNLOCKED");
     assert!(
         !locked(&s, "TT:SetTradePlayerItem(3)"),
-        "no object, no block lock"
+        "an empty slot builds nothing"
     );
 }
 

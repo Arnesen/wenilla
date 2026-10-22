@@ -29,18 +29,17 @@
 //!
 //! `IsUnitOnQuest` reads a unit's quest-log window off its snapshot ([`super::UnitState`]).
 //!
-//! Not built: `GetAbandonQuestItems` answers nil; the leaderboard's `event` and reputation lines;
-//! a GameObject objective's name, which wears the placeholder.
+//! Not built: `GetAbandonQuestItems` answers nil; a GameObject objective's name, which wears the
+//! placeholder.
 
 use std::collections::{HashMap, HashSet};
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::{flag, number_arg};
+use super::binding_abi::{self, flag, number_arg};
 use super::quest::{QuestItemView, QuestRewardSpell};
 use super::Model;
-use crate::script::binding_abi::{Idx, Idx32};
-use crate::strings::{fill, Arg};
+use crate::strings::{fill, global, Arg};
 
 /// The quest slots, `PLAYER_QUEST_LOG_1_1` on, 12 bytes each (`0x4de73e`).
 pub const QUEST_LOG_SLOTS: usize = 20;
@@ -110,8 +109,14 @@ pub struct QuestRecordView {
     /// `(faction, standing)`: the least standing the turn-in test needs (`+0x14`, `+0x18`, `jl`
     /// at `0x4df6d6`), faction 0 for none.
     pub rep_min: (u32, i32),
+    /// [`Self::rep_min`]'s faction name, `Faction.dbc`'s at the locale (`[row+locale*4+0x4c]`,
+    /// `0x4e0743`); `None` with no row, whose reputation line is counted but reads three nils
+    /// (`0x4e053b`).
+    pub rep_faction_name: Option<String>,
     /// `(faction, standing)`: the most standing it allows (`+0x1c`, `+0x20`, `jg` at `0x4df6eb`).
     pub rep_max: (u32, i32),
+    /// The template's end text (`+0x129c`), as the wire sent it: when not empty, the event line.
+    pub end_text: String,
     /// `GetQuestLogRequiredMoney` and `GetQuestLogRewardMoney`, in copper.
     pub required_money: u32,
     pub reward_money: u32,
@@ -520,17 +525,22 @@ impl Model {
     }
 }
 
-/// One leaderboard line of a record, as `GetQuestLogLeaderBoard` walks the quads (`0x4e0110`): a
-/// creature or GameObject pass over the ids that are set, the array index counting the empty ones
-/// (`0x4e02d7`), then an item pass over the ids above 0 that are not the quest's own item
-/// (`0x4e04f4`-`0x4e04fd`); a quad carrying both gives two lines.
+/// One leaderboard line of a record, in `GetQuestLogLeaderBoard`'s order (`0x4e0110`): the event
+/// line when the end text is not empty (`0x4e026c`-`0x4e0285`); a creature or GameObject pass over
+/// the ids that are set, the array index counting the empty ones (`0x4e02d7`); an item pass over
+/// the ids above 0 that are not the quest's own item (`0x4e04f4`-`0x4e04fd`), a quad carrying both
+/// giving two lines; then the reputation line for a non-zero `+0x14` (`0x4e0510`).
+/// `GetNumQuestLeaderBoards` counts the same lines (`0x4e009a`-`0x4e00e7`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Line {
+    Event,
     Creature(usize),
     Item(usize),
+    Reputation,
 }
 
 fn lines(record: &QuestRecordView) -> impl Iterator<Item = Line> + '_ {
+    let event = (!record.end_text.is_empty()).then_some(Line::Event);
     let creatures = record
         .objectives
         .iter()
@@ -543,88 +553,177 @@ fn lines(record: &QuestRecordView) -> impl Iterator<Item = Line> + '_ {
         .enumerate()
         .filter(|(_, o)| (o.item_id as i32) > 0 && o.item_id != record.src_item_id)
         .map(|(i, _)| Line::Item(i));
-    creatures.chain(items)
+    let reputation = (record.rep_min.0 != 0).then_some(Line::Reputation);
+    event
+        .into_iter()
+        .chain(creatures)
+        .chain(items)
+        .chain(reputation)
 }
 
-/// What a line shows before its format key is filled.
+/// The line `GetQuestLogLeaderBoard` answers for the 1-based `line`. The event, creature and item
+/// lines each match their own index alone (`cmp eax,ecx` at `0x4e0285`, `cmp ecx,eax` at `0x4e02dd` and `0x4e0503`);
+/// the reputation tail compares no index (`0x4e0510`), so it answers any index the others leave,
+/// 0 and past the count included.
+fn line_at(record: &QuestRecordView, line: usize) -> Option<Line> {
+    line.checked_sub(1)
+        .and_then(|n| lines(record).filter(|l| *l != Line::Reputation).nth(n))
+        .or_else(|| (record.rep_min.0 != 0).then_some(Line::Reputation))
+}
+
+/// `0x4d63a0`'s rank of a standing, 0 Hated to 7 Exalted, which the reputation line also applies
+/// to its required value inline (`0x4e0544`-`0x4e06a5`).
+fn standing_rank(standing: i32) -> u8 {
+    match standing {
+        42000.. => 7,
+        21000.. => 6,
+        9000.. => 5,
+        3000.. => 4,
+        0.. => 3,
+        -3000.. => 2,
+        -6000.. => 1,
+        _ => 0,
+    }
+}
+
+/// What a line shows before its strings are read off the VM.
+enum LineText {
+    /// The text as it is, under no format key (`0x4e0289`).
+    Raw(String),
+    /// `key` filled with the name and the two counts.
+    Count {
+        key: &'static str,
+        name: String,
+        cur: u32,
+        req: u32,
+    },
+    /// `QUEST_FACTION_NEEDED` filled with the faction's name, then the current and the required
+    /// rank's label (`0x4e0732`-`0x4e0764`), each gendered for the player (`0x612bf0`).
+    Faction {
+        name: String,
+        current: u8,
+        required: u8,
+        female: bool,
+    },
+}
+
 struct LineParts {
-    key: &'static str,
-    name: String,
-    cur: u32,
-    req: u32,
+    text: LineText,
     kind: &'static str,
+    finished: bool,
 }
 
-/// Line `line` (1-based) of row `index`, read at the call. A creature line takes the slot's 6-bit
-/// counter (`0x4e0302`); its override text is the name under `QUEST_OBJECTS_FOUND` (`0x4e03e1`),
-/// else a GameObject's key is that one too (`0x4e031e`) and a creature's `QUEST_MONSTERS_KILLED`
-/// with its name looked up (`0x4e0461`). An item line holds the count in the bags capped at the
-/// need (`0x4e0579`-`0x4e059c`) and its name looked up at every call (`0x4e05e0`).
+impl LineParts {
+    /// A counted line, finished when the count reaches the need (`jl 0x4e07bc` at `0x4e078d`).
+    fn count(key: &'static str, name: String, cur: u32, req: u32, kind: &'static str) -> Self {
+        Self {
+            text: LineText::Count {
+                key,
+                name,
+                cur,
+                req,
+            },
+            kind,
+            finished: cur >= req,
+        }
+    }
+}
+
+/// Line `line` (1-based) of row `index`, read at the call. The event line is the end text,
+/// finished by the slot's complete bit alone (`test byte [slot+7],1`, `0x4e02a2`). A creature line
+/// takes the slot's 6-bit counter (`0x4e0302`); its override text is the name under
+/// `QUEST_OBJECTS_FOUND` (`0x4e03e1`), else a GameObject's key is that one too (`0x4e031e`) and a
+/// creature's `QUEST_MONSTERS_KILLED` with its name looked up (`0x4e0461`). An item line holds the
+/// count in the bags capped at the need (`0x4e0579`-`0x4e059c`) and its name looked up at every
+/// call (`0x4e05e0`). The reputation line is finished when the player's standing reaches `+0x18`
+/// (`cmp edi,[esi+0x18]`, `0x4e0787`).
 fn line_parts(model: &mut Model, index: usize, line: usize) -> Option<LineParts> {
-    let (which, o, counter) = {
+    let (is_creature, o, counter) = {
         let (record, slot) = model.quest_row_parts(index)?;
-        let which = lines(record).nth(line.checked_sub(1)?)?;
-        let i = match which {
-            Line::Creature(i) | Line::Item(i) => i,
+        let (is_creature, i) = match line_at(record, line)? {
+            Line::Event => {
+                return Some(LineParts {
+                    text: LineText::Raw(record.end_text.clone()),
+                    kind: "event",
+                    finished: slot.state & SLOT_COMPLETE != 0,
+                });
+            }
+            Line::Reputation => {
+                let (faction, required) = record.rep_min;
+                let name = record.rep_faction_name.clone()?;
+                // `0x4d6370`, as the turn-in test reads it: 0 for a faction not pushed.
+                let standing = model.faction_standings.get(&faction).copied().unwrap_or(0);
+                // `0x612bf0` on the active player: its gender 1 takes the `_FEMALE` text.
+                let female = model.unit("player").is_some_and(|u| u.sex == 3);
+                return Some(LineParts {
+                    text: LineText::Faction {
+                        name,
+                        current: standing_rank(standing),
+                        required: standing_rank(required),
+                        female,
+                    },
+                    kind: "reputation",
+                    finished: standing >= required,
+                });
+            }
+            Line::Creature(i) => (true, i),
+            Line::Item(i) => (false, i),
         };
         let o = &record.objectives[i];
         // The override text only names a creature line.
-        let text = matches!(which, Line::Creature(_)) && !o.text.is_empty();
+        let text = is_creature && !o.text.is_empty();
         let o = QuestObjectiveView {
             text: if text { o.text.clone() } else { String::new() },
             ..*o
         };
-        (which, o, slot.counters[i])
+        (is_creature, o, slot.counters[i])
     };
-    match which {
-        Line::Creature(_) => {
-            let req = o.required_count;
-            let cur = u32::from(counter);
-            let is_go = o.creature_or_go & GO_OBJECTIVE_BIT != 0;
-            let kind = if is_go { "object" } else { "monster" };
-            if !o.text.is_empty() {
-                return Some(LineParts {
-                    key: "QUEST_OBJECTS_FOUND",
-                    name: o.text,
-                    cur,
-                    req,
-                    kind,
-                });
-            }
-            if is_go {
-                return Some(LineParts {
-                    key: "QUEST_OBJECTS_FOUND",
-                    name: NAME_PLACEHOLDER.into(),
-                    cur,
-                    req,
-                    kind,
-                });
-            }
-            let name = model
-                .quest_creature_lookup(o.creature_or_go)
-                .unwrap_or_else(|| NAME_PLACEHOLDER.into());
-            Some(LineParts {
-                key: "QUEST_MONSTERS_KILLED",
-                name,
+    if is_creature {
+        let req = o.required_count;
+        let cur = u32::from(counter);
+        let is_go = o.creature_or_go & GO_OBJECTIVE_BIT != 0;
+        let kind = if is_go { "object" } else { "monster" };
+        if !o.text.is_empty() {
+            return Some(LineParts::count(
+                "QUEST_OBJECTS_FOUND",
+                o.text,
                 cur,
                 req,
                 kind,
-            })
+            ));
         }
-        Line::Item(_) => {
-            let (item_id, req) = (o.item_id, o.item_count);
-            let held = model.quest_store.held.get(&item_id).copied().unwrap_or(0);
-            let name = model
-                .quest_item_lookup(item_id)
-                .map_or_else(|| NAME_PLACEHOLDER.into(), |(name, _, _)| name);
-            Some(LineParts {
-                key: "QUEST_ITEMS_NEEDED",
-                name,
-                cur: held.min(req),
+        if is_go {
+            return Some(LineParts::count(
+                "QUEST_OBJECTS_FOUND",
+                NAME_PLACEHOLDER.into(),
+                cur,
                 req,
-                kind: "item",
-            })
+                kind,
+            ));
         }
+        let name = model
+            .quest_creature_lookup(o.creature_or_go)
+            .unwrap_or_else(|| NAME_PLACEHOLDER.into());
+        Some(LineParts::count(
+            "QUEST_MONSTERS_KILLED",
+            name,
+            cur,
+            req,
+            kind,
+        ))
+    } else {
+        let (item_id, req) = (o.item_id, o.item_count);
+        let held = model.quest_store.held.get(&item_id).copied().unwrap_or(0);
+        let name = model
+            .quest_item_lookup(item_id)
+            .map_or_else(|| NAME_PLACEHOLDER.into(), |(name, _, _)| name);
+        Some(LineParts::count(
+            "QUEST_ITEMS_NEEDED",
+            name,
+            held.min(req),
+            req,
+            "item",
+        ))
     }
 }
 
@@ -1075,11 +1174,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // SelectQuestLogEntry(i) (`0x4dfae0` -> `0x4def30`) sets the selected quest id (`0xbb7480`,
+    // `0x4def5d`) only for an index inside the list (`0x4def40`, `0x4def48`) whose row is a quest
+    // (`0x4def55`); any other call, a header's included, leaves the old selection.
     g.set(
         "SelectQuestLogEntry",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: SelectQuestLogEntry(index)` (`0x84b540`, `0x4dfb0e`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: SelectQuestLogEntry(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.quest_log_selection = i;
+            if model.quest_row(i as usize).is_some_and(|r| !r.is_header) {
+                model.quest_log_selection = i;
+            }
             Ok(())
         })?,
     )?;
@@ -1111,9 +1217,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`QuestLogFrame.lua:616`).
     g.set(
         "GetNumQuestLeaderBoards",
-        lua.create_function(|lua, i: Option<Idx32>| {
+        lua.create_function(|lua, i: Value| {
+            // A non-number reads the selection (`0x4e0056` → `0x4e0073`); it never raises.
+            let i = binding_abi::index_or(lua, i)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let index = i.map_or(model.quest_log_selection, |i| i.0) as usize;
+            let index = i.unwrap_or(model.quest_log_selection) as usize;
             Ok(model
                 .quest_row_parts(index)
                 .map_or(0, |(record, _)| lines(record).count() as i64))
@@ -1123,14 +1231,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `text, type, finished` of line `i`, for any row as above (`QuestLogFrame.lua:635`), built at
     // the call ([`line_parts`]). Three values on every path (`mov eax,3` at `0x4e02ba`,
     // `0x4e079b`, `0x4e07c8`): `finished` is the number 1 (`0x4e02ae`, `0x4e078f`) or nil
-    // (`0x4e07bc`), and a row or line that does not exist takes the tail at `0x4e07ac`, which
-    // pushes three nils. A format key the install lacks gives an empty line, not no line.
+    // (`0x4e07bc`). A row that does not exist, and a line no line takes on a quest with no
+    // reputation line ([`line_at`]), take the tails at `0x4e07ac` and `0x4e07a9`, which push
+    // three nils. A format key the install lacks gives an empty line, not no line.
     g.set(
         "GetQuestLogLeaderBoard",
-        lua.create_function(|lua, (Idx(i), quest): (Idx, Option<Idx32>)| {
+        lua.create_function(|lua, (i, quest): (Value, Value)| {
+            // `is-number` else `Usage: GetQuestLogLeaderBoard(index)` (`0x84b650`, `0x4e0141`); the
+            // quest is the selection for a non-number (`0x4e01a2` → `0x4e01f6`).
+            let i = binding_abi::index_arg(lua, i, "Usage: GetQuestLogLeaderBoard(index)")?;
+            let quest = binding_abi::index_or(lua, quest)?;
             let parts = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                let index = quest.map_or(model.quest_log_selection, |q| q.0) as usize;
+                let index = quest.unwrap_or(model.quest_log_selection) as usize;
                 line_parts(&mut model, index, i)
             };
             let Some(p) = parts else {
@@ -1141,25 +1254,46 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 ]));
             };
             // The VM's own `GlobalStrings.lua`, read through `0x703bf0`.
-            let text = lua
-                .globals()
-                .get::<String>(p.key)
-                .ok()
-                .filter(|t| !t.is_empty())
-                .map_or_else(String::new, |f| {
+            let template = |key: &str| global(lua, key).unwrap_or_default();
+            let text = match &p.text {
+                LineText::Raw(text) => text.clone(),
+                LineText::Count {
+                    key,
+                    name,
+                    cur,
+                    req,
+                } => fill(
+                    &template(key),
+                    &[
+                        Arg::S(name),
+                        Arg::D(i64::from(*cur)),
+                        Arg::D(i64::from(*req)),
+                    ],
+                ),
+                LineText::Faction {
+                    name,
+                    current,
+                    required,
+                    female,
+                } => {
+                    // `FACTION_STANDING_LABEL<rank + 1>` (`0x84b5dc`) through `0x612bf0`.
+                    let label = |rank: u8| {
+                        crate::strings::standing_label(&|k| global(lua, k), rank.into(), *female)
+                    };
                     fill(
-                        &f,
+                        &template("QUEST_FACTION_NEEDED"),
                         &[
-                            Arg::S(&p.name),
-                            Arg::D(i64::from(p.cur)),
-                            Arg::D(i64::from(p.req)),
+                            Arg::S(name),
+                            Arg::S(&label(*current)),
+                            Arg::S(&label(*required)),
                         ],
                     )
-                });
+                }
+            };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&text)?),
                 Value::String(lua.create_string(p.kind)?),
-                flag(p.cur >= p.req),
+                flag(p.finished),
             ]))
         })?,
     )?;
@@ -1250,7 +1384,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // or an item not yet held answers nil.
     g.set(
         "GetQuestLogItemLink",
-        lua.create_function(|lua, (kind, index): (String, usize)| {
+        lua.create_function(|lua, (kind, index): (Value, Value)| {
+            // `is-number` on arg 2, `is-number-or-string` on arg 1 else
+            // `Usage: GetQuestLogItemLink("type", index)` (`0x84b6d0`, `0x4e1053`).
+            let kind =
+                binding_abi::string_arg(lua, kind, r#"Usage: GetQuestLogItemLink("type", index)"#)?;
+            let index =
+                binding_abi::index_arg(lua, index, r#"Usage: GetQuestLogItemLink("type", index)"#)?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 selected_quest_item(&model, &kind, index).and_then(|it| it.link)
@@ -1285,14 +1425,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // passes (`QuestLogFrame.lua:557`, `:561`).
     g.set(
         "CollapseQuestHeader",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: CollapseQuestHeader(index)` (`0x84b720`, `0x4e1741`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: CollapseQuestHeader(index)")?;
             super::tick::verb(lua, |model| set_collapsed(model, i, true));
             Ok(())
         })?,
     )?;
     g.set(
         "ExpandQuestHeader",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: ExpandQuestHeader(index)` (`0x84b744`, `0x4e1791`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: ExpandQuestHeader(index)")?;
             super::tick::verb(lua, |model| set_collapsed(model, i, false));
             Ok(())
         })?,
@@ -1433,7 +1577,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`QuestTimerFrame.lua:43`, `QuestTimerFrame.xml:20`).
     g.set(
         "GetQuestIndexForTimer",
-        lua.create_function(|lua, Idx(t): Idx| {
+        lua.create_function(|lua, t: Value| {
+            // `is-number` else `Usage: GetQuestIndexForTimer(index)` (`0x84b6fc`, `0x4e160c`).
+            let t = binding_abi::index_arg(lua, t, "Usage: GetQuestIndexForTimer(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             // Nil without a player (`0x4e165f`).
             let index = t
@@ -1533,6 +1679,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     fn watch_id_at(model: &Model, index: u32) -> Option<u32> {
         model.quest_row(index as usize).map(|e| e.quest_id)
     }
+    // `AddQuestWatch` (`0x4e1930`) and `RemoveQuestWatch` (`0x4e1970`): a `lua_isnumber` argument
+    // (`0x4e1938`, `0x4e1978`) is a row, `_ftol`ed and looked up by `0x4df150`; a miss takes the
+    // selected quest's id (`0xbb7480`, `0x4e195c`, `0x4e199c`), which `SelectQuestLogEntry` only
+    // ever sets to a quest, never a header, so the selected row is one. Either way an id of 0
+    // does nothing.
+    fn watch_target(lua: &Lua, model: &Model, arg: Value) -> Option<u32> {
+        match crate::script::binding_abi::is_number(lua, arg) {
+            Some(n) => watch_id_at(model, crate::script::binding_abi::ftol(n) as u32),
+            None => model
+                .quest_row(model.quest_log_selection as usize)
+                .filter(|r| !r.is_header)
+                .map(|r| r.quest_id),
+        }
+    }
     // The share button enables on `GetQuestLogPushable() and GetNumPartyMembers() > 0`
     // (`QuestLogFrame.lua:301`) and clicks `QuestLogPushQuest()` (`QuestLogFrame.xml:512`), both
     // about the selection. `GetQuestLogPushable` answers 1 or nil, never false (`0x4e12b0`).
@@ -1578,7 +1738,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "IsQuestWatched",
-        lua.create_function(|lua, Idx32(i): Idx32| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: IsQuestWatched(index)` (`0x84b764`, `0x4e18a1`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: IsQuestWatched(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(flag(
                 watch_id_at(&model, i).is_some_and(|id| model.quest_log_watched.contains(&id)),
@@ -1587,10 +1749,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "AddQuestWatch",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(id) = watch_id_at(&model, i) {
-                if !model.quest_log_watched.contains(&id) && model.quest_log_watched.len() < 5 {
+            // `0x4dede0`: the id is appended while the list holds fewer than 5 (`0x4dede5`), with no
+            // test for it already being there; the stock Lua checks `IsQuestWatched` itself.
+            if let Some(id) = watch_target(lua, &model, i) {
+                if model.quest_log_watched.len() < 5 {
                     model.quest_log_watched.push(id);
                 }
             }
@@ -1599,10 +1763,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "RemoveQuestWatch",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(id) = watch_id_at(&model, i) {
-                model.quest_log_watched.retain(|w| *w != id);
+            // `0x4dee00` removes the first entry equal to the id (`0x4dee10`) and closes the gap.
+            if let Some(id) = watch_target(lua, &model, i) {
+                if let Some(at) = model.quest_log_watched.iter().position(|w| *w == id) {
+                    model.quest_log_watched.remove(at);
+                }
             }
             Ok(())
         })?,
@@ -1610,7 +1777,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The watched quest's current 1-based row, nil when it is not a visible row.
     g.set(
         "GetQuestIndexForWatch",
-        lua.create_function(|lua, Idx(w): Idx| {
+        lua.create_function(|lua, w: Value| {
+            // `is-number` else `Usage: GetQuestIndexForWatch(index)` (`0x84b784`, `0x4e19c9`).
+            let w = binding_abi::index_arg(lua, w, "Usage: GetQuestIndexForWatch(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let index = w
                 .checked_sub(1)
@@ -2520,6 +2689,170 @@ mod tests {
         assert!(heard::take(&s).is_empty());
     }
 
+    /// A quest whose end text is not empty has an event line first (`0x4e00a4`, `0x4e0285`): the
+    /// text as the wire sent it, typed `event` (`0x84b648`), finished by the slot's complete bit
+    /// alone (`0x4e02a2`). The other lines move down one.
+    #[test]
+    fn the_end_text_is_an_event_line_first_finished_by_the_complete_bit() {
+        let mut body_and_heart = record("Body and Heart", 10, 141, "Teldrassil");
+        body_and_heart.end_text = "Face Lunaclaw and earn the strength of $N.".into();
+        let mut escort = threat_within();
+        escort.end_text = "Escort the wagon.".into();
+        let mut s = UiScript::new().unwrap();
+        caches(&mut s);
+        // Rows: Elwynn Forest (1), A Threat Within (2), Teldrassil (3), Body and Heart (4).
+        seat(
+            &mut s,
+            &[
+                (783, escort, slot(783, 3, 0)),
+                (6001, body_and_heart.clone(), slot(6001, 0, 0)),
+            ],
+        );
+        let board = |s: &UiScript, line: u32, row: u32| {
+            s.eval::<(Option<String>, Option<String>, Option<i64>)>(&format!(
+                "return GetQuestLogLeaderBoard({line}, {row})"
+            ))
+            .unwrap()
+        };
+        let count = |s: &UiScript, row: u32| {
+            s.eval::<i64>(&format!("return GetNumQuestLeaderBoards({row})"))
+                .unwrap()
+        };
+        assert_eq!(count(&s, 4), 1, "the event line alone");
+        assert_eq!(
+            board(&s, 1, 4),
+            (
+                Some("Face Lunaclaw and earn the strength of $N.".into()),
+                Some("event".into()),
+                None
+            ),
+            "the raw text, under no format key"
+        );
+        assert_eq!(board(&s, 2, 4), (None, None, None));
+        assert_eq!(count(&s, 2), 2, "the event line, then the kill line");
+        assert_eq!(
+            board(&s, 1, 2),
+            (Some("Escort the wagon.".into()), Some("event".into()), None)
+        );
+        assert_eq!(
+            board(&s, 2, 2),
+            (
+                Some("Kobold Vermin slain: 3/10".into()),
+                Some("monster".into()),
+                None
+            ),
+            "the kill line at index 2"
+        );
+        assert_eq!(board(&s, 3, 2), (None, None, None));
+
+        // The complete bit finishes the event line and nothing else.
+        let mut escort = threat_within();
+        escort.end_text = "Escort the wagon.".into();
+        seat(
+            &mut s,
+            &[
+                (783, escort, slot(783, 3, SLOT_COMPLETE)),
+                (6001, body_and_heart, slot(6001, 0, SLOT_COMPLETE)),
+            ],
+        );
+        assert_eq!(board(&s, 1, 4).2, Some(1));
+        assert_eq!(board(&s, 1, 2).2, Some(1));
+        assert_eq!(board(&s, 2, 2).2, None, "the kill line reads its count");
+    }
+
+    /// A quest with a reputation faction (`+0x14`) has its reputation line last (`0x4e00da`,
+    /// `0x4e0510`): `QUEST_FACTION_NEEDED` with the faction's name, the current rank's label and
+    /// the required one's (`0x4e0732`-`0x4e0764`), typed `reputation` (`0x84b5b8`), finished at the
+    /// player's standing of at least `+0x18` (`0x4e0787`). It answers any index the other lines
+    /// leave (`0x4e0510`), and a faction with no name is counted but reads three nils
+    /// (`0x4e053b`).
+    #[test]
+    fn a_reputation_faction_is_the_last_line_finished_at_the_standing() {
+        const ARGENT_DAWN: u32 = 529;
+        let mut s = UiScript::new().unwrap();
+        caches(&mut s);
+        s.set_item_template(
+            900,
+            ItemTemplateView {
+                name: "Scourgestone".into(),
+                ..Default::default()
+            },
+        );
+        s.run(
+            "QUEST_FACTION_NEEDED = '%s:  %s / %s' \
+             FACTION_STANDING_LABEL4 = 'Neutral' \
+             FACTION_STANDING_LABEL5 = 'Friendly' \
+             FACTION_STANDING_LABEL6 = 'Honored' \
+             FACTION_STANDING_LABEL6_FEMALE = 'Honored (f)'",
+        )
+        .unwrap();
+        let mut r = record("Honor the Dawn", 60, 12, "Elwynn Forest");
+        r.objectives[0] = kill(VERMIN, 10);
+        r.objectives[1] = collect(900, 3);
+        r.rep_min = (ARGENT_DAWN, 9000);
+        r.rep_faction_name = Some("Argent Dawn".into());
+        seat(&mut s, &[(50, r.clone(), slot(50, 0, 0))]);
+        let board = |s: &UiScript, line: i64| {
+            s.eval::<(Option<String>, Option<String>, Option<i64>)>(&format!(
+                "return GetQuestLogLeaderBoard({line}, 2)"
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            s.eval::<i64>("return GetNumQuestLeaderBoards(2)").unwrap(),
+            3
+        );
+        assert_eq!(board(&s, 1).1.as_deref(), Some("monster"));
+        assert_eq!(board(&s, 2).1.as_deref(), Some("item"));
+        let line = |text: &str, finished| {
+            (
+                Some(text.to_string()),
+                Some("reputation".to_string()),
+                finished,
+            )
+        };
+        assert_eq!(
+            board(&s, 3),
+            line("Argent Dawn:  Neutral / Honored", None),
+            "a faction not pushed reads 0, Neutral"
+        );
+        s.set_faction_standings([(ARGENT_DAWN, 8999)].into());
+        assert_eq!(board(&s, 3), line("Argent Dawn:  Friendly / Honored", None));
+        s.set_faction_standings([(ARGENT_DAWN, 9000)].into());
+        assert_eq!(
+            board(&s, 3),
+            line("Argent Dawn:  Honored / Honored", Some(1))
+        );
+        assert_eq!(
+            board(&s, 4),
+            board(&s, 3),
+            "the reputation tail compares no index"
+        );
+        assert_eq!(board(&s, 0), board(&s, 3));
+
+        s.set_unit(
+            "player",
+            Some(crate::script::UnitState {
+                exists: true,
+                sex: 3,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            board(&s, 3),
+            line("Argent Dawn:  Honored (f) / Honored (f)", Some(1)),
+            "a female player's labels (`0x612bf0`)"
+        );
+
+        r.rep_faction_name = None;
+        seat(&mut s, &[(50, r, slot(50, 0, 0))]);
+        assert_eq!(
+            s.eval::<i64>("return GetNumQuestLeaderBoards(2)").unwrap(),
+            3
+        );
+        assert_eq!(board(&s, 3), (None, None, None));
+    }
+
     #[test]
     fn abandon_two_step_pins_the_click_time_target() {
         let mut s = two_quests();
@@ -2575,6 +2908,70 @@ mod tests {
         s.run("AddQuestWatch(2)").unwrap();
         seat(&mut s, &[]);
         assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 0);
+    }
+
+    /// `AddQuestWatch` and `RemoveQuestWatch` (`0x4e1930`, `0x4e1970`): an argument that fails
+    /// `lua_isnumber` (`0x4e1938`, `0x4e1978`) takes the selected quest's id (`0xbb7480`,
+    /// `0x4e195c`, `0x4e199c`) and raises nothing; a number is a row, and the selection stays out
+    /// of it.
+    #[test]
+    fn a_non_number_watches_the_selected_quest() {
+        for arg in ["", "nil", "'x'", "{}", "true"] {
+            let s = two_quests();
+            s.run("SelectQuestLogEntry(3)").unwrap(); // quest 7
+            s.run(&format!("AddQuestWatch({arg})")).unwrap();
+            assert_eq!(s.quest_log_watched(), vec![7], "AddQuestWatch({arg})");
+            s.run("SelectQuestLogEntry(2)").unwrap(); // quest 783
+            s.run(&format!("RemoveQuestWatch({arg})")).unwrap();
+            assert_eq!(s.quest_log_watched(), vec![7], "other quest, Remove({arg})");
+            s.run("SelectQuestLogEntry(3)").unwrap();
+            s.run(&format!("RemoveQuestWatch({arg})")).unwrap();
+            assert!(s.quest_log_watched().is_empty(), "RemoveQuestWatch({arg})");
+        }
+        // A number is a row whatever is selected; a numeric string counts as one.
+        let s = two_quests();
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        s.run("AddQuestWatch('3')").unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7]);
+    }
+
+    /// `SelectQuestLogEntry` (`0x4def30`) sets the selected quest id only for an in-list index whose
+    /// row is a quest (`0x4def40`, `0x4def48`, `0x4def55`), so a header, 0 or an out-of-range index
+    /// leaves the previous quest selected, which the watch fallback then names.
+    #[test]
+    fn selecting_a_header_or_nothing_keeps_the_previous_quest() {
+        let s = two_quests();
+        s.run("SelectQuestLogEntry(3)").unwrap(); // quest 7
+        for call in [
+            "SelectQuestLogEntry(1)",
+            "SelectQuestLogEntry(0)",
+            "SelectQuestLogEntry(99)",
+        ] {
+            s.run(call).unwrap();
+            assert_eq!(
+                s.eval::<i64>("return GetQuestLogSelection()").unwrap(),
+                3,
+                "{call}"
+            );
+        }
+        s.run("AddQuestWatch()").unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7]);
+    }
+
+    /// `0x4dede0` appends while the list holds fewer than 5, with no test for a duplicate; the stock
+    /// Lua checks `IsQuestWatched`. `0x4dee00` removes the first match only.
+    #[test]
+    fn a_duplicate_watch_is_appended_and_a_remove_takes_one() {
+        let s = two_quests();
+        s.run("AddQuestWatch(3) AddQuestWatch(3) AddQuestWatch(2)")
+            .unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7, 7, 783]);
+        assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 3);
+        s.run("RemoveQuestWatch(3)").unwrap();
+        assert_eq!(s.quest_log_watched(), vec![7, 783]);
+        s.run("AddQuestWatch(3) AddQuestWatch(3) AddQuestWatch(3)")
+            .unwrap();
+        assert_eq!(s.quest_log_watched().len(), 5, "no sixth (`0x4dede5`)");
     }
 
     /// The prune (`0x4de7a7` to `0x4de80f`) counts folded quests; a collapse never prunes.

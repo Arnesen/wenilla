@@ -108,8 +108,9 @@ fn collate(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// The groups in display order (`0x4fca20`): by `ItemClass`, then name, never subclass id; each
-/// group's recipes by tier, product ItemLevel (`record+0x14`), then name. A recipe with no group
-/// yet goes into an empty-named group keyed `u32::MAX`, which sorts last.
+/// group's recipes by tier ascending, product ItemLevel (`row+0x14`) descending (`setl` at
+/// `0x4fd4e6`), then name (`0x4fd380`). A recipe with no group yet goes into an empty-named group
+/// keyed `u32::MAX`, which sorts last.
 pub(super) fn build_groups(recipes: &[TradeSkillRecipe]) -> Vec<TradeSkillGroup> {
     let mut map: HashMap<(u32, u32), TradeSkillGroup> = HashMap::new();
     for (i, r) in recipes.iter().enumerate() {
@@ -134,9 +135,9 @@ pub(super) fn build_groups(recipes: &[TradeSkillRecipe]) -> Vec<TradeSkillGroup>
                 .tier()
                 .cmp(&recipes[b].difficulty.tier())
                 .then_with(|| {
-                    recipes[a]
+                    recipes[b]
                         .product_item_level
-                        .cmp(&recipes[b].product_item_level)
+                        .cmp(&recipes[a].product_item_level)
                 })
                 .then_with(|| collate(&recipes[a].name, &recipes[b].name))
         });
@@ -225,49 +226,63 @@ pub(super) fn selected_visible_index(model: &Model) -> u32 {
         .map_or(0, |p| (p + 1) as u32)
 }
 
-/// `SelectTradeSkill`: holds the recipe at a visible index. A header index leaves the selection
-/// as it was, and an out-of-range one clears it; the stock Lua folds a header instead of selecting
-/// it (`Blizzard_TradeSkillUI.lua:184-192`).
+/// `SelectTradeSkill` (`0x4fc9b0`): holds the recipe at a visible index by its spell id
+/// (`0xbde044`), which survives a close and remaps across a re-push. A header row's id is -1 and
+/// stores 0 (`jg` at `0x4fc9c9`), as an index past the rows does, compared unsigned (`jae` at
+/// `0x4fc9b6`): both clear the selection. The stock Lua folds a header instead of selecting it
+/// (`Blizzard_TradeSkillUI.lua:184-192`).
 pub(super) fn select(model: &mut Model, index: u32) {
-    let visible = rows(model);
-    match index.checked_sub(1).and_then(|n| visible.get(n as usize)) {
-        Some(Row::Entry(ei)) => {
-            model.trade_skill_selection = (*ei + 1) as u32;
-            // The spell id (`0xbde044`) is what survives a close and remaps across a re-push.
-            model.trade_skill_selected_spell = model
-                .trade_skill
-                .as_ref()
-                .and_then(|t| t.recipes.get(*ei))
-                .map_or(0, |r| r.spell_id);
-        }
-        Some(Row::Header { .. }) => {}
-        None => {
-            model.trade_skill_selection = 0;
-            model.trade_skill_selected_spell = 0;
-        }
+    let entry = index
+        .checked_sub(1)
+        .and_then(|n| match rows(model).get(n as usize) {
+            Some(Row::Entry(ei)) => Some(*ei),
+            Some(Row::Header { .. }) | None => None,
+        });
+    model.trade_skill_selected_spell = entry
+        .and_then(|ei| model.trade_skill.as_ref()?.recipes.get(ei))
+        .map_or(0, |r| r.spell_id);
+    model.trade_skill_selection = entry.map_or(0, |ei| (ei + 1) as u32);
+}
+
+/// What a fold verb's index names (`0x5000c0`, `0x500140`).
+pub(super) enum Fold {
+    /// Every group, the stock collapse-all button's 0.
+    All,
+    /// The group of a header row.
+    Group((u32, u32)),
+}
+
+/// The fold verbs' target for an `_ftol`'d index: `index - 1` below 0 is every group (`jns` at
+/// `0x5000f5` and `0x500175`); otherwise the visible row there must be a header, whose group
+/// `0x4fd650` finds, and a recipe row or one past the rows is `None`, which the verbs raise.
+pub(super) fn fold_target(model: &Model, index: i32) -> Option<Fold> {
+    let Ok(n) = usize::try_from(index.wrapping_sub(1)) else {
+        return Some(Fold::All);
+    };
+    match rows(model).get(n)? {
+        Row::Header { key, .. } => Some(Fold::Group(*key)),
+        Row::Entry(_) => None,
     }
 }
 
-/// Folds or unfolds the group whose header is visible row `id`; 0 is every group, as the stock
-/// collapse-all button passes, and any other row is a no-op.
-pub(super) fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
-    if id == 0 && !collapse {
-        model.trade_skill_collapsed.clear();
-        return;
-    }
-    let targets: Vec<(u32, u32)> = if id == 0 {
-        let Some(t) = model.trade_skill.as_ref() else {
+/// Folds or unfolds `target`: every group takes the collapse mask 0 or all ones (`0x5000f9`,
+/// `0x50017a`), one group its bit (`0x500133`, `0x5001b2`).
+pub(super) fn set_collapsed(model: &mut Model, target: Fold, collapse: bool) {
+    let targets: Vec<(u32, u32)> = match target {
+        Fold::All if !collapse => {
+            model.trade_skill_collapsed.clear();
             return;
-        };
-        build_groups(&t.recipes)
-            .into_iter()
-            .map(|g| g.key)
-            .collect()
-    } else {
-        match rows(model).get(id - 1) {
-            Some(Row::Header { key, .. }) => vec![*key],
-            _ => Vec::new(),
         }
+        Fold::All => {
+            let Some(t) = model.trade_skill.as_ref() else {
+                return;
+            };
+            build_groups(&t.recipes)
+                .into_iter()
+                .map(|g| g.key)
+                .collect()
+        }
+        Fold::Group(key) => vec![key],
     };
     for k in targets {
         if collapse {

@@ -67,6 +67,8 @@ pub struct MailListEntry {
     pub subject: String,
     /// `0` = no letter body to fetch; nonzero = a [`super::item_text_query`] key.
     pub item_text_id: u32,
+    /// The `Package.dbc` id (`[rec+0x118]`), 0 for none; vmangos always sends 0.
+    pub package: u32,
     pub stationery: u32,
     pub item: Option<MailAttachment>,
     pub money: u32,
@@ -148,11 +150,12 @@ pub fn mail_delete(mailbox: u64, mail_id: u32) -> Vec<u8> {
     mailbox_and_mail_id(mailbox, mail_id)
 }
 
-/// `CMSG_MAIL_CREATE_TEXT_ITEM`: mailbox, mail id and a `u32` template id, 0 for player mail.
-/// Answered by a [`mail_action::MADE_PERMANENT`] result; on OK the mail's COPIED bit is set.
-pub fn mail_create_text_item(mailbox: u64, mail_id: u32) -> Vec<u8> {
+/// `CMSG_MAIL_CREATE_TEXT_ITEM`: mailbox, mail id and the mail's `u32` template id, 0 for none
+/// (`0x4afb3f`-`0x4afb54`). Answered by a [`mail_action::MADE_PERMANENT`] result; on OK the
+/// mail's COPIED bit is set.
+pub fn mail_create_text_item(mailbox: u64, mail_id: u32, template_id: u32) -> Vec<u8> {
     let mut body = mailbox_and_mail_id(mailbox, mail_id);
-    body.extend_from_slice(&0u32.to_le_bytes()); // mailTemplateId
+    body.extend_from_slice(&template_id.to_le_bytes());
     body
 }
 
@@ -184,7 +187,7 @@ pub(super) fn read_mail_list_result(r: &mut &[u8]) -> io::Result<Vec<MailListEnt
         };
         let subject = read_cstring(r)?;
         let item_text_id = read_u32_le(r)?;
-        let _package = read_u32_le(r)?; // always 0 (vmangos hardcodes it)
+        let package = read_u32_le(r)?;
         let stationery = read_u32_le(r)?;
         let entry = read_u32_le(r)?;
         let perm_enchant = read_u32_le(r)?;
@@ -216,6 +219,7 @@ pub(super) fn read_mail_list_result(r: &mut &[u8]) -> io::Result<Vec<MailListEnt
             sender_id,
             subject,
             item_text_id,
+            package,
             stationery,
             item,
             money,

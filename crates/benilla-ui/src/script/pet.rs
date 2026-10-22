@@ -7,9 +7,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi;
 use super::protected::{self, Tag};
 use super::Model;
-use crate::script::binding_abi::Idx32;
 
 // The slot-word values the one-shot orders synthesize, restated from
 // `benilla_protocol::messages::pet` because this crate does not depend on the protocol.
@@ -388,7 +388,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // An out-of-range index answers seven nils (`0x4bdf3e`), which the Lua reads as an empty slot.
     g.set(
         "GetPetActionInfo",
-        lua.create_function(move |lua, Idx32(i): Idx32| {
+        lua.create_function(move |lua, i: Value| {
+            // `is-number` else `Usage: GetPetActionInfo(index)` (`0x8478b8`, `0x4bdc67`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: GetPetActionInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(slot) = slot_at(&model, i) else {
                 return Ok(super::binding_abi::tuple(&[None; 7]));
@@ -413,7 +415,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // An elapsed or absent cooldown answers (0, 0, 1), so a re-feed never replays the sweep.
     g.set(
         "GetPetActionCooldown",
-        lua.create_function(|lua, Idx32(i): Idx32| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: GetPetActionCooldown(index)` (`0x8478d8`, `0x4bdfb7`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: GetPetActionCooldown(index)")?;
             let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(match slot_at(&model, i).and_then(|s| s.cooldown) {
@@ -430,7 +434,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The one pet binding that answers a real boolean (`0x6f39f0`), `false` even out of range.
     g.set(
         "IsPetAttackActive",
-        lua.create_function(move |lua, Idx32(i): Idx32| {
+        lua.create_function(move |lua, i: Value| {
+            // `is-number` else `Usage: IsPetAttackActive(index)` (`0x8478fc`, `0x4be0f1`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: IsPetAttackActive(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(slot_at(&model, i).is_some_and(|s| s.view.attack_active))
         })?,
@@ -441,22 +447,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`PetHandler.cpp:178`).
     g.set(
         "CastPetAction",
-        lua.create_function(|lua, i: u32| {
+        lua.create_function(|lua, i: Value| {
+            // `is-number` else `Usage: CastPetAction(index)` (`0x8479d4`, `0x4be35b`).
+            let i = binding_abi::index_arg32(lua, i, "Usage: CastPetAction(index)")?;
             // `PressPetAction 0x4bd1d0` opens on the gate's tag 2 (`0x4bd1e5`), ahead of its bar
             // test and every effect; a refusal is silent.
             if !protected::gate(lua, Tag::CAST) {
                 return Ok(());
             }
-            super::tick::verb(lua, |model| {
+            let pressed = super::tick::verb(lua, |model| {
                 let Some(packed) = slot_at(model, i)
                     .filter(|s| s.view.name.is_some())
                     .map(|s| s.view.packed)
                 else {
-                    return;
+                    return false;
                 };
                 latch_press(model, packed);
-                model.queue_call(super::ScriptCall::PetAction(i));
+                true
             });
+            if pressed {
+                super::calls::submit(lua, super::ScriptCall::PetAction(i))?;
+            }
             Ok(())
         })?,
     )?;
@@ -663,12 +674,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 if !protected::gate(lua, Tag::CAST) {
                     return Ok(());
                 }
-                super::tick::verb(lua, |model| {
+                let pressed = super::tick::verb(lua, |model| {
                     if model.pet_bar.has_bar {
                         latch_press(model, packed);
-                        model.queue_call(super::ScriptCall::PetOrder(packed));
                     }
+                    model.pet_bar.has_bar
                 });
+                if pressed {
+                    super::calls::submit(lua, super::ScriptCall::PetOrder(packed))?;
+                }
                 Ok(())
             })?,
         )?;
@@ -894,6 +908,7 @@ mod tests {
     #[test]
     fn intents_queue_and_the_meaningless_ones_are_dropped() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_pet_actions(true, true, true, slots());
 
         s.run("CastPetAction(1) CastPetAction(3) CastPetAction(9)")
@@ -1049,6 +1064,7 @@ mod tests {
     #[test]
     fn the_pet_one_shots_synthesize_the_bars_slot_words() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("PetAttack(); PetFollow(); PetWait(); PetPassiveMode()")
             .unwrap();
         assert!(s.take_pet_orders().is_empty(), "no bar, no order");
@@ -1094,6 +1110,7 @@ mod tests {
             token("PET_ACTION_ATTACK", 0x0700_0002),
         ];
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_pet_actions(true, true, true, bar.clone());
         s.set_pet_state(1 << 8 | 1);
         s.run("function LIT(i) local _, _, _, _, a = GetPetActionInfo(i) return a or 0 end")
@@ -1397,5 +1414,25 @@ mod tests {
         let (start, _, _) = poll(&s);
         assert_eq!(start, s.eval::<f64>("return GetTime()").unwrap());
         assert!((start - 10.02).abs() < 1e-9);
+    }
+
+    /// `CastPetAction` and the six one-shot orders re-enter `PressPetAction` (`0x4bd1d0`) inside
+    /// the call, so each hands its press to the lent host before it returns.
+    #[test]
+    fn pet_presses_apply_in_the_call_with_a_host_lent() {
+        use crate::script::ScriptCall;
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_actions(true, true, true, slots());
+        assert_eq!(
+            crate::script::host::test_support::applied_in_call(&mut s, "CastPetAction(1)"),
+            vec![ScriptCall::PetAction(1)]
+        );
+        let orders = crate::script::host::test_support::applied_in_call(
+            &mut s,
+            "PetPassiveMode() PetDefensiveMode() PetAggressiveMode() PetWait() PetFollow() \
+             PetAttack()",
+        );
+        assert_eq!(orders.len(), 6, "{orders:?}");
+        assert!(orders.iter().all(|c| matches!(c, ScriptCall::PetOrder(_))));
     }
 }

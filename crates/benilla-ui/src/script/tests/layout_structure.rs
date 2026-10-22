@@ -427,7 +427,7 @@ fn a_child_two_scrollframes_claim_holds_the_last_re_anchor() {
     assert!(s
         .eval::<bool>("local p, r = c:GetPoint(1); return c:GetNumPoints() == 1 and r == b")
         .unwrap());
-    assert_eq!(s.eval::<f64>("return c:GetLeft()").unwrap(), 200.0);
+    crate::assert_near!(s.eval::<f64>("return c:GetLeft()").unwrap(), 200.0);
 }
 
 /// A frame whose id is minted after a region on it joined the graph (the engine builds some
@@ -460,7 +460,10 @@ fn an_owner_minted_after_its_region_joined_takes_the_owner_edge() {
             )
             .expect("region");
         let d = m.region_data.entry(rh).or_default();
-        d.size = Some((8.0, 8.0));
+        d.size = Some((
+            crate::layout::Len::Script(8.0),
+            crate::layout::Len::Script(8.0),
+        ));
         d.anchors = crate::layout::Anchors::from([crate::layout::Anchor::new(
             crate::layout::Point::TopLeft,
             root_id,
@@ -478,16 +481,11 @@ fn an_owner_minted_after_its_region_joined_takes_the_owner_edge() {
             !m.frame_to_id.contains_key(&host),
             "the owner has no id yet"
         );
-        m.set_frame_scale(host, 2.0);
+        m.set_frame_scale(host, 2.0, false);
         m.frame_id(host);
     }
     resolve_matches_scratch(&mut s, "the owner's id minted");
-    let r = s
-        .model_ref()
-        .region_resolved
-        .get(&rh)
-        .copied()
-        .expect("rect");
+    let r = s.model_ref().region_rect(rh).expect("rect");
     assert!(
         ((r.right - r.left) - 16.0).abs() < 1e-3,
         "the region takes its now-known owner's scale: {r:?}"

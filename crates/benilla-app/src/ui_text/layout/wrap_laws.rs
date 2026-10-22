@@ -185,6 +185,20 @@ fn an_editbox_row_after_a_code_starts_past_it() {
     assert_eq!(rows[..2], [0, 12], "{rows:?}");
 }
 
+/// A LF that opens a line is a line start of its own (`0x5c24cd` records it and steps past it),
+/// and one that ends a line's run is consumed by it, the next line starting after it (`0x5c764d`).
+#[test]
+fn a_row_table_counts_a_line_that_opens_on_a_lf() {
+    benilla_formats::wow_data_or_skip!();
+    let mut e = test_engine(1.0).expect("the client faces open");
+    let (rows, _) = line_rows(&mut e, "ab\ncd", 60.0, spec(false, 0));
+    assert_eq!(rows, [0, 3]);
+    let (rows, _) = line_rows(&mut e, "ab\n\ncd", 60.0, spec(false, 0));
+    assert_eq!(rows, [0, 3, 4], "the empty line starts on its LF");
+    let (rows, _) = line_rows(&mut e, "\ncd", 60.0, spec(false, 0));
+    assert_eq!(rows, [0, 1]);
+}
+
 /// A text ending in LF gets its length as a last offset (`0x5c250b`) even when the wrap's skip
 /// ate the LF, and after a bail.
 #[test]

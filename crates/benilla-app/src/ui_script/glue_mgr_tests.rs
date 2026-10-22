@@ -3070,19 +3070,50 @@ fn preview(app: &App) -> &crate::portrait::GluePreview {
     app.world().resource::<crate::portrait::GluePreview>()
 }
 
+/// The stock scene file `GlueParent.lua`'s `SetBackgroundModel` names, `UI_<name>`.
+fn stock_scene(name: &str) -> crate::portrait::GlueSceneFile {
+    crate::portrait::GlueSceneFile::new(&format!(
+        "Interface\\Glues\\Models\\UI_{name}\\UI_{name}.mdx"
+    ))
+}
+
 /// The stock login's `AccountLogin` pane drives the glue booth: `UI_MainMenu` under the pane's
 /// own fog, `AccountLogin.xml`'s `<FogColor>` and `fogFar`, with nobody standing in it.
 #[test]
 fn the_stock_login_stands_the_main_menu_in_the_glue_booth() {
     let _ = benilla_formats::wow_data_or_skip!();
-    let (app, _rx, _abandon) = stock_app();
+    let (mut app, _rx, _abandon) = stock_app();
     let p = preview(&app);
-    assert_eq!(p.scene, Some(crate::portrait::GlueScene::MainMenu));
+    assert_eq!(p.scene, Some(stock_scene("MainMenu")));
     assert!(p.look.is_none());
     let fog = p.fog.expect("the main menu fogs");
     assert_eq!((fog.near, fog.far), (0.0, 1200.0));
     for (got, want) in fog.rgb.iter().zip([0.25, 0.06, 0.015]) {
         assert!((got - want).abs() < 1.0 / 255.0, "{:?}", fog.rgb);
+    }
+    // The booth aims by the camera the pane chose, on the file it chose it on. This harness
+    // lands no model facts, so each `SetCamera` stays pending on the pane's file.
+    let on = |index| {
+        Some(benilla_ui::widget::InstalledCamera {
+            file: "Interface\\Glues\\Models\\UI_MainMenu\\UI_MainMenu.mdx".to_string(),
+            index,
+        })
+    };
+    assert_eq!(p.camera, on(0));
+    for index in [1, 0] {
+        vm(&app)
+            .run(&format!("AccountLogin:SetCamera({index})"))
+            .unwrap();
+        app.update();
+        assert_eq!(
+            vm(&app).glue_scene().expect("the login pane").camera,
+            on(index)
+        );
+        assert_eq!(
+            preview(&app).camera,
+            on(index),
+            "the feeder carries {index}"
+        );
     }
 }
 
@@ -3091,7 +3122,7 @@ fn the_stock_login_stands_the_main_menu_in_the_glue_booth() {
 /// facing cell `SetCharacterSelectFacing` writes, and the next select squares it.
 #[test]
 fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
-    use crate::portrait::{GlueLook, GlueScene, SelectLook};
+    use crate::portrait::{GlueLook, SelectLook};
     let _ = benilla_formats::wow_data_or_skip!();
     let mut roster = roster3();
     let mut dwarf = crate::glue_session::roster::test_character(0x14, "Delta");
@@ -3107,14 +3138,17 @@ fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
         p.look == Some(GlueLook::Select(SelectLook::from(&roster[1]))),
         "lastCharacterIndex 1 stands Bravo"
     );
-    assert_eq!((p.scene, p.fog), (Some(GlueScene::Human), None));
+    assert_eq!((p.scene.clone(), p.fog), (Some(stock_scene("Human")), None));
     assert_eq!(p.yaw, 0.0);
 
     vm(&app).run("CharacterSelect_SelectCharacter(1)").unwrap();
     app.update();
     let p = preview(&app);
     assert!(p.look == Some(GlueLook::Select(SelectLook::from(&roster[0]))));
-    assert_eq!((p.scene, p.fog), (Some(GlueScene::NightElf), None));
+    assert_eq!(
+        (p.scene.clone(), p.fog),
+        (Some(stock_scene("NightElf")), None)
+    );
 
     vm(&app).run("SetCharacterSelectFacing(90)").unwrap();
     app.update();
@@ -3126,7 +3160,7 @@ fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
     assert_eq!(p.yaw, 0.0, "every select zeroes the facing (`0x472a61`)");
     assert_eq!(
         p.scene,
-        Some(GlueScene::Dwarf),
+        Some(stock_scene("Dwarf")),
         "a gnome stands in Dwarf's stage"
     );
     // The dwarf after the gnome: the same stage, set again by its own file string, is a new
@@ -3135,7 +3169,7 @@ fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
     vm(&app).run("CharacterSelect_SelectCharacter(4)").unwrap();
     app.update();
     let p = preview(&app);
-    assert_eq!(p.scene, Some(GlueScene::Dwarf));
+    assert_eq!(p.scene, Some(stock_scene("Dwarf")));
     assert_ne!(p.stage, gnome_stage);
     // The pane is GlueParent's, the whole 4:3 screen.
     assert_eq!(p.pane, Some([0.0, 1.0, 0.0, 1.0]));
@@ -3147,7 +3181,6 @@ fn the_stock_select_stands_the_selected_character_at_the_cells_facing() {
 /// empties: an empty roster sets no background.
 #[test]
 fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
-    use crate::portrait::GlueScene;
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _realmd, _world) = char_select_app(&[], "0", true);
     until(&mut app, "the roster load", |app| {
@@ -3155,7 +3188,7 @@ fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
     });
     app.update();
     let p = preview(&app);
-    assert_eq!(p.scene, Some(GlueScene::Orc));
+    assert_eq!(p.scene, Some(stock_scene("Orc")));
     assert!(p.look.is_none());
     let fog = p.fog.expect("the empty roster's scene is fogged");
     assert_eq!((fog.near, fog.far), (0.0, 270.0));
@@ -3168,7 +3201,10 @@ fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
     });
     app.update();
     let p = preview(&app);
-    assert_eq!((p.scene, p.fog), (Some(GlueScene::Tauren), None));
+    assert_eq!(
+        (p.scene.clone(), p.fog),
+        (Some(stock_scene("Tauren")), None)
+    );
     assert!(p.look.is_some());
 
     world.set_roster(&[]);
@@ -3179,7 +3215,10 @@ fn the_stock_select_fogs_the_empty_roster_and_keeps_the_last_stage() {
     });
     app.update();
     let p = preview(&app);
-    assert_eq!((p.scene, p.fog), (Some(GlueScene::Tauren), None));
+    assert_eq!(
+        (p.scene.clone(), p.fog),
+        (Some(stock_scene("Tauren")), None)
+    );
     assert!(p.look.is_none(), "the records are freed and detached");
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
 }
@@ -4604,7 +4643,7 @@ fn create_look(app: &App) -> benilla_ui::script::GlueCreateLook {
 /// up, which asks for the list again and selects the new last row (`SELECT_LAST_CHARACTER`).
 #[test]
 fn the_stock_create_makes_the_character_and_selects_it() {
-    use crate::portrait::{CreateLook, GlueLook, GlueScene};
+    use crate::portrait::{CreateLook, GlueLook};
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _realmd, world) = create_screen();
     assert!(shown(&app, "CharacterCreate") && !shown(&app, "CharacterSelect"));
@@ -4637,7 +4676,7 @@ fn the_stock_create_makes_the_character_and_selects_it() {
                 facial_hair: 0,
             }))
     );
-    assert_eq!(p.scene, Some(GlueScene::Human));
+    assert_eq!(p.scene, Some(stock_scene("Human")));
     assert!((p.yaw + 15f32.to_radians()).abs() < 1e-5, "{}", p.yaw);
 
     // Orc (the list's fifth), female, Hunter (the Orc list's second), one skin colour on.
@@ -4682,7 +4721,7 @@ fn the_stock_create_makes_the_character_and_selects_it() {
                 facial_hair: cycled.facial_hair,
             }))
     );
-    assert_eq!(p.scene, Some(GlueScene::Orc));
+    assert_eq!(p.scene, Some(stock_scene("Orc")));
     let fog = p.fog.expect("the create scene keeps its fog");
     assert_eq!((fog.near, fog.far), (0.0, 270.0));
 
