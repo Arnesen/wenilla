@@ -27,6 +27,13 @@ export WASI_SDK="${WASI_SDK:-$(pwd)/tools/wasi-sdk}"
 command -v wasm-bindgen >/dev/null || { echo "wasm-bindgen not found — run scripts/web-setup.sh" >&2; exit 1; }
 [ -d "${WASI_SDK}" ] || { echo "wasi-sdk not at ${WASI_SDK} — run scripts/web-setup.sh (or set WASI_SDK)" >&2; exit 1; }
 
+# wasm SIMD (simd128): glam's Vec3A/Vec4/Mat3A/Mat4/Quat, so Bevy's GlobalTransform (Affine3A),
+# Aabb and frustum math, switch to v128. Measured on glam 0.30's kernels under V8: transform
+# composition and frustum-vs-AABB 1.24-1.27x, rig slerp+Mat4 unchanged. Every WebGPU browser has
+# it (Chrome 91, Firefox 89, Safari 16.4). Not relaxed-simd: Safari only has it behind a flag, and
+# a module it cannot validate is a black screen. A target-scoped variable, so build scripts and
+# proc macros stay host code; set it yourself to override.
+export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="${CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS--C target-feature=+simd128}"
 cargo build --profile "${PROFILE}" --target wasm32-unknown-unknown -p wenilla --no-default-features --features "${BACKEND}"
 
 mkdir -p "${DIST}"
@@ -49,7 +56,7 @@ WASM_OPT="${WASM_OPT:-$(pwd)/tools/binaryen/bin/wasm-opt}"
 command -v "${WASM_OPT}" >/dev/null || WASM_OPT="$(command -v wasm-opt || true)"
 if [ -n "${WASM_OPT}" ] && [ "${WEB_DEBUG:-0}" != 1 ]; then
   "${WASM_OPT}" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
-    --enable-mutable-globals --enable-reference-types --enable-multivalue \
+    --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd \
     "${DIST}/wenilla_bg.wasm" -o "${DIST}/wenilla_bg.wasm.opt"
   mv "${DIST}/wenilla_bg.wasm.opt" "${DIST}/wenilla_bg.wasm"
 elif [ "${WEB_DEBUG:-0}" = 1 ]; then
