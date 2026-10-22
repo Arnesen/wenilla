@@ -73,6 +73,10 @@ pub(crate) struct QuestGiver {
     /// with a callback (`0x5017de`).
     panels: u64,
     panels_asked: u64,
+    /// The item records `GetQuestItemInfo`'s calls missed, one per call: the item cache's
+    /// callbacks `0x5018c0`, which outlive the panel and fire `QUEST_ITEM_UPDATE` when their
+    /// record lands (`0x5018fe`-`0x501903`), whatever the window shows then.
+    item_waits: Vec<u32>,
 }
 
 /// The greeting's pools, the available quests (`0xbdfe60`, its count `0xbe0834`) with each row's
@@ -207,6 +211,24 @@ impl QuestGiver {
         self.closing = None;
         self.view = None;
         self.pools = QuestPools::default();
+        self.item_waits.clear();
+    }
+
+    /// Spend the waits whose item record answered: how many brought a record, each its own
+    /// `QUEST_ITEM_UPDATE`; a refusal runs its callback with status 0, which fires nothing
+    /// (`0x5018d6`-`0x5018e0`).
+    fn item_answers(&mut self, items: &Items) -> usize {
+        let mut landed = 0;
+        self.item_waits.retain(|&entry| {
+            if !items.template_answered(entry) {
+                return true;
+            }
+            if items.template(entry, 0, Ask::Read).is_some() {
+                landed += 1;
+            }
+            false
+        });
+        landed
     }
 }
 
@@ -496,8 +518,9 @@ fn panel_event(panel: QuestPanel) -> &'static str {
     }
 }
 
-/// Push the quest view into the VM and fire its events: a panel's open event on a new panel,
-/// `QUEST_ITEM_UPDATE` on a content change. The close is the core's ([`close_core`]).
+/// Push the quest view into the VM and fire its events: a panel's event on each publish,
+/// `QUEST_ITEM_UPDATE` on each item record a `GetQuestItemInfo` call missed. The close is the
+/// core's ([`close_core`]).
 pub(crate) fn feed_quest(
     mut vm: crate::script_calls::VmWith<ResMut<'static, QuestGiver>>,
     objects: crate::net::Objects,
@@ -512,7 +535,6 @@ pub(crate) fn feed_quest(
     materials: Option<Res<crate::ui_item_text::PageMaterials>>,
     mut sink: MessageSink,
     mut last: crate::ui_script::WindowMemo<Option<QuestState>>,
-    mut last_name: crate::ui_script::WindowMemo<Option<String>>,
     mut closes: CoreCloses,
 ) {
     // The window is the host's too, so the feed reads and pushes it as an engine turn; the panel
@@ -522,10 +544,8 @@ pub(crate) fn feed_quest(
             return;
         };
         let last = last.get(script);
-        let last_name = last_name.get(script);
         if closes.since_last(script, NpcWindow::Quest) {
             *last = None;
-            *last_name = None;
         }
         if giver.take_completed_fanfare() {
             script.queue_sound_kit("QUESTCOMPLETED");
@@ -542,11 +562,12 @@ pub(crate) fn feed_quest(
         show_messages(script, &mut sink, "ui_quest", lines);
         let player = crate::npc_text::player_identity(&self_q, &names, unit_names.get());
         // A panel's publish, or a window this VM has not shown, is the stock frame's getter calls.
-        let ask = Ask::at(
-            last.is_none() || giver.panels != giver.panels_asked,
-            &commands,
-        );
+        let published = giver.panels != giver.panels_asked;
+        let ask = Ask::at(last.is_none() || published, &commands);
         giver.panels_asked = giver.panels;
+        let waits = script.take_quest_item_waits();
+        giver.item_waits.extend(waits);
+        let item_updates = giver.item_answers(&items);
         let fresh = snapshot(
             &giver,
             &items,
@@ -572,28 +593,28 @@ pub(crate) fn feed_quest(
             });
             st
         });
-        let npc_name = giver
-            .npc
-            .and_then(|g| names.resolve(&objects, g, ask).map(str::to_string));
-        let name_changed = *last_name != npc_name;
-        if fresh == *last && !name_changed {
-            return;
+        // The frame reads `UnitName("npc")` (`QuestFrame.lua:63`), which looks the name up with a
+        // callback (`0x5171b8`) at the panel's event; its landing fires nothing.
+        if let Some(g) = giver.npc {
+            let _ = names.resolve(&objects, g, ask);
         }
-        script.set_quest(fresh.clone());
-        // The panel events carry no argument: the frame reads `UnitName("npc")`
-        // (`QuestFrame.lua:63`). A close is the core's, which told the VM; a disconnect's clear
-        // tells it nothing.
-        if let Some(f) = &fresh {
-            let same_panel = last.as_ref().is_some_and(|l| l.panel == f.panel);
-            let event = if same_panel {
-                "QUEST_ITEM_UPDATE"
-            } else {
-                panel_event(f.panel)
-            };
-            fires.post(event, vec![]);
+        // Each panel setter fires its event at its end, every publish (`0x500ee5`, `0x50105d`,
+        // `0x501120`); a window this VM has not shown takes it too. No event carries an argument.
+        // A close is the core's, which told the VM; a disconnect's clear tells it nothing.
+        let shows = fresh
+            .as_ref()
+            .filter(|_| published || last.is_none())
+            .map(|f| f.panel);
+        if fresh != *last {
+            script.set_quest(fresh.clone());
+            *last = fresh;
         }
-        *last = fresh;
-        *last_name = npc_name;
+        if let Some(panel) = shows {
+            fires.post(panel_event(panel), vec![]);
+        }
+        for _ in 0..item_updates {
+            fires.post("QUEST_ITEM_UPDATE", vec![]);
+        }
     })
 }
 
@@ -1047,6 +1068,145 @@ mod tests {
         assert_eq!(
             ui_error_text(&UiError::key("ERR_QUEST_LOG_FULL"), &g).as_deref(),
             Some("Your quest log is full.")
+        );
+    }
+
+    /// `QUEST_ITEM_UPDATE` fires only in the item-cache callback `0x5018c0` (`0x501903`), and the
+    /// panel's event once per panel: the giver's name landing fires nothing.
+    #[test]
+    fn the_givers_name_landing_fires_no_quest_event() {
+        const GIVER: u64 = 0x10;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "SEEN = {} local f = CreateFrame('Frame') \
+                 for _, e in ipairs({'QUEST_GREETING', 'QUEST_ITEM_UPDATE'}) do \
+                 f:RegisterEvent(e) end \
+                 f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        open_panel(
+            app.world_mut(),
+            GIVER,
+            QuestView::Greeting(benilla_protocol::messages::QuestGiverList {
+                npc: GIVER,
+                greeting: "Greetings.".into(),
+                emote_delay: 0,
+                emote: 0,
+                quests: Vec::new(),
+            }),
+        );
+        // Registered once, so its memo lasts from run to run.
+        let feed = app.world_mut().register_system(feed_quest);
+        let tick = |app: &mut App| -> Vec<String> {
+            app.world_mut().run_system(feed).unwrap();
+            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            seen
+        };
+        assert_eq!(tick(&mut app), ["QUEST_GREETING"]);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(GIVER, "Giver".into(), None);
+        assert!(tick(&mut app).is_empty(), "a landed name fires nothing");
+    }
+
+    /// The feed over a headless client's world, registered once so its memo lasts from run to
+    /// run, and a VM that records the panel events in `SEEN`.
+    fn quest_app() -> (App, bevy::ecs::system::SystemId) {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "SEEN = {} local f = CreateFrame('Frame') \
+                 for _, e in ipairs({'QUEST_GREETING', 'QUEST_DETAIL', 'QUEST_PROGRESS', \
+                 'QUEST_COMPLETE', 'QUEST_ITEM_UPDATE'}) do f:RegisterEvent(e) end \
+                 f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let feed = app.world_mut().register_system(feed_quest);
+        (app, feed)
+    }
+
+    fn quest_tick(app: &mut App, feed: bevy::ecs::system::SystemId) -> Vec<String> {
+        app.world_mut().run_system(feed).unwrap();
+        let s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+        s.run("SEEN = {}").unwrap();
+        seen
+    }
+
+    fn offer(quest_id: u32, title: &str, choice: u32) -> QuestView {
+        QuestView::Detail(benilla_protocol::messages::QuestDetails {
+            npc: 0x10,
+            quest_id,
+            title: title.into(),
+            details: String::new(),
+            objectives: String::new(),
+            auto_finish: 0,
+            choices: vec![triple(choice)],
+            rewards: Vec::new(),
+            money: 0,
+            reward_spell: 0,
+        })
+    }
+
+    /// Each panel setter fires its event at its end, every time (`0x500ee5`, `0x50105d`,
+    /// `0x501120`): a second offer fires `QUEST_DETAIL` again, an identical one too.
+    /// `QUEST_ITEM_UPDATE` fires only from the callback `GetQuestItemInfo`'s lookup keeps
+    /// (`0x5017ce`), once per call, when the record lands (`0x5018fe`-`0x501903`); a record no
+    /// call asked for fires nothing.
+    #[test]
+    fn panel_events_fire_per_publish_and_item_updates_per_callback() {
+        let (mut app, feed) = quest_app();
+        let publish = |app: &mut App, view| open_panel(app.world_mut(), 0x10, view);
+        publish(&mut app, offer(100, "A Threat Within", 901));
+        assert_eq!(quest_tick(&mut app, feed), ["QUEST_DETAIL"]);
+        publish(&mut app, offer(101, "Kobold Camp Cleanup", 902));
+        assert_eq!(
+            quest_tick(&mut app, feed),
+            ["QUEST_DETAIL"],
+            "a second offer"
+        );
+        publish(&mut app, offer(101, "Kobold Camp Cleanup", 902));
+        assert_eq!(
+            quest_tick(&mut app, feed),
+            ["QUEST_DETAIL"],
+            "an identical one"
+        );
+
+        let land = |app: &mut App, entry| {
+            app.world_mut()
+                .resource_mut::<Items>()
+                .insert_template(entry, Some(crate::items::test_template("Sword")));
+        };
+        // No call asked for 902: its landing repaints in place and fires nothing.
+        land(&mut app, 902);
+        assert!(quest_tick(&mut app, feed).is_empty());
+
+        publish(&mut app, offer(102, "Westbrook Garrison", 903));
+        assert_eq!(quest_tick(&mut app, feed), ["QUEST_DETAIL"]);
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("GetQuestItemInfo('choice', 1) GetQuestItemInfo('choice', 1)")
+            .unwrap();
+        assert!(
+            quest_tick(&mut app, feed).is_empty(),
+            "the record is still out"
+        );
+        land(&mut app, 903);
+        assert_eq!(
+            quest_tick(&mut app, feed),
+            ["QUEST_ITEM_UPDATE", "QUEST_ITEM_UPDATE"],
+            "one per call"
+        );
+        assert!(
+            quest_tick(&mut app, feed).is_empty(),
+            "the callbacks are spent"
         );
     }
 }

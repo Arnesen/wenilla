@@ -511,8 +511,9 @@ fn category_maps_the_wire_state_byte() {
         category(trainer_spell_state::GRAY),
         TrainerServiceCategory::Used
     );
-    // An unexpected value is gated, never learnable.
-    assert_eq!(category(99), TrainerServiceCategory::Unavailable);
+    // The re-evaluator's 3 and any other byte name a bit no filter sets (`0x4d84ba`, `0x4da390`).
+    assert_eq!(category(3), TrainerServiceCategory::Hidden);
+    assert_eq!(category(10), TrainerServiceCategory::Hidden);
 }
 
 #[test]
@@ -1252,17 +1253,17 @@ fn every_list_packet_begins_a_window_session() {
     // A pending re-derivation never survives a list: the packet carries the server's own states.
     open.fresh_list = false;
     open.trigger_re_derive();
-    assert!(open.re_derive);
+    assert!(open.re_derive_owed());
     open.open(TRAINER, 0, list(), "Greetings".into());
     assert!(
-        !open.re_derive,
+        !open.re_derive_owed(),
         "a fresh list is the server's states — nothing pending against it"
     );
 
     // A trigger with no window open does nothing (`0x4d7d46`'s early-out).
     open.clear();
     open.trigger_re_derive();
-    assert!(!open.re_derive);
+    assert!(!open.re_derive_owed());
 }
 
 mod re_derive {
@@ -1634,6 +1635,89 @@ mod re_derive {
         assert_eq!(list[0].state, trainer_spell_state::GRAY);
         assert_eq!(list[1].state, trainer_spell_state::GREEN);
     }
+
+    /// A type-1 row re-derived to state 3 (`0x4d7e3e`) is listed under no filter: the filter map
+    /// `0x4da390` names bits 0-2 only, and the finalizer hides a row whose state bit is clear
+    /// (`0x4d84ba`). Its type string is still `"unavailable"` (`0x4d8ba0`).
+    #[test]
+    fn a_hidden_row_shows_under_no_filter() {
+        let mut app = super::feed_app(catalog(), skill_lines());
+        app.world_mut()
+            .resource_mut::<PlayerActions>()
+            .spells
+            .insert(RANK2);
+        app.world_mut().resource_mut::<TrainerOpen>().open(
+            0x10,
+            1,
+            vec![service(RANK1_WRAPPER)],
+            String::new(),
+        );
+        assert_eq!(super::tick(&mut app), ["TRAINER_SHOW"]);
+        let every_filter = "SetTrainerServiceTypeFilter('available', 1) \
+                            SetTrainerServiceTypeFilter('unavailable', 1) \
+                            SetTrainerServiceTypeFilter('used', 1) SEEN = {} \
+                            return GetNumTrainerServices()";
+        assert_eq!(
+            super::lua_count(&mut app, every_filter),
+            2,
+            "the server's red row and its header"
+        );
+        app.world_mut()
+            .resource_mut::<TrainerOpen>()
+            .trigger_re_derive();
+        assert_eq!(super::tick(&mut app), ["TRAINER_UPDATE"]);
+        assert_eq!(super::lua_count(&mut app, every_filter), 0);
+        let kinds = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .eval::<Vec<String>>(
+            "local out = {} local i = 1 while true do local _, _, t = GetTrainerServiceInfo(i) \
+             if t == nil then break end table.insert(out, t) i = i + 1 end return out",
+            )
+            .unwrap();
+        assert!(kinds.contains(&"unavailable".to_string()), "{kinds:?}");
+    }
+
+    /// The list files a row the server sent known into the known group, key -1 (`0x4d77e8`), and
+    /// the state pass writes -1 into every row it leaves known (`0x4d82b2`-`0x4d82c1`), never back:
+    /// a known row re-derived to learnable stays under the known header until the next list.
+    #[test]
+    fn a_row_keyed_known_keeps_the_key_until_the_next_list() {
+        let mut app = super::feed_app(catalog(), skill_lines());
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("KNOWN_TALENTS_HEADER = 'My Talents'")
+            .unwrap();
+        let mut known = service(RANK1_WRAPPER);
+        known.state = trainer_spell_state::GRAY;
+        let list = |app: &mut App, row: TrainerSpell| {
+            app.world_mut()
+                .resource_mut::<TrainerOpen>()
+                .open(0x10, 1, vec![row], String::new());
+        };
+        let header = |app: &mut App| -> String {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<String>(
+                    "SetTrainerServiceTypeFilter('all') SEEN = {} \
+                     return (GetTrainerServiceInfo(1))",
+                )
+                .unwrap()
+        };
+        list(&mut app, known);
+        assert_eq!(super::tick(&mut app), ["TRAINER_SHOW"]);
+        assert_eq!(header(&mut app), "My Talents");
+        // RANK1 is not in the book: the pass reads it learnable, and the key stays -1.
+        app.world_mut()
+            .resource_mut::<TrainerOpen>()
+            .trigger_re_derive();
+        assert_eq!(super::tick(&mut app), ["TRAINER_UPDATE"]);
+        assert_eq!(header(&mut app), "My Talents");
+        // The next list files it by its state again.
+        list(&mut app, service(RANK1_WRAPPER));
+        assert_eq!(super::tick(&mut app), ["TRAINER_SHOW"]);
+        assert_eq!(header(&mut app), "Skill 1");
+    }
 }
 
 /// A mistyped key yields an empty header, which [`probe_strings`] cannot catch. Skips without
@@ -1954,4 +2038,201 @@ fn the_trainer_rows_sort_only_at_a_list_and_a_re_derive() {
         carried, first,
         "the re-derive sorts from the order the list left"
     );
+}
+
+/// The real [`feed_trainer`] over a VM that records `TRAINER_SHOW` and `TRAINER_UPDATE` in
+/// `SEEN`, with `spells` and `lines` loaded.
+fn feed_app(spells: SpellCatalog, lines: SkillLineCatalog) -> App {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>()
+        .insert_resource(NetCommands(tx))
+        .init_resource::<TrainerOpen>()
+        .init_resource::<TrainerErrors>()
+        .init_resource::<TrainerTooltipSubjects>()
+        .init_resource::<PlayerActions>()
+        .init_resource::<Items>()
+        .init_resource::<NameCache>()
+        .init_resource::<GuidIndex>()
+        .init_resource::<crate::ui_pet::PetBar>()
+        .init_resource::<crate::spell::SpellModifiers>()
+        .insert_resource(Spells {
+            catalog: spells,
+            ..Spells::empty_for_tests()
+        })
+        .insert_resource(SkillLines { catalog: lines })
+        .add_systems(Update, feed_trainer);
+    let script = UiScript::new().unwrap();
+    script
+        .run(
+            "SEEN = {} local f = CreateFrame('Frame') f:RegisterEvent('TRAINER_SHOW') \
+             f:RegisterEvent('TRAINER_UPDATE') \
+             f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
+        )
+        .unwrap();
+    app.insert_non_send_resource(script);
+    app
+}
+
+/// One frame, then the trainer events the VM saw.
+fn tick(app: &mut App) -> Vec<String> {
+    app.update();
+    let s = app.world_mut().non_send_resource_mut::<UiScript>();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+    s.run("SEEN = {}").unwrap();
+    seen
+}
+
+/// `chunk`'s number.
+fn lua_count(app: &mut App, chunk: &str) -> i64 {
+    let s = app.world_mut().non_send_resource_mut::<UiScript>();
+    s.eval::<i64>(chunk).unwrap()
+}
+
+/// `chunk`'s list of numbers.
+fn lua_numbers(app: &mut App, chunk: &str) -> Vec<i64> {
+    let s = app.world_mut().non_send_resource_mut::<UiScript>();
+    s.eval::<Vec<i64>>(chunk).unwrap()
+}
+
+/// `TRAINER_SHOW` fires from the list builder alone (`0x4d7b73`), so the open trainer's second
+/// list fires it again; `TRAINER_UPDATE` from the state pass (`0x4d83f9`) and the mask commits
+/// (`0x4d8ca0`-`0x4d8ce0`) alone. The trainer's name landing fires neither.
+#[test]
+fn the_trainer_events_fire_only_from_their_producers() {
+    const TRAINER: u64 = 0x10;
+    let mut app = feed_app(
+        icon_catalog(),
+        benilla_formats::SkillLineCatalog::from_spell_lines([]),
+    );
+    let list = |app: &mut App| {
+        app.world_mut().resource_mut::<TrainerOpen>().open(
+            TRAINER,
+            TRAINER_TYPE_TRADESKILL,
+            vec![wire(301, trainer_spell_state::GREEN, 1, 1, 0)],
+            String::new(),
+        );
+    };
+    list(&mut app);
+    assert_eq!(tick(&mut app), ["TRAINER_SHOW"]);
+    app.world_mut()
+        .resource_mut::<NameCache>()
+        .insert_player(TRAINER, "Trainer".into(), None);
+    assert!(tick(&mut app).is_empty(), "a landed name fires nothing");
+    list(&mut app);
+    assert_eq!(tick(&mut app), ["TRAINER_SHOW"], "every list shows");
+    app.world_mut()
+        .resource_mut::<TrainerOpen>()
+        .trigger_re_derive();
+    assert_eq!(tick(&mut app), ["TRAINER_UPDATE"]);
+    assert!(tick(&mut app).is_empty());
+}
+
+/// The rows' order, each by its cost (a header as 0), over the whole array.
+fn costs(app: &mut App, rows: usize) -> Vec<i64> {
+    lua_numbers(
+        app,
+        &format!(
+            "local out = {{}} for i = 1, {rows} do out[i] = (GetTrainerServiceCost(i)) end \
+             return out"
+        ),
+    )
+}
+
+/// An item record that a getter's lookup missed lands: the callback that lookup registered
+/// (`0x4d9140` from `GetTrainerServiceIcon`, `0x4d907e`) runs the state pass `0x4d7d40`
+/// (`0x4d914a`), which re-derives, sorts from the order the last pass left and fires
+/// `TRAINER_UPDATE`. A record no getter call asked for runs nothing.
+#[test]
+fn an_item_record_a_getter_missed_runs_the_state_pass() {
+    const TRAINER: u64 = 0x10;
+    let open = |app: &mut App| {
+        // Wrapper 100's product, item 777, is asked for its icon; the rest have no record, so
+        // every row ties (`0x4d87cd`) and lands where the sort's history puts it.
+        let mut services = vec![wire(100, trainer_spell_state::GREEN, 5, 1, 0)];
+        services
+            .extend((1..=4).map(|cost| wire(300 + cost, trainer_spell_state::GREEN, cost, 1, 0)));
+        app.world_mut().resource_mut::<TrainerOpen>().open(
+            TRAINER,
+            TRAINER_TYPE_TRADESKILL,
+            services,
+            String::new(),
+        );
+    };
+    let land = |app: &mut App| {
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(777, Some(crate::items::test_template("Copper Shortsword")));
+    };
+
+    // No getter asked: the landing is silent and moves nothing.
+    let mut app = feed_app(
+        icon_catalog(),
+        benilla_formats::SkillLineCatalog::from_spell_lines([]),
+    );
+    open(&mut app);
+    assert_eq!(tick(&mut app), ["TRAINER_SHOW"]);
+    let listed = costs(&mut app, 6);
+    land(&mut app);
+    assert!(tick(&mut app).is_empty(), "no callback, no pass");
+    assert_eq!(costs(&mut app, 6), listed);
+
+    // The stock window's detail pane asks the row's icon: the landing runs the pass.
+    let mut app = feed_app(
+        icon_catalog(),
+        benilla_formats::SkillLineCatalog::from_spell_lines([]),
+    );
+    open(&mut app);
+    assert_eq!(tick(&mut app), ["TRAINER_SHOW"]);
+    assert_eq!(costs(&mut app, 6), listed);
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run("for i = 1, 6 do GetTrainerServiceIcon(i) end")
+        .unwrap();
+    assert!(tick(&mut app).is_empty(), "the record is still out");
+    land(&mut app);
+    assert_eq!(tick(&mut app), ["TRAINER_UPDATE"]);
+    assert_ne!(
+        costs(&mut app, 6),
+        listed,
+        "the pass sorts from the order the list left"
+    );
+    assert!(tick(&mut app).is_empty(), "the callback is spent");
+}
+
+/// `0x4d7d40` runs, and fires `TRAINER_UPDATE` (`0x4d83f9`), once per trigger: two triggers in
+/// one frame are two passes, and a record two getter calls missed is two callbacks (`0x4d907e`,
+/// dedupe flag 0), so two passes when it lands.
+#[test]
+fn the_state_pass_runs_once_per_trigger_and_per_callback() {
+    let mut app = feed_app(
+        icon_catalog(),
+        benilla_formats::SkillLineCatalog::from_spell_lines([]),
+    );
+    app.world_mut().resource_mut::<TrainerOpen>().open(
+        0x10,
+        TRAINER_TYPE_TRADESKILL,
+        vec![wire(100, trainer_spell_state::GREEN, 5, 1, 0)],
+        String::new(),
+    );
+    assert_eq!(tick(&mut app), ["TRAINER_SHOW"]);
+    {
+        let mut open = app.world_mut().resource_mut::<TrainerOpen>();
+        open.trigger_re_derive();
+        open.trigger_re_derive();
+    }
+    assert_eq!(tick(&mut app), ["TRAINER_UPDATE", "TRAINER_UPDATE"]);
+    assert!(tick(&mut app).is_empty());
+
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run("for i = 1, 2 do GetTrainerServiceIcon(i) end GetTrainerServiceIcon(2)")
+        .unwrap();
+    assert!(tick(&mut app).is_empty(), "the record is still out");
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(777, Some(crate::items::test_template("Copper Shortsword")));
+    assert_eq!(tick(&mut app), ["TRAINER_UPDATE", "TRAINER_UPDATE"]);
+    assert!(tick(&mut app).is_empty(), "the callbacks are spent");
 }
