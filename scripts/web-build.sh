@@ -4,7 +4,7 @@
 #
 #   scripts/web-build.sh            # WebGPU backend (the world needs it: storage buffers)
 #   WEB_BACKEND=webgl2 scripts/web-build.sh   # WebGL2: every browser, glue screens only
-#   WEB_PROFILE=ship scripts/web-build.sh    # compare fat LTO against the release default
+#   WEB_PROFILE=release scripts/web-build.sh # faster rebuilds than the fat-LTO `ship` default
 #   WEB_DEBUG=1 scripts/web-build.sh          # keep the wasm name section (symbolic stack traces)
 #
 # Then serve web/dist with wenilla-host:
@@ -16,7 +16,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DIST=web/dist
 BACKEND="${WEB_BACKEND:-webgpu}"
-PROFILE="${WEB_PROFILE:-release}"
+# `ship` (fat LTO, one codegen unit) by default: measured against `release` on the login screen,
+# ~3 % less CPU per frame and a 13 % smaller module (80 -> 70 MB), at ~2.5x the cold build time.
+# `WEB_PROFILE=release` for a faster edit-build loop.
+PROFILE="${WEB_PROFILE:-ship}"
 case "${PROFILE}" in
   release|ship) ;;
   *) echo "WEB_PROFILE must be release or ship" >&2; exit 1 ;;
