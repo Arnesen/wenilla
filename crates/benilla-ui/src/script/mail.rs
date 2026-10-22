@@ -921,20 +921,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // GetSendMailItem(): name, texture, stackCount, quality (`MailFrame.lua:511`). The reference
     // answers `nil, nil, 0, 0` both with nothing attached and before the template loads
-    // (`0x4ae590`). It answers quality -1 for an item whose InventoryType is 0 (`0x4ae6bf`); this
-    // answers the cached quality, or 0.
+    // (`0x4ae590`), and quality -1 for an item whose inventory type is 0 (`0x4ae6aa`,
+    // `0x4ae6bf`).
     g.set(
         "GetSendMailItem",
         lua.create_function(|lua, ()| {
             // A whole-stack pickup records no count, so the size comes from the source slot.
+            // The template's lookup (`0x4ae604`) misses with nothing to read (`0x4ae60e`).
             let item = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.mail_send_item.clone().map(|it| {
+                model.mail_send_item.clone().and_then(|it| {
+                    let template = model.item_templates.get(&it.item_id)?;
+                    let quality = match template.inventory_type {
+                        0 => -1,
+                        _ => i64::from(template.quality),
+                    };
                     let count = cursor::held_count(&model, &it);
-                    (it, count)
+                    Some((it, count, quality))
                 })
             };
-            let Some((it, count)) = item else {
+            let Some((it, count, quality)) = item else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
@@ -952,8 +958,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(t) => Value::String(lua.create_string(t)?),
                 None => Value::Nil,
             };
-            // A number on every path, as in the reference.
-            let quality = Value::Integer(i64::from(it.quality.unwrap_or(0)));
+            // The template's quality (`+0x1c`) for an item with an inventory type (`+0x2c`), else
+            // -1 (`0x4ae6aa`).
+            let quality = Value::Integer(quality);
             Ok(MultiValue::from_vec(vec![
                 name,
                 texture,
@@ -1976,11 +1983,20 @@ mod tests {
             quality: Some(1),
             equip_slots: Vec::new(),
         }));
+        // Its template, whose inventory type 0 reads quality -1 (`0x4ae6bf`).
+        s.set_item_template(
+            2589,
+            crate::script::ItemTemplateView {
+                name: "Linen Cloth".into(),
+                quality: 1,
+                ..Default::default()
+            },
+        );
         s.run("ClickSendMailItemButton()").unwrap();
         assert!(s.eval::<bool>("return not CursorHasItem()").unwrap());
         let (name, _tex, count, quality): (String, String, i64, i64) =
             s.eval("return GetSendMailItem()").unwrap();
-        assert_eq!((name.as_str(), count, quality), ("Linen Cloth", 7, 1));
+        assert_eq!((name.as_str(), count, quality), ("Linen Cloth", 7, -1));
 
         select_default_stationery(&mut s);
         s.run("SendMail('Alt', 'stuff', '')").unwrap();
@@ -1991,6 +2007,70 @@ mod tests {
         assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
         assert!(s
             .eval::<bool>("local n = GetSendMailItem()\nreturn n == nil")
+            .unwrap());
+    }
+
+    /// `GetSendMailItem` answers quality -1 for an attachment whose template's inventory type
+    /// (`+0x2c`) is 0, the template's quality (`+0x1c`) otherwise (`0x4ae6aa`, `0x4ae6bf`).
+    #[test]
+    fn an_attachment_of_inventory_type_zero_reads_quality_minus_one() {
+        use crate::script::cursor::CursorItem;
+        for (inventory_type, quality) in [(0, -1), (5, 1)] {
+            let mut s = kept();
+            s.set_item_template(
+                2589,
+                crate::script::ItemTemplateView {
+                    name: "Linen Cloth".into(),
+                    quality: 1,
+                    inventory_type,
+                    ..Default::default()
+                },
+            );
+            s.model_mut().mail_send_item = Some(CursorItem {
+                guid: 0x102,
+                bag: 0,
+                slot: 5,
+                item_id: 2589,
+                item_class: None,
+                texture: None,
+                link: Some("|cff...|Hitem:2589|h[Linen Cloth]|h|r".into()),
+                count: Some(1),
+                quality: Some(1),
+                equip_slots: Vec::new(),
+                bar_placeable: true,
+                consumable: false,
+            });
+            let (_, _, _, q): (String, Option<String>, i64, i64) =
+                s.eval("return GetSendMailItem()").unwrap();
+            assert_eq!(q, quality, "inventory type {inventory_type}");
+        }
+    }
+
+    /// With the attachment's template not cached, `GetSendMailItem` answers `nil, nil, 0, 0`
+    /// (`0x4ae60e` → `0x4ae6d1`), whatever the cursor knew.
+    #[test]
+    fn an_attachment_whose_template_is_not_cached_reads_nothing() {
+        use crate::script::cursor::CursorItem;
+        let s = kept();
+        s.model_mut().mail_send_item = Some(CursorItem {
+            guid: 0x102,
+            bag: 0,
+            slot: 5,
+            item_id: 2589,
+            item_class: None,
+            texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
+            link: Some("|cff...|Hitem:2589|h[Linen Cloth]|h|r".into()),
+            count: Some(1),
+            quality: Some(1),
+            equip_slots: Vec::new(),
+            bar_placeable: true,
+            consumable: false,
+        });
+        assert!(s
+            .eval::<bool>(
+                "local n, t, c, q = GetSendMailItem() \
+                 return n == nil and t == nil and c == 0 and q == 0"
+            )
             .unwrap());
     }
 
@@ -2206,6 +2286,15 @@ mod tests {
         use crate::script::tick::heard;
         let mut s = kept();
         s.set_container(0, Some(two_item_bag()));
+        for (id, name) in [(117, "Tough Jerky"), (118, "Minor Healing Potion")] {
+            s.set_item_template(
+                id,
+                crate::script::ItemTemplateView {
+                    name: name.into(),
+                    ..Default::default()
+                },
+            );
+        }
         install_kind_probe(&s);
         s.run("PickupContainerItem(0, 1) ClickSendMailItemButton() PickupContainerItem(0, 2)")
             .unwrap();

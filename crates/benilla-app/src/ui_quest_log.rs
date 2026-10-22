@@ -7,8 +7,9 @@
 //! reads two message queues and the engine's ask lists.
 //!
 //! The quest-update packets' toasts are shown from here: `SMSG_QUESTUPDATE_ADD_ITEM`,
-//! `_ADD_KILL` and `_COMPLETE`, each with its `QUEST_WATCH_UPDATE`. Abandons, shares and the
-//! slot watcher's accept line drain from here too.
+//! `_ADD_KILL` and `_COMPLETE`, each with its `QUEST_WATCH_UPDATE`, and the slot watcher's accept
+//! line drains from here too; abandons and shares send in their calls
+//! ([`crate::ui_quest::QuestVerbs`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -45,7 +46,7 @@ pub(crate) struct QuestLog {
     refused: Vec<u32>,
     /// The fold mask and the selected quest a dying VM left ([`fold_dying_vm_quest_folds`]),
     /// seated in the next.
-    folds: (HashSet<String>, Option<u32>),
+    folds: benilla_ui::script::QuestLogCarry,
     /// The quest-update toasts the handlers resolved, shown by the next feed.
     toasts: Vec<Toast>,
     /// `(quest id, item id, count)` pairs of an added item whose quest record was not cached, held
@@ -510,8 +511,6 @@ impl Plugin for UiQuestLogPlugin {
                         .in_set(crate::ui_unit::WorldEnterSeats),
                     // Before the script tick, so `QuestTimerFrame` reads this frame's clock.
                     feed_server_clock.in_set(UiFeed),
-                    drain_quest_log_abandons.in_set(crate::ui_script::UiDrain),
-                    drain_quest_log_pushes.in_set(crate::ui_script::UiDrain),
                 ),
             );
     }
@@ -625,6 +624,7 @@ fn record_view(t: &QuestTemplate, tables: &RecordTables) -> QuestRecordView {
         end_text: t.end_text.clone(),
         required_money,
         reward_money,
+        reward_money_max_level: t.money_max_level as i32,
         rewards: set(&t.rewards),
         choices: set(&t.choices),
         // Quest text arrives with its `$N`, `$B`, `$G` and `$<n>w` macros unexpanded.
@@ -719,31 +719,34 @@ pub(crate) struct QuestLogReads<'w, 's> {
 /// the held counts current when the bags or the slots moved, runs the item-change trigger
 /// (`0x4df7b0`) for each item notice that carries it, fires the callbacks whose records landed,
 /// and shows the quest-update toasts. An idle frame does none of it.
+#[allow(clippy::type_complexity)] // the VM beside the window its latch refreshes
 pub(crate) fn feed_quest_log(
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // The questgiver window is the host's too: the latch's refresh is bumped after the VM's run.
+    mut vm: ParamSet<(
+        crate::script_calls::HostedVm,
+        ResMut<crate::ui_quest::QuestGiver>,
+    )>,
     reads: QuestLogReads,
     mut quest_log: ResMut<QuestLog>,
     // The toasts are message-catalog rows, whose surface and sound the sink reads.
     mut sink: crate::ui_action::MessageSink,
     // The accept line's queue.
     mut quest_lines: ResMut<crate::ui_quest::QuestLines>,
-    // The latch's quest-giver refresh.
-    mut quest_giver: ResMut<crate::ui_quest::QuestGiver>,
     mut item_notices: MessageReader<ItemNotice>,
     // The notices still to fire this frame: the lanes' drain follows every feed.
     field_notices: Res<crate::field_watch::NoticeLane>,
     mut memo: Local<crate::ui_script::VmMemo<FeedMemo>>,
 ) {
-    hosted_vm.run(|script| {
+    let refreshes = vm.p0().run(|script| {
         let Some(script) = script else {
-            return;
+            return 0;
         };
         let memo = memo.get(script);
         let Some((store, guid)) = reads.self_q.iter().next() else {
             if memo.player.take().is_some() {
                 script.set_quest_log_player(false);
             }
-            return;
+            return 0;
         };
         let store = &store.0;
         let slots_moved = field_notices
@@ -925,10 +928,8 @@ pub(crate) fn feed_quest_log(
         for _ in 0..std::mem::take(&mut quest_log.faction_rank_moves) {
             script.quest_log_faction_rank_changed();
         }
-        // What the expiry latch owes the givers (`0x4df531`).
-        if script.take_quest_giver_refreshes() > 0 {
-            quest_giver.bump_reask();
-        }
+        // What the expiry latch owes the givers (`0x4df531`), bumped once the VM is free.
+        let refreshes = script.take_quest_giver_refreshes();
         // The update packets lead the object updates they report (vmangos `Player.cpp:10249`, and
         // the kill's counter `:14570` before `:14575`), so the toasts go first.
         if !quest_log.toasts.is_empty() {
@@ -938,7 +939,11 @@ pub(crate) fn feed_quest_log(
             script.quest_item_changed(entry);
         }
         script.flush_quest_log_refires();
-    })
+        refreshes
+    });
+    if refreshes > 0 {
+        vm.p1().bump_reask();
+    }
 }
 
 /// The quest-update toasts the handlers resolved, each its catalog row, then `QUEST_WATCH_UPDATE`
@@ -1027,39 +1032,6 @@ fn load_quest_tag_names(mut commands: Commands, assets: Option<Res<benilla_asset
     }
 }
 
-/// `QuestLogPushQuest()`: the quest id taken at the click goes out; the server finds the party.
-fn drain_quest_log_pushes(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        for quest in script.take_quest_log_pushes() {
-            debug!("ui_quest_log: sharing quest {quest} with the party");
-            let _ = commands.0.send(ClientCommand::PushQuestToParty { quest });
-        }
-    })
-}
-
-/// `AbandonQuest()`'s sends: the slot of the row the engine found for the marked quest
-/// (`0x4df070`).
-fn drain_quest_log_abandons(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        for slot in script.take_quest_log_abandons() {
-            debug!("ui_quest_log: abandon slot {slot}");
-            let _ = commands.0.send(ClientCommand::QuestlogRemove { slot });
-        }
-    })
-}
-
 /// Quest-log fixtures for a bare VM: records and slots seated as the feed seats them.
 #[cfg(test)]
 mod tests {
@@ -1093,10 +1065,13 @@ mod tests {
         std::array::from_fn(|_| obj(0, 0, 0, 0, ""))
     }
 
-    /// Quest `quest_id` in group 0, the reference's missing header, so it is row 2.
+    /// Quest `quest_id` in group 0, the reference's missing header, so it is row 2. Its level is
+    /// its id, so the rows sort in id order (`0x4decd9`), where one level and title would leave
+    /// them in `qsort`'s.
     fn quest_template(quest_id: u32, objectives: [QuestObjective; 4]) -> QuestTemplate {
         let mut t = crate::ui_quest::test_template(quest_id, "A Threat Within", 0);
         t.zone_or_sort = 0;
+        t.level = quest_id;
         t.objectives = objectives;
         t
     }
@@ -1235,7 +1210,7 @@ mod tests {
 
     // ── The feed over one player ────────────────────────────────────────────────────────────────
 
-    /// The feed, the quest log's field watcher and the abandon drain over one player, the script
+    /// The feed and the quest log's field watcher over one player, the script
     /// logging the quest events as `name:arg1`.
     struct Rig {
         app: App,
@@ -1277,7 +1252,6 @@ mod tests {
                 (
                     feed_quest_log,
                     crate::ui_unit::field_events::fire_field_notices,
-                    drain_quest_log_abandons,
                 )
                     .chain(),
             );
@@ -1878,16 +1852,13 @@ mod tests {
         // With the popup up, fold Z1: B moves to row 3 and C takes row 4.
         rig.script().run("CollapseQuestHeader(1)").unwrap();
         rig.frame();
+        // The call is kept for the test: the host sends its slot ([`crate::ui_quest::QuestVerbs`]).
+        rig.script().keep_calls();
         rig.script().run("AbandonQuest()").unwrap();
-        rig.frame();
-        let sent: Vec<_> = rig
-            .sent()
-            .into_iter()
-            .filter(|c| matches!(c, ClientCommand::QuestlogRemove { .. }))
-            .collect();
-        assert!(
-            matches!(sent.as_slice(), [ClientCommand::QuestlogRemove { slot: 1 }]),
-            "the abandon removes B's slot (1), never C's (2): {sent:?}"
+        assert_eq!(
+            rig.script().take_quest_log_abandons(),
+            [1],
+            "the abandon removes B's slot (1), never C's (2)"
         );
     }
 

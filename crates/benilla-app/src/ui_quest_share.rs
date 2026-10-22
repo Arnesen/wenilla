@@ -16,7 +16,7 @@ use benilla_ui::script::ScriptValue;
 use bevy::prelude::*;
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::NetCommands;
 use crate::query_cache::Ask;
 use crate::ui_action::{show_messages, ui_error_text, MessageSink, Shown, UiError};
 use crate::ui_script::UiFeed;
@@ -40,9 +40,6 @@ pub(crate) struct QuestShare {
     pending_confirm: Option<QuestConfirmAccept>,
     /// The held confirm's name has been looked up once, as its packet's: the frames after read.
     confirm_asked: bool,
-    /// The quest `ConfirmAcceptQuest()` answers, latched when the event fires: the verb takes no
-    /// argument (`StaticPopup.lua:731-733`), so it answers the last confirm asked.
-    confirm_quest: Option<u32>,
 }
 
 impl QuestShare {
@@ -67,7 +64,6 @@ impl QuestShare {
     pub(crate) fn clear_session(&mut self) {
         self.verdicts.clear();
         self.pending_confirm = None;
-        self.confirm_quest = None;
     }
 }
 
@@ -114,8 +110,15 @@ mod net {
         }
     }
 
-    fn on_confirm_accept(In(ev): In<SessionEvent>, mut share: ResMut<QuestShare>) {
+    fn on_confirm_accept(
+        In(ev): In<SessionEvent>,
+        mut share: ResMut<QuestShare>,
+        mut giver: ResMut<crate::ui_quest::QuestGiver>,
+    ) {
         if let SessionEvent::QuestConfirmAccept(c) = ev {
+            // The quest `ConfirmAcceptQuest` answers, written at the packet (`0x5019c7`) and
+            // never cleared.
+            giver.confirm = c.quest_id;
             quest_confirm_accept(c, &mut share);
         }
     }
@@ -145,26 +148,21 @@ mod net {
     }
 }
 
-/// Owns [`QuestShare`] and its two systems; nothing here is bound to the questgiver window.
+/// Owns [`QuestShare`] and its feed; nothing here is bound to the questgiver window.
 pub(crate) struct QuestSharePlugin;
 
 impl Plugin for QuestSharePlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        // Feed before the input pass, so a line shows the frame its packet lands; drain after
-        // it, so Yes goes out the frame it is clicked.
-        app.init_resource::<QuestShare>().add_systems(
-            Update,
-            (
-                feed_quest_share.in_set(UiFeed),
-                drain_quest_share.in_set(crate::ui_script::UiDrain),
-            ),
-        );
+        // Feed before the input pass, so a line shows the frame its packet lands; the popup's Yes
+        // sends in its call (`QuestCall::ConfirmAccept`).
+        app.init_resource::<QuestShare>()
+            .add_systems(Update, feed_quest_share.in_set(UiFeed));
     }
 }
 
 /// Resolves the queued names and shows what they unlock: verdict lines and `QUEST_ACCEPT_CONFIRM`.
-fn feed_quest_share(
+pub(crate) fn feed_quest_share(
     mut hosted_vm: crate::script_calls::HostedVm,
     mut share: ResMut<QuestShare>,
     names: Res<NameCache>,
@@ -225,33 +223,12 @@ fn feed_quest_share(
         if let Some(c) = share.pending_confirm.as_ref() {
             if let Some(name) = names.resolve_player(c.sender, ask).map(str::to_string) {
                 let title = c.title.clone();
-                share.confirm_quest = Some(c.quest_id);
                 share.pending_confirm = None;
                 script.fire_event(
                     "QUEST_ACCEPT_CONFIRM",
                     vec![ScriptValue::Str(name), ScriptValue::Str(title)],
                 );
             }
-        }
-    })
-}
-
-/// `ConfirmAcceptQuest()`, the popup's Yes, answered with the latched quest id.
-fn drain_quest_share(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    share: Res<QuestShare>,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        for _ in 0..script.take_quest_confirms() {
-            let Some(quest) = share.confirm_quest else {
-                debug!("ui_quest_share: ConfirmAcceptQuest with no confirm held — ignored");
-                continue;
-            };
-            let _ = commands.0.send(ClientCommand::QuestConfirmAccept { quest });
         }
     })
 }

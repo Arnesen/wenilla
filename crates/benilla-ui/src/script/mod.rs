@@ -281,7 +281,7 @@ pub use duel::DuelRequest;
 pub use follow::FollowRequest;
 pub use gm_survey::{GmSurveyTables, SurveyAnswerSend};
 pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
-pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
+pub use gossip::{GossipCall, GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
@@ -340,10 +340,10 @@ pub use party::{
 };
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{decorated_name, pvp_name_global_keys, HonorState, InspectHonorData, RankTitle};
-pub use quest::{
-    QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
+pub use quest::{QuestCall, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState};
+pub use quest_log::{
+    QuestLogCarry, QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS,
 };
-pub use quest_log::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
 pub(crate) use region::{
     apply_texture_name, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
     load_blend_mode, load_texture_file, load_texture_name, load_xml_font_file,

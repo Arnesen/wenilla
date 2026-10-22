@@ -50,10 +50,13 @@ fn on_worldport(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
     }
 }
 
-fn world_enter_reset(quest: &mut QuestGiver) {
+pub(super) fn world_enter_reset(quest: &mut QuestGiver) {
     quest.close_on_cancel = 0;
-    // The same reset zeroes the chosen reward (`0x500b15`).
+    // The same reset zeroes the chosen reward (`0x500b15`) and both pools (`0x500b21`-`0x500b5c`).
     quest.chosen_reward = 0;
+    quest.pools = super::QuestPools::default();
+    // And the panel kind (`0x500afc`).
+    quest.view = None;
 }
 
 fn on_giver_status(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {

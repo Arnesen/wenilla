@@ -184,9 +184,16 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "the quest lines",
     ),
     (
-        Row::Queue,
+        Row::HostHeld,
+        "::ui_gossip::GossipState",
+        "the gossip message's slots, which `feed_gossip` fires from; the gossip verbs, acting in \
+         their calls, hold it in the host",
+    ),
+    (
+        Row::HostHeld,
         "::ui_quest::QuestGiver",
-        "the quest giver's packets",
+        "the quest giver's packets, which `feed_quest` fires from; the quest verbs, acting in \
+         their calls, hold it in the host",
     ),
     (
         Row::Queue,
