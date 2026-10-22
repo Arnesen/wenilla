@@ -25,8 +25,8 @@ pub(crate) const BIND_WHEN_USE: u32 = 3;
 /// the same sender with `suppress` set, so a slot that changed under the dialog is re-judged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PendingEquip {
-    /// `EQUIP_BIND_CONFIRM`, in Lua space so the re-issue goes back through the move drain's own
-    /// sender, which re-derives the wire pair and takes the pending-op lock.
+    /// `EQUIP_BIND_CONFIRM`, in Lua space so the re-issue goes back through the move's own sender,
+    /// which re-derives the wire pair.
     Swap {
         src_bag: i64,
         src_slot: u32,
@@ -111,12 +111,13 @@ impl BindGate<'_> {
         let Some(fields) = objects.object(item_guid) else {
             return false;
         };
-        if crate::items::already_bound(fields, self.enchants.as_deref()) {
-            return false;
-        }
-        let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
+        let Some(entry) = fields.object_entry() else {
             return false;
         };
+        let flags = crate::items::record_flags(items, entry, item_guid);
+        if crate::items::already_bound(fields, flags, self.enchants.as_deref()) {
+            return false;
+        }
         let Some(t) = items.template(entry, item_guid, Ask::Read) else {
             return false;
         };
@@ -130,12 +131,13 @@ impl BindGate<'_> {
         let Some(fields) = objects.object(item_guid) else {
             return false;
         };
-        if crate::items::already_bound(fields, self.enchants.as_deref()) {
-            return false;
-        }
-        let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
+        let Some(entry) = fields.object_entry() else {
             return false;
         };
+        let flags = crate::items::record_flags(items, entry, item_guid);
+        if crate::items::already_bound(fields, flags, self.enchants.as_deref()) {
+            return false;
+        }
         items
             .template(entry, item_guid, Ask::Read)
             .is_some_and(|t| t.bonding == BIND_WHEN_USE)
