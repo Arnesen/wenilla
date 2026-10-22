@@ -15,8 +15,9 @@
 //! [`Scheduler`] keeps the same main-thread mix but:
 //! - queues short chunks ([`CHUNK_FRAMES`]) up to a target lead, refilled from every chunk's
 //!   `ended` (an audio event, so it keeps running in a background tab where timers are throttled);
-//! - adapts the lead: an underrun grows it (×1.5, up to [`MAX_LEAD_S`]); a quiet stretch walks it
-//!   back down one chunk at a time to the floor, so latency is only paid while the page is janky;
+//! - adapts the lead: an underrun grows it (×1.5, up to [`MAX_LEAD_S`]) unless the stall was
+//!   longer than any lead could cover; a quiet stretch walks it back down one chunk at a time to
+//!   the floor, so latency is only paid while the page is janky;
 //! - on an underrun, resyncs the cursor to just ahead of the playhead — one gap, never overlap;
 //! - reuses its `AudioBuffer`s (a pool refilled on `ended`) instead of allocating per chunk.
 //!
@@ -53,8 +54,12 @@ const MIN_LEAD_S: f64 = 0.08;
 const MAX_LEAD_S: f64 = 0.35;
 /// After an underrun, the first chunk starts this far ahead of the playhead.
 const RESYNC_MARGIN_S: f64 = 0.01;
-/// How long the queue must run without an underrun before the lead steps down one chunk.
-const DECAY_AFTER_S: f64 = 8.0;
+/// How long the queue must run without an underrun before the lead starts stepping down. Long
+/// enough to ride out world entry's streaming stalls, which come a few seconds apart.
+const DECAY_AFTER_S: f64 = 5.0;
+/// Then one chunk per this long: ceiling to floor in ~12 s. (One chunk per 8 s, as first shipped,
+/// left the lead at 230+ ms a minute after world entry, measured in-world.)
+const DECAY_STEP_S: f64 = 1.0;
 
 enum State {
     Empty,
@@ -120,8 +125,10 @@ struct Scheduler {
     cursor: f64,
     lead: f64,
     min_lead: f64,
-    /// Context time of the last underrun or lead step-down.
-    settled_since: f64,
+    /// Context time of the last underrun.
+    last_underrun: f64,
+    /// Context time of the last lead step-down.
+    last_step: f64,
     underruns: u32,
     interleaved: Vec<f32>,
     planar: Vec<f32>,
@@ -153,7 +160,8 @@ impl Scheduler {
             cursor: 0.0,
             lead: min_lead,
             min_lead,
-            settled_since: 0.0,
+            last_underrun: 0.0,
+            last_step: 0.0,
             underruns: 0,
             interleaved: vec![0.0; CHUNK_FRAMES * channels],
             planar: vec![0.0; CHUNK_FRAMES],
@@ -202,14 +210,23 @@ impl Scheduler {
         if self.cursor < now + RESYNC_MARGIN_S {
             if self.cursor > 0.0 {
                 self.underruns += 1;
-                self.lead = (self.lead * 1.5).min(MAX_LEAD_S);
+                // A stall no lead could have covered — world entry's loads, a hidden tab — says
+                // nothing about the lead being short; growing it would only add latency for the
+                // next minute. Grow only when the stall was within reach of the ceiling.
+                let stall = self.lead + (now - self.cursor);
+                if stall <= MAX_LEAD_S {
+                    self.lead = (self.lead * 1.5).min(MAX_LEAD_S);
+                }
                 self.publish();
             }
             self.cursor = now + RESYNC_MARGIN_S;
-            self.settled_since = now;
-        } else if self.lead > self.min_lead && now - self.settled_since > DECAY_AFTER_S {
+            self.last_underrun = now;
+        } else if self.lead > self.min_lead
+            && now - self.last_underrun > DECAY_AFTER_S
+            && now - self.last_step > DECAY_STEP_S
+        {
             self.lead = (self.lead - self.step).max(self.min_lead);
-            self.settled_since = now;
+            self.last_step = now;
             self.publish();
         }
         while self.cursor < now + self.lead {
