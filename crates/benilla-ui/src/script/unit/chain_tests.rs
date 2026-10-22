@@ -209,10 +209,66 @@ fn a_token_without_a_hop_still_reads_its_own_push() {
         "Pia"
     );
     // And the entry is dropped with `None`.
-    s.set_unit_by_guid(P1, None);
+    s.set_unit_by_guid(MOB, None);
     assert!(eval::<bool>(
         &s,
-        r#"return UnitName("targettarget") == nil"#
+        r#"return UnitName("playertarget") == nil"#
+    ));
+}
+
+/// A chain end with no object answers as its group row's own token does, which carries the
+/// records the getters read without the object (`0x496400`, `0x496420`) and the roster's
+/// `UnitExists` (`0x491900`); a held end reads its own snapshot, and an end off the roster its
+/// own entry.
+#[test]
+fn an_unheld_end_on_the_roster_reads_its_rows_push() {
+    let mut s = world();
+    let row = UnitState {
+        exists: true,
+        guid: P1,
+        name: Some("Pia".into()),
+        health: 640,
+        ..Default::default()
+    };
+    let cached = |guid: u64, name: &str| UnitState {
+        guid,
+        name: Some(name.into()),
+        ..Default::default()
+    };
+    s.set_unit("party1", Some(row));
+    // `MOB` targets party1. Held, its own snapshot answers.
+    assert_eq!(eval::<i64>(&s, r#"return UnitHealth("targettarget")"#), 800);
+    assert!(eval::<bool>(
+        &s,
+        r#"return UnitIsVisible("targettarget") == 1"#
+    ));
+    // Out of view: the app's no-object entry loses to the row's push.
+    s.set_unit_by_guid(P1, Some(cached(P1, "Cached")));
+    assert_eq!(eval::<i64>(&s, r#"return UnitHealth("targettarget")"#), 640);
+    assert_eq!(
+        eval::<String>(&s, r#"return UnitName("targettarget")"#),
+        "Pia"
+    );
+    assert!(eval::<bool>(
+        &s,
+        r#"return UnitExists("targettarget") == 1"#
+    ));
+    assert!(eval::<bool>(
+        &s,
+        r#"return UnitIsVisible("targettarget") == nil"#
+    ));
+    // So does no entry at all.
+    s.set_unit_by_guid(P1, None);
+    assert_eq!(eval::<i64>(&s, r#"return UnitHealth("targettarget")"#), 640);
+    // `BOSS` targets `GONE`, off the roster: its own entry, a name and no unit.
+    s.set_unit_by_guid(GONE, Some(cached(GONE, "Gone")));
+    assert_eq!(
+        eval::<String>(&s, r#"return UnitName("party1targettarget")"#),
+        "Gone"
+    );
+    assert!(eval::<bool>(
+        &s,
+        r#"return UnitExists("party1targettarget") == nil"#
     ));
 }
 
@@ -324,4 +380,39 @@ fn spell_can_target_unit_raises_as_the_resolver_and_the_gate_do() {
     ] {
         assert!(err(chunk).contains("Unknown unit name"), "{chunk}");
     }
+}
+
+/// `UnitIsUnit` (`0x516070`) compares the two strings without regard to case first (`SStrCmpI`,
+/// `0x5160c4`) and answers 1 on a match (`0x5160cd`), before either is resolved: no unit, an
+/// unknown token and a number's text all match themselves. Only unequal strings resolve
+/// (`0x5160e8`, `0x5160f4`), and a shared nonzero GUID answers 1 (`0x516100`), held or not.
+#[test]
+fn unit_is_unit_matches_the_strings_before_it_resolves_them() {
+    let bare = UiScript::new().unwrap();
+    assert!(eval::<bool>(
+        &bare,
+        r#"return UnitIsUnit("target", "target") == 1"#
+    ));
+    let mut s = world();
+    // The unit nobody holds, as the chain feed pushes it: its guid and no object.
+    s.set_unit_by_guid(
+        GONE,
+        Some(UnitState {
+            guid: GONE,
+            ..Default::default()
+        }),
+    );
+    for chunk in [
+        r#"return UnitIsUnit("focus", "focus") == 1"#,
+        r#"return UnitIsUnit("Party1Target", "PARTY1TARGET") == 1"#,
+        r#"return UnitIsUnit("", "") == 1"#,
+        r#"return UnitIsUnit(1, "1") == 1"#,
+        // Two chains ending on the unit nobody holds share its guid.
+        r#"return UnitIsUnit("party1targettarget", "targettargettargettarget") == 1"#,
+        r#"return UnitIsUnit("party1target", "targettarget") == nil"#,
+    ] {
+        assert!(eval::<bool>(&s, chunk), "{chunk}");
+    }
+    // Unequal strings resolve, so an unknown one raises.
+    assert!(s.run(r#"UnitIsUnit("focus", "target")"#).is_err());
 }

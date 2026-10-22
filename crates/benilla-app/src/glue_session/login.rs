@@ -422,42 +422,6 @@ fn debug_login_shot(
     *done = true;
 }
 
-// ── The saved account name ───────────────────────────────────────────────────────────────────────
-
-/// Read the saved account name at `path`; a missing file reads empty.
-fn load_saved_account_from(path: &std::path::Path) -> String {
-    crate::local_state::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
-/// Write (or, for an empty name, remove) the saved account name at `path`.
-fn save_account_to(path: &std::path::Path, name: &str) {
-    if name.is_empty() {
-        let _ = crate::local_state::remove_file(path);
-        return;
-    }
-    // Through `write_atomic` like every other resident of the folder: that is what makes the
-    // page's store (localStorage) hold this file too.
-    if let Err(e) = crate::local_state::write_atomic(path, name) {
-        warn!("login: saving account name failed: {e}");
-    }
-}
-
-/// `GetSavedAccountName`, at [`crate::local_state`]'s path.
-pub(crate) fn load_saved_account() -> String {
-    crate::local_state::saved_account_path()
-        .map(|p| load_saved_account_from(&p))
-        .unwrap_or_default()
-}
-
-/// `SetSavedAccountName`; empty clears.
-pub(crate) fn save_account(name: &str) {
-    if let Some(path) = crate::local_state::saved_account_path() {
-        save_account_to(&path, name);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,25 +768,5 @@ mod tests {
             !refusal_exits(true),
             "a password typed at the screen is attended by direct evidence — dialog, another go",
         );
-    }
-
-    /// Save, load and clear round-trip through the file (`Get`/`SetSavedAccountName`).
-    #[test]
-    fn saved_account_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "benilla-login-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let path = dir.join("account");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(load_saved_account_from(&path), "");
-        // The write creates the folder, as a first run must.
-        save_account_to(&path, "PLAYER");
-        assert_eq!(load_saved_account_from(&path), "PLAYER");
-        save_account_to(&path, "");
-        assert_eq!(load_saved_account_from(&path), "");
-        assert!(!path.exists(), "clearing the name removes the file");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -16,6 +16,7 @@ fn clip(anim_id: u16, move_speed: f32) -> AnimClip {
         anim_id,
         seq_index: 0,
         node: AnimationNodeIndex::new(0),
+        blend_node: None,
         looping: true,
         duration: 1.0,
         move_speed,
@@ -480,9 +481,8 @@ fn ranged_load_idle_selects_by_weapon_and_ranks_below_ready() {
 }
 
 /// `0x5fd460` claims the drawn ranged idle ([`ranged_idle_gate`]) on the ranged sheath
-/// (`cmp [+0xd40],2`) and the local auto-repeat bit `0x200` (`test ah,0x2`) alone. The any-caster
-/// hold `0x400` is tested only by `0x5fc3f0`'s Hold sustain: one Serpent Sting sets it and no
-/// volley end clears it, so admitting it would leave a shooter aiming.
+/// (`cmp [+0xd40],2`) and the local auto-repeat bit `0x200` (`test ah,0x2`) alone. The precast
+/// bit `0x400` is tested only by `0x5fc3f0`'s Hold sustain.
 #[test]
 fn the_ranged_idle_is_entered_by_the_auto_repeat_bit_and_the_ranged_sheath_alone() {
     assert!(ranged_idle_gate(true, Some(2)));

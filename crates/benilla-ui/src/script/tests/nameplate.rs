@@ -48,7 +48,7 @@ fn plate(name: &str, health: f32, max: f32) -> PlateState {
         skull: false,
         level_colour: [1.0, 1.0, 0.0],
         raid_icon: None,
-        alpha: 1.0,
+        alpha: 255,
         lit: false,
         hovered: false,
     }
@@ -278,8 +278,8 @@ fn the_target_plate_is_the_opaque_one() {
     let mut s = vm();
     let mut target = plate("Wolf", 30.0, 40.0);
     let mut other = plate("Bear", 10.0, 90.0);
-    target.alpha = 1.0;
-    other.alpha = 0.5;
+    target.alpha = 255;
+    other.alpha = 127;
     drive(&mut s, &[target, other]);
     assert!(s
         .eval::<bool>(
@@ -307,12 +307,20 @@ fn an_engine_health_write_fires_onvaluechanged_with_the_plate_as_parent() {
     "#,
     )
     .unwrap();
+    // The watcher (`0x7cc570`) sets the range, which re-fires the held value, then the value.
     drive(&mut s, &[plate("Wolf", 12.0, 40.0)]);
-    assert_eq!(s.eval::<i64>("return Fired").unwrap(), 1);
+    assert_eq!(s.eval::<i64>("return Fired").unwrap(), 2);
     assert!(s.eval::<bool>("return ParentIsPlate").unwrap());
-    // Unmoved health fires nothing: the driver writes only what changed.
+    // Unmoved health fires nothing: a watcher runs only on a changed field.
     drive(&mut s, &[plate("Wolf", 12.0, 40.0)]);
-    assert_eq!(s.eval::<i64>("return Fired").unwrap(), 1);
+    assert_eq!(s.eval::<i64>("return Fired").unwrap(), 2);
+    // Health and maximum both moved: one watcher each, the range fire twice, the value once.
+    drive(&mut s, &[plate("Wolf", 20.0, 50.0)]);
+    assert_eq!(s.eval::<i64>("return Fired").unwrap(), 5);
+    // The maximum alone moved: its watcher (field `0x58`) runs once, the range re-firing the held
+    // value, and the equal value stores nothing.
+    drive(&mut s, &[plate("Wolf", 20.0, 60.0)]);
+    assert_eq!(s.eval::<i64>("return Fired").unwrap(), 6);
 }
 
 /// The driver writes a plate's static properties once, at creation, so an addon's takeover (pfUI
@@ -1150,4 +1158,38 @@ fn a_global_index_metamethod_may_touch_the_model_during_a_plates_font_lookup() {
     );
     assert_eq!(s.eval::<i64>("return hits").unwrap(), 4);
     assert!(s.take_errors().is_empty());
+}
+
+/// The fill is a bar texture like any other (`0x7cb329` → `0x783140`), so it cuts its drawn rect
+/// to the health: 40, 20 and 10 of 40 draw it whole, half and a quarter as wide.
+#[test]
+fn the_plates_fill_shrinks_with_health() {
+    use crate::script::QuadContent;
+    let mut s = vm();
+    let fill_width = |s: &mut UiScript| {
+        s.extract()
+            .iter()
+            .find_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. } if p.contains("BarFill") => {
+                    q.rect.map(|r| r.right - r.left)
+                }
+                _ => None,
+            })
+            .expect("a drawn fill")
+    };
+    drive(&mut s, &[plate("Wolf", 40.0, 40.0)]);
+    s.tick(0.0);
+    assert!(s
+        .eval::<bool>(
+            "return WorldFrame:GetChildren():GetChildren():GetStatusBarTexture()\
+             :GetTexCoordModifiesRect() == 1"
+        )
+        .unwrap());
+    let whole = fill_width(&mut s);
+    assert!(whole > 0.0);
+    for (health, part) in [(20.0, 0.5), (10.0, 0.25)] {
+        drive(&mut s, &[plate("Wolf", health, 40.0)]);
+        s.tick(0.0);
+        crate::assert_near!(fill_width(&mut s), whole * part);
+    }
 }

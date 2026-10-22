@@ -158,6 +158,41 @@ fn blizzard_is_no_frame_strata() {
     assert!(crate::script::object::strata_from_str("tooltip").is_some());
 }
 
+/// The strata, draw-layer and frame-type lookups compare the whole string with `SStrCmpI`
+/// (`0x6f17ee`, `0x6f18ce`, `0x6ee32c`): case is folded, padding is not trimmed.
+#[test]
+fn a_padded_strata_layer_or_type_name_misses() {
+    let s = script();
+    s.run(r#"f = CreateFrame("Frame", "PadProbe") t = f:CreateTexture("PadProbeT", "ARTWORK")"#)
+        .unwrap();
+    for (call, want) in [
+        (
+            r#"f:SetFrameStrata(" HIGH")"#,
+            "PadProbe:SetFrameStrata(): Unknown frame strata:  HIGH",
+        ),
+        (
+            r#"f:SetFrameStrata("HIGH ")"#,
+            "PadProbe:SetFrameStrata(): Unknown frame strata: HIGH ",
+        ),
+        (
+            r#"t:SetDrawLayer(" OVERLAY")"#,
+            r#"Usage: PadProbeT:SetDrawLayer("layer")"#,
+        ),
+        (r#"CreateFrame("Frame ")"#, "Unknown frame type 'Frame '"),
+    ] {
+        let e = s.run(call).expect_err(call).to_string();
+        assert!(e.contains(want), "{call}: {e}");
+    }
+    s.run(r#"f:SetFrameStrata("high") t:SetDrawLayer("overlay")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<(String, String)>("return f:GetFrameStrata(), t:GetDrawLayer()")
+            .unwrap(),
+        ("HIGH".to_string(), "OVERLAY".to_string()),
+        "case is folded"
+    );
+}
+
 /// `SetDrawLayer` (`0x79a780`) reads the layer name alone against the five-row table (`0x811a80`):
 /// a third argument orders nothing, and a name off the table raises the Usage line (`0x87c42c`).
 #[test]
@@ -332,7 +367,11 @@ fn region_shadow_accessors_round_trip_four_values() {
     let (r, g, b, a) = s
         .eval::<(f32, f32, f32, f32)>("return SHFText:GetShadowColor()")
         .unwrap();
-    assert_eq!((r, g, b, a), (0.0, 0.0, 0.0, 0.3), "the alpha survives");
+    assert_eq!(
+        (r, g, b, a),
+        (0.0, 0.0, 0.0, crate::color::quant::read32(0.3)),
+        "the alpha survives"
+    );
     assert_eq!(
         s.eval::<(f32, f32)>("return SHFText:GetShadowOffset()")
             .unwrap(),
@@ -343,7 +382,7 @@ fn region_shadow_accessors_round_trip_four_values() {
     assert_eq!(
         s.eval::<f32>("local _,_,_,a = SHFText:GetShadowColor() return a")
             .unwrap(),
-        0.3,
+        crate::color::quant::read32(0.3),
         "setting the offset alone keeps the colour"
     );
 }
@@ -381,7 +420,7 @@ fn region_set_parent_relinks_the_draw_owner_and_leaves_anchors_alone() {
     s.resolve();
     // A is [bottom 0, left 0, top 50, right 100]: TOPLEFT +(4,-4), 24x24 ⇒ 4..28 x 22..46.
     let before = tex_rect(&s, "SPGlow").expect("the spark draws under A");
-    assert_eq!(before, crate::layout::Rect::new(22.0, 4.0, 46.0, 28.0));
+    crate::assert_near!(before, crate::layout::Rect::new(22.0, 4.0, 46.0, 28.0));
 
     assert_eq!(
         s.arity("Spark:SetParent(B)").unwrap(),
@@ -487,7 +526,7 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
     assert_eq!(
         s.eval::<String>("local _, _, flags = SFBare:GetFont() return flags")
             .unwrap(),
-        "THICKOUTLINE"
+        "OUTLINE, THICKOUTLINE"
     );
     // Both arguments are required (`lua_isstring` + `lua_isnumber`, else the usage error).
     assert!(s.run(r#"SFBare:SetFont("Fonts\\SKURRI.TTF")"#).is_err());
@@ -690,7 +729,7 @@ fn editbox_font_block_return_shapes_are_the_shared_implementations() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return EBShape:GetShadowColor()")
             .unwrap(),
-        (0.0, 0.0, 0.0, 0.3)
+        (0.0, 0.0, 0.0, crate::color::quant::read32(0.3))
     );
     assert_eq!(
         s.eval::<(f32, f32)>("return EBShape:GetShadowOffset()")
@@ -738,7 +777,14 @@ fn the_dewdrop_editbox_font_shape_resolves_and_paints() {
     let (r, g, b, _) = s
         .eval::<(f32, f32, f32, f32)>("return DewdropEBFrame.editBox:GetTextColor()")
         .unwrap();
-    assert_eq!((r, g, b), (0.9, 0.9, 0.9));
+    assert_eq!(
+        (r, g, b),
+        (
+            crate::color::quant::read32(0.9),
+            crate::color::quant::read32(0.9),
+            crate::color::quant::read32(0.9)
+        )
+    );
 
     // `AceGUIWidget-Slider.lua:204-210` ends the same shape with this.
     s.run(r#"DewdropEBFrame.editBox:SetJustifyH("CENTER")"#)
@@ -880,7 +926,12 @@ fn set_desaturated_reports_shader_support_and_does_not_raise() {
         .eval::<(f32, f32, f32)>("return DsTex:GetVertexColor()")
         .unwrap();
     assert!(
-        (r - 0.65).abs() < 1e-6 && (g - 0.65).abs() < 1e-6 && (b - 0.65).abs() < 1e-6,
+        (r, g, b)
+            == (
+                crate::color::quant::read32(0.65),
+                crate::color::quant::read32(0.65),
+                crate::color::quant::read32(0.65)
+            ),
         "the shader arm keeps the caller's tint, got {r},{g},{b}"
     );
 

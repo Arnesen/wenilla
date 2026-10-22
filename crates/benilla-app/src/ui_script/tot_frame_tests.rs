@@ -32,6 +32,7 @@ fn unit(name: &str, guid: u64, health: u32) -> UnitState {
 /// already allows the frame.
 fn load_tot() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -96,6 +97,7 @@ fn debuff(spell_id: u32, name: &str, debuff_type: Option<&str>) -> AuraState {
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count: 1,
+        level: 0,
         debuff_type: debuff_type.map(str::to_string),
         // Only auras on the player carry a duration on the wire (vmangos `SpellAuras.cpp:7516`).
         duration: 0.0,
@@ -104,6 +106,7 @@ fn debuff(spell_id: u32, name: &str, debuff_type: Option<&str>) -> AuraState {
         cancelable: false,
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }
 }
 
@@ -354,7 +357,11 @@ fn the_portrait_tints_with_a_players_state_and_never_a_creatures() {
     let (r, g, b) = s
         .eval::<(f64, f64, f64)>("return TargetofTargetPortrait:GetVertexColor()")
         .unwrap();
-    assert_eq!((r, g, b), (1.0, 0.0, 0.0), "a player under a fifth: red");
+    assert_eq!(
+        (r, g, b),
+        (benilla_ui::color::quant::read(1.0), 0.0, 0.0),
+        "a player under a fifth: red"
+    );
 
     let mut healthy = unit("Tri", 0x100, 90);
     healthy.is_player = true;
@@ -363,7 +370,8 @@ fn the_portrait_tints_with_a_players_state_and_never_a_creatures() {
     let (r, g, b) = s
         .eval::<(f64, f64, f64)>("return TargetofTargetPortrait:GetVertexColor()")
         .unwrap();
-    assert_eq!((r, g, b), (1.0, 1.0, 1.0), "and white again");
+    let one = benilla_ui::color::quant::read(1.0);
+    assert_eq!((r, g, b), (one, one, one), "and white again");
 
     // A creature at 15%: the check returns before touching the tint.
     s.set_unit("targettarget", Some(unit("Kobold", 0x500, 15)));
@@ -371,7 +379,7 @@ fn the_portrait_tints_with_a_players_state_and_never_a_creatures() {
     let (r, g, b) = s
         .eval::<(f64, f64, f64)>("return TargetofTargetPortrait:GetVertexColor()")
         .unwrap();
-    assert_eq!((r, g, b), (1.0, 1.0, 1.0), "creatures carry no reading");
+    assert_eq!((r, g, b), (one, one, one), "creatures carry no reading");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -403,10 +411,13 @@ fn the_debuff_row_draws_what_the_unit_carries() {
     s.set_unit_guids(&unit_guids());
     s.set_unit_auras(
         TOT,
-        Some(vec![
-            debuff(1000, "Rend", None),
-            debuff(1001, "Curse of Agony", Some("Curse")),
-        ]),
+        Some(
+            vec![
+                debuff(1000, "Rend", None),
+                debuff(1001, "Curse of Agony", Some("Curse")),
+            ]
+            .into(),
+        ),
     );
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("targettarget".into())]);
     s.tick(0.016);
@@ -437,7 +448,7 @@ fn the_target_rows_wrap_short_while_the_frame_stands_beside_them() {
     let mut s = load_tot();
     // A hostile target, so the debuffs lead and the buffs hang off them.
     s.set_unit_guids(&unit_guids());
-    s.set_unit_auras(TARGET, Some(vec![debuff(2000, "Sunder", None)]));
+    s.set_unit_auras(TARGET, Some(vec![debuff(2000, "Sunder", None)].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
 
     let anchor = |s: &mut UiScript, frame: &str| -> String {

@@ -54,15 +54,15 @@ fn blocks(s: &UiScript, name: &str) -> Vec<Blk> {
                         .position(|id| *id == Some(a.relative_to))
                         .map_or(Rel::Other, Rel::Block)
                 };
-                (a.point, a.relative_point, a.x_off, a.y_off, rel)
+                (a.point, a.relative_point, a.x_off.raw(), a.y_off.raw(), rel)
             });
             Blk {
                 text: d.text.clone(),
                 texture: d.tex.path().clone(),
                 justify_h: d.justify.name_h(),
                 font: d.font_path.clone(),
-                font_height: d.font_height,
-                size: d.size,
+                font_height: d.font_height.map(crate::layout::Len::raw),
+                size: d.size.map(|(w, h)| (w.raw(), h.raw())),
                 anchor,
             }
             .tap_kind(kind)
@@ -203,7 +203,7 @@ fn blocks_chain_bottom_to_top_and_are_flush_at_spacing_zero() {
     // The frame top is the screen top, 600; three 16 px lines run down to 552.
     measure_at_16px(&mut s);
     let tops = resolved_tops(&s, "Page");
-    assert_eq!(tops, [(600.0, 584.0), (584.0, 568.0), (568.0, 552.0)]);
+    crate::assert_near!(tops, vec![(600.0, 584.0), (584.0, 568.0), (568.0, 552.0)]);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -249,9 +249,9 @@ fn a_body_level_br_is_exactly_one_blank_line() {
         .unwrap();
     assert_eq!(texts(&s, "Page"), ["a", "\n", "b"]);
     measure_at_16px(&mut s);
-    assert_eq!(
+    crate::assert_near!(
         resolved_tops(&s, "Page"),
-        [(600.0, 584.0), (584.0, 568.0), (568.0, 552.0)],
+        vec![(600.0, 584.0), (584.0, 568.0), (568.0, 552.0)],
         "the BR block is one line tall and pushes `b` down by exactly that"
     );
 }
@@ -395,7 +395,7 @@ fn the_page_text_body_renders_the_block_list_a_reader_would_draw() {
     measure_at_16px(&mut s);
     let tops = resolved_tops(&s, "Page");
     assert_eq!(tops.first(), Some(&(600.0, 584.0)));
-    assert_eq!(tops.last(), Some(&(536.0, 520.0)));
+    crate::assert_near!(tops.last(), Some(&(536.0, 520.0)));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -556,7 +556,7 @@ fn the_books_unsized_crest_is_its_arts_texel_square_not_the_whole_page() {
     );
 
     let rect = resolved_rect(&s, "Page", img);
-    assert_eq!(
+    crate::assert_near!(
         (rect.right - rect.left, rect.top - rect.bottom),
         (128.0, 128.0),
         "a texel is a FrameXML unit: the 128x128 crest is a 128-unit square, not the page"
@@ -719,8 +719,8 @@ fn the_hyperlink_format_shapes_the_a_splice() {
         .unwrap();
     assert_eq!(texts(&s, "Page"), ["see |cff33ff99|Hitem:1|h[this]|h|r"]);
 
-    // A non-string argument raises the reference's usage string.
-    assert!(s.run("Page:SetHyperlinkFormat(7)").is_err());
+    // A value `lua_isstring` refuses raises the reference's usage line (`0x796bcc`).
+    assert!(s.run("Page:SetHyperlinkFormat({})").is_err());
 }
 
 #[test]
@@ -739,13 +739,25 @@ fn the_paint_setters_land_on_the_element_and_reach_the_next_parse() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return Page:GetTextColor(\"H1\")")
             .unwrap(),
-        (1.0, 0.0, 0.0, 1.0)
+        (
+            crate::color::quant::read32(1.0),
+            0.0,
+            0.0,
+            crate::color::quant::read32(1.0)
+        )
     );
     // `P` keeps the font object's colour: the element argument scoped the write.
     let (r, g, b, _) = s
         .eval::<(f32, f32, f32, f32)>("return Page:GetTextColor(\"P\")")
         .unwrap();
-    assert_eq!((r, g, b), (0.18, 0.12, 0.06));
+    assert_eq!(
+        (r, g, b),
+        (
+            crate::color::quant::read32(0.18),
+            crate::color::quant::read32(0.12),
+            crate::color::quant::read32(0.06)
+        )
+    );
     assert_eq!(
         s.eval::<(f32, f32)>("return Page:GetShadowOffset()")
             .unwrap(),
@@ -754,7 +766,7 @@ fn the_paint_setters_land_on_the_element_and_reach_the_next_parse() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return Page:GetShadowColor()")
             .unwrap(),
-        (0.0, 0.0, 0.0, 0.5)
+        (0.0, 0.0, 0.0, crate::color::quant::read32(0.5))
     );
 }
 
@@ -777,11 +789,16 @@ fn an_element_with_no_font_of_its_own_loses_its_own_colour_too() {
     assert_eq!(
         s.eval::<(f32, f32, f32, f32)>("return Page:GetTextColor(\"H1\")")
             .unwrap(),
-        (1.0, 0.0, 0.0, 1.0)
+        (
+            crate::color::quant::read32(1.0),
+            0.0,
+            0.0,
+            crate::color::quant::read32(1.0)
+        )
     );
     assert_eq!(
         block_color(&s, "Page", 0),
-        Some([0.18, 0.12, 0.06, 1.0]),
+        Some(crate::color::quant::drawn([0.18, 0.12, 0.06, 1.0])),
         "the block took elementFont[0] wholesale, so H1's red never reaches it"
     );
 
@@ -796,13 +813,166 @@ fn an_element_with_no_font_of_its_own_loses_its_own_colour_too() {
     assert_eq!(block_color(&s, "Page", 0), Some([1.0, 0.0, 0.0, 1.0]));
 }
 
+/// A block follows its element font (`0x78ae54` → `LinkFontFollower 0x770c60`), so a set on the
+/// element after `SetText` reaches the blocks already built: `SetTextColor` pushes the colour
+/// (`0x79f4d0`), `SetFont` the face. An `H1` with no face of its own follows `P`'s font.
+#[test]
+fn a_built_block_follows_later_sets_on_its_element_font() {
+    let s = script();
+    page(&s);
+    s.run(r#"Page:SetText("<HTML><BODY><P>a</P><H1>t</H1></BODY></HTML>")"#)
+        .unwrap();
+    s.run(r#"Page:SetTextColor("P", 1, 0, 0)"#).unwrap();
+    for i in 0..2 {
+        assert_eq!(
+            block_color(&s, "Page", i),
+            Some([1.0, 0.0, 0.0, 1.0]),
+            "{i}"
+        );
+    }
+    s.run(r#"Page:SetFont("P", "Fonts\\SKURRI.TTF", 20, "MONOCHROME")"#)
+        .unwrap();
+    let b = blocks(&s, "Page");
+    assert_eq!(
+        (b[0].font.as_deref(), b[0].font_height),
+        (Some("Fonts\\SKURRI.TTF"), Some(20.0))
+    );
+    let mono = {
+        let lua = s.lua();
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let fh = model.arena.lookup("Page").expect("frame");
+        let st = model.simple_html.get(&fh).expect("state");
+        model.region_data[&st.blocks[0]].monochrome
+    };
+    assert!(mono, "the block draws the element font's MONOCHROME");
+}
+
+/// `SetFontObject` on an element font after `SetText` re-links that font (`0x79ef10` →
+/// `0x770c60`), and the link pushes the new face to the blocks that follow it.
+#[test]
+fn a_later_element_set_font_object_reaches_the_built_blocks() {
+    let s = script();
+    page(&s);
+    s.run(
+        r#"
+        local f = CreateFont("LaterFace"); f:SetFont("Fonts\\SKURRI.TTF", 22)
+        Page:SetText("<HTML><BODY><P>a</P></BODY></HTML>")
+        Page:SetFontObject("P", LaterFace)
+    "#,
+    )
+    .unwrap();
+    let b = blocks(&s, "Page");
+    assert_eq!(
+        (b[0].font.as_deref(), b[0].font_height),
+        (Some("Fonts\\SKURRI.TTF"), Some(22.0))
+    );
+}
+
+/// The face test is made once, at the build (`0x78ae36`): an `H1` block built on `P`'s font stays
+/// on `P` when `H1` gains a face later, and follows `P`'s changes.
+#[test]
+fn an_h1_block_built_on_p_stays_on_p() {
+    let s = script();
+    page(&s);
+    s.run(
+        r#"
+        Page:SetText("<HTML><BODY><H1>t</H1></BODY></HTML>")
+        Page:SetFont("H1", "Fonts\\SKURRI.TTF", 24)
+    "#,
+    )
+    .unwrap();
+    let face = |s: &UiScript| {
+        let b = blocks(s, "Page");
+        (b[0].font.clone(), b[0].font_height)
+    };
+    assert_eq!(face(&s), (Some("Fonts\\MORPHEUS.TTF".into()), Some(15.0)));
+    s.run(r#"Page:SetFont("P", "Fonts\\FRIZQT__.TTF", 11)"#)
+        .unwrap();
+    assert_eq!(face(&s), (Some("Fonts\\FRIZQT__.TTF".into()), Some(11.0)));
+}
+
+/// Each frame makes its own four element fonts (`0x789e61`-`0x789ea3`).
+#[test]
+fn two_simplehtmls_have_their_own_element_fonts() {
+    let s = script();
+    s.run(
+        r#"
+        HtmlOne = CreateFrame("SimpleHTML"); HtmlTwo = CreateFrame("SimpleHTML")
+        HtmlOne:SetFont("P", "Fonts\\SKURRI.TTF", 20)
+        HtmlOne:SetTextColor("H2", 1, 0, 0)
+    "#,
+    )
+    .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "local p = HtmlTwo:GetFont('P'); local _, g = HtmlTwo:GetTextColor('H2')
+             local _, g1 = HtmlOne:GetTextColor('H2')
+             return p == nil and g > 0.99 and g1 == 0
+                and HtmlOne:GetFont('P') == 'Fonts\\\\SKURRI.TTF'"
+        )
+        .unwrap());
+}
+
+/// An element font tells its frame of each change (`0x77e530`), and a new face or spacing raises
+/// the link-button rebuild flag (`0x78a380`, bits `0x11`); a colour does not.
+#[test]
+fn a_new_face_or_spacing_on_an_element_font_rebuilds_the_links() {
+    let s = script();
+    page(&s);
+    s.run(r#"Page:SetText("<HTML><BODY><P>a</P></BODY></HTML>")"#)
+        .unwrap();
+    let spend = |s: &UiScript| {
+        let lua = s.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let fh = model.arena.lookup("Page").expect("frame");
+        let st = model.simple_html.get_mut(&fh).expect("state");
+        std::mem::take(&mut st.links_dirty)
+    };
+    assert!(spend(&s), "SetText raises it");
+    s.run(r#"Page:SetTextColor("P", 1, 0, 0)"#).unwrap();
+    assert!(!spend(&s), "a colour leaves it down");
+    s.run(r#"Page:SetSpacing("P", 3)"#).unwrap();
+    assert!(spend(&s), "a spacing raises it");
+    s.run(r#"ItemTextFontNormal:SetFont("Fonts\\FRIZQT__.TTF", 11)"#)
+        .unwrap();
+    assert!(
+        spend(&s),
+        "a face pushed from the font it follows raises it"
+    );
+}
+
+/// The colour setters are the Font's shared ones (`0x7960d0` → `0x79f4d0`, `0x796270` →
+/// `0x79f730`): r, g and b that are not numbers read 0 rather than raise.
+#[test]
+fn the_element_colour_setters_read_a_non_number_as_zero() {
+    let s = script();
+    page(&s);
+    s.run(r#"Page:SetTextColor("H1", nil, 1, "x"); Page:SetShadowColor("H2", 1, nil, 0)"#)
+        .unwrap();
+    let one = crate::color::quant::read32(1.0);
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return Page:GetTextColor('H1')")
+            .unwrap(),
+        (0.0, one, 0.0, one)
+    );
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return Page:GetShadowColor('H2')")
+            .unwrap(),
+        (one, 0.0, 0.0, one)
+    );
+}
+
 /// Block `i`'s `vertex_color`, which for a FontString is the colour it draws.
 fn block_color(s: &UiScript, name: &str, i: usize) -> Option<[f32; 4]> {
     let lua = s.lua();
     let model = lua.app_data_ref::<Model>().expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
-    model.region_data.get(&st.blocks[i])?.vertex_color
+    model
+        .region_data
+        .get(&st.blocks[i])?
+        .vertex_color
+        .map(crate::color::Rgba8::to_f32)
 }
 
 /// `SetFontObject` on an element font: a re-point keeps what a local setter set (the inheritMask
@@ -830,7 +1000,7 @@ fn set_font_object_keeps_local_overrides_and_the_nil_form_leaves_the_paint_stand
     assert_eq!(
         s.eval::<(f32, f32, f32)>("local r, g, b = H:GetTextColor(); return r, g, b")
             .unwrap(),
-        (0.0, 1.0, 0.0),
+        (0.0, crate::color::quant::read32(1.0), 0.0),
         "the colour was never set locally, so it re-reads from the new object"
     );
 
@@ -839,7 +1009,7 @@ fn set_font_object_keeps_local_overrides_and_the_nil_form_leaves_the_paint_stand
     assert_eq!(
         s.eval::<(f32, f32, f32)>("local r, g, b = H:GetTextColor(); return r, g, b")
             .unwrap(),
-        (0.0, 1.0, 0.0),
+        (0.0, crate::color::quant::read32(1.0), 0.0),
         "severing the link leaves the resolved paint standing, it does not blank the element"
     );
 }
@@ -881,7 +1051,7 @@ fn resolved_tops(s: &UiScript, name: &str) -> Vec<(f32, f32)> {
     st.blocks
         .iter()
         .map(|rh| {
-            let r = model.region_resolved.get(rh).expect("block rect");
+            let r = model.region_rect(*rh).expect("block rect");
             (r.top, r.bottom)
         })
         .collect()
@@ -892,7 +1062,7 @@ fn maybe_resolved_rect(s: &UiScript, name: &str, block: usize) -> Option<crate::
     let model = lua.app_data_ref::<Model>().expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
-    model.region_resolved.get(&st.blocks[block]).copied()
+    model.region_rect(st.blocks[block])
 }
 
 fn resolved_rect(s: &UiScript, name: &str, block: usize) -> crate::layout::Rect {
@@ -900,10 +1070,7 @@ fn resolved_rect(s: &UiScript, name: &str, block: usize) -> crate::layout::Rect 
     let model = lua.app_data_ref::<Model>().expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
-    *model
-        .region_resolved
-        .get(&st.blocks[block])
-        .expect("block rect")
+    model.region_rect(st.blocks[block]).expect("block rect")
 }
 
 /// The text of every quad the extract emits: what is on screen.
@@ -918,6 +1085,27 @@ fn page_texts_on_screen(s: &UiScript) -> Vec<String> {
 }
 
 /// A Rust string as a Lua long-bracket literal, so quotes and backslashes need no second escape.
+/// The client's `[[` has no `=` levels, so the text must hold no bracket pair of its own.
 fn lua_str(s: &str) -> String {
-    format!("[==[{s}]==]")
+    assert!(
+        !s.contains("[[") && !s.contains("]]") && !s.starts_with('\n'),
+        "{s:?}"
+    );
+    format!("[[{s}]]")
+}
+
+/// `SetText` hands `lua_tostring(2)` to the parse (`0x796b1e`), which converts a number in place
+/// with `%.14g` (`0x6f7ca6`, `0x871960`): no f32 rounding, MSVC's three-digit exponent.
+#[test]
+fn a_number_parses_as_lua_number_text() {
+    let s = script();
+    page(&s);
+    for (code, want) in [
+        ("1/3", "0.33333333333333"),
+        ("123456789", "123456789"),
+        ("1e20", "1e+020"),
+    ] {
+        s.run(&format!("Page:SetText({code})")).unwrap();
+        assert_eq!(texts(&s, "Page"), [want], "{code}");
+    }
 }

@@ -2,6 +2,7 @@
 //! flash and fade, red Failed with its 1 s hold, the channel bar draining. The state tests read the
 //! Lua back, which cannot see what paints; the draw-list tests below see the flash.
 
+use benilla_ui::color::quant::read;
 use benilla_ui::script::{ExtractedQuad, QuadContent, ScriptValue, UiScript};
 
 use super::test_ui::load_ui as load_xml;
@@ -61,7 +62,7 @@ fn cast_fills_then_completes_green_and_fades() {
     );
     let (r, g, b) = bar_color(&s);
     assert!(
-        (r - 1.0).abs() < 1e-6 && (g - 0.7).abs() < 1e-6 && b.abs() < 1e-6,
+        (r, g, b) == (read(1.0), read(0.7), 0.0),
         "casting is orange (got {r} {g} {b})"
     );
 
@@ -77,7 +78,7 @@ fn cast_fills_then_completes_green_and_fades() {
     );
 
     s.fire_event("SPELLCAST_STOP", vec![]);
-    assert_eq!(bar_color(&s), (0.0, 1.0, 0.0), "completed is green");
+    assert_eq!(bar_color(&s), (0.0, read(1.0), 0.0), "completed is green");
     for _ in 0..30 {
         s.tick(0.1);
     }
@@ -116,7 +117,7 @@ fn a_hit_pushes_the_bar_back_it_does_not_cancel() {
     );
     let (r, g, b) = bar_color(&s);
     assert!(
-        (r - 1.0).abs() < 1e-6 && (g - 0.7).abs() < 1e-6 && b.abs() < 1e-6,
+        (r, g, b) == (read(1.0), read(0.7), 0.0),
         "still orange — not failed/red (got {r} {g} {b})"
     );
     let (_, max_after) = s.eval::<(f64, f64)>(minmax).unwrap();
@@ -141,7 +142,7 @@ fn failed_cast_turns_red_holds_then_fades() {
         vec![ScriptValue::Str("Frostbolt".into()), ScriptValue::Int(3000)],
     );
     s.fire_event("SPELLCAST_FAILED", vec![]);
-    assert_eq!(bar_color(&s), (1.0, 0.0, 0.0), "failed is red");
+    assert_eq!(bar_color(&s), (read(1.0), 0.0, 0.0), "failed is red");
     assert_eq!(
         s.eval::<String>("return CastingBarText:GetText()").unwrap(),
         "Failed"
@@ -188,7 +189,7 @@ fn channel_counts_down_not_up() {
     // completion flash. The Era client's green channel bar is not 1.12's.
     let (r, g, b) = bar_color(&s);
     assert!(
-        (r - 1.0).abs() < 1e-6 && (g - 0.7).abs() < 1e-6 && b.abs() < 1e-6,
+        (r, g, b) == (read(1.0), read(0.7), 0.0),
         "a channel opens orange, exactly like a cast (got {r} {g} {b})"
     );
 
@@ -213,7 +214,11 @@ fn channel_counts_down_not_up() {
     );
 
     s.fire_event("SPELLCAST_CHANNEL_STOP", vec![]);
-    assert_eq!(bar_color(&s), (0.0, 1.0, 0.0), "channel end flashes green");
+    assert_eq!(
+        bar_color(&s),
+        (0.0, read(1.0), 0.0),
+        "channel end flashes green"
+    );
     for _ in 0..30 {
         s.tick(0.1);
     }
@@ -250,7 +255,7 @@ fn a_finished_channel_fades_on_its_own_clock_and_the_late_stop_is_inert() {
     );
     let (r, g, b) = bar_color(&s);
     assert!(
-        (r - 1.0).abs() < 1e-6 && (g - 0.7).abs() < 1e-6 && b.abs() < 1e-6,
+        (r, g, b) == (read(1.0), read(0.7), 0.0),
         "never flashes green — a finished channel fades, it does not complete (got {r} {g} {b})"
     );
 
@@ -444,20 +449,20 @@ fn managed_positions_track_the_bottom_bar_stack() {
     // The load-time pass with no bars shown: the bare bases.
     s.run("UIParent_ManageFramePositions()").unwrap();
     s.resolve();
-    assert_eq!(
+    benilla_ui::assert_near!(
         bottom(&s, "CastingBarFrame"),
         60.0,
         "baseY replaces the XML 55"
     );
-    assert_eq!(bottom(&s, "ChatFrame1"), 85.0, "chat baseY");
+    benilla_ui::assert_near!(bottom(&s, "ChatFrame1"), 85.0, "chat baseY");
 
     // Both bottom multibars on: `bottomEither` for the cast bar, `bottomLeft` for chat. The flags
     // come from `SHOW_MULTI_ACTIONBAR_1`/`_2`, not the frames (`UIParent.lua:1599-1607`).
     s.run("SHOW_MULTI_ACTIONBAR_1 = 1 SHOW_MULTI_ACTIONBAR_2 = 1 UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
-    assert_eq!(bottom(&s, "CastingBarFrame"), 100.0, "60 + bottomEither 40");
-    assert_eq!(bottom(&s, "ChatFrame1"), 102.0, "85 + bottomLeft 17");
+    benilla_ui::assert_near!(bottom(&s, "CastingBarFrame"), 100.0, "60 + bottomEither 40");
+    benilla_ui::assert_near!(bottom(&s, "ChatFrame1"), 102.0, "85 + bottomLeft 17");
 
     // The stance bar shows: the pet term, plus chat's both-flags extra. The pass's stance-bar arm
     // (`UIParent.lua:1705-1732`) shows and hides the bar's three shelf textures by name, unguarded.
@@ -472,8 +477,8 @@ fn managed_positions_track_the_bottom_bar_stack() {
     )
         .unwrap();
     s.resolve();
-    assert_eq!(bottom(&s, "CastingBarFrame"), 140.0, "60 + 40 + pet 40");
-    assert_eq!(
+    benilla_ui::assert_near!(bottom(&s, "CastingBarFrame"), 140.0, "60 + 40 + pet 40");
+    benilla_ui::assert_near!(
         bottom(&s, "ChatFrame1"),
         142.0,
         "85 + 17 + pet 17 + both-flags 23"
@@ -482,8 +487,8 @@ fn managed_positions_track_the_bottom_bar_stack() {
     s.run("ShapeshiftBarFrame:Hide() UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
-    assert_eq!(bottom(&s, "CastingBarFrame"), 100.0);
-    assert_eq!(bottom(&s, "ChatFrame1"), 102.0);
+    benilla_ui::assert_near!(bottom(&s, "CastingBarFrame"), 100.0);
+    benilla_ui::assert_near!(bottom(&s, "ChatFrame1"), 102.0);
 }
 
 /// `CastingBarFrame_OnLoad` publishes `CastingBarFrameStatusBar` as an alias of the bar itself

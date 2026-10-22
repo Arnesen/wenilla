@@ -75,8 +75,11 @@ fn legs_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
     .init_resource::<crate::net::GuidIndex>()
     .init_resource::<crate::screen_fade::ScreenFade>()
     .init_resource::<crate::items::Items>()
+    .init_resource::<crate::ui_party::GroupState>()
+    .init_resource::<crate::ui_action::UiErrorKeys>()
     .add_message::<crate::sound::LootPickupSound>()
     .add_message::<crate::target::DeselectGuid>();
+    crate::ui_loot::seat_loot_steps(app.world_mut());
     (app, rx)
 }
 

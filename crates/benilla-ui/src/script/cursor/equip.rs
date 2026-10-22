@@ -184,7 +184,7 @@ mod tests {
 
     fn bag(slots: &[(u32, u64, u32)]) -> ContainerState {
         ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: slots
                 .iter()
@@ -289,7 +289,7 @@ mod tests {
     /// slot.
     fn boe_bag(bonding: u32, bound: bool) -> ContainerState {
         ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: [(
                 1,
@@ -375,6 +375,7 @@ mod tests {
     #[test]
     fn a_right_click_on_a_bind_on_equip_item_holds_it_under_the_question() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(boe_bag(2, false)));
         s.run("UseContainerItem(0, 1)").unwrap();
 
@@ -393,6 +394,7 @@ mod tests {
     #[test]
     fn a_right_click_on_an_ordinary_item_sends_and_leaves_the_cursor_empty() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(boe_bag(0, false)));
         s.run("UseContainerItem(0, 1)").unwrap();
 
@@ -410,6 +412,7 @@ mod tests {
     #[test]
     fn the_accept_clears_the_cursor_and_sends_without_asking_again() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(boe_bag(2, false)));
         s.run("UseContainerItem(0, 1)").unwrap();
         assert!(s.cursor_item().is_some());
@@ -432,6 +435,7 @@ mod tests {
     #[test]
     fn an_item_in_the_trade_window_is_refused_before_the_set() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.open_trade_window();
         s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
         // Offer the second item, then hold the first.
@@ -457,5 +461,36 @@ mod tests {
             AutoEquip::Sent { .. }
         ));
         assert!(s.take_ui_errors().is_empty());
+    }
+
+    /// `0x5e1840` sets the item on the cursor, the set's inner clear signalling `CURSOR_UPDATE`
+    /// with the cursor emptied (`0x4952cc`) and the set its own with the item held, then sends it
+    /// off, whose clear signals with the cursor empty again (`0x5e1761`). An engine step's handlers
+    /// held for the host read the cursor as each of those steps left it, as they do in place.
+    #[test]
+    fn a_held_handler_reads_the_cursor_its_step_left() {
+        for held in [false, true] {
+            let mut s = UiScript::new().unwrap();
+            s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
+            s.run(
+                "SEEN = '' local f = CreateFrame('Frame') f:RegisterEvent('CURSOR_UPDATE') \
+                 f:SetScript('OnEvent', function() SEEN = SEEN .. (CursorHasItem() and 1 or 0) end)",
+            )
+            .unwrap();
+            let sent = if held {
+                let sent = s.host_out(|s| s.auto_equip_guid(0x12, false));
+                s.refuse_waiting();
+                sent
+            } else {
+                s.auto_equip_guid(0x12, false)
+            };
+            assert!(matches!(sent, AutoEquip::Sent { guid: 0x12, .. }));
+            assert_eq!(
+                s.eval::<String>("return SEEN").unwrap(),
+                "010",
+                "held: {held}"
+            );
+            assert!(s.cursor_item().is_none(), "held: {held}");
+        }
     }
 }

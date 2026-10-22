@@ -8,8 +8,9 @@ use crate::widget::FrameHandle;
 const DRAG_START_DISTANCE_SQ: f32 = 0.01 * 0.01;
 
 /// Whether `pos` is far enough from the press point `start` to start the drag (`0x76b34c`–`0x76b372`).
-/// The reference measures in layout units, where the screen diagonal is 1 (`0x41ad80`, from the
-/// press and move converters `0x425666`/`0x425766`), so the pointer, in root units, is divided by
+/// The reference measures in layout units, where the screen diagonal is 1 (`0x41ad80`, called at
+/// `0x766fb1` in the interface's mouse converter `0x766f70`, which the press and move handlers
+/// `0x7662c0` and `0x7660d0` run), so the pointer, in root units, is divided by
 /// [`Model::layout_unit`]: 1% of the diagonal at every screen size and UI scale. The squared
 /// distance is taken in `f64` against the f32 threshold (x87 at 53 bits: `WinMain`'s
 /// `_controlfp(0x9001f)`, `D3DCREATE_FPU_PRESERVE`), and only a smaller one skips (`0x76b372`
@@ -652,8 +653,8 @@ mod tests {
     }
 
     /// A press whose frame hid (the removal cleared the capture, `0x764cad`) reaches no one on the
-    /// release: `0x766420` dispatches to the capture alone, and the world hook `0x492b50` runs
-    /// only in freelook, so the world click `0x495300` never runs.
+    /// release: `0x766420` dispatches to the capture alone, and the world hook `0x492b50` sends
+    /// a release to the world frame only in freelook, so the world click `0x495300` never runs.
     #[test]
     fn a_press_whose_frame_hid_is_not_a_world_drop() {
         let mut s = drag_script();

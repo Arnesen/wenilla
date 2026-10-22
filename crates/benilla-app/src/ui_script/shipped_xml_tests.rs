@@ -618,6 +618,8 @@ fn every_texture_frame_outranks_its_status_bars() {
     use benilla_ui::order::unpack;
 
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    // No engine behind it: `RaidFrame`'s `RequestRaidInfo()` at world entry is kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The in-game UI loads on world entry, so a player always exists by then.
     s.set_unit(
@@ -841,7 +843,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
     .unwrap();
     s.resolve();
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return BuffProbe:GetWidth(), BuffProbe:GetHeight()")
             .unwrap(),
         (21.0, 21.0),
@@ -857,7 +859,7 @@ fn the_inheritable_reference_templates_confer_their_shape() {
         "the tooltip script comes with the template"
     );
 
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return MicroProbe:GetWidth(), MicroProbe:GetHeight()")
             .unwrap(),
         (29.0, 58.0)
@@ -1155,15 +1157,15 @@ fn the_shipped_manifest_opens_the_macro_icon_picker() {
         }),
     );
     // One saved macro, so "Change Name/Icon" has something selected.
-    s.set_macros(benilla_ui::script::MacroState {
-        account: vec![benilla_ui::script::MacroView {
+    s.set_macros(benilla_ui::script::MacroState::from_scopes(
+        vec![benilla_ui::script::MacroView {
             name: "die".into(),
             texture: Some(r"Interface\Icons\Ability_Ambush".into()),
             body: ".die".into(),
             ..Default::default()
         }],
-        character: Vec::new(),
-    });
+        Vec::new(),
+    ));
     s.set_macro_icons(vec![
         r"Interface\Icons\Ability_Ambush".into(),
         r"Interface\Icons\Ability_Backstab".into(),

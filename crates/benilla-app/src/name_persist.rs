@@ -143,6 +143,7 @@ mod tests {
                 hair_color: 0,
                 facial_hair: 0,
                 level: 1,
+                new_character: false,
                 zone: 0,
                 map: 0,
                 position: benilla_protocol::wire::Vector3d {
@@ -194,6 +195,7 @@ mod tests {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,

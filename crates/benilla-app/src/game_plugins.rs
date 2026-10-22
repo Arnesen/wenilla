@@ -67,7 +67,6 @@ use crate::ui_party::UiPartyPlugin;
 use crate::ui_pass::PlayerUiPlugin;
 use crate::ui_pet::UiPetPlugin;
 use crate::ui_pet_book::UiPetBookPlugin;
-use crate::ui_pet_doll::UiPetDollPlugin;
 use crate::ui_pet_stats::UiPetStatsPlugin;
 use crate::ui_petition::UiPetitionPlugin;
 use crate::ui_quest::UiQuestPlugin;
@@ -112,7 +111,8 @@ impl PluginGroup for GamePlugins {
             .add(QuestMarkersPlugin)
             .add(crate::pipe_warm::plugin)
             .add(EntitiesPlugin)
-            // The combat log, ahead of the animation layer, whose two shared kinds run second.
+            // The combat log, ahead of the animation layer, whose environmental-damage handler runs
+            // second; its swing handler registers ahead of the line (`net_handler_ahead`).
             .add(crate::combat_log::CombatLogPlugin)
             .add(CreatureAnimPlugin)
             // The blob shadow (`0x6d7920`), sized from the Stand box (`playableAnimationLookup[0]`,
@@ -161,6 +161,7 @@ impl PluginGroup for GamePlugins {
             .add(crate::realmlist::RealmlistPlugin)
             .add(crate::cvars::CvarPlugin)
             .add(crate::console::ConsolePlugin)
+            .add(crate::player_commands::PlayerCommandsPlugin)
             .add(crate::bindings::BindingsPlugin)
             .add(UiUnitPlugin)
             .add(UiPartyPlugin)
@@ -213,7 +214,6 @@ impl PluginGroup for GamePlugins {
             .add(ChrClassesPlugin)
             .add(UiPetBookPlugin)
             .add(UiPetStatsPlugin)
-            .add(UiPetDollPlugin)
             .add(UiNetPlugin)
             .add(UiCastPlugin)
             .add(UiMirrorPlugin)
@@ -246,6 +246,8 @@ impl PluginGroup for GamePlugins {
             .add(UiChatPlugin)
             .add(UiLayoutPlugin)
             .add(crate::screenshot::ScreenshotPlugin)
+            // Last: it orders every system the plugins added, the probes' too.
+            .add(crate::vm_pass::VmPassPlugin)
     }
 }
 
@@ -263,6 +265,12 @@ pub(crate) mod schedule_tests {
     /// or GPU (`backends: None`, so no render app), then the engine, then the game. Every
     /// plugin's `build` and `finish` runs and no schedule does, which fixes the schedule graph.
     pub(crate) fn headless_client() -> App {
+        headless_client_with(|_| {})
+    }
+
+    /// [`headless_client`] with `more` added before it finishes, as the binary adds its
+    /// instruments and probes.
+    pub(crate) fn headless_client_with(more: impl FnOnce(&mut App)) -> App {
         let mut app = App::new();
         app.add_plugins(
             benilla_world::boot::tuned_default_plugins(Window::default())
@@ -287,6 +295,7 @@ pub(crate) mod schedule_tests {
             connect: false,
             start: crate::client_state::ClientState::Login,
         });
+        more(&mut app);
         app.finish();
         app.cleanup();
         app
@@ -320,10 +329,16 @@ pub(crate) mod schedule_tests {
         /// The systems whose declared access includes the Lua VM, read off each system's own
         /// access set: a holder whose every VM pair is declared shows in no conflict.
         pub holds_vm: HashSet<SystemKey>,
+        /// The systems whose declared access covers the call host's
+        /// ([`crate::script_calls::ScriptCallHost`]): every one that writes the VM.
+        pub hosted: HashSet<SystemKey>,
         /// The systems whose own access names [`crate::net::SelfPlayer`]: a read of the
         /// component, or a `With`, `Without`, `Added` or `Has` on it. Read off each system's
         /// access set; a system that reads every component (`EntityRef`, `&World`) names none.
         pub uses_self: HashSet<SystemKey>,
+        /// The build's own order, system to system, with the sync points it placed when the
+        /// census reads [`SyncPoints::Built`].
+        pub built: Vec<(SystemKey, SystemKey)>,
     }
 
     impl Census {
@@ -336,6 +351,65 @@ pub(crate) mod schedule_tests {
 
         pub fn component(&self, id: ComponentId) -> &str {
             self.components.get(&id).map(String::as_str).unwrap_or("?")
+        }
+
+        /// Whether what `a` queues has applied by the time `b` runs: a sync point of the build
+        /// lies on a path from `a` to `b`, so it runs after `a` and before `b`, and applies every
+        /// buffer of a system that ran before it. Reads a [`SyncPoints::Built`] census.
+        pub fn applies_before(&self, a: SystemKey, b: SystemKey) -> bool {
+            let mut next: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+            for (x, y) in &self.built {
+                next.entry(*x).or_default().push(*y);
+            }
+            // Each node at most twice: before a sync point and past one.
+            let mut seen: HashSet<(SystemKey, bool)> = HashSet::new();
+            let mut stack = vec![(a, false)];
+            while let Some((n, synced)) = stack.pop() {
+                for m in next.get(&n).into_iter().flatten() {
+                    let synced = synced || is_sync_point(self.name(*m));
+                    if *m == b && synced {
+                        return true;
+                    }
+                    if seen.insert((*m, synced)) {
+                        stack.push((*m, synced));
+                    }
+                }
+            }
+            false
+        }
+    }
+
+    /// A build pass that keeps the graph the build ends with. Registered after the pass that
+    /// inserts the sync points, it runs after it and sees them.
+    #[derive(Debug, Default)]
+    struct KeepBuiltOrder(std::sync::Arc<std::sync::Mutex<Vec<(SystemKey, SystemKey)>>>);
+
+    impl bevy::ecs::schedule::ScheduleBuildPass for KeepBuiltOrder {
+        type EdgeOptions = ();
+
+        fn add_dependency(&mut self, _: NodeId, _: NodeId, _: Option<&()>) {}
+
+        fn collapse_set(
+            &mut self,
+            _: bevy::ecs::schedule::SystemSetKey,
+            _: &indexmap::IndexSet<SystemKey, bevy::platform::hash::FixedHasher>,
+            _: &bevy::ecs::schedule::graph::DiGraph<NodeId>,
+        ) -> impl Iterator<Item = (NodeId, NodeId)> {
+            std::iter::empty()
+        }
+
+        fn build(
+            &mut self,
+            _: &mut World,
+            _: &mut bevy::ecs::schedule::ScheduleGraph,
+            flat: &mut bevy::ecs::schedule::graph::Dag<SystemKey>,
+        ) -> Result<(), bevy::ecs::schedule::ScheduleBuildError> {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                flat.graph().all_edges().collect();
+            Ok(())
         }
     }
 
@@ -368,6 +442,11 @@ pub(crate) mod schedule_tests {
             let vm = world
                 .components()
                 .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
+            let host = {
+                use bevy::ecs::system::{IntoSystem, System};
+                let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
+                System::initialize(&mut host, world)
+            };
             // Pass 1, before the build: the graph still holds the systems.
             let graph = schedule.graph();
             let set_conditions: HashMap<_, Vec<String>> = graph
@@ -388,6 +467,7 @@ pub(crate) mod schedule_tests {
                 .get_id(TypeId::of::<crate::net::SelfPlayer>());
             let mut systems = HashMap::new();
             let mut holds_vm = HashSet::new();
+            let mut hosted = HashSet::new();
             let mut uses_self = HashSet::new();
             for (key, system, conds) in graph.systems.iter() {
                 if let (Some(id), Some(with_access)) = (self_player, graph.systems.get(key)) {
@@ -404,6 +484,11 @@ pub(crate) mod schedule_tests {
                     let access = with_access.access.combined_access();
                     if access.has_resource_read(vm) || access.has_resource_write(vm) {
                         holds_vm.insert(key);
+                    }
+                    let mut with_host = with_access.access.clone();
+                    with_host.extend(host.clone());
+                    if with_host.combined_access() == access {
+                        hosted.insert(key);
                     }
                 }
                 let mut sets = Vec::new();
@@ -456,8 +541,35 @@ pub(crate) mod schedule_tests {
                 }
                 out
             };
+            // An edge through a set that holds no system still orders its neighbours, as the
+            // build flattens it (the VM pass's links are such sets).
+            let mut edges: Vec<(NodeId, NodeId)> = graph.dependency().graph().all_edges().collect();
+            let empty: Vec<NodeId> = graph
+                .system_sets
+                .iter()
+                .map(|(key, _, _)| NodeId::Set(key))
+                .filter(|n| members(*n).is_empty())
+                .collect();
+            for set in empty {
+                let into: Vec<NodeId> = edges
+                    .iter()
+                    .filter(|(_, b)| *b == set)
+                    .map(|(a, _)| *a)
+                    .collect();
+                let out: Vec<NodeId> = edges
+                    .iter()
+                    .filter(|(a, _)| *a == set)
+                    .map(|(_, b)| *b)
+                    .collect();
+                edges.retain(|(a, b)| *a != set && *b != set);
+                for a in &into {
+                    for b in &out {
+                        edges.push((*a, *b));
+                    }
+                }
+            }
             let mut dependencies = Vec::new();
-            for (a, b) in graph.dependency().graph().all_edges() {
+            for (a, b) in edges {
                 for x in members(a) {
                     for y in members(b) {
                         if x != y {
@@ -467,8 +579,17 @@ pub(crate) mod schedule_tests {
                 }
             }
             // Pass 2: build, and read what the build found. `is_send` is only known once a
-            // system's params have registered their access, i.e. after this.
+            // system's params have registered their access, i.e. after this. The keeper goes in
+            // last, behind the sync points' pass the settings above may have re-added.
+            let built = std::sync::Arc::default();
+            schedule.remove_build_pass::<KeepBuiltOrder>();
+            schedule.add_build_pass(KeepBuiltOrder(std::sync::Arc::clone(&built)));
             schedule.initialize(world).expect("the schedule builds");
+            let built = std::mem::take(
+                &mut *built
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             let mut non_send = Vec::new();
             for (key, system) in schedule.systems().expect("initialized") {
                 if !system.is_send() {
@@ -510,7 +631,9 @@ pub(crate) mod schedule_tests {
                 dependencies,
                 non_send,
                 holds_vm,
+                hosted,
                 uses_self,
+                built,
             }
         })
     }
@@ -518,7 +641,7 @@ pub(crate) mod schedule_tests {
     /// Does this build carry type names? Bevy has them only under its `debug` feature, which
     /// rides with `benilla-world`'s `dev`. Probed off the census, not a `cfg`, which belongs in
     /// `run_mode` alone; name-dependent tests skip without them.
-    fn type_names_available(c: &Census) -> bool {
+    pub(crate) fn type_names_available(c: &Census) -> bool {
         c.systems.values().any(|s| s.name.contains("benilla_app::"))
     }
 
@@ -779,66 +902,51 @@ pub(crate) mod schedule_tests {
     /// graph ([`SyncPoints::Declared`]). `WOW_AMBIGUITY_DUMP=1` prints every pair.
     ///
     /// The largest part is `Transform` on disjoint lanes, populations that never intersect,
-    /// which no class can express. Known pairs accepted with a reason:
+    /// which no class can express. Every system that lends the call host runs in the VM pass's
+    /// one chain ([`crate::vm_pass`]), so no two of them pair, and the world's movers and readers
+    /// of what a script call reaches order against its ends. The host's shared sinks
+    /// ([`crate::vm_pass::shared_sinks`]) are written through `&self`, so their users declare
+    /// reads and pair here only over something else: without the pass's order on them, 764 pairs
+    /// of users would share a sink in no order, none of which this count would show. The pass
+    /// orders every user (`every_user_of_a_shared_sink_runs_in_one_order`), so the count hides
+    /// none. Known pairs accepted with a reason:
     /// - the ranged prop's two `AnimationPlayer` writers against the booth's and the quest
     ///   markers';
     /// - the fx attaches and `entities::update_display_models`/`attach_entity_visuals` against
     ///   the mat-anim tick over `MatAnimTable`/`UvAnimMaterials`: attach writes the rows a tick
     ///   would, off the same clock;
-    /// - the area-spirit-healer poll over `Transform` and `NetEntity`: it is level-triggered, so a
-    ///   unit seen a frame early or late is decided again next frame;
-    /// - the cursor classifier against `world_focus`'s focus publish and settle release over
-    ///   `Player`: it reads `own_control_lost`, and they write only `settling` and `world_stale`;
-    /// - `ui_quest::lines::feed_quest_lines` and the reader's begin and feed
-    ///   (`ui_item_text::begin_item_text`, `feed_item_text`) against `ui_items::feed_item_stats`
-    ///   and `ui_tooltip::feed_spell_tooltips` over `Items` and the VM: they only read templates,
-    ///   which those two do not write, and a chat line or the reader's text commutes with their
-    ///   pushes;
     /// - `ui_session::feed_interact_npc` against `query_cache::release_on_enter::<MailOpen>`: the
     ///   feed reads the mailbox's guid, and the release clears only the pending queries;
-    /// - `script_calls::apply_script_calls`, in the target chain, against the `.after(UiInput)`
-    ///   drains of gestures that are not such script calls (the ATTACKTARGET binding, the
-    ///   item-pick commit, the GameObject openers, the chat, party, duel, trade and death drains)
-    ///   over the `CastLadder`, the selection and the unit-token resolver: the class
-    ///   `drop_item_on_unit` and the world click's legs already carry, as none of those drains
-    ///   orders against the target chain. Such a gesture and a script call in one frame take
-    ///   either order;
-    /// - the range compare's readers (`ui_action::state::feed_action_state`,
-    ///   `ui_tooltip::spell_feed::feed_spell_tooltips`, `spell::targeting::feed_targeting_to_vm`,
-    ///   the targeting cursor and the object-click commit) against the writers of `Player` and
-    ///   `RemoteMotion` (`camera_saved::load_camera_pose`, `world_focus`'s focus publish and settle
-    ///   release, `transport::compose_riders` and `ground_deck_riders`): the readers take the
-    ///   movement flags of the caster (`Player::move_flags`) and its target
-    ///   (`RemoteMotion::flags`), and those writers touch `login_pitch`, the settle fields and a
-    ///   rider's pose, never the flags;
-    /// - Click to Move's steer and arrival (`player::approach::steer_approach`,
-    ///   `target::click::act_on_arrival`) against what `steer_follow` and `act_on_right_click`
-    ///   already pair with: the steer is chained after follow's and writes the same `Player`
-    ///   fields, the arrival runs the click's dispatchers, and their `Transform` reads are the
-    ///   disjoint-lane kind. The dispatchers also carry the walk's start (`Player`,
-    ///   `FollowState`, `Approach`, the stand request), which only a click, an arrival or a
-    ///   crate's interaction writes;
-    /// - a crate's interaction (`target::click::act_on_interact`) against what
-    ///   `act_on_right_click` and the cursor classifier already pair with: it runs the click's
-    ///   dispatchers over the classifier's reading of its object, and its attack leg
-    ///   selects as the click does, so it writes `Selection` where the click's drain does;
-    /// - the soulstone's cast cancel (`death::drain_death`, through `spell::SelfCancel`) against
-    ///   `cursor::drive_displayed_cursor` over `SpellTargeting` and
-    ///   `creature_anim::spell_visual::route_cast_visuals` over the `CastEvent` messages: both are
-    ///   level-triggered readers, so a cancel seen a frame early or late is decided again next
-    ///   frame;
-    /// - `ui_items::lock_openers::feed_lock_openers` against `ui_action::feed::feed_actions` and
-    ///   `normalize_action_ranks` over `PlayerActions` and the VM: it reads only the book's spell
-    ///   ids, which those two never rewrite, and writes the lock state alone; its gate watches
-    ///   `PlayerActions`, so a book change seen a frame late is pushed the next;
-    /// - the item gate's control-bypass feed (`ui_unit::control_gate::feed_control_bypass`)
-    ///   against `player::camera_saved::load_camera_pose` over `Player`: the feed reads
-    ///   `own_control_lost` only, and the loader writes the saved camera pose.
+    /// - Click to Move's steer (`player::approach::steer_approach`) against what `steer_follow`
+    ///   already pairs with: the steer is chained after follow's and writes the same `Player`
+    ///   fields;
+    /// - the terrain stream's spawn half (`terrain_stream::spawn_streamed_tiles`) against the
+    ///   readers of `TerrainStreamer`, `Placements` and the asset stores its request half
+    ///   (`stream_terrain`) already pairs with: the inner-window wait sits between the two, so a
+    ///   pair the one system carried now counts on both; and `attach_inner_colliders` against the
+    ///   other users of `PendingCollider`, `StreamActivity` and `TerrainStreamer`: it attaches
+    ///   only the held inner tiles' terrain builds, and the others never touch those;
+    /// - the missile arrival's log leg (`combat_log::on_missile_miss`) against nine `Transform`
+    ///   writers, the disjoint-lane kind: `portrait::booth::face_booth_billboards`,
+    ///   `portrait::glue_booth::sync_glue_booth` and `sync_glue_scene`,
+    ///   `portrait::panes::sync_panes`, `portrait::sync_portraits`,
+    ///   `portrait::test_bake::sync_test_portraits`,
+    ///   `sound::emitter_pool::pump_emitters`, `sound::liquid_loop::drive_liquid_loops` and
+    ///   `quest_markers::bake_seat_scale`. It reads its two units' poses for the display range;
+    ///   those move booth, emitter and marker-seat entities, never a unit;
+    /// - the lanes' drain (`lanes::fire_in_order`), exclusive as the handler table's drain is,
+    ///   against the 80 world systems no declared order places against it, which bevy lists with
+    ///   no component. What they meet of the drain's (its lanes' firings, the VM with the call host,
+    ///   and the unit edits it applies in place: every component a change writes, the cast events,
+    ///   the precast tail's loot release) is the name cache alone, a pure cache, which the
+    ///   persisted-name load writes; `lanes::guard_tests` checks that it stays so, and that no
+    ///   exclusive system is among them. Commands a firing defers, which the drain applies after
+    ///   it, are outside that model.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_346;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_779;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -933,6 +1041,49 @@ pub(crate) mod schedule_tests {
     /// The `ApplyDeferred` the build inserts between a system with commands and its dependents.
     fn is_sync_point(name: &str) -> bool {
         name == "bevy_ecs::apply_deferred"
+    }
+
+    /// `Update`'s sync points, the barriers the build inserts after a system with commands on
+    /// the way to one ordered after it. The call host holds no commands, its seams queueing what
+    /// they change on a unit for the pass's end ([`crate::creature_anim::UnitEdits`]), and the
+    /// VM pass's links ignore the deferred buffers between them
+    /// ([`crate::vm_pass::order_the_pass`]), so a link's commands wait for the first barrier past
+    /// the chain. The count may not rise past the ceiling, and the ceiling follows it down. Read
+    /// on the dev build, whose schedule holds every system the player build does.
+    const UPDATE_SYNC_POINT_CEILING: usize = 54;
+    const UPDATE_SYNC_POINT_SLACK: usize = 4;
+
+    #[test]
+    fn the_update_schedule_has_no_more_sync_points_than_its_ceiling() {
+        let mut app = headless_client();
+        let update = census(&mut app, Update, SyncPoints::Built);
+        if !type_names_available(&update) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let n = update
+            .systems
+            .values()
+            .filter(|s| is_sync_point(&s.name))
+            .count();
+        eprintln!(
+            "Update: {n} sync points (ceiling {UPDATE_SYNC_POINT_CEILING}, slack \
+             {UPDATE_SYNC_POINT_SLACK})"
+        );
+        assert!(
+            n <= UPDATE_SYNC_POINT_CEILING,
+            "{n} sync points in Update; the ceiling is {UPDATE_SYNC_POINT_CEILING}. A system with \
+             commands is ordered before one that need not wait for them, or the VM pass links a \
+             pair the declared order already holds: drop the edge, or raise the ceiling here with \
+             the reason. `concurrency_census` prints the count."
+        );
+        assert!(
+            n + UPDATE_SYNC_POINT_SLACK >= UPDATE_SYNC_POINT_CEILING,
+            "only {n} sync points in Update and the ceiling still says \
+             {UPDATE_SYNC_POINT_CEILING}. Lower the ceiling to {n} so it keeps ratcheting."
+        );
     }
 
     /// How parallel could `Update` be? A greedy list schedule with unlimited threads: each wave
@@ -1105,7 +1256,11 @@ pub(crate) mod schedule_tests {
     /// Why a VM holder in `Update` ordered before the tick may stay out of
     /// [`crate::ui_script::UiFeed`], keyed by a suffix of the system's full name, with the
     /// reason.
-    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
+    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[(
+        "::ui_chat::frames::tee_shown_lines",
+        "in the lanes' set after their drain (`lanes::UiLanes`, after `UiFeed` and before the \
+         tick), so the log files take the lines the verbs showed after the drain's own",
+    )];
 
     /// The create's control restore (`player::regain_control_on_arrival`) is registered in the
     /// built client and ordered: after the self create it answers, before the controller and the
@@ -1186,7 +1341,7 @@ pub(crate) mod schedule_tests {
         ("::death::drive_death_look",
          "level-driven: it writes the fade from the ghost flag every frame and re-reads self each time, so a frame with no self is overwritten by the next"),
         ("::tutorial::run_world_enter_cascade",
-         "`armed` stays set until self exists, so the welcome and questgiver triggers wait for the tag rather than being spent"),
+         "`armed` stays set until self exists, so the welcome and questgiver triggers wait for the tag rather than being spent, and the arrival's `Added<SelfPlayer>` is relative to this system's own last run, so a tag that lands after a run is still seen at the next"),
         ("::ui_session::close_npc_session_out_of_range<",
          "no self returns before anything changes, and a question open on an NPC needs a self that interacted; the leash is re-tested every frame"),
         ("::ui_session::latch::watch_interaction_range",
@@ -1273,6 +1428,104 @@ pub(crate) mod schedule_tests {
         assert!(stale.is_empty(), "stale rows:\n  {}", stale.join("\n  "));
     }
 
+    /// A nameplate's right-click is `SelectTarget` (`0x492870`), which with a targeting cursor up
+    /// binds the cast and returns, and then the unit's interact (`0x492881`), so the cast goes out
+    /// ahead of what the interact does. The click's select parks the unit; the target chain's bind
+    /// gives it to the cast; the interact runs after that, or its attack leg would swing before the
+    /// cast and select nothing.
+    #[test]
+    fn a_plates_interact_runs_after_the_bind_of_the_unit_its_click_parked() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let (select, bind, interact) = (
+            one("::target::click::select_on_plate_click"),
+            one("::script_calls::bind_parked_picks"),
+            one("::target::click::act_on_interact"),
+        );
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let runs_before = |from: SystemKey, to: SystemKey| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![from];
+            while let Some(n) = stack.pop() {
+                for m in succ.get(&n).into_iter().flatten() {
+                    if seen.insert(*m) {
+                        stack.push(*m);
+                    }
+                }
+            }
+            seen.contains(&to)
+        };
+        assert!(
+            runs_before(select, bind),
+            "the click parks before the chain binds"
+        );
+        assert!(
+            runs_before(bind, interact),
+            "the interact runs after the chain's bind"
+        );
+    }
+
+    /// The world click's trade leg runs ahead of its select (`0x4925d0`: the trade request at
+    /// `0x49278e`, `SelectTarget` at `0x49280c`), so the targeting cursor it tests (`0x492668`)
+    /// is the one the click found, not what the select's bind left.
+    #[test]
+    fn the_world_clicks_trade_leg_runs_before_its_select() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let trade = one("::ui_action::drop_item::trade_on_world_click");
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let mut seen = HashSet::new();
+        let mut stack = vec![trade];
+        while let Some(n) = stack.pop() {
+            for m in succ.get(&n).into_iter().flatten() {
+                if seen.insert(*m) {
+                    stack.push(*m);
+                }
+            }
+        }
+        for select in [
+            "::target::click::select_on_plate_click",
+            "::target::click::select_on_click",
+        ] {
+            assert!(
+                seen.contains(&one(select)),
+                "the trade leg runs before {select}"
+            );
+        }
+    }
+
     /// The `Startup` VM, the stock glue's, is built after the glyph cache:
     /// its first screen sizes frames by measured text in the show (`TOSFrameHeader` off
     /// `TOSFrameTitle:GetWidth()`, `AccountLogin.lua`), which with no cache measures 0.
@@ -1313,6 +1566,50 @@ pub(crate) mod schedule_tests {
             }
         }
         assert!(seen.contains(&vm), "the VM is built after the glyph cache");
+    }
+
+    /// The party feed fires `RAID_TARGET_UPDATE` after the unit feed has pushed this frame's
+    /// snapshots: TargetFrame answers it with `GetRaidTargetIndex("target")`, which reads the
+    /// target snapshot's `raid_target`, so a party feed that ran first left a new mark off the
+    /// target frame until the target changed. Read off the declared graph.
+    #[test]
+    fn the_party_feed_runs_after_the_unit_snapshots() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let (units, party) = (
+            one("::ui_unit::feed_units"),
+            one("::ui_party::feed::feed_party"),
+        );
+        let mut seen = HashSet::new();
+        let mut stack = vec![units];
+        while let Some(n) = stack.pop() {
+            for m in succ.get(&n).into_iter().flatten() {
+                if seen.insert(*m) {
+                    stack.push(*m);
+                }
+            }
+        }
+        assert!(
+            seen.contains(&party),
+            "feed_party runs after feed_units, whose snapshots RAID_TARGET_UPDATE's handler reads"
+        );
     }
 
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
@@ -1396,7 +1693,9 @@ pub(crate) mod schedule_tests {
                 ));
             } else {
                 offenders.push(format!(
-                    "{}: no declared side of the tick — `.in_set(UiFeed)` for a push the tick must see this frame, `.after(UiInput)` for a drain of what the tick produced",
+                    "{}: no declared side of the tick — `.in_set(UiFeed)` for a push the tick must \
+                     see this frame, `.in_set(crate::ui_script::UiDrain)` for a drain of what the \
+                     tick produced",
                     s.name
                 ));
             }
@@ -1426,15 +1725,16 @@ pub(crate) mod schedule_tests {
         assert!(
             offenders.is_empty(),
             "these systems hold the VM in `Update` without declaring their side of the tick \
-             (`UiFeed` before it, or `.after(UiInput)`):\n  {}",
+             (`UiFeed` before it, or `.in_set(crate::ui_script::UiDrain)`):\n  {}",
             offenders.join("\n  ")
         );
         assert!(stale.is_empty(), "stale rows:\n  {}", stale.join("\n  "));
     }
 
     /// The consumer markers: a VM holder that does one of these to host state has spent
-    /// something this frame that nothing can re-spend.
-    const CONSUMES: &[&str] = &["fire_event(", "mem::take(", ".drain("];
+    /// something this frame that nothing can re-spend. A feed posts its events
+    /// (`script_calls::Fires::post`) to fire once its pushes are in.
+    const CONSUMES: &[&str] = &["fire_event(", "fires.post(", "mem::take(", ".drain("];
 
     /// Why an ungated one-shot consumer holding the VM loses nothing in the one-frame window
     /// where the wire is in world and the glue VM is still live.
@@ -1466,18 +1766,20 @@ pub(crate) mod schedule_tests {
          "`seen_generation` is a `VmMemo`: a new VM reads `None` and rebuilds, and its seed's load owes the UPDATE_BINDINGS"),
         ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,
          "the battleground probe: dev-only (`WOW_PROBE_BG`, `cfg(feature = \"dev\")`) so it is not in a player build at all, and its `mem::take` is of its OWN pending-events string, not a queue anything else fills. Its one real VM dependency is the Lua event tap, which self-heals: `EVENT_DRAIN` returns a `<tap-gone>` sentinel when the tap's globals are missing — the case this window causes, since a tap installed in the glue VM is discarded when `mint_entry_vm` builds the interface — and the probe re-installs on the next frame"),
+        ("capture/probes/act.rs", "fire_probe_drag", Because::FilledByVm,
+         "the drag probe: dev-only (`WOW_PROBE_DRAG`), it starts past `WOW_PROBE_DRAG_AT` with the \
+          player's body in the world, and its `.drain(..)` is of the VM's own script errors, \
+          raised by the gesture it just made"),
         ("death/mod.rs", "feed_death", Because::MemoLatched,
          "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo makes the first snapshot an edge and re-announces a held offer, confirm and corpse range"),
+        ("net/objects/update.rs", "on_update_end", Because::Deliberate,
+         "a net handler whose take is the packet's own pass, the blocks its write pass recorded, documented at the line: it publishes nothing to the VM, whose `UNKNOWNOBJECT` text it reads only to name a party member's pet; its notices go to the gated field-notice firing"),
         ("screenshot.rs", "ask_for_captures", Because::FilledByVm,
          "`pending` holds only the VM's own `Screenshot()` asks, and the take spawns a capture, publishing nothing"),
         ("screenshot.rs", "report_captures", Because::FilledByVm,
          "the outcome chain starts with the VM's own `Screenshot()` call"),
-        ("tutorial.rs", "drain_tutorials", Because::FilledByVm,
-         "`sends` exist only after Lua acknowledged, cleared or reset a flag, and go to the wire"),
-        ("ui_action/drain.rs", "drain_go_openers", Because::FilledByVm,
-         "filled only by a world right-click on a GameObject; the drain sends casts to the wire"),
-        ("ui_auction/mod.rs", "drain_auction", Because::FilledByVm,
-         "VM verbs; the refresh flags act only under an open window and become wire re-asks"),
+        ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
+         "filled only by a world right-click on a GameObject or a body; the drain sends casts to the wire"),
         ("ui_bank/mod.rs", "feed_bank", Because::PlayerRoundTrip,
          "`BankErrors` answers a `BuyBankSlot` click; the OPENED edge rides `VmMemo`s"),
         ("ui_battlefield.rs", "feed_battlefield", Because::SelfHealing,
@@ -1486,6 +1788,9 @@ pub(crate) mod schedule_tests {
          "`SMSG_BINDER_CONFIRM` only answers the innkeeper's gossip line"),
         ("ui_char.rs", "feed_char", Because::MemoLatched,
          "`feed.vm: VmMemo<CharFeedMemo>`; `vm_reset` fires every transition on a fresh memo"),
+        ("ui_chat/feed.rs", "played_time_bridge", Because::FilledByVm,
+         "the answer it takes follows `RequestTimePlayed()`, Lua's own ask, which a frameless VM \
+          never makes"),
         ("ui_dialog_verbs.rs", "feed_meeting_stone", Because::SelfHealing,
          "the query waits for the world-enter cascade (`meeting_stone_enter_world`), our own create a server round trip past the login edge, and every `/reload` re-asks onto its new VM"),
         ("ui_duel.rs", "feed_duel", Because::PlayerRoundTrip,
@@ -1496,8 +1801,6 @@ pub(crate) mod schedule_tests {
          "`feed.vm: VmMemo<FedTicket>` counters restart per VM while `state.answers` keeps counting, so the latest answer is re-fired"),
         ("ui_honor.rs", "feed_honor", Because::MemoLatched,
          "`state.vm: VmMemo<HonorFeedMemo>`; a fresh VM is pushed the block again and re-fires `INSPECT_HONOR_UPDATE` for a held reply"),
-        ("ui_inspect.rs", "feed_inspect", Because::MemoLatched,
-         "the token is latched only by Lua's `NotifyInspect`, and the diffs ride a `VmMemo`"),
         ("ui_item_text.rs", "feed_item_text", Because::MemoLatched,
          "`told` is a `VmMemo` inside the session (a fresh VM re-begins), and the open is a player click"),
         ("ui_items/locks.rs", "apply_item_releases", Because::Deliberate,
@@ -1505,9 +1808,9 @@ pub(crate) mod schedule_tests {
         ("ui_logout.rs", "feed_logout", Because::PlayerRoundTrip,
          "both packets answer the `CMSG_LOGOUT_REQUEST`/cancel the game menu sent"),
         ("ui_loot/mod.rs", "drain_loot", Because::Deliberate,
-         "the pre-VM take of `LootMoveStart` is documented at the line and publishes nothing to the VM; the event-firing takes are Lua's queues"),
+         "its takes of `LootMoveStart` and `LootCloseAtRest` close on the engine's side and publish nothing to the VM, whose `LOOT_CLOSED` is the feed's diff; the at-rest sweep signals only on a disenchant window, which the interface's own cast opens"),
         ("ui_loot/mod.rs", "feed_loot", Because::PlayerRoundTrip,
-         "it takes `LootMoveStart` only on a window it has just opened, which answers a loot click"),
+         "the window steps it takes are the loot packets', which follow the response to a loot click, and it takes `LootMoveStart` only on a window it has just opened"),
         ("ui_loot_roll.rs", "feed_loot_rolls", Because::PlayerRoundTrip,
          "a roll exists only after a group member loots under group loot; leftovers are cleared at socket teardown (another player's act: coincidence-only residual)"),
         ("ui_macro/mod.rs", "load_macros", Because::MemoLatched,
@@ -1529,7 +1832,7 @@ pub(crate) mod schedule_tests {
         ("ui_script/extract/mod.rs", "paint_script", Because::Deliberate,
          "per-frame paint and cost state, not a queue"),
         ("ui_social/feed.rs", "feed_social", Because::Deliberate,
-         "its take is `name_events`, the packets' ask markers: taken before the interface is up they still send their name queries, to the server and not the VM, and the lists and lines are read again as the names land"),
+         "its take is the handlers' list events and lines: those taken into the glue VM are lost there, and the in-game VM's first feed fires both list events again over the lists as they stand"),
         ("ui_stable/mod.rs", "feed_stable", Because::PlayerRoundTrip,
          "both packets follow a stable master's gossip and a click in its window"),
         ("ui_summon.rs", "feed_summon", Because::PlayerRoundTrip,
@@ -1559,24 +1862,28 @@ pub(crate) mod schedule_tests {
         }
     }
 
-    /// A consumer (a system taking `NonSend[Mut]<UiScript>` whose body has a [`CONSUMES`]
-    /// marker) passes if the schedule shows `ingame_ui_up` on it or a set above it, if it is a
-    /// `fire_event` driven by a `VmMemo` parameter, or if [`EXEMPT`] argues it. Read off the
-    /// schedule, where a gate on a set, a tuple or the member all look alike. A stale `EXEMPT`
-    /// row fails too.
+    /// A consumer (a system taking `NonSend[Mut]<UiScript>`, a `HostedVm` or a `VmWith`, whose body
+    /// has a [`CONSUMES`] marker) passes if the schedule shows `ingame_ui_up` on it or a set above
+    /// it, if it is a `fire_event` driven by a `VmMemo` parameter, or if [`EXEMPT`] argues it. Read
+    /// off the schedule, where a gate on a set, a tuple or the member all look alike. A stale
+    /// `EXEMPT` row fails too.
     #[test]
     fn every_one_shot_consumer_that_holds_the_vm_is_gated_or_argued() {
         use crate::test_support::{fn_items, rel_path, rust_files, src_dir};
         let mut consumers = Vec::new();
         for file in rust_files(&src_dir()) {
             let text = std::fs::read_to_string(&file).expect("readable source");
-            if !text.contains("UiScript") {
+            if !text.contains("UiScript") && !text.contains("HostedVm") {
                 continue;
             }
             let rel = rel_path(&file);
             for f in fn_items(&text) {
-                let holds_vm = f.params.contains("NonSendMut<UiScript>")
-                    || f.params.contains("NonSend<UiScript>");
+                let holds_vm = ["NonSendMut<", "NonSend<"].iter().any(|t| {
+                    f.params.contains(&format!("{t}UiScript>"))
+                        || f.params
+                            .contains(&format!("{t}benilla_ui::script::UiScript>"))
+                }) || f.params.contains("HostedVm")
+                    || f.params.contains("VmWith<");
                 if !holds_vm || !CONSUMES.iter().any(|m| f.body.contains(m)) {
                     continue;
                 }

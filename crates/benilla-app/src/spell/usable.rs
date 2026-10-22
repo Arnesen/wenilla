@@ -18,11 +18,11 @@ use benilla_formats::{
 };
 
 use crate::items::Items;
-use crate::net::{ObjectStore, Objects, Reputations};
+use crate::net::{ObjectStore, Objects};
 use crate::query_cache::Ask;
 use crate::spell::Cooldowns;
-use crate::spell::{SpellModifiers, OP_COST};
-use crate::target::{can_attack, ring_reaction, Factions};
+use crate::spell::{SpellLevel, SpellModifiers, SpellReads, UnitField, Unrecorded, OP_COST};
+use crate::target::{RelUnit, Relations};
 
 use crate::ui_action::Spells;
 
@@ -34,13 +34,14 @@ use crate::player::UNIT_FLAG_IN_COMBAT;
 const IMPLICIT_TARGET_ENEMY: u32 = 6;
 const IMPLICIT_TARGET_FRIEND: u32 = 21;
 
-/// Everything the walk reads besides the spell. `target_store` is the current target's (leg 10
-/// reads the current-target global `0xb4e2d8`, not an explicit cast target).
+/// Everything the walk reads besides the spell. `store` is the caster's, the active player's
+/// ([`Relations::me`]), and `target` the current target's guid and descriptor (leg 10 reads the
+/// current-target global `0xb4e2d8`, not an explicit cast target).
 pub(crate) struct UsableCtx<'a> {
     pub(crate) store: &'a ObjectStore,
-    pub(crate) target_store: Option<&'a ObjectStore>,
-    pub(crate) factions: Option<&'a Factions>,
-    pub(crate) reputations: &'a Reputations,
+    pub(crate) target: Option<(u64, &'a ObjectStore)>,
+    /// The relation functions leg 10b's fork asks.
+    pub(crate) rel: Relations<'a>,
     pub(crate) cooldowns: &'a Cooldowns,
     /// The talent spell-modifier tables leg 12's cost goes through.
     pub(crate) spell_mods: &'a SpellModifiers,
@@ -50,6 +51,10 @@ pub(crate) struct UsableCtx<'a> {
     /// Every entry's stack count at mask 0 for the frame ([`crate::ui_items::stack_counts`]):
     /// the reagent and totem counts of `0x6e4000`.
     pub(crate) stacks: &'a std::collections::HashMap<u32, u32>,
+    /// The skill lines leg 12's cost finds its level through ([`SpellLevel::Player`]).
+    pub(crate) skill_lines: Option<&'a benilla_formats::SkillLineCatalog>,
+    /// `ItemSubClass.dbc`, whose `Flags` leg 4's ammo leg reads; absent when it did not load.
+    pub(crate) sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
 }
 
 /// The search covers equipment indices `0..=22` (`0x5f0c50`'s `cmp ebx,0x17; jl`): the 19 worn
@@ -93,6 +98,7 @@ fn needs_equipped_item(d: &SpellDisplay) -> bool {
 /// The equipment slots [`equipped_item_fits`] reads for `d`, a bit each: none unless it searches,
 /// else the slots its hand restriction leaves and both hands, which the disarm ladder reads
 /// whatever the restriction (`0x5f0c69`, `0x5f0c91`).
+#[cfg(test)]
 pub(crate) fn worn_slots_read(d: &SpellDisplay) -> u32 {
     if needs_equipped_item(d) {
         (hand_mask(d) | HANDS) & EQUIPMENT_MASK
@@ -110,27 +116,86 @@ pub(crate) const EQUIPMENT_MASK: u32 = (1 << EQUIPMENT_SLOTS) - 1;
 
 /// Leg 4 (`0x6e40e0`), shared with the tooltip's requirement line and the cast ladder's rung 7:
 /// does a worn item match `EquippedItemClass` and `EquippedItemSubClassMask`? The templates are
-/// only read (`0x6e428f`): one that has not streamed counts as a match.
+/// only read (`0x6e428f`): one that has not streamed counts as a match. The search reports the
+/// slots it reads to `reads`.
 pub(crate) fn equipped_item_fits(
     d: &SpellDisplay,
     store: &ObjectStore,
     objects: &Objects,
     items: &Items,
+    reads: &mut dyn SpellReads,
 ) -> bool {
     if !needs_equipped_item(d) {
         return true;
     }
+    // The disarm ladder reads both hands whatever the restriction (`0x5f0c69`, `0x5f0c91`), then
+    // the search the slots the restriction leaves.
+    reads.item_search((hand_mask(d) | HANDS) & EQUIPMENT_MASK);
+    first_fitting_item(d, store, objects, items).is_some()
+}
+
+/// `FindEquippedItemForSpell 0x5f0c50`: the first worn item, in slot order, that fits `d`'s
+/// requirement once the disarm ladder has hidden its hand.
+fn first_fitting_item(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    objects: &Objects,
+    items: &Items,
+) -> Option<u64> {
     let mut mask = hand_mask(d);
     if let Some(hidden) = crate::items::disarmed_equipment_slot(store, objects, items) {
         mask &= !(1u32 << hidden);
     }
-    equipped_slots_match(
+    first_fitting_slot(
         store,
         mask,
         d.equipped_item_class as u32,
         d.equipped_item_subclass_mask,
         |guid| worn_item_cached(guid, objects, items),
     )
+}
+
+/// The ammo leg of `0x6e40e0` (`0x6e41f6`-`0x6e4373`). Its two callers both pass the ammo flag:
+/// the cast request (`0x6e4dff`) and the usable walk (`0x6e3e67`); the spell tooltip calls the
+/// worn-item search `0x5f0c50` alone (`0x52ef73`). `Some(ammo type)` refuses, `0x2f`
+/// `SPELL_FAILED_NEED_AMMO` with the type as its argument (`0x6e434d`, `0x6e4372`).
+/// `subclass_flags` is `ItemSubClass.dbc`'s `Flags` for a class and subclass, 0 for no row;
+/// `held` is the inventory walk's count of an entry at mask 0 (`0x622420`).
+pub(crate) fn ammo_refusal(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    objects: &Objects,
+    items: &Items,
+    subclass_flags: &dyn Fn(u32, u32) -> u32,
+    held: &dyn Fn(u32) -> u32,
+) -> Option<u32> {
+    /// `ItemSubClass.dbc` `Flags & 0x10` (`0x6e4264`): a weapon that fires no ammo, in 5875 the
+    /// Thrown row (2, 16) alone.
+    const SUBCLASS_NO_AMMO: u32 = 0x10;
+    /// `ITEM_CLASS_PROJECTILE`, the class the carried walk's callback takes (`0x6e43ab`).
+    const CLASS_PROJECTILE: u32 = 6;
+    if !needs_equipped_item(d) {
+        return None;
+    }
+    let weapon = first_fitting_item(d, store, objects, items)?;
+    // No record yet passes (`0x6e4296`), as no ammo type does (`0x6e42a7`).
+    let template = items.template(objects.object(weapon)?.object_entry()?, 0, Ask::Read)?;
+    if subclass_flags(template.class, template.subclass) & SUBCLASS_NO_AMMO != 0 {
+        return None;
+    }
+    let ammo_type = template.ammo_type;
+    if ammo_type == 0 {
+        return None;
+    }
+    // `PLAYER_AMMO_ID` (`[+0xe68]+0x102c`), then a carried projectile of that entry and the
+    // weapon's ammo type (`0x6e4331`, `0x6e43a0`).
+    let ammo_id = store.0.player_ammo_id().unwrap_or(0);
+    let carried = ammo_id != 0
+        && items
+            .template(ammo_id, 0, Ask::Read)
+            .is_some_and(|t| t.class == CLASS_PROJECTILE && t.subclass == ammo_type)
+        && held(ammo_id) > 0;
+    (!carried).then_some(ammo_type)
 }
 
 /// The worn item `guid` names from the cached records alone: `None` while its object or its
@@ -238,21 +303,19 @@ pub(crate) struct WornItem {
     pub(crate) max_durability: Option<u32>,
 }
 
-/// The search body over a caller-supplied resolver; `None` from it (template not landed) counts
-/// as a match.
-fn equipped_slots_match(
+/// The search body over a caller-supplied resolver, the guid of the first slot that fits; `None`
+/// from the resolver (template not landed) counts as a match.
+fn first_fitting_slot(
     store: &ObjectStore,
     mask: u32,
     class: u32,
     subclass_mask: u32,
     mut worn: impl FnMut(u64) -> Option<WornItem>,
-) -> bool {
+) -> Option<u64> {
     (0..EQUIPMENT_SLOTS)
         .filter(|slot| mask & (1u32 << slot) != 0)
-        .any(|slot| {
-            let guid = store.0.player_inv_slot(slot).unwrap_or(0);
-            SlotItem::of(guid, &mut worn).fits(class, subclass_mask)
-        })
+        .map(|slot| store.0.player_inv_slot(slot).unwrap_or(0))
+        .find(|&guid| SlotItem::of(guid, &mut worn).fits(class, subclass_mask))
 }
 
 /// The item arm of the usable compute (`0x4e5050`), gate by gate:
@@ -341,8 +404,13 @@ pub(crate) fn spell_usable(
             return (false, false);
         }
     }
-    // Leg 4 (`0x6e40e0`): some worn item matches the class and subclass mask.
-    if !equipped_item_fits(d, ctx.store, objects, items) {
+    // Leg 4 (`0x6e40e0`): some worn item matches the class and subclass mask, and its ammo leg,
+    // the walk passing the ammo flag (`0x6e3e67`), finds a loaded and carried projectile.
+    if !equipped_item_fits(d, ctx.store, objects, items, &mut Unrecorded) {
+        return (false, false);
+    }
+    let flags = |class, subclass| ctx.sub_classes.map_or(0, |c| c.flags(class, subclass));
+    if ammo_refusal(d, ctx.store, objects, items, &flags, &stacks).is_some() {
         return (false, false);
     }
     // Leg 5 (`0x6e3e7a`..`0x6e3eb2`): a finishing move (`AttributesEx & 0x500000`, one any-of
@@ -380,24 +448,25 @@ pub(crate) fn spell_usable(
     // Legs 10/10b (`0x6e3f58`): no current target is unusable; then the aura-state bit; then the
     // relation fork.
     if d.target_aura_state != 0 {
-        let Some(target) = ctx.target_store else {
+        let Some((target_guid, target)) = ctx.target else {
             return (false, false);
         };
         if target.0.unit_aura_state() & (1 << (d.target_aura_state - 1)) == 0 {
             return (false, false);
         }
+        // The caster is the active player's object; without its guid there is no unit to ask.
+        let Some(me) = ctx.rel.me else {
+            return (false, false);
+        };
+        let caster = RelUnit::of(me, ctx.store);
+        let target = RelUnit::of(target_guid, target);
         match d.implicit_target_a1 {
             // `CanAttack 0x606980`.
-            IMPLICIT_TARGET_ENEMY
-                if !can_attack(Some(target), ctx.factions, ctx.reputations, Some(ctx.store)) =>
-            {
+            IMPLICIT_TARGET_ENEMY if !ctx.rel.can_attack(&caster, &target) => {
                 return (false, false);
             }
-            // Reaction friendly or better, standing in for `CanAssist 0x6066f0`.
-            IMPLICIT_TARGET_FRIEND
-                if ring_reaction(ctx.factions, ctx.reputations, Some(target), Some(ctx.store))
-                    < 4 =>
-            {
+            // `CanAssist 0x6066f0`, the caster as `this` (`0x6e3f98`-`0x6e3f9b`).
+            IMPLICIT_TARGET_FRIEND if !ctx.rel.can_assist(&caster, &target) => {
                 return (false, false);
             }
             _ => {}
@@ -409,7 +478,7 @@ pub(crate) fn spell_usable(
         return (false, false);
     }
     // Leg 12 (`0x6e3fba`..`0x6e3feb`): power, the only notEnoughMana writer.
-    if !can_afford(d, ctx.store, ctx.spell_mods) {
+    if !can_afford(d, ctx.store, ctx.skill_lines, ctx.spell_mods) {
         return (false, true);
     }
     (true, false)
@@ -418,42 +487,100 @@ pub(crate) fn spell_usable(
 /// The resolved power cost, `GetPowerCost 0x6e31b0`: `manaCost`, plus the signed
 /// `(level - baseLevel) * manaCostPerlevel` (only creature spells carry it), plus
 /// `ManaCostPercentage` of the reference's per-type basis (`0x612c50`): base health for health,
-/// base mana for mana, 1000 for rage, 100 for focus and energy, and 0 otherwise. Then
-/// `SPELLMOD_COST` through `0x6e6af0` (`6e32e3`), clamped at 0.
-/// The reference's per-school unit modifiers are not applied.
+/// base mana for mana, 1000 for rage, 100 for focus and energy, and 0 otherwise. Then the caster's
+/// `POWER_COST_MODIFIER` and `POWER_COST_MULTIPLIER` for the spell's school, the clamp at 0, and
+/// `SPELLMOD_COST` through `0x6e6af0` last (`0x6e32f0`), whose result is not clamped.
 ///
 /// One cost for leg 12, the press-path gate and the tooltip, as `0x6e31b0` serves all six of its
 /// callers. The press-path gate refuses an unaffordable cast without sending anything
 /// (`0x609657`), so an unmodified cost refuses casts a talented character can afford.
-pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> u32 {
-    // The level term reads `baseLevel` (`+0x70`), as `0x6e31b0` does, but the reference scales a
-    // caster value / 5 there (vmangos: the level / 5); only creature spells have a per-level cost.
-    power_cost_at(d, &store.0, store.0.unit_level().unwrap_or(0), mods)
+pub(crate) fn power_cost(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    mods: &SpellModifiers,
+    reads: &mut dyn SpellReads,
+) -> i32 {
+    let level = SpellLevel::Player {
+        me: Some(store),
+        skill_lines,
+    };
+    power_cost_at(d, &store.0, level, mods, reads)
 }
 
-/// [`power_cost`] against `unit`'s fields at the level term `level`, the value `0x6e31b0` reads
+/// [`power_cost`] against `unit`'s fields at the level term's `level`, the value `0x6e31b0` reads
 /// through the caster's `[vtbl+0xa8]` over 5 (`6e3242`-`6e3254`). With the unit selector set, the
 /// tooltip's caster is the player's charm, else its summon (`6e31fe`-`6e3228`), whose own basis
-/// `0x612c50` is called (`6e327d`).
+/// `0x612c50` is called (`6e327d`). `reads` hears the level when the cost has a level term, and
+/// the fields it reads.
 pub(crate) fn power_cost_at(
     d: &SpellDisplay,
     unit: &benilla_protocol::ObjectFields,
-    level: u32,
+    level: SpellLevel,
     mods: &SpellModifiers,
-) -> u32 {
+    reads: &mut dyn SpellReads,
+) -> i32 {
     let base = match cost_basis(d) {
         CostBasis::None => 0,
-        CostBasis::BaseMana => unit.unit_base_mana().unwrap_or(0),
-        CostBasis::BaseHealth => unit.unit_base_health().unwrap_or(0),
+        CostBasis::BaseMana => {
+            reads.unit(UnitField::BaseMana);
+            unit.unit_base_mana().unwrap_or(0)
+        }
+        CostBasis::BaseHealth => {
+            reads.unit(UnitField::BaseHealth);
+            unit.unit_base_health().unwrap_or(0)
+        }
         CostBasis::Fixed(value) => value,
     };
-    let level_delta = i64::from(level) - i64::from(d.base_level);
-    let cost = i64::from(d.mana_cost)
-        + level_delta * i64::from(d.mana_cost_per_level)
-        + i64::from(base) * i64::from(d.mana_cost_pct) / 100;
-    // The talent cut applies before the clamp at 0.
-    let cost = cost.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    u32::try_from(mods.apply(d, OP_COST, cost)).unwrap_or(0)
+    // Only a spell with a per-level cost, a creature's, reads the level. The sums are the
+    // reference's 32-bit ones (`0x6e325f`-`0x6e32a1`).
+    let level_term = if d.mana_cost_per_level != 0 {
+        level
+            .read(d, reads)
+            .wrapping_sub(d.base_level)
+            .wrapping_mul(d.mana_cost_per_level) as i32
+    } else {
+        0
+    };
+    let pct = (base as i32).wrapping_mul(d.mana_cost_pct as i32) / 100;
+    let cost = (d.mana_cost as i32)
+        .wrapping_add(level_term)
+        .wrapping_add(pct);
+    // The school's flat term (`0x6e32ad`), then its factor: `(1 + multiplier) × cost` on the x87
+    // stack, stored as an `f32`, then `fistp`, which rounds to nearest even and stores the
+    // integer indefinite for a NaN or a value out of range (`0x6e32c0`-`0x6e32d6`).
+    reads.unit(UnitField::PowerCostModifier);
+    reads.unit(UnitField::PowerCostMultiplier);
+    let cost = cost.wrapping_add(unit.unit_power_cost_modifier(d.school).unwrap_or(0));
+    let factor = f64::from(unit.unit_power_cost_multiplier(d.school).unwrap_or(0.0)) + 1.0;
+    let scaled = f64::from((factor * f64::from(cost)) as f32).round_ties_even();
+    let cost = if (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&scaled) {
+        scaled as i32
+    } else {
+        i32::MIN
+    };
+    // The clamp at 0 (`0x6e32de`-`0x6e32ea`), then the talent modifier, which can take the cost
+    // below 0 again (`0x6e32f0`).
+    mods.apply(d, OP_COST, cost.max(0))
+}
+
+/// The per-second cost the tooltip's `_PER_TIME` cell shows, `0x6e3300`: `manaPerSecond` plus
+/// `(level - baseLevel) * manaPerSecondPerLevel` (`0x6e3323`-`0x6e3335`), in 32-bit arithmetic,
+/// `level` the value `0x6e3130` reads. `reads` hears the level when the term has a factor.
+pub(crate) fn per_second_cost(
+    d: &SpellDisplay,
+    level: SpellLevel,
+    reads: &mut dyn SpellReads,
+) -> i32 {
+    let level_term = if d.mana_per_second_per_level != 0 {
+        level
+            .read(d, reads)
+            .wrapping_sub(d.base_level)
+            .wrapping_mul(d.mana_per_second_per_level)
+    } else {
+        0
+    };
+    d.mana_per_second.wrapping_add(level_term) as i32
 }
 
 /// What [`power_cost_at`] scales `d`'s percentage cost by: `0x612c50`, a jump table on the power
@@ -470,7 +597,7 @@ pub(crate) enum CostBasis {
     Fixed(u32),
 }
 
-pub(crate) fn cost_basis(d: &SpellDisplay) -> CostBasis {
+fn cost_basis(d: &SpellDisplay) -> CostBasis {
     if d.mana_cost_pct == 0 {
         return CostBasis::None;
     }
@@ -483,27 +610,29 @@ pub(crate) fn cost_basis(d: &SpellDisplay) -> CostBasis {
     }
 }
 
-/// Whether [`power_cost_at`]'s level term moves the cost: only a spell with a per-level cost.
-pub(crate) fn cost_reads_level(d: &SpellDisplay) -> bool {
-    d.mana_cost_per_level != 0
-}
-
 /// Whether the caster can afford `d`, for leg 12 (`0x6e3fba`) and the press-path gate
 /// (`0x60962c`): `UNIT_FIELD_POWER[type]`, or `UNIT_FIELD_HEALTH` for any negative PowerType
-/// (`0x609631`; Bloodrage's -2), against [`power_cost`].
-pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> bool {
+/// (`0x609631`; Bloodrage's -2), against [`power_cost`], both compares signed (`0x6e3fe2`,
+/// `0x60965f`), so a cost a talent took below 0 is always affordable.
+pub(crate) fn can_afford(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    mods: &SpellModifiers,
+) -> bool {
     let power_type = d.power_type as i32;
     let avail = if power_type < 0 {
         store.0.unit_health().unwrap_or(0)
     } else {
         store.0.unit_power(power_type as u8).unwrap_or(0)
     };
-    avail >= power_cost(d, store, mods)
+    avail as i32 >= power_cost(d, store, skill_lines, mods, &mut Unrecorded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::Reputations;
     use benilla_protocol::ObjectFields;
 
     // Field indices, private in the protocol crate: health 22, power1 23, max health 28, flags
@@ -551,7 +680,7 @@ mod tests {
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
             deps.with_objects(|objects, items, _| {
-                equipped_item_fits(&needs_a_weapon, &store, objects, items)
+                equipped_item_fits(&needs_a_weapon, &store, objects, items, &mut Unrecorded)
             })
         };
 
@@ -607,7 +736,9 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            deps.with_objects(|objects, items, _| equipped_item_fits(d, &store, objects, items))
+            deps.with_objects(|objects, items, _| {
+                equipped_item_fits(d, &store, objects, items, &mut Unrecorded)
+            })
         };
 
         let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
@@ -680,6 +811,7 @@ mod tests {
                     &store,
                     objects,
                     items,
+                    &mut Unrecorded,
                 )
             })
         };
@@ -692,6 +824,258 @@ mod tests {
         assert!(fits(0, true));
     }
 
+    /// `0x6e40e0`'s ammo leg: a weapon whose record names an ammo type (`+0x114`) fires only with
+    /// `PLAYER_AMMO_ID` set (`0x6e42db`) and a carried projectile of that entry, class 6 and that
+    /// subclass (`0x6e43a0`); an `ItemSubClass.dbc` row with flag `0x10` (Thrown), a weapon of
+    /// ammo type 0 and a record not cached pass (`0x6e4264`, `0x6e42a7`, `0x6e4296`).
+    #[test]
+    fn a_ranged_weapon_needs_its_ammo_loaded_and_carried() {
+        use crate::items::TestDeps;
+        use benilla_protocol::messages::ItemInfo;
+
+        const INV_RANGED: u16 = 486 + 2 * 17;
+        const INV_BACKPACK: u16 = 486 + 2 * 23;
+        const AMMO_ID: u16 = 1223;
+        const BOW: u64 = 0x2a;
+        const ARROWS: u64 = 0x2b;
+        const BOW_ENTRY: u32 = 2504;
+        const ARROW_ENTRY: u32 = 2512;
+
+        let shot = SpellDisplay {
+            equipped_item_class: 2,
+            equipped_item_subclass_mask: 1 << 2 | 1 << 3 | 1 << 16 | 1 << 18,
+            ..Default::default()
+        };
+        struct Case {
+            ammo_type: u32,
+            ammo_id: u32,
+            carried: bool,
+            projectile: (u32, u32),
+            flags: u32,
+            cached: bool,
+        }
+        let base = Case {
+            ammo_type: 2,
+            ammo_id: ARROW_ENTRY,
+            carried: true,
+            projectile: (6, 2),
+            flags: 0,
+            cached: true,
+        };
+        let refusal = |c: Case| {
+            let mut deps = TestDeps::new();
+            deps.spawn_item(BOW, ObjectFields::from_pairs(&[(3, BOW_ENTRY)]));
+            if c.cached {
+                deps.items.insert_template(
+                    BOW_ENTRY,
+                    Some(ItemInfo {
+                        class: 2,
+                        subclass: 2,
+                        ammo_type: c.ammo_type,
+                        ..crate::items::test_template("Bow")
+                    }),
+                );
+            }
+            deps.items.insert_template(
+                ARROW_ENTRY,
+                Some(ItemInfo {
+                    class: c.projectile.0,
+                    subclass: c.projectile.1,
+                    ..crate::items::test_template("Arrow")
+                }),
+            );
+            let mut pairs = vec![(INV_RANGED, BOW as u32), (AMMO_ID, c.ammo_id)];
+            if c.carried {
+                deps.spawn_item(ARROWS, ObjectFields::from_pairs(&[(3, ARROW_ENTRY)]));
+                pairs.push((INV_BACKPACK, ARROWS as u32));
+            }
+            let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+            let flags = c.flags;
+            deps.with_objects(|objects, items, _| {
+                let held = |entry| {
+                    crate::ui_items::count_of(
+                        &store.0,
+                        objects,
+                        entry,
+                        crate::ui_items::InventoryScope::DEFAULT,
+                    )
+                };
+                let flags = |class, subclass| {
+                    if (class, subclass) == (2, 2) {
+                        flags
+                    } else {
+                        0
+                    }
+                };
+                ammo_refusal(&shot, &store, objects, items, &flags, &held)
+            })
+        };
+
+        assert_eq!(refusal(Case { ..base }), None, "loaded and carried");
+        assert_eq!(
+            refusal(Case { ammo_id: 0, ..base }),
+            Some(2),
+            "nothing loaded"
+        );
+        assert_eq!(
+            refusal(Case {
+                carried: false,
+                ..base
+            }),
+            Some(2),
+            "loaded but none carried"
+        );
+        assert_eq!(
+            refusal(Case {
+                projectile: (6, 3),
+                ..base
+            }),
+            Some(2),
+            "bullets for a bow"
+        );
+        assert_eq!(
+            refusal(Case {
+                projectile: (15, 2),
+                ..base
+            }),
+            Some(2),
+            "not a projectile"
+        );
+        assert_eq!(
+            refusal(Case {
+                ammo_id: 0,
+                flags: 0x10,
+                ..base
+            }),
+            None,
+            "a subclass flagged 0x10"
+        );
+        assert_eq!(
+            refusal(Case {
+                ammo_id: 0,
+                ammo_type: 0,
+                ..base
+            }),
+            None,
+            "no ammo type"
+        );
+        assert_eq!(
+            refusal(Case {
+                ammo_id: 0,
+                cached: false,
+                ..base
+            }),
+            None,
+            "no record yet"
+        );
+    }
+
+    /// The usable walk runs the equipped-item check with the ammo flag (`0x6e3e67`), so a bow
+    /// with no arrows loaded greys the shot, and loaded arrows the bags hold light it.
+    #[test]
+    fn a_shot_without_ammo_greys_its_button() {
+        use crate::items::TestDeps;
+        use benilla_protocol::messages::ItemInfo;
+        const INV_RANGED: u16 = 486 + 2 * 17;
+        const INV_BACKPACK: u16 = 486 + 2 * 23;
+        const AMMO_ID: u16 = 1223;
+        const BOW: u64 = 0x2a;
+        const ARROWS: u64 = 0x2b;
+        const BOW_ENTRY: u32 = 2504;
+        const ARROW_ENTRY: u32 = 2512;
+
+        let shot = SpellDisplay {
+            equipped_item_class: 2,
+            equipped_item_subclass_mask: 1 << 2,
+            ..Default::default()
+        };
+        let lit = |ammo_id: u32| {
+            let mut deps = TestDeps::new();
+            deps.spawn_item(BOW, ObjectFields::from_pairs(&[(3, BOW_ENTRY)]));
+            deps.spawn_item(
+                ARROWS,
+                ObjectFields::from_pairs(&[(3, ARROW_ENTRY), (14, 200)]),
+            );
+            deps.items.insert_template(
+                BOW_ENTRY,
+                Some(ItemInfo {
+                    class: 2,
+                    subclass: 2,
+                    ammo_type: 2,
+                    ..crate::items::test_template("Bow")
+                }),
+            );
+            deps.items.insert_template(
+                ARROW_ENTRY,
+                Some(ItemInfo {
+                    class: 6,
+                    subclass: 2,
+                    ..crate::items::test_template("Arrow")
+                }),
+            );
+            let store = player(&[
+                (INV_RANGED, BOW as u32),
+                (INV_BACKPACK, ARROWS as u32),
+                (AMMO_ID, ammo_id),
+            ]);
+            let cooldowns = Cooldowns::default();
+            let reputations = Reputations::default();
+            let spells = Spells::empty_for_tests();
+            let spell_mods = SpellModifiers::default();
+            deps.with_objects(|objects, items, _| {
+                let stacks = crate::ui_items::stack_counts(&store.0, objects);
+                let ctx = ctx(&store, &cooldowns, &reputations, &stacks, &spell_mods);
+                spell_usable(3044, &shot, &spells, &ctx, objects, items)
+            })
+        };
+        assert_eq!(lit(0), (false, false), "nothing loaded");
+        assert_eq!(lit(ARROW_ENTRY), (true, false), "loaded and carried");
+    }
+
+    /// The spell tooltip's requirement line searches the worn items alone (`0x52ef73`): an empty
+    /// quiver leaves the bow's requirement met.
+    #[test]
+    fn the_worn_item_search_reads_no_ammo() {
+        use crate::items::TestDeps;
+        let mut deps = TestDeps::new();
+        deps.spawn_item(0x2a, ObjectFields::from_pairs(&[(3, 2504)]));
+        deps.items.insert_template(
+            2504,
+            Some(benilla_protocol::messages::ItemInfo {
+                class: 2,
+                subclass: 2,
+                ammo_type: 2,
+                ..crate::items::test_template("Bow")
+            }),
+        );
+        let store = ObjectStore(ObjectFields::from_pairs(&[(486 + 2 * 17, 0x2a)]));
+        let shot = SpellDisplay {
+            equipped_item_class: 2,
+            equipped_item_subclass_mask: 1 << 2,
+            ..Default::default()
+        };
+        deps.with_objects(|objects, items, _| {
+            assert!(equipped_item_fits(
+                &shot,
+                &store,
+                objects,
+                items,
+                &mut Unrecorded
+            ));
+        });
+    }
+
+    /// The relation functions with nothing held and no catalog: every faction leg neutral.
+    fn no_relations(reputations: &Reputations) -> Relations<'_> {
+        Relations {
+            factions: None,
+            reputations,
+            me: None,
+            roster: None,
+            units: &crate::target::relations::NoUnits,
+        }
+    }
+
     fn ctx<'a>(
         store: &'a ObjectStore,
         cooldowns: &'a Cooldowns,
@@ -701,13 +1085,14 @@ mod tests {
     ) -> UsableCtx<'a> {
         UsableCtx {
             store,
-            target_store: None,
-            factions: None,
-            reputations,
+            target: None,
+            rel: no_relations(reputations),
             cooldowns,
             stacks,
             spell_mods,
             control_lost: false,
+            skill_lines: None,
+            sub_classes: None,
         }
     }
 
@@ -740,16 +1125,22 @@ mod tests {
         };
         let mods = SpellModifiers::default();
         let with_gear = player(&[(22, 400), (28, 4_000), (163, 1_689)]);
-        assert_eq!(power_cost(&bloodrage, &with_gear, &mods), 337);
-        assert!(can_afford(&bloodrage, &with_gear, &mods));
+        assert_eq!(
+            power_cost(&bloodrage, &with_gear, None, &mods, &mut Unrecorded),
+            337
+        );
+        assert!(can_afford(&bloodrage, &with_gear, None, &mods));
         assert_eq!(walk(&bloodrage, &with_gear), (true, false));
 
         let below_cost = player(&[(22, 336), (28, 4_000), (163, 1_689)]);
-        assert!(!can_afford(&bloodrage, &below_cost, &mods));
+        assert!(!can_afford(&bloodrage, &below_cost, None, &mods));
         assert_eq!(walk(&bloodrage, &below_cost), (false, true));
 
         let without_gear = player(&[(22, 400), (28, 1_689), (163, 1_689)]);
-        assert_eq!(power_cost(&bloodrage, &without_gear, &mods), 337);
+        assert_eq!(
+            power_cost(&bloodrage, &without_gear, None, &mods, &mut Unrecorded),
+            337
+        );
     }
 
     /// `0x612c50`'s jump table (`0x612ca0`, indexed by the type plus 2): base health for -2, base
@@ -784,7 +1175,11 @@ mod tests {
                 mana_cost_pct: 20,
                 ..Default::default()
             };
-            assert_eq!(power_cost(&spell, &store, &mods), cost, "type {power_type}");
+            assert_eq!(
+                power_cost(&spell, &store, None, &mods, &mut Unrecorded),
+                cost,
+                "type {power_type}"
+            );
         }
     }
 
@@ -803,19 +1198,19 @@ mod tests {
         let mut mods = SpellModifiers::default();
         mods.set_class_family(3);
         assert_eq!(
-            power_cost(&d, &store, &mods),
+            power_cost(&d, &store, None, &mods, &mut Unrecorded),
             100,
             "no packet yet — the flat DBC cost"
         );
         assert!(
-            !can_afford(&d, &store, &mods),
+            !can_afford(&d, &store, None, &mods),
             "80 mana does not buy a 100 mana spell"
         );
 
         mods.set(false, 5, OP_COST, -30);
-        assert_eq!(power_cost(&d, &store, &mods), 70);
+        assert_eq!(power_cost(&d, &store, None, &mods, &mut Unrecorded), 70);
         assert!(
-            can_afford(&d, &store, &mods),
+            can_afford(&d, &store, None, &mods),
             "the talent brings it inside the pool, so TryCast must send the cast"
         );
 
@@ -824,7 +1219,57 @@ mod tests {
             spell_family: 4,
             ..d
         };
-        assert_eq!(power_cost(&other_class, &store, &mods), 100);
+        assert_eq!(
+            power_cost(&other_class, &store, None, &mods, &mut Unrecorded),
+            100
+        );
+    }
+
+    /// The school's flat term and factor (`0x6e32ad`, `0x6e32c0`-`0x6e32d6`), then the clamp at
+    /// 0, then the talent modifier, which no clamp follows (`0x6e32de`-`0x6e32f0`).
+    #[test]
+    fn the_school_cost_terms_come_before_the_clamp_and_the_talent_after() {
+        // A 100-mana Fire spell (school 2) of family 3, bit 5.
+        let d = SpellDisplay {
+            school: 2,
+            spell_family: 3,
+            spell_family_flags: 1 << 5,
+            mana_cost: 100,
+            ..Default::default()
+        };
+        let cost = |fields: &[(u16, u32)], flat: i32| {
+            let mut mods = SpellModifiers::default();
+            mods.set_class_family(3);
+            mods.set(true, 5, OP_COST, flat);
+            let store = player(fields);
+            (
+                power_cost(&d, &store, None, &mods, &mut Unrecorded),
+                can_afford(&d, &store, None, &mods),
+            )
+        };
+        let f = |v: f32| v.to_bits();
+        assert_eq!(cost(&[], 0).0, 100);
+        assert_eq!(cost(&[(175, 20)], 0).0, 120, "Fire's modifier");
+        assert_eq!(cost(&[(174, 20), (181, f(1.0))], 0).0, 100, "Holy's");
+        assert_eq!(cost(&[(182, f(-0.25))], 0).0, 75, "Fire's factor");
+        assert_eq!(
+            cost(&[(175, 20), (182, f(0.5))], 0).0,
+            180,
+            "the modifier, then the factor"
+        );
+        assert_eq!(cost(&[(175, 1), (182, f(-0.5))], 0).0, 50, "50.5 to even");
+        assert_eq!(
+            cost(&[(182, f(f32::NAN))], 0).0,
+            0,
+            "indefinite, then clamped"
+        );
+        let below = (-150i32) as u32;
+        assert_eq!(cost(&[(175, below)], 0), (0, true), "clamped at 0");
+        assert_eq!(
+            cost(&[(175, below)], -10),
+            (-10, true),
+            "the talent after the clamp"
+        );
     }
 
     /// Each gate trips alone; only the power leg raises notEnoughMana (`0x6e3feb`).
@@ -936,6 +1381,57 @@ mod tests {
         assert_eq!(walk(&tradeskill, &dead), (true, false));
     }
 
+    /// Leg 10b's friend arm is `CanAssist(caster, target)` (`0x6e3f98`-`0x6e3f9b`), not the
+    /// reaction: a friendly creature the caster may not assist, being no PvP-flagged one
+    /// (`0x6067bd`), greys the spell, and the same creature flagged lights it; a not-selectable
+    /// friend greys it whatever its flag (`0x606706`).
+    #[test]
+    fn the_friend_arm_asks_can_assist_of_the_caster() {
+        use crate::target::relations::fixture::{factions, Scene, HUMAN};
+        let me = player(&[(2, 0x19), (35, HUMAN)]);
+        let cooldowns = Cooldowns::default();
+        let spells = Spells::empty_for_tests();
+        let items = Items::default();
+        let mut objs = crate::ui_items::TestObjects::new();
+        let objects = objs.get();
+        let stacks = crate::ui_items::stack_counts(&me.0, &objects);
+        // An implicit-21 spell gated on the target's aura state 2.
+        let friend_spell = SpellDisplay {
+            target_aura_state: 2,
+            implicit_target_a1: 21,
+            ..Default::default()
+        };
+        let scene = Scene::new(RelUnit::of(1, &me), Some(factions()));
+        let friend = |flags: u32| {
+            ObjectStore(ObjectFields::from_pairs(&[
+                (2, 0x09),
+                (22, 100),
+                (35, HUMAN),
+                (46, flags),
+                (125, 0x2),
+            ]))
+        };
+        for (flags, usable) in [(0, false), (0x1000, true), (0x1000 | (1 << 25), false)] {
+            let target = friend(flags);
+            let ctx = UsableCtx {
+                store: &me,
+                target: Some((2, &target)),
+                rel: scene.rel(),
+                cooldowns: &cooldowns,
+                stacks: &stacks,
+                spell_mods: &SpellModifiers::default(),
+                control_lost: false,
+                skill_lines: None,
+                sub_classes: None,
+            };
+            assert_eq!(
+                spell_usable(1, &friend_spell, &spells, &ctx, &objects, &items).0,
+                usable,
+                "flags {flags:#x}"
+            );
+        }
+    }
+
     /// Leg 10: the aura-state bit gates, and CanAttack passes on the default neutral reaction.
     #[test]
     fn target_aura_state_reads_the_current_target() {
@@ -955,20 +1451,31 @@ mod tests {
         let mut objs = crate::ui_items::TestObjects::new();
         let objects = objs.get();
         let stacks = crate::ui_items::stack_counts(&me.0, &objects);
-        for (target, expect) in [(&healthy, false), (&low, true)] {
+        // Without the active player's guid there is no caster to ask the relation of, so the fork
+        // refuses even the low target: no relation unit is built with guid 0.
+        for (me_guid, target, expect) in [
+            (Some(1), &healthy, false),
+            (Some(1), &low, true),
+            (None, &low, false),
+        ] {
             let ctx = UsableCtx {
                 store: &me,
-                target_store: Some(target),
-                factions: None,
-                reputations: &reputations,
+                target: Some((2, target)),
+                rel: Relations {
+                    me: me_guid,
+                    ..no_relations(&reputations)
+                },
                 cooldowns: &cooldowns,
                 stacks: &stacks,
                 spell_mods: &SpellModifiers::default(),
                 control_lost: false,
+                skill_lines: None,
+                sub_classes: None,
             };
             assert_eq!(
                 spell_usable(5308, &execute, &spells, &ctx, &objects, &items),
-                (expect, false)
+                (expect, false),
+                "{me_guid:?}"
             );
         }
     }

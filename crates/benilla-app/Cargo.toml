@@ -71,6 +71,8 @@ toml = "0.8"
 avian3d = "0.6"
 # Shapes and rasterizes `FontString` text standalone (`ui_text`), at bevy_text's own 0.16.
 cosmic-text = "0.16"
+# The smooth scan converter `ui_text` rasterizes anti-aliased glyphs with; `swash`'s own version.
+zeno = "0.3.3"
 # The layout's unshifted character per key (`KeyEventExtModifierSupplement`), which bevy's
 # `KeyboardInput` drops; bevy_winit's own 0.30, whose features it sets.
 winit = { version = "0.30", default-features = false }
@@ -161,10 +163,12 @@ web-sys = { version = "0.3", features = [
 cpal = "0.17"
 
 # Windows CPU clocks for `perf::clock`; `GetLocalTime` for the log stamp (`ui_chat::logging`); the
-# layout's virtual keys for `bindings::layout`.
+# layout's virtual keys for `bindings::layout`; the MTA cpal's device enumerator is made in
+# (`sound::output::cpal`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_System_Com",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -173,8 +177,21 @@ windows-sys = { version = "0.59", features = [
 # The login cycle's fake realmd runs the server half of SRP6 (`net::io::cycle_tests`).
 [dev-dependencies]
 benilla-srp = { path = "../benilla-srp" }
+# The UI's geometry comparisons (`benilla_ui::assert_near!`).
+benilla-ui = { path = "../benilla-ui", features = ["test-support"] }
+# The schedule census keeps the build's own graph, sync points included, through a build pass,
+# whose signature names the `IndexSet` bevy already builds (`game_plugins::schedule_tests`).
+indexmap = "2.14.0"
 num-bigint = "0.4.6"
 sha1.workspace = true
 # tests/boot_manifest.rs parses web/boot-manifest.json (the boot-prefetch read-set). Dev-only:
 # the 0978 decision to keep serde_json out of the shipped app stands.
 serde_json = "1"
+
+# The shader translation test writes the backend this platform renders with, through the naga
+# bevy already builds (`shaders.rs`).
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+naga = { version = "27.0.3", features = ["msl-out"] }
+
+[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
+naga = { version = "27.0.3", features = ["spv-out"] }

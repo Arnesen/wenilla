@@ -158,7 +158,11 @@ fn a_comma_list_is_one_name_and_a_single_name_still_chains() {
             .unwrap(),
         (50.0, 60.0)
     );
-    assert_eq!(s.eval::<f32>("return One:GetAlpha()").unwrap(), 0.25);
+    // `alpha="0.25"` is the byte 63 (`0x769a82`).
+    assert_eq!(
+        s.eval::<f64>("return One:GetAlpha()").unwrap(),
+        63.0 / 255.0
+    );
     assert!(s.take_errors().is_empty());
     assert!(s.take_warnings().is_empty());
 
@@ -347,14 +351,14 @@ fn a_scroll_child_element_gives_the_frame_a_real_scroll_range() {
         .eval::<bool>("return Roller:GetScrollChild() == RollerChild")
         .unwrap());
     // The range is the overhang: a 400-tall child in a 100-tall window scrolls 300.
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return Roller:GetVerticalScrollRange()")
             .unwrap(),
         300.0,
         "no child means range 0, which is the silent failure this element fixes"
     );
     s.run("Roller:SetVerticalScroll(120)").unwrap();
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return Roller:GetVerticalScroll()").unwrap(),
         120.0
     );
@@ -391,13 +395,13 @@ fn the_scroll_range_is_the_childs_whole_subtree() {
     s.resolve();
     s.tick(0.016);
 
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return Reader:GetVerticalScrollRange()")
             .unwrap(),
         204.0,
         "the 304-tall page inside the 10-tall child, less the 100-tall window"
     );
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return ReaderChild:GetHeight()").unwrap(),
         10.0,
         "and the child itself really is the reference's 10 — the range does not come from it"

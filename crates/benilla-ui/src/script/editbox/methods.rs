@@ -3,6 +3,7 @@
 
 use mlua::{Lua, Table, Value};
 
+use crate::script::binding_abi;
 use crate::script::object::frame_handle_of;
 use crate::widget::EditBoxState;
 
@@ -117,16 +118,18 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // HighlightText([start [, end]]): the defaults (0, -1) select all.
+    // HighlightText([start [, end]]): the defaults (0, -1) select all. Each argument has its own
+    // `lua_isnumber` gate (`0x798907`, `0x79892e`) and is `_ftol`ed; a miss keeps the default.
     m.set(
         "HighlightText",
-        lua.create_function(
-            |lua, (this, start, end): (Table, Option<i64>, Option<i64>)| {
-                let h = frame_handle_of(lua, &this)?;
-                highlight_text(lua, h, start.unwrap_or(0), end.unwrap_or(-1));
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (this, start, end): (Table, Value, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            let arg = |v, default| {
+                binding_abi::is_number(lua, v).map_or(default, |n| i64::from(binding_abi::ftol(n)))
+            };
+            highlight_text(lua, h, arg(start, 0), arg(end, -1));
+            Ok(())
+        })?,
     )?;
 
     m.set(
@@ -137,16 +140,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     m.set(
-        // `SetMaxBytes` (`0x798f30`) has `SetMaxLetters`'s exact count gate (`0x798fbc`) and raw
-        // coercion, but it stores n - 1 for a positive n and -1, unlimited, otherwise
-        // (`0x799012`-`0x799022`; the ctor writes -1 at `0x7799df`).
+        // `SetMaxBytes` (`0x798f30`) has `SetMaxLetters`'s exact count gate (`0x798fbc`, raising
+        // `Usage: %s:SetMaxBytes(max)` with the box's name, `0x87bf14`) and raw coercion, but it
+        // stores n - 1 for a positive n and -1, unlimited, otherwise (`0x799012`-`0x799022`; the
+        // ctor writes -1 at `0x7799df`).
         "SetMaxBytes",
         lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
             let args: Vec<Value> = args.into_iter().collect();
+            with_editbox(lua, &this, |_| ())?;
             if args.len() != 1 {
-                return Err(mlua::Error::runtime(
-                    "Usage: <unnamed>:SetMaxBytes(maxBytes)",
-                ));
+                return Err(binding_abi::usage(lua, &this, "SetMaxBytes(max)"));
             }
             let n = crate::script::binding_abi::coerced_number(lua, args.first().cloned());
             let n = n as i64;
@@ -164,15 +167,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         // `SetMaxLetters` (`0x799110`) checks the count exactly, `lua_gettop` (`0x6f3070`) against
-        // 2 at `0x79919c`, and not the type: no argument or two raise `Usage:`, nil or `{}` store
-        // 0, `"12"` stores 12. 0 is no limit: the insert skips its trim on zero (`0x77c085`).
+        // 2 at `0x79919c`, and not the type: no argument or two raise `Usage: %s:SetMaxLetters(max)`
+        // (`0x87bf30`) with the box's name, nil or `{}` store 0, `"12"` stores 12. 0 is no limit:
+        // the insert skips its trim on zero (`0x77c085`).
         "SetMaxLetters",
         lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
             let args: Vec<Value> = args.into_iter().collect();
+            with_editbox(lua, &this, |_| ())?;
             if args.len() != 1 {
-                return Err(mlua::Error::runtime(
-                    "Usage: <unnamed>:SetMaxLetters(maxLetters)",
-                ));
+                return Err(binding_abi::usage(lua, &this, "SetMaxLetters(max)"));
             }
             let n = crate::script::binding_abi::coerced_number(lua, args.first().cloned());
             // Truncated toward zero like `__ftol`; the reference stores a negative as is, but its
@@ -190,16 +193,20 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // SetHistoryLines (`0x799450`), SetBlinkSpeed (`0x798250`) and SetTextInsets (`0x798a60`) gate
+    // their numbers with `lua_isnumber` after the receiver checks, else raise their usage line
+    // (`0x87bf50`, `0x87be90`, `0x87bef0`; `0x799521`, `0x7982ff`, `0x798c11`). SetHistoryLines
+    // also raises for an `_ftol`ed count not above 0 (`jle`, `0x7994f9`).
     m.set(
         "SetHistoryLines",
-        lua.create_function(|lua, (this, n): (Table, i64)| {
-            with_editbox(lua, &this, |eb| {
-                eb.history_max = n.max(0) as usize;
-                let over = eb.history.len().saturating_sub(eb.history_max);
-                if over > 0 {
-                    eb.history.drain(..over);
-                }
-            })
+        lua.create_function(|lua, (this, n): (Table, Value)| {
+            frame_handle_of(lua, &this)?;
+            let n = binding_abi::method_number(lua, &this, n, "SetHistoryLines(numLines)")?;
+            let n = binding_abi::ftol(n);
+            if n <= 0 {
+                return Err(binding_abi::usage(lua, &this, "SetHistoryLines(numLines)"));
+            }
+            super::set_history_lines(lua, &this, n)
         })?,
     )?;
     m.set(
@@ -211,8 +218,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // SetBlinkSpeed/GetBlinkSpeed: the caret half-period (XML `blinkSpeed`, 0.5 s by default).
     m.set(
         "SetBlinkSpeed",
-        lua.create_function(|lua, (this, s): (Table, f32)| {
-            with_editbox(lua, &this, |eb| eb.blink_period = s)
+        lua.create_function(|lua, (this, s): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            let s = binding_abi::method_number(lua, &this, s, "SetBlinkSpeed(speed)")? as f32;
+            with_eb(lua, h, |eb| eb.blink_period = s)
+                .ok_or_else(|| mlua::Error::runtime("not an EditBox"))
         })?,
     )?;
     m.set(
@@ -222,35 +232,32 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetTextInsets",
         lua.create_function(
-            |lua,
-             (this, l, r, t, b): (
-                Table,
-                Option<f32>,
-                Option<f32>,
-                Option<f32>,
-                Option<f32>,
-            )| {
+            |lua, (this, l, r, t, b): (Table, Value, Value, Value, Value)| {
                 let h = frame_handle_of(lua, &this)?;
-                set_text_insets(
-                    lua,
-                    h,
-                    l.unwrap_or(0.0),
-                    r.unwrap_or(0.0),
-                    t.unwrap_or(0.0),
-                    b.unwrap_or(0.0),
-                );
+                let line = "SetTextInsets(l, r, t, b)";
+                let mut v = [0.0f32; 4];
+                for (slot, arg) in v.iter_mut().zip([l, r, t, b]) {
+                    *slot = binding_abi::method_number(lua, &this, arg, line)? as f32;
+                }
+                set_text_insets(lua, h, v[0], v[1], v[2], v[3]);
                 Ok(())
             },
         )?,
     )?;
     // GetTextInsets (`0x798c30` → `0x77a710`) copies the four out, then re-seats the text region
-    // (`0x77a73f` → `0x77b8c0`), so the getter puts a script-moved region back.
+    // (`0x77a73f` → `0x77b8c0`), so the getter puts a script-moved region back. Each is answered
+    // through `G` (`0x798cfc`..`0x798d68`), `SetTextInsets` having stored `S` of each
+    // (`0x798b5b`..`0x798bd9`); benilla keeps the script numbers and takes both steps here.
     m.set(
         "GetTextInsets",
         lua.create_function(|lua, this: Table| {
             let ins = with_editbox(lua, &this, |eb| eb.text_insets)?;
             reseat_text_region(lua, frame_handle_of(lua, &this)?);
-            Ok((ins[0], ins[1], ins[2], ins[3]))
+            let u = lua
+                .app_data_ref::<crate::script::model::Model>()
+                .expect("model")
+                .layout_units();
+            Ok((ins[0].get(u), ins[1].get(u), ins[2].get(u), ins[3].get(u)))
         })?,
     )?;
     // GetNumLetters (`0x7992c0`): the class array's letters (`0x77bc80`), classes 2, 3 and 6 only,
@@ -309,6 +316,17 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         )?;
     }
 
+    // The read-backs test one bit of the flags word `+0x318` each (`0x797dc5` & 1, `0x797f35` & 2,
+    // `0x7980a5` & 4, `0x798215` & 8) and push 1 or nil; no argument is read.
+    for (name, get) in flag_getters() {
+        m.set(
+            name,
+            lua.create_function(move |lua, this: Table| {
+                with_editbox(lua, &this, |eb| binding_abi::flag(get(eb)))
+            })?,
+        )?;
+    }
+
     install_font_block(lua, &m)?;
 
     lua.set_named_registry_value(REG_EDITBOX_METHODS, m)?;
@@ -347,10 +365,13 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
     ] {
         m.set(
             name,
-            lua.create_function(move |lua, (this, token): (Table, String)| {
-                let bits = EditBoxState::justify_bit(&token).ok_or_else(|| {
-                    mlua::Error::runtime(format!("Usage: <EditBox>:{name}(\"justify\")"))
-                })?;
+            lua.create_function(move |lua, (this, token): (Table, Value)| {
+                frame_handle_of(lua, &this)?;
+                let bits = binding_abi::optional_string(lua, &token)
+                    .and_then(|t| EditBoxState::justify_bit(&t))
+                    .ok_or_else(|| {
+                        binding_abi::usage(lua, &this, &format!("{name}(\"justify\")"))
+                    })?;
                 with_editbox(lua, &this, |eb| eb.set_justify_axis(mask, bits))
             })?,
         )?;
@@ -381,5 +402,18 @@ fn flag_setters() -> [FlagSetter; 4] {
         ("SetNumeric", |eb, on| eb.numeric = on),
         ("SetPassword", |eb, on| eb.password = on),
         ("SetMultiLine", |eb, on| eb.multi_line = on),
+    ]
+}
+
+/// An `Is<Flag>` method name and the field it reads.
+type FlagGetter = (&'static str, fn(&EditBoxState) -> bool);
+
+/// The four config-flag read-backs, the setters' partners.
+fn flag_getters() -> [FlagGetter; 4] {
+    [
+        ("IsAutoFocus", |eb| eb.auto_focus),
+        ("IsNumeric", |eb| eb.numeric),
+        ("IsPassword", |eb| eb.password),
+        ("IsMultiLine", |eb| eb.multi_line),
     ]
 }

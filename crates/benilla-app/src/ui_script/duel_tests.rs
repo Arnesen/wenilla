@@ -114,20 +114,44 @@ fn finishing_sweeps_both_dialogs_silently() {
     assert!(s.take_duel_requests().is_empty());
 }
 
-/// The four 1.12 duel verbs; `StartDuel` and `StartDuelUnit` pass their argument to the app.
+/// The four 1.12 duel verbs; `StartDuel` and `StartDuelUnit` pass the guid their resolver names
+/// to the app, `StartDuelUnit` none for a token naming nobody (`0x4d4cb8`).
 #[test]
 fn the_era_globals_queue_their_intents() {
     benilla_formats::wow_data_or_skip!();
     let mut s = setup();
-    s.run("AcceptDuel(); CancelDuel(); StartDuel('Onerogue'); StartDuelUnit('target')")
-        .unwrap();
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            has_object: true,
+            ..Default::default()
+        }),
+    );
+    s.set_party(benilla_ui::script::PartyState {
+        members: vec![benilla_ui::script::PartyMemberInfo {
+            name: "Onerogue".into(),
+            guid: 0x0E,
+        }],
+        ..Default::default()
+    });
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 1,
+        party: [0x0E, 0, 0, 0],
+        ..Default::default()
+    });
+    s.run(
+        "AcceptDuel(); CancelDuel(); StartDuel('Onerogue'); StartDuelUnit('target'); \
+         StartDuelUnit('party1')",
+    )
+    .unwrap();
     assert_eq!(
         s.take_duel_requests(),
         vec![
             DuelRequest::Accept,
             DuelRequest::Cancel,
-            DuelRequest::StartByName("Onerogue".into()),
-            DuelRequest::StartByUnit("target".into()),
+            DuelRequest::StartByGuid(0x0E),
+            DuelRequest::StartByGuid(0x0E),
         ]
     );
 }

@@ -8,6 +8,10 @@ description = "Engine-free WoW UI engine core: TOC and FrameXML parsing, templat
 [lints]
 workspace = true
 
+[features]
+# `test_support`: the geometry comparisons other crates' tests check the UI with.
+test-support = []
+
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
 # `Date.now()` in a browser, where std's panics on first use.

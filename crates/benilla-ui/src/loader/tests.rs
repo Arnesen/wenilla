@@ -14,6 +14,72 @@ mod loader_tests {
         framexml::parse(text).expect("valid FrameXML")
     }
 
+    /// The Minimap's post-load (`0x4ee2b0`) runs `CSimpleFrame`'s first (`0x4ee2c0`), so its own
+    /// `OnLoad` finds the player arrow with no model yet.
+    #[test]
+    fn the_minimap_models_land_after_its_onload() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Minimap name="Minimap">
+                    <Scripts><OnLoad>seen = ({this:GetChildren()})[9]:GetModel() or "none"</OnLoad></Scripts>
+                </Minimap>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(s.eval::<String>("return seen").unwrap(), "none");
+        assert_eq!(
+            s.eval::<String>("return ({Minimap:GetChildren()})[9]:GetModel()")
+                .unwrap(),
+            "Interface\\Minimap\\MinimapArrow.mdx"
+        );
+    }
+
+    /// `CreateFrame("Minimap")` runs the same post-load hook (`0x70628b` → `0x6ee280` → slot 0x24 at
+    /// `0x6ee4ea`, `0x4ee2b0`): after the template's `OnLoad`, the stock models and their sequences.
+    #[test]
+    fn a_created_minimap_takes_the_stock_models_after_its_onload() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="MinimapTpl" virtual="true">
+                    <Scripts><OnLoad>seen = ({this:GetChildren()})[9]:GetModel() or "none"</OnLoad></Scripts>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.run(r#"m = CreateFrame("Minimap", "Made", nil, "MinimapTpl") bare = CreateFrame("Minimap")"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>("return seen").unwrap(), "none");
+        for frame in ["m", "bare"] {
+            assert_eq!(
+                s.eval::<String>(&format!("return ({{{frame}:GetChildren()}})[9]:GetModel()"))
+                    .unwrap(),
+                crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+                "{frame}"
+            );
+            for i in 1..=8 {
+                assert_eq!(
+                    s.eval::<String>(&format!(
+                        "return ({{{frame}:GetChildren()}})[{i}]:GetModel()"
+                    ))
+                    .unwrap(),
+                    crate::widget::MINIMAP_DEFAULT_ARROW_MODEL,
+                    "{frame} child {i}"
+                );
+            }
+        }
+        let made = s.minimap_child("Made", 1).unwrap();
+        assert_eq!(made.sequence, i32::from(crate::script::MINIMAP_GROUP_ARROW));
+        let made = s.minimap_child("Made", 6).unwrap();
+        assert_eq!(
+            made.sequence,
+            i32::from(crate::script::MINIMAP_LANDMARK_ARROW)
+        );
+    }
+
     /// `CMinimap::LoadXML 0x4ee2b0`: `minimapArrowModel` goes to engine children 1-8 (`0x4ee170`),
     /// `minimapPlayerModel` to child 9 alone (`[Minimap+0x338]`, `0x4ee260`); without the
     /// attributes the defaults are `0x84c768` and `0x8453c0`. `Minimap.xml:97` sets both.
@@ -42,6 +108,11 @@ mod loader_tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
 
         for i in 1..=8 {
+            assert_eq!(
+                s.minimap_child("Minimap", i).unwrap().sequence,
+                if i <= 5 { 165 } else { 166 },
+                "child {i} plays GroupArrow or Arrow (`0x4ee1de`, `0x4ee22b`)"
+            );
             assert_eq!(
                 s.eval::<String>(&format!(
                     "return ({{Minimap:GetChildren()}})[{i}]:GetModel()"
@@ -118,7 +189,7 @@ mod loader_tests {
             "the attribute supplied the parent"
         );
         // Host's TOPLEFT is screen (100, 550) in y-up; Attached hangs 5 in and 5 down from it.
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<(f64, f64)>("return Attached:GetLeft(), Attached:GetTop()")
                 .unwrap(),
             (105.0, 545.0),
@@ -154,6 +225,45 @@ mod loader_tests {
             "a non-frame global of the right name is named too: {:?}",
             report2.warnings
         );
+    }
+
+    /// `parent=` looks the name up with the Frame id (`0x6ee3c9` → `0x76c760`), so a global holding
+    /// another object, a Texture or a Font, is a miss: the frame is built parentless and the miss
+    /// logged (`0x8710f0`), never a `CreateFrame` raise.
+    #[test]
+    fn a_parent_attribute_naming_a_region_or_a_font_is_a_miss() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            ParentOwner = CreateFrame("Frame", "ParentOwner")
+            ParentTexture = ParentOwner:CreateTexture("ParentTexture")
+            CreateFont("ParentFont")
+        "#,
+        )
+        .unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="OnTexture" parent="ParentTexture"/>
+                <Frame name="OnFont" parent="ParentFont"/>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        for (frame, global) in [("OnTexture", "ParentTexture"), ("OnFont", "ParentFont")] {
+            assert!(
+                s.eval::<bool>(&format!(
+                    "return {frame} ~= nil and {frame}:GetParent() == nil"
+                ))
+                .unwrap(),
+                "{frame} is built parentless"
+            );
+            let want = format!("Couldn't find frame parent: {global}");
+            assert!(
+                report.warnings.contains(&want),
+                "{want}: {:?}",
+                report.warnings
+            );
+        }
     }
 
     /// A miss stores 0 over the default parent (`0x6ee3ef`), so the frame is built parentless; an
@@ -378,7 +488,7 @@ mod loader_tests {
             s.eval::<f32>("return SizedInstance:GetWidth()").unwrap(),
             125.0
         );
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<f32>("return SizedInstance:GetHeight()").unwrap(),
             21.0
         );
@@ -432,7 +542,7 @@ mod loader_tests {
         assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
         s.resolve();
         assert_eq!(s.eval::<f32>("return PinChild:GetLeft()").unwrap(), 40.0);
-        assert_eq!(s.eval::<f32>("return PinChild:GetTop()").unwrap(), 550.0);
+        crate::assert_near!(s.eval::<f32>("return PinChild:GetTop()").unwrap(), 550.0);
         assert_eq!(s.eval::<f32>("return PinChild:GetWidth()").unwrap(), 300.0);
         assert_eq!(s.eval::<f32>("return PinChild:GetHeight()").unwrap(), 200.0);
     }
@@ -836,8 +946,8 @@ mod loader_tests {
         let (hl_right, text_left): (f64, f64) = s
             .eval("return RowHighlight:GetRight(), RowText:GetLeft()")
             .unwrap();
-        assert_eq!(hl_right, 22.0 + 3.0 + 16.0);
-        assert_eq!(
+        crate::assert_near!(hl_right, 22.0 + 3.0 + 16.0);
+        crate::assert_near!(
             text_left,
             hl_right + 2.0,
             "the label hangs off the highlight, not the button"
@@ -922,7 +1032,7 @@ mod loader_tests {
         assert!(s.eval::<bool>("return Real ~= nil").unwrap());
         // The Lua door raises on the same lookup.
         let err = s.run(r#"CreateFrame("Bogus")"#).unwrap_err().to_string();
-        assert!(err.contains("unknown frame type 'Bogus'"), "{err}");
+        assert!(err.contains("Unknown frame type 'Bogus'"), "{err}");
     }
 
     /// A `.toc` line hands a listed `Bindings.xml` to `0x6ede10` (from `0x6edd51`), so each
@@ -1002,13 +1112,14 @@ mod loader_tests {
             return mn == 0 and mx == 100 and XmlBar:GetValue() == 50
                 and XmlBar:GetOrientation() == "HORIZONTAL"
                 and XmlBar:GetStatusBarTexture() ~= nil
-                and r < 0.2 and g > 0.8 and a == 1
+                and r < 0.2 and g > 0.8 and a > 0.99
         "#,
             )
             .unwrap();
         assert!(ok, "XML attributes + children landed in the widget state");
 
-        s.resolve();
+        // The fill's coordinates are the bar's update (`0x7833c0`), in the tick's walk.
+        s.tick(0.0);
         let bar = s
             .extract()
             .into_iter()
@@ -1018,7 +1129,7 @@ mod loader_tests {
             })
             .expect("bar fill quad");
         let r = bar.rect.expect("bar rect resolved");
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (0.0, 50.0, 0.0, 10.0),
             "defaultValue 50/100 fills half the 100px width"
@@ -1058,7 +1169,7 @@ mod loader_tests {
             })
             .expect("the plate draws");
         let r = plate.rect.expect("the plate resolved");
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (10.0, 182.0, 10.0, 106.0),
             "implicit SetAllPoints fills the 172×96 frame; the 256×32 size is unread"
@@ -1095,7 +1206,7 @@ mod loader_tests {
                 "return SeatLeft:GetLeft(), SeatLeft:GetRight(), SeatLeft:GetTop(), SeatLeft:GetBottom()",
             )
             .unwrap();
-        assert_eq!(
+        crate::assert_near!(
             (l, r, b, t),
             (0.0, 80.0, 40.0, 60.0),
             "justifyH=LEFT seats the implicit single anchor at the page's LEFT, size live"
@@ -1137,7 +1248,7 @@ mod loader_tests {
             .expect("the state texture draws");
         let r = scoped.rect.expect("resolved");
         // Button [100,100]..[136,136]; TOPLEFT+2,-2 with 24×24 → [102,110]..[126,134].
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (102.0, 126.0, 110.0, 134.0),
             "authored anchors + size hold; no implicit corner welds it to the button"
@@ -1327,7 +1438,7 @@ mod loader_tests {
             })
             .expect("hovered highlight quad");
         let r = hi.rect.expect("highlight rect resolved");
-        assert_eq!(
+        crate::assert_near!(
             (r.left, r.right, r.bottom, r.top),
             (0.0, 20.0, 10.0, 30.0),
             "highlight is the anchored 20px square at the button's TOPLEFT, not the whole button"
@@ -1552,14 +1663,21 @@ mod loader_tests {
 
         let base = s.font_object("Base").expect("Base registered");
         assert_eq!(base.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-        assert_eq!(base.height, Some(12.0));
-        assert_eq!(base.color, Some([1.0, 0.82, 0.0, 1.0]));
+        assert_eq!(base.height, Some(crate::layout::Len::Script(12.0)));
+        assert_eq!(
+            base.color,
+            Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0]))
+        );
 
-        // Leaf: Base's face through Mid, Mid's white, its own height of 10.
+        // Leaf: Base's face and height through Mid, and Mid's white; its own `<FontHeight>` has
+        // no `font=` beside it, so it is never read (`0x783cf1`).
         let leaf = s.font_object("Leaf").expect("Leaf registered");
         assert_eq!(leaf.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-        assert_eq!(leaf.height, Some(10.0));
-        assert_eq!(leaf.color, Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(leaf.height, Some(crate::layout::Len::Script(12.0)));
+        assert_eq!(
+            leaf.color,
+            Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0]))
+        );
     }
 
     #[test]
@@ -1615,7 +1733,7 @@ mod loader_tests {
         assert!(matches!(
             &small.content,
             QuadContent::Text { font: Some(f), color: Some(c), .. }
-                if f == "Fonts\\FRIZQT__.TTF" && *c == [1.0, 0.82, 0.0, 1.0]
+                if f == "Fonts\\FRIZQT__.TTF" && *c == crate::color::quant::drawn([1.0, 0.82, 0.0, 1.0])
         ));
     }
 
@@ -1658,7 +1776,7 @@ mod loader_tests {
         assert!(matches!(
             &a.content,
             QuadContent::Text { color: Some(c), font_height: Some(h), .. }
-                if *c == [0.1, 0.2, 0.3, 1.0] && *h == 12.0
+                if *c == crate::color::quant::drawn([0.1, 0.2, 0.3, 1.0]) && *h == 12.0
         ));
         // B's unknown font object leaves it with no font: it holds its text and draws none
         // (`0x7724f8`).
@@ -1761,13 +1879,13 @@ mod loader_tests {
             .expect("the typed text renders in the box's text region");
 
         // The header: its own LEFT+13 anchor and the 30×12 extent, centred on the 100..132 box.
-        assert_eq!(
+        crate::assert_near!(
             header.rect,
             Some(crate::layout::Rect::new(110.0, 113.0, 122.0, 143.0)),
             "header must keep its own anchor + auto-size"
         );
         // Typed text rect: the box minus the XML `<TextInsets>` (47 left, 13 right).
-        assert_eq!(
+        crate::assert_near!(
             typed.rect,
             Some(crate::layout::Rect::new(100.0, 147.0, 132.0, 687.0)),
             "the text region is anchored by the insets"
@@ -1798,20 +1916,20 @@ mod loader_tests {
             s.resolve();
             s.eval::<f64>(&format!("return {f}:GetLeft()")).unwrap()
         };
-        assert_eq!(left(&mut s, "Tut"), 100.0);
+        crate::assert_near!(left(&mut s, "Tut"), 100.0);
         s.mouse_button(150.0, 150.0, "LeftButton", true);
         s.mouse_move(250.0, 150.0);
-        assert_eq!(
+        crate::assert_near!(
             left(&mut s, "Tut"),
             200.0,
             "the element's title region drags the frame"
         );
         s.mouse_button(250.0, 150.0, "LeftButton", false);
 
-        assert_eq!(left(&mut s, "Plain"), 400.0);
+        crate::assert_near!(left(&mut s, "Plain"), 400.0);
         s.mouse_button(450.0, 150.0, "LeftButton", true);
         s.mouse_move(550.0, 150.0);
-        assert_eq!(left(&mut s, "Plain"), 400.0, "no element, no handle");
+        crate::assert_near!(left(&mut s, "Plain"), 400.0, "no element, no handle");
         s.mouse_button(550.0, 150.0, "LeftButton", false);
     }
 
@@ -1861,8 +1979,9 @@ mod loader_tests {
         let (l, r, t, b) = s
             .eval::<(f64, f64, f64, f64)>("return Micro:GetHitRectInsets()")
             .unwrap();
-        assert_eq!((l, r, t, b), (0.0, 0.0, 18.0, 0.0));
-        assert_eq!(s.eval::<f64>("return Micro:GetHeight()").unwrap(), 58.0);
+        let law = crate::test_support::law43;
+        assert_eq!((l, r, t, b), (law(0.0), law(0.0), law(18.0), law(0.0)));
+        crate::assert_near!(s.eval::<f64>("return Micro:GetHeight()").unwrap(), 58.0);
         // A button is mouse-enabled by construction, so the hit test is live.
         assert!(
             s.hit_test(14.0, 50.0).is_none(),
@@ -1959,7 +2078,7 @@ mod loader_tests {
             "the <NormalText> region must BE the button's label"
         );
         // 3 · The element's geometry landed on the label.
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<f64>("return KtmSelfHeaderNameText:GetWidth()")
                 .unwrap(),
             70.0
@@ -1981,7 +2100,7 @@ mod loader_tests {
             .expect("the <NormalText> label must paint");
         assert_eq!(
             label,
-            Some([0.9, 0.8, 0.1, 1.0]),
+            Some(crate::color::quant::drawn([0.9, 0.8, 0.1, 1.0])),
             "<NormalText inherits=> must reach the button's Normal-state font"
         );
     }
@@ -2077,12 +2196,12 @@ mod loader_tests {
                  return c:GetLeft(), c:GetRight(), l:GetLeft(), l:GetRight()",
             )
             .unwrap();
-        assert_eq!(
+        crate::assert_near!(
             (cl, cr),
             (40.0, 80.0),
             "the Gatherer row's label is centred on the button, not hugging its left edge"
         );
-        assert_eq!(
+        crate::assert_near!(
             (ll, lr),
             (28.0, 68.0),
             "the <ButtonText> row's label still hugs the button's left edge"
@@ -2202,6 +2321,41 @@ mod loader_tests {
         assert_eq!(s.eval::<i64>("return Gone:GetNumRegions()").unwrap(), 0);
     }
 
+    /// `0x78a130` sets the `file=` document (`0x78a2b2`) before it reads `hyperlinkFormat`
+    /// (`0x78a2d4`), so the document's links splice with the ctor's format and the XML's applies
+    /// from the next `SetText`.
+    #[test]
+    fn simplehtml_parses_its_file_before_taking_its_hyperlink_format() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="LinkDocFont" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+                <SimpleHTML name="LinkDoc" file="doc.html" hyperlinkFormat="|H%s|h[%s]|h">
+                    <Size><AbsDimension x="270" y="304"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <FontString inherits="LinkDocFont"/>
+                </SimpleHTML>
+            </Ui>"#,
+        );
+        let files = |req: &str| -> Option<Vec<u8>> {
+            (req == "doc.html")
+                .then(|| b"<html><body><p><a href=\"x\">go</a></p></body></html>".to_vec())
+        };
+        let report = load_in(&s, &doc, "Interface/GlueXML/LinkDoc.xml", &files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let text = "local r = LinkDoc:GetRegions(); return r:GetText()";
+        assert_eq!(s.eval::<String>(text).unwrap(), "|Hx|hgo|h");
+        assert_eq!(
+            s.eval::<String>("return LinkDoc:GetHyperlinkFormat()")
+                .unwrap(),
+            "|H%s|h[%s]|h"
+        );
+        s.run(r#"LinkDoc:SetText('<html><body><p><a href="x">go</a></p></body></html>')"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>(text).unwrap(), "|Hx|h[go]|h");
+    }
+
     /// A `<SimpleHTML>` element font is loaded by `CSimpleFont::LoadXML` (`0x78a26e` → `0x783c30`),
     /// whose file needs a height above 0 (`0x783d6d`-`0x783d78`): else it reports
     /// `Font %s: Missing font height in %s element` (`0x87a4f0`) and returns (`0x783dae`) before
@@ -2238,13 +2392,14 @@ mod loader_tests {
         let green = s
             .eval::<(f32, f32, f32, f32)>("return Page:GetTextColor(\"H1\")")
             .unwrap();
-        assert_eq!(green, (0.0, 1.0, 0.0, 1.0));
+        let one = crate::color::quant::read32(1.0);
+        assert_eq!(green, (0.0, one, 0.0, one));
         let p = s
             .eval::<(f32, f32, f32, f32)>("return Page:GetTextColor()")
             .unwrap();
         assert_ne!(
             p,
-            (1.0, 0.0, 0.0, 1.0),
+            (one, 0.0, 0.0, one),
             "the refused element's Color is not read"
         );
     }
@@ -2328,7 +2483,7 @@ mod loader_tests {
                     .collect::<Vec<_>>(),
                 blocks
                     .iter()
-                    .map(|rh| model.region_data[rh].size)
+                    .map(|rh| model.region_data[rh].size.map(|(w, h)| (w.raw(), h.raw())))
                     .collect::<Vec<_>>(),
             )
         };
@@ -2388,8 +2543,9 @@ mod loader_tests {
     /// state-texture element builds a new region through the `<Layers>` adder (`0x6f26f0`) that the
     /// slot store installs, destroying the one it displaces (`0x778fd0` via `0x77900a`, the
     /// highlight's `0x779110`, the checked pair's `0x785330`/`0x785440`). So an instance's element
-    /// keeps nothing of the template's: the fresh region's TexCoords, alpha and BLEND (`0x76fc40`;
-    /// the highlight keeps its own, `0x7789a4`), and `SetAllPoints` with no anchors (`0x7701c0`).
+    /// keeps nothing of the template's: the fresh region's TexCoords and BLEND (`0x76fc40`; the
+    /// highlight keeps its own, `0x7789a4`), and `SetAllPoints` with no anchors (`0x7701c0`). No
+    /// texture level reads `alpha` (`0x76fe20`), so every alpha stays 1.
     #[test]
     fn an_instance_state_texture_replaces_the_templates() {
         const TAGS: [(&str, &str); 6] = [
@@ -2481,7 +2637,8 @@ mod loader_tests {
             "one region per slot, none of the template's left over"
         );
 
-        // An instance element's own size, anchors and alpha lay the fresh region out.
+        // An instance element's own size and anchors lay the fresh region out; its `alpha=` is not
+        // read.
         let laid: (i64, String, f32, f32, f32, Vec<f32>) = s
             .eval(
                 r#"local t = LaidOutInst:GetNormalTexture()
@@ -2496,7 +2653,7 @@ mod loader_tests {
                 "CENTER".to_string(),
                 20.0,
                 16.0,
-                0.25,
+                1.0,
                 vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
             )
         );
@@ -2594,7 +2751,8 @@ mod loader_tests {
                 "Interface\\After".to_string(),
                 vec![0.25, 0.25, 0.25, 0.75, 0.75, 0.25, 0.75, 0.75],
                 "MOD".to_string(),
-                0.5,
+                // `SetAlpha(0.5)` is the byte 127 (`0x79b638`).
+                127.0 / 255.0,
                 1,
                 "TOPLEFT".to_string(),
             )
@@ -2633,19 +2791,56 @@ mod layer_blend_tests {
         let mut s = s;
         s.set_screen_size(800.0, 600.0);
         s.resolve();
-        let additive = s
+        let blend = s
             .extract()
             .iter()
             .find_map(|q| match &q.content {
                 QuadContent::Texture {
                     path: Some(p),
-                    additive,
+                    blend,
                     ..
-                } if p == "Interface\\Glow" => Some(*additive),
+                } if p == "Interface\\Glow" => Some(*blend),
                 _ => None,
             })
             .expect("the layer texture extracted");
-        assert!(additive, "alphaMode=ADD must ride into the quad blend flag");
+        assert_eq!(
+            blend,
+            crate::script::BlendMode::Add,
+            "alphaMode=ADD must ride into the quad blend"
+        );
+    }
+
+    /// `alphaMode=` (`0x770176`) skips an empty value and ignores an unknown one with no log
+    /// (`0x770185`, `0x770195`), where `SetBlendMode` raises; a known one is any case.
+    #[test]
+    fn an_unknown_alpha_mode_is_ignored_without_a_fault() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="ModeHost">
+                    <Layers><Layer level="ARTWORK">
+                        <Texture name="ModeBogus" file="Interface\Bogus" alphaMode="ADDITIVE"/>
+                        <Texture name="ModeEmpty" file="Interface\Empty" alphaMode=""/>
+                        <Texture name="ModeMod" file="Interface\Mod" alphaMode="mod"/>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        )
+        .unwrap();
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert!(
+            report.warnings.is_empty(),
+            "warnings: {:?}",
+            report.warnings
+        );
+        let modes: (String, String, String) = s
+            .eval(
+                "return ModeBogus:GetBlendMode(), ModeEmpty:GetBlendMode(), \
+                 ModeMod:GetBlendMode()",
+            )
+            .unwrap();
+        assert_eq!(modes, ("BLEND".into(), "BLEND".into(), "MOD".into()));
     }
 }
 

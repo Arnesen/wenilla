@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 
+# wenilla: the start-up seed's wall clock in a page, where std's panics.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [dev-dependencies]
 benilla-formats = { path = "../benilla-formats" }
 roxmltree = "0.20"

@@ -30,6 +30,14 @@ pub(crate) struct CvarSlot {
     pub pending: Option<String>,
     /// The change callback that may refuse a write ([`super::cvar_checks`]); host-seeded only.
     pub check: Option<CvarCheck>,
+    /// The record's reset text (`rec+0x34`), which `cvar_reset` restores (`0x63dff0`): the saved
+    /// value the row started at, else the first value its own console command stored, else none.
+    pub reset: Option<String>,
+    /// The session, not the player, owns the row (an env lever): a reset of every row passes it.
+    pub session: bool,
+    /// The row's place in the mirror's list, its insertion order, which a walk of every row
+    /// follows.
+    pub seq: usize,
 }
 
 /// One row of the host's registry as the VM's mirror is seeded from it; `value` is the applied
@@ -41,6 +49,23 @@ pub struct SeededCvar {
     pub default: String,
     pub latched: bool,
     pub check: Option<CvarCheck>,
+    /// The reset text ([`CvarSlot::reset`]).
+    pub reset: Option<String>,
+    /// Owned by the session ([`CvarSlot::session`]).
+    pub session: bool,
+}
+
+/// One write the mirror made, queued for the host's registry in the order it was made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CvarWrite {
+    /// `CVar::Set` (`0x63df50`) past its callback: a latched row's stage, else its new value.
+    Set { name: String, value: String },
+    /// The record's empty reset slot filled (`0x63e158`) by the CVar's own console command
+    /// (`0x63de23` passes `setReset`), whether or not the value moved.
+    FillReset { name: String, value: String },
+    /// `CVar::Reset` (`0x63dff0`) or `CVar::Default` (`0x63e010`): `InternalSet` called directly,
+    /// so no callback ran and a latched row took the value at once, its stage kept.
+    Restore { name: String, value: String },
 }
 
 /// One multisample format the device supports, the reference's triple (`[0xb4b444]`, count
@@ -124,20 +149,22 @@ impl super::UiScript {
             match model.cvars.get_mut(&key) {
                 Some(slot) => slot.default = default.to_string(),
                 None => {
-                    let value = model
-                        .cvars_saved_base
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| default.to_string());
+                    // A saved value is also the reset text, as the config line's `set` made the
+                    // record with it (`0x63d582`).
+                    let saved = model.cvars_saved_base.get(&key).cloned();
+                    let seq = model.cvars.len();
                     model.cvars.insert(
                         key,
                         CvarSlot {
                             name: name.to_string(),
-                            value,
+                            value: saved.clone().unwrap_or_else(|| default.to_string()),
                             default: default.to_string(),
                             latched: false,
                             pending: None,
                             check: None,
+                            reset: saved,
+                            session: false,
+                            seq,
                         },
                     );
                 }
@@ -152,6 +179,7 @@ impl super::UiScript {
         let mut model = self.model_mut();
         for row in rows {
             let key = row.name.to_ascii_lowercase();
+            let seq = model.cvars.get(&key).map_or(model.cvars.len(), |s| s.seq);
             model.cvars.insert(
                 key,
                 CvarSlot {
@@ -161,6 +189,9 @@ impl super::UiScript {
                     latched: row.latched,
                     pending: None,
                     check: row.check,
+                    reset: row.reset,
+                    session: row.session,
+                    seq,
                 },
             );
         }
@@ -195,7 +226,7 @@ impl super::UiScript {
         self.model_mut()
             .cvars
             .get(&name.to_ascii_lowercase())
-            .map(|s| super::binding_abi::s_str_to_int(&s.value) as i32)
+            .map(|s| super::binding_abi::s_str_to_int(&s.value))
     }
 
     /// Snapshot the table as `(name, value, default)`; the saver writes only rows off their
@@ -222,10 +253,24 @@ impl super::UiScript {
             || !model.cvar_console.is_empty()
     }
 
-    /// Drain the `(name, new_value)` changes queued since the last call, under the registered
-    /// spelling: the host's cue to sync its resources and mark the config dirty.
-    pub fn take_cvar_changes(&mut self) -> Vec<(String, String)> {
+    /// Drain the writes queued since the last call, in order, under the registered spelling: the
+    /// host's cue to sync its resources and mark the config dirty.
+    pub fn take_cvar_writes(&mut self) -> Vec<CvarWrite> {
         std::mem::take(&mut self.model_mut().cvar_changes)
+    }
+
+    /// [`Self::take_cvar_writes`] as `(name, value)` per value written, a stage or a restore; a
+    /// reset slot's fill is dropped.
+    pub fn take_cvar_changes(&mut self) -> Vec<(String, String)> {
+        self.take_cvar_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                CvarWrite::Set { name, value } | CvarWrite::Restore { name, value } => {
+                    Some((name, value))
+                }
+                CvarWrite::FillReset { .. } => None,
+            })
+            .collect()
     }
 
     /// Drain the `(name, default)` rows an addon's `RegisterCVar` created since the last call; the
@@ -246,10 +291,11 @@ impl super::UiScript {
         self.model_mut().cvar_lua_created
     }
 
-    /// Flag a CVar read-only to Lua, or clear it: `CVar::SetReadOnly` (`0x63e030`). A flagged name
-    /// makes `SetCVar` raise `"%s" is read-only` (`0x488c67`-`0x488c78`); host and engine writes,
-    /// and `ConsoleExec`, still land, as the reference's `CVar::Set` (`0x63df50`) never tests the
-    /// flag. The name need not be registered yet.
+    /// Flag a CVar read-only, or clear it: `CVar::SetReadOnly` (`0x63e030`). A flagged name makes
+    /// `SetCVar` raise `"%s" is read-only` (`0x488c67`-`0x488c78`), and every other write to it
+    /// (`ConsoleExec`, an engine write) stores nothing, as `CVar::Set` (`0x63df50`) stores through
+    /// `InternalSet`, which returns at the flag (`0x63e0ba`). The host's mirror sync
+    /// ([`Self::set_cvar_host`]) is not a write and passes. The name need not be registered yet.
     pub fn set_cvar_read_only(&mut self, name: &str, read_only: bool) {
         let key = name.to_ascii_lowercase();
         let mut model = self.model_mut();
@@ -319,18 +365,38 @@ pub(super) fn set_from_engine(model: &mut Model, name: &str, value: String) {
 /// and the change was queued. The row's check runs first and may refuse the write, as the
 /// reference's `Set 0x63df50` calls the callback before anything else (`0x63df7d`). A latched
 /// slot stages the write, as `Set` stores `latchedValue` and skips `InternalSet`; writing back the
-/// applied value unstages it.
+/// applied value unstages it. Otherwise it is `InternalSet` (`0x63e0b0`): nothing for a read-only
+/// row (`0x63e0ba`-`0x63e0c2`), nothing for text equal to the value case-blind (`SStrCmpI`,
+/// `0x63e0ec`), and any other text stored as it is, a number or not.
 fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
-    let slot = model.cvars.get_mut(key)?;
-    if let Some(check) = slot.check {
-        let verdict = check(&value, &slot.value);
-        model.cvar_console.extend(verdict.line);
+    store_with(model, key, value, false)
+}
+
+/// [`store`], and with `fill_reset` the CVar's own console command (`0x63dde0`), which passes
+/// `setReset` (`0x63de1c`): past the callback, an unlatched row that is not read-only takes the
+/// text as its reset text if it has none (`0x63e13f`-`0x63e158`), moved or not. A latched row
+/// returns at its stage first (`0x63dfc1`).
+fn store_with(model: &mut Model, key: &str, value: String, fill_reset: bool) -> Option<String> {
+    let verdict = {
+        let cvars = &model.cvars;
+        let slot = cvars.get(key)?;
+        slot.check.map(|check| {
+            check(&value, &slot.value, &|name| {
+                cvars
+                    .get(&name.to_ascii_lowercase())
+                    .map(|s| s.value.clone())
+            })
+        })
+    };
+    if let Some(verdict) = verdict {
+        model.cvar_console.extend(verdict.lines);
         if !verdict.accept {
             return None;
         }
     }
+    let slot = model.cvars.get_mut(key)?;
     if slot.latched {
-        let staged = (value != slot.value).then_some(value.clone());
+        let staged = (!value.eq_ignore_ascii_case(&slot.value)).then_some(value.clone());
         if slot.pending == staged && staged.is_some() {
             return None;
         }
@@ -339,14 +405,68 @@ fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
         }
         slot.pending = staged;
     } else {
-        if slot.value == value {
+        if model.cvars_read_only.contains(key) {
+            return None;
+        }
+        let fill = (fill_reset && slot.reset.is_none()).then(|| {
+            slot.reset = Some(value.clone());
+            CvarWrite::FillReset {
+                name: slot.name.clone(),
+                value: value.clone(),
+            }
+        });
+        if slot.value.eq_ignore_ascii_case(&value) {
+            model.cvar_changes.extend(fill);
             return None;
         }
         slot.value = value.clone();
+        let registered = slot.name.clone();
+        model.cvar_changes.push(CvarWrite::Set {
+            name: registered.clone(),
+            value,
+        });
+        model.cvar_changes.extend(fill);
+        return Some(registered);
     }
     let registered = slot.name.clone();
-    model.cvar_changes.push((registered.clone(), value));
+    model.cvar_changes.push(CvarWrite::Set {
+        name: registered.clone(),
+        value,
+    });
     Some(registered)
+}
+
+/// The CVar's own console command with a value (`0x63dde0`): `CVar::Set(rest, 1, 1, 0, 1)`
+/// (`0x63de18`-`0x63de23`), a write that also fills an empty reset slot.
+pub(super) fn console_set(model: &mut Model, key: &str, value: String) {
+    store_with(model, key, value, true);
+}
+
+/// `CVar::Reset` (`0x63dff0`, the reset text, else the default) or, with `to_default`,
+/// `CVar::Default` (`0x63e010`, the default, else the reset text), each `InternalSet(text, 1, 0,
+/// 0, 1)` called directly: no callback runs and none can refuse, a latched row takes the value at
+/// once and keeps its stage, and a read-only row (`0x63e0ba`) or text equal to the value
+/// case-blind (`0x63e0ec`) stores nothing. A row always has a default here, so `to_default` never
+/// falls back.
+pub(super) fn restore_cvar(model: &mut Model, key: &str, to_default: bool) {
+    if model.cvars_read_only.contains(key) {
+        return;
+    }
+    let Some(slot) = model.cvars.get_mut(key) else {
+        return;
+    };
+    let text = match (&slot.reset, to_default) {
+        (Some(reset), false) => reset.clone(),
+        _ => slot.default.clone(),
+    };
+    if slot.value.eq_ignore_ascii_case(&text) {
+        return;
+    }
+    slot.value = text.clone();
+    model.cvar_changes.push(CvarWrite::Restore {
+        name: slot.name.clone(),
+        value: text,
+    });
 }
 
 /// A by-name write from a binding that raises nothing (`ConsoleExec`, `SetGamma`,
@@ -399,28 +519,6 @@ pub(super) fn format_f(v: f64) -> String {
     written
 }
 
-/// Storm's `SStrToInt` (`0x64ac60`), how a CVar record's integer (`rec+0x28`) is parsed from its
-/// value and how a change callback reads it: an optional `-`, then decimal digits up to the first
-/// other byte, with no whitespace skip, no `+` and no overflow check (`10·n + d` wraps); no digit
-/// is 0.
-pub fn sstr_to_int(s: &str) -> i32 {
-    let (neg, digits) = match s.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, s),
-    };
-    let n = digits
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .fold(0i32, |n, d| {
-            n.wrapping_mul(10).wrapping_add(i32::from(d - b'0'))
-        });
-    if neg {
-        n.wrapping_neg()
-    } else {
-        n
-    }
-}
-
 /// What `SetCVar` and `RegisterCVar` store for a value with no string form (`0x82e570`, loaded
 /// at `0x488c98` and `0x488b6f`).
 const NO_STRING_FORM: &str = "0";
@@ -446,7 +544,7 @@ const TOO_MANY_CVARS: &str = "Attempted to register too many CVars";
 /// The CVars `CGGameUI::InitializeGame` flags read-only for the whole world session, the table
 /// at `0x83de4c` walked by `0x48f566`-`0x48f584`; `ShutdownGame` clears them again
 /// (`0x491240`-`0x49125d`). The host flags them on each in-game VM before its UI loads, as
-/// `InitializeGame` does before `UI_Init`.
+/// `InitializeGame` does before `UI_Init`, and on its own registry for the session.
 pub const IN_WORLD_READ_ONLY_CVARS: [&str; 3] = ["realmList", "realmName", "scriptMemory"];
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -482,15 +580,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // The host gives the row a place in its registry, which outlives this VM.
             model.cvar_registrations.push((name.clone(), value.clone()));
+            let seq = model.cvars.len();
             model.cvars.insert(
                 key,
                 CvarSlot {
                     name,
-                    value: saved.unwrap_or_else(|| value.clone()),
+                    value: saved.clone().unwrap_or_else(|| value.clone()),
                     default: value,
                     latched: false,
                     pending: None,
                     check: None,
+                    // The saved value is the reset text of the record its config line made.
+                    reset: saved,
+                    session: false,
+                    seq,
                 },
             );
             Ok(())
@@ -572,7 +675,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     lua.globals().set(
         "SetMultisampleFormat",
-        lua.create_function(|lua, id: Option<f64>| {
+        lua.create_function(|lua, id: Value| {
+            // `lua_isnumber` (`0x48c659`): a non-number is a missing id, which the deviation below
+            // ignores.
+            let id = crate::script::binding_abi::is_number(lua, id);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // 1-based from `UIDropDownMenu_GetSelectedID`. Deviation: an id out of range is
             // ignored, because the reference reads one entry past the last (`0x48c67c`) and a
@@ -722,16 +828,18 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     // `RestartGx()` restarts a resolution change twice, here as in the reference.
     lua.globals().set(
         "SetScreenResolution",
-        lua.create_function(|lua, id: Option<f64>| {
+        lua.create_function(|lua, id: Option<Value>| {
+            // `is-number` (`0x48bfe8`) false leaves the index at entry 1 (`0x48bfe6`).
+            let idx = match id {
+                Some(v) => lua.coerce_number(v)?.map_or(0, super::binding_abi::ftol),
+                None => 0,
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if model.screen_resolutions.is_empty() {
                 return Ok(());
             }
-            // nil selects entry 1; a non-numeric argument has already raised in the conversion,
-            // where the reference takes entry 1. Truncate, then clamp both ends.
-            let idx = id.map_or(0.0, f64::trunc);
             let last = model.screen_resolutions.len() - 1;
-            let r = model.screen_resolutions[if idx < 1.0 {
+            let r = model.screen_resolutions[if idx < 1 {
                 0
             } else {
                 (idx as usize - 1).min(last)
@@ -1027,6 +1135,8 @@ mod tests {
                 default: "1".into(),
                 latched: true,
                 check: None,
+                reset: None,
+                session: false,
             },
             SeededCvar {
                 name: "MusicVolume".into(),
@@ -1034,6 +1144,8 @@ mod tests {
                 default: "0.4".into(),
                 latched: false,
                 check: None,
+                reset: None,
+                session: false,
             },
         ]);
         s.run(r#"SetCVar("gxVSync", 0)"#).unwrap();
@@ -1129,6 +1241,42 @@ mod tests {
         let snap = s.cvars_snapshot();
         let master = snap.iter().find(|(n, _, _)| n == "MasterVolume").unwrap();
         assert_eq!((master.1.as_str(), master.2.as_str()), ("0.25", "1.0"));
+    }
+
+    /// `SetScreenResolution` tests its argument with `is-number` (`0x48bfe8`): a false answer
+    /// leaves the index at entry 1 (`0x48bfe6`) and never raises; a numeric string counts.
+    #[test]
+    fn set_screen_resolution_takes_entry_one_for_a_non_number() {
+        let mut s = UiScript::new().unwrap();
+        s.register_cvars([("gxResolution", "1024x768")]);
+        s.set_screen_resolutions(
+            vec![
+                super::ScreenResolution {
+                    width: 800,
+                    height: 600,
+                },
+                super::ScreenResolution {
+                    width: 1024,
+                    height: 768,
+                },
+                super::ScreenResolution {
+                    width: 1280,
+                    height: 960,
+                },
+            ],
+            None,
+        );
+        let pick = |s: &UiScript, call: &str| {
+            s.eval::<String>(&format!("{call} return GetCVar('gxResolution')"))
+                .unwrap()
+        };
+        assert_eq!(pick(&s, "SetScreenResolution('3')"), "1280x960");
+        assert_eq!(pick(&s, "SetScreenResolution('abc')"), "800x600");
+        assert_eq!(pick(&s, "SetScreenResolution(' 2 ')"), "1024x768");
+        assert_eq!(pick(&s, "SetScreenResolution({})"), "800x600");
+        assert_eq!(pick(&s, "SetScreenResolution(3)"), "1280x960");
+        assert_eq!(pick(&s, "SetScreenResolution(true)"), "800x600");
+        assert!(s.take_errors().is_empty());
     }
 
     /// `0x488bd1`-`0x488bed`, `0x488c47`-`0x488c59`, `0x488d21`-`0x488d3d`: the lookup `0x63dec0`

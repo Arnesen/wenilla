@@ -150,9 +150,10 @@ impl SortStack {
         Ordering::Equal
     }
 
-    /// Put `rows` in display order; unstable, like the reference's MSVC CRT `qsort` (`0x73f727`).
+    /// Put `rows` in display order with the CRT `qsort` (`0x73f727`) and the compare `0x4d0d50`
+    /// (`0x4d0d32`, `0x4d0f95`, `0x4d1018`): rows that tie on every key sit where it leaves them.
     pub(super) fn order(&self, rows: &mut [RosterRow], show_offline: bool) {
-        rows.sort_unstable_by(|a, b| self.compare(a, b, show_offline));
+        benilla_ui::crt::qsort(rows, |a, b| self.compare(a, b, show_offline) as i32);
     }
 }
 
@@ -286,6 +287,24 @@ mod tests {
         sort.order(&mut rows, true);
         let names: Vec<&str> = rows.iter().map(|r| r.info.name.as_str()).collect();
         assert_eq!(names, ["Alice", "Bob", "Carol", "Dave"], "interleaved");
+    }
+
+    /// Rows that tie on all eight keys (here one name without case) sit where the CRT `qsort`
+    /// (`0x73f727`) leaves them, not in the order a pdqsort or a stable sort keeps. Three go to
+    /// `shortsort` (`0x73f87b`), which swaps the first-found largest to the end each pass, so
+    /// they come out second, third, first.
+    #[test]
+    fn tied_rows_sit_where_the_crt_qsort_leaves_them() {
+        let mut sort = SortStack::default();
+        sort.select(SortField::Level);
+        let tied = |guid: u64, name: &str| RosterRow {
+            guid,
+            ..row(name, true, 60, 0)
+        };
+        let mut rows = vec![tied(1, "Same"), tied(2, "SAME"), tied(3, "same")];
+        sort.order(&mut rows, true);
+        let guids: Vec<u64> = rows.iter().map(|r| r.guid).collect();
+        assert_eq!(guids, [2, 3, 1]);
     }
 
     #[test]

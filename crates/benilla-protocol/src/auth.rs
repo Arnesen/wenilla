@@ -340,17 +340,25 @@ pub(crate) const MAGIC_POPULATIONS: [(u32, u32, u8); 3] = [
     (0x43c8_0000, 0x4100_0000, 0x80), // 400.0 → 8.0,   Full
 ];
 
-/// Read `CMD_REALM_LIST_Server` into the advertised realms.
-///
-/// **Every per-realm field is kept.** The flags byte, the category byte and the realm id were
-/// read-and-dropped for as long as benilla connected to `realms.first()` without ever drawing a
-/// list; the realm-list screen displays or groups on all three, and the population is the input to
-/// the load band rather than a string to print.
-///
-/// **And the population is rewritten on the way in** — see [`MAGIC_POPULATIONS`]. This has to
-/// happen *here*, in the parser, exactly as the reference does it: the realm-list screen computes a
-/// mean over every realm's population, and a realm advertised as Recommended arrives carrying
-/// `600.0`, which would drag that mean far enough to mislabel every other row on the list.
+/// The characters the realm record fill (`0x5b2230`) turns into spaces in a realm name: those
+/// `0x5b2450` maps to the case that stores a space (`0x5b2391`).
+const NAME_FORBIDDEN: &str = "\"*/:<>?\\|";
+
+/// A realm name as the record fill leaves it: each of [`NAME_FORBIDDEN`] becomes a space
+/// (`0x5b2376`-`0x5b2391`), then the trailing spaces and dots are cut (`0x5b23a6`-`0x5b23c5`,
+/// through `0x5b24b0` with its trailing flag set).
+fn clean_realm_name(name: &str) -> String {
+    let spaced: String = name
+        .chars()
+        .map(|c| if NAME_FORBIDDEN.contains(c) { ' ' } else { c })
+        .collect();
+    spaced.trim_end_matches([' ', '.']).to_string()
+}
+
+/// Read `CMD_REALM_LIST_Server` into the advertised realms, rewriting [`MAGIC_POPULATIONS`] here
+/// as the reference parser does: the realm-list screen averages every realm's population, and an
+/// unswapped Recommended `600.0` would skew that mean for every row. Each name is cleaned
+/// ([`clean_realm_name`]) before anything shows it.
 pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInfo>> {
     let opcode = read_u8_async(r).await?;
     if opcode != CMD_REALM_LIST {
@@ -378,7 +386,7 @@ pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInf
             flags |= bit;
         }
         realms.push(RealmInfo {
-            name,
+            name: clean_realm_name(&name),
             address,
             population,
             characters,
@@ -572,5 +580,65 @@ mod tests {
         let plain = one(1.5);
         assert_eq!(plain.flags, 0x02);
         assert_eq!(plain.population, 1.5);
+    }
+
+    /// A one-realm `CMD_REALM_LIST_Server` named `name`, whose address is `127.0.0.1:8085`.
+    fn realm_named(name: &[u8]) -> RealmInfo {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(0);
+        body.extend_from_slice(name);
+        body.push(0);
+        body.extend_from_slice(b"127.0.0.1:8085\0");
+        body.extend_from_slice(&1.5f32.to_le_bytes());
+        body.extend_from_slice(&[0, 1, 0]);
+        let mut packet = vec![CMD_REALM_LIST];
+        packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes());
+        packet.extend_from_slice(&0u32.to_le_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(&0u16.to_le_bytes());
+        futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet)))
+            .unwrap()
+            .remove(0)
+    }
+
+    /// The realm record fill (`0x5b2230`) turns each of `"*/:<>?\|` in a name into a space
+    /// (`0x5b2376`-`0x5b2391`, the table `0x5b2450`) and leaves every other character: the other
+    /// punctuation, the dot and the space inside a name, and bytes past `0x7c`.
+    #[test]
+    fn a_realm_name_loses_the_nine_characters_a_file_name_cannot_hold() {
+        for c in "\"*/:<>?\\|".chars() {
+            assert_eq!(
+                realm_named(format!("A{c}B").as_bytes()).name,
+                "A B",
+                "{c:?}"
+            );
+        }
+        let kept = "A!#$%&'()+,-;=@[]^_`{}~B C.D";
+        assert_eq!(realm_named(kept.as_bytes()).name, kept);
+        assert_eq!(realm_named("Königreich Å".as_bytes()).name, "Königreich Å");
+    }
+
+    /// Trailing spaces and dots are cut (`0x5b23a6`-`0x5b23c5` through `0x5b24b0` with its
+    /// trailing flag set), after the nine characters became spaces: `Test:Realm.` lists as
+    /// `Test Realm`, and a name of nothing but those characters lists empty.
+    #[test]
+    fn a_realm_name_loses_its_trailing_spaces_and_dots() {
+        let cleaned = |name: &str| realm_named(name.as_bytes()).name;
+        assert_eq!(cleaned("Test:Realm."), "Test Realm");
+        assert_eq!(cleaned("Realm. . "), "Realm");
+        assert_eq!(cleaned("Realm:"), "Realm");
+        assert_eq!(cleaned("A:."), "A");
+        assert_eq!(cleaned("Königreich:"), "Königreich");
+        assert_eq!(cleaned("..."), "");
+        assert_eq!(cleaned("*|"), "");
+        assert_eq!(cleaned(" Lead.dot"), " Lead.dot", "only the end is cut");
+    }
+
+    /// Only the name is cleaned: the address keeps its colon, so the dial still has its port.
+    #[test]
+    fn the_address_is_not_cleaned() {
+        assert_eq!(realm_named(b"R").address, "127.0.0.1:8085");
     }
 }

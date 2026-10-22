@@ -8,7 +8,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::binding_abi::{flag, string_arg};
+use super::binding_abi::{flag, s_str_to_int, string_arg};
 use super::{Model, ScriptValue};
 
 /// One of the four user agreements the login screen walks before it shows the login boxes
@@ -57,9 +57,9 @@ pub struct NoticeState {
 }
 
 impl NoticeState {
-    /// The flags for a CVar value, read as `atoi` reads it: anything unparseable is 0.
+    /// The flags for a CVar value, read as its record's integer ([`s_str_to_int`]).
     pub fn from_cvar(value: &str) -> Self {
-        let n = leading_int(value);
+        let n = s_str_to_int(value);
         NoticeState {
             accepted: n == 1,
             show_notice: n < 0,
@@ -67,8 +67,36 @@ impl NoticeState {
     }
 }
 
-/// `atoi`: an optional sign and the leading digits, 0 when there are none.
-pub(super) fn leading_int(s: &str) -> i64 {
+/// The four agreements' flag pairs (`[0xb41df8]`-`[0xb41e14]`): C globals, which outlive the Lua
+/// state. The glue manager seeds them once (`0x46a400`) and seats the same cells in every glue VM
+/// it builds, so a rebuild (`0x46a7b0`) reads what the last one left and the accepts' stores
+/// (`0x46aef0` and its siblings) are the only writes after the seed.
+#[derive(Clone, Default)]
+pub struct GlueNotices(std::rc::Rc<std::cell::Cell<[NoticeState; 4]>>);
+
+impl GlueNotices {
+    /// The cells seeded with `states`, in [`GlueNotice::ALL`] order.
+    pub fn new(states: [NoticeState; 4]) -> Self {
+        Self(std::rc::Rc::new(std::cell::Cell::new(states)))
+    }
+
+    /// One agreement's flags.
+    pub fn get(&self, notice: GlueNotice) -> NoticeState {
+        self.0.get()[notice.index()]
+    }
+
+    /// Store one agreement's flags.
+    pub fn set(&self, notice: GlueNotice, state: NoticeState) {
+        let mut all = self.0.get();
+        all[notice.index()] = state;
+        self.0.set(all);
+    }
+}
+
+/// The first `%d` of the CRT's `sscanf` (`0x73fb5d`): leading whitespace skipped, an optional sign
+/// and the leading digits; `None` when no digit follows, which leaves the out-slot untouched; 0
+/// for a number past `i64`.
+pub fn scanf_d(s: &str) -> Option<i64> {
     let s = s.trim_start();
     let (sign, digits) = match s.as_bytes().first() {
         Some(b'-') => (-1, &s[1..]),
@@ -78,7 +106,7 @@ pub(super) fn leading_int(s: &str) -> i64 {
     let end = digits
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(digits.len());
-    sign * digits[..end].parse::<i64>().unwrap_or(0)
+    (end > 0).then(|| sign * digits[..end].parse::<i64>().unwrap_or(0))
 }
 
 /// `DefaultServerLogin`'s two strings. Never logged: the `Debug` form names the account only.
@@ -97,12 +125,13 @@ impl std::fmt::Debug for GlueCredentials {
     }
 }
 
+/// The `accountName` CVar's table key, its name lowercased.
+const CVAR_ACCOUNT_NAME_KEY: &str = "accountname";
+
 /// A glue verb's effect the host carries out on its next frame, drained by its glue manager: the
-/// account name's file, the glue music and the browser. None of them is anything Lua reads back.
+/// glue music and the browser. None of them is anything Lua reads back.
 #[derive(Clone, Debug)]
 pub enum GlueRequest {
-    /// `SetSavedAccountName(name)` (`0x46cdf0`): the `accountName` CVar's new value.
-    SetSavedAccountName(String),
     /// `PlayGlueMusic(file)` (`0x46ceb0` → `0x45aeb0`).
     PlayGlueMusic(String),
     /// `StopGlueMusic()` (`0x46cf00`): `0x45b050(1.0)`, a one-second fade.
@@ -354,11 +383,12 @@ const LAUNCH_HOSTS: [&str; 10] = [
 ];
 
 /// The gate in front of the browser: `0x5abd00` tests `0x5abc10` and `0x429ff0` takes the URL.
-/// The URL begins `http://` (`0x85d6bc`, compared case-folded), every byte after it is a letter,
-/// a digit, `.`, `-` or `/` (so no query, port, escape or `_`), and its host, the text up to the
-/// first `/`, is one of [`LAUNCH_HOSTS`], compared case-folded. `0x429ff0` refuses a URL of 0x400
-/// bytes or more (`0x42a01c`). The reference works on a C string, so the verb cuts its argument
-/// at a NUL before asking; a URL with a NUL in it is refused here.
+/// The URL begins `http://` (`0x85d6bc`, compared case-folded), every byte after it is `/`, `.`,
+/// `-` (`0x5abc54`-`0x5abc5e`) or passes `isalpha` (`0x73fb91`, mask `0x103`), so no digit, query,
+/// port, escape or `_`, and its host, the text up to the first `/`, is one of [`LAUNCH_HOSTS`],
+/// compared case-folded. `0x429ff0` refuses a URL of 0x400 bytes or more (`0x42a01c`). The
+/// reference works on a C string, so the verb cuts its argument at a NUL before asking; a URL with
+/// a NUL in it is refused here.
 ///
 /// Deviation: a host of 0x80 bytes or more is refused. The reference copies the host into a 0x80-byte
 /// buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and the cut
@@ -378,7 +408,7 @@ pub fn launch_url_allowed(url: &str) -> bool {
     };
     if !rest
         .iter()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'/'))
+        .all(|b| b.is_ascii_alphabetic() || matches!(b, b'.' | b'-' | b'/'))
     {
         return false;
     }
@@ -507,11 +537,9 @@ pub(crate) struct GlueCore {
     host: Option<std::rc::Rc<dyn GlueHost>>,
     /// Calls made before any host was seated, for the one that seats this VM to run.
     calls: Vec<GlueCall>,
-    /// The `accountName` CVar (`[0x8826c8]`), which `GetSavedAccountName` (`0x46cdd0`) reads.
-    saved_account: String,
-    /// The agreements' flag pairs (`[0xb41df8]`-`[0xb41e14]`): read off their CVars when the glue
-    /// starts, set by their accepts, and read by the getters and the login's first two tests.
-    notices: [NoticeState; 4],
+    /// The agreements' flag pairs (`[0xb41df8]`-`[0xb41e14]`): read by the getters and the login's
+    /// first two tests, set by the accepts, and the host's to seed ([`GlueNotices`]).
+    notices: GlueNotices,
     /// The current glue screen's name (`[0xb41478]`), which `SetCurrentScreen` (`0x46ce60` →
     /// `0x46b860`) copies into a 0x40-byte buffer.
     pub(super) screen: String,
@@ -570,19 +598,24 @@ impl super::UiScript {
         self.model_mut().glue.name_lists = Some(lists);
     }
 
-    /// Seed the saved account name `GetSavedAccountName` answers.
-    pub fn set_glue_saved_account(&mut self, name: &str) {
-        self.model_mut().glue.saved_account = name.to_string();
-    }
-
-    /// Seed one agreement's flags.
+    /// Store one agreement's flags in the cells this VM is seated with.
     pub fn set_glue_notice(&mut self, notice: GlueNotice, state: NoticeState) {
-        self.model_mut().glue.notices[notice.index()] = state;
+        self.model_ref().glue.notices.set(notice, state);
     }
 
-    /// One agreement's flags as the VM holds them.
+    /// One agreement's flags as the cells hold them.
     pub fn glue_notice(&self, notice: GlueNotice) -> NoticeState {
-        self.model_ref().glue.notices[notice.index()]
+        self.model_ref().glue.notices.get(notice)
+    }
+
+    /// The agreement cells this VM reads and writes.
+    pub fn glue_notices(&self) -> GlueNotices {
+        self.model_ref().glue.notices.clone()
+    }
+
+    /// Seat the host's agreement cells, which outlive this VM.
+    pub fn set_glue_notices(&mut self, notices: GlueNotices) {
+        self.model_mut().glue.notices = notices;
     }
 
     /// Whether the glue has hidden the pointer (`HideCursor`) and not shown it again.
@@ -748,7 +781,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let agreed = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let n = &model.glue.notices;
-                n[GlueNotice::Tos.index()].accepted && n[GlueNotice::Eula.index()].accepted
+                n.get(GlueNotice::Tos).accepted && n.get(GlueNotice::Eula).accepted
             };
             if agreed {
                 call(lua, GlueCall::Login(GlueCredentials { account, password }));
@@ -765,25 +798,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The `accountName` CVar's string (`0x46cdd5`, `[cvar+0x20]`).
+    // The `accountName` CVar's string (`0x46cdd5`, `[[0x8826c8]+0x20]`), the saved, script-visible
+    // record registered at `0x402bd2`: `GetCVar("accountName")` reads the same text.
     g.set(
         "GetSavedAccountName",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            lua.create_string(&model.glue.saved_account)
+            let value = model
+                .cvars
+                .get(CVAR_ACCOUNT_NAME_KEY)
+                .map_or("", |slot| slot.value.as_str());
+            lua.create_string(value)
         })?,
     )?;
     // A string argument (`0x46cdf8`) or `Usage: SetSavedAccountName("accountName")` (`0x837c28`),
-    // then `CVar::Set` (`0x46ce2e`), so the next `GetSavedAccountName` reads it back at once.
+    // then `CVar::Set(s, 1, 0, 0, 1)` on that record (`0x46ce13`-`0x46ce2e`), a write like
+    // `SetCVar`'s that the host persists, so the next `GetSavedAccountName` reads it back at once.
     g.set(
         "SetSavedAccountName",
         lua.create_function(|lua, name: Value| {
             let name = string_arg(lua, name, "Usage: SetSavedAccountName(\"accountName\")")?;
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .glue
-                .saved_account = name.clone();
-            queue(lua, GlueRequest::SetSavedAccountName(name));
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            super::cvars::write_cvar(&mut model, "accountName", name);
             Ok(())
         })?,
     )?;
@@ -814,29 +850,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             "AcceptContest",
         ),
     ] {
-        let i = notice.index();
         g.set(
             show,
             lua.create_function(move |lua, _: MultiValue| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                Ok(flag(model.glue.notices[i].show_notice))
+                Ok(flag(model.glue.notices.get(notice).show_notice))
             })?,
         )?;
         g.set(
             accepted,
             lua.create_function(move |lua, _: MultiValue| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                Ok(flag(model.glue.notices[i].accepted))
+                Ok(flag(model.glue.notices.get(notice).accepted))
             })?,
         )?;
         g.set(
             accept,
             lua.create_function(move |lua, _: MultiValue| {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.glue.notices[i] = NoticeState {
-                    accepted: true,
-                    show_notice: false,
-                };
+                model.glue.notices.set(
+                    notice,
+                    NoticeState {
+                        accepted: true,
+                        show_notice: false,
+                    },
+                );
                 super::cvars::set_from_engine(&mut model, notice.cvar(), "1".to_string());
                 Ok(())
             })?,
@@ -993,7 +1031,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let on = model
                 .cvars
                 .get("moviesubtitle")
-                .is_some_and(|c| leading_int(&c.value) != 0);
+                .is_some_and(|c| s_str_to_int(&c.value) != 0);
             Ok(flag(on))
         })?,
     )?;
@@ -1007,7 +1045,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let width = model
                 .cvars
                 .get("gxresolution")
-                .map_or(0, |c| leading_int(&c.value));
+                .map_or(0, |c| scanf_d(&c.value).unwrap_or(0));
             Ok(width as f64)
         })?,
     )?;
@@ -1230,6 +1268,20 @@ mod tests {
         assert!(s.take_glue_calls().is_empty());
     }
 
+    /// An agreement's flags come off its record's integer (`0x46a41a` reads `+0x28`), Storm's
+    /// `SStrToInt`: no whitespace skip, no `+`, a 32-bit wrap.
+    #[test]
+    fn an_agreement_reads_its_cvar_as_the_records_integer() {
+        let accepted = |text: &str| NoticeState::from_cvar(text).accepted;
+        assert!(accepted("1"));
+        assert!(accepted("1abc"));
+        assert!(!accepted(" 1"), "no whitespace skip");
+        assert!(!accepted("+1"), "no unary plus");
+        assert!(accepted("4294967297"), "the register wraps");
+        assert!(NoticeState::from_cvar("-1").show_notice);
+        assert!(!NoticeState::from_cvar(" -1").show_notice);
+    }
+
     /// `AcceptEULA` sets its flag pair and its CVar in the call (`0x46af20`).
     #[test]
     fn the_agreements_answer_their_seeded_flags_and_accept_sets_them() {
@@ -1261,23 +1313,30 @@ mod tests {
         assert!(s.take_glue_requests().is_empty() && s.take_glue_calls().is_empty());
     }
 
+    /// The saved account name is the `accountName` CVar (`0x46cdd0`, `0x46cdf0`): what one side
+    /// writes the other reads, and the write queues for the host like a `SetCVar`.
     #[test]
-    fn the_saved_account_reads_back_what_was_set() {
+    fn the_saved_account_is_the_account_name_cvar() {
         let mut s = UiScript::new_glue().unwrap();
-        s.set_glue_saved_account("PROBE");
+        s.register_cvars([("accountName", "")]);
+        s.set_cvar_host("accountName", "PROBE");
         assert_eq!(
             s.eval::<String>("return GetSavedAccountName()").unwrap(),
             "PROBE"
         );
+        s.run("SetSavedAccountName('Other')").unwrap();
+        assert_eq!(s.cvar("accountName").as_deref(), Some("Other"));
         s.run("SetSavedAccountName('')").unwrap();
         assert_eq!(
             s.eval::<String>("return GetSavedAccountName()").unwrap(),
             ""
         );
-        assert!(matches!(
-            s.take_glue_requests().as_slice(),
-            [GlueRequest::SetSavedAccountName(n)] if n.is_empty()
-        ));
+        assert_eq!(
+            s.take_cvar_changes(),
+            [("accountName", "Other"), ("accountName", "")]
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+        );
+        assert!(s.take_glue_requests().is_empty());
         let err = s.run("SetSavedAccountName()").unwrap_err().to_string();
         assert!(
             err.contains("Usage: SetSavedAccountName(\"accountName\")"),
@@ -1312,6 +1371,8 @@ mod tests {
             "http://battle.net/",
             "http://www.blizzard.com/?q=1",
             "http://www.blizzard.com:80/",
+            "http://www.blizzard.com/patch1121",
+            "http://us1.blizzard.com/",
             "http://www.blizzard.com/a_b",
             "http://www.blizzard.com/a b",
             "http://www.blizzard.com\n/",
@@ -1448,6 +1509,28 @@ mod tests {
         );
         s.set_cvar_host("gxResolution", "800x600");
         assert_eq!(s.eval::<f64>("return GetMovieResolution()").unwrap(), 800.0);
+        // `GetMovieSubtitles` reads the record's integer (`0x46dbc5`, `+0x28`), `SStrToInt`: a
+        // leading space or `+` is 0. `GetMovieResolution` scans the text with `sscanf`
+        // (`0x46cf34`), which skips whitespace and takes a sign.
+        for text in [" 1", "+1"] {
+            s.set_cvar_host("movieSubtitle", text);
+            assert!(
+                s.eval::<bool>("return GetMovieSubtitles() == nil").unwrap(),
+                "{text:?}"
+            );
+        }
+        s.set_cvar_host("movieSubtitle", "1x");
+        assert_eq!(
+            s.eval::<Option<i64>>("return GetMovieSubtitles()").unwrap(),
+            Some(1)
+        );
+        s.set_cvar_host("gxResolution", " 640x480");
+        assert_eq!(s.eval::<f64>("return GetMovieResolution()").unwrap(), 640.0);
+        s.set_cvar_host("gxResolution", "+1280x960");
+        assert_eq!(
+            s.eval::<f64>("return GetMovieResolution()").unwrap(),
+            1280.0
+        );
         assert!(s
             .eval::<bool>("return table.getn({GetMovieResolution()}) == 1")
             .unwrap());

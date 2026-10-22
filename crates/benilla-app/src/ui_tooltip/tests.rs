@@ -1,18 +1,84 @@
 //! The spell-view cell tests, against the real 5875 data, and the feed's place in the schedule.
 
-use super::spell_feed::{build_view, feed_spell_tooltips, ViewCaster, ViewCtx};
+use super::spell_feed::{build_aura_view, build_view, feed_spell_tooltips, ViewCaster, ViewCtx};
 use super::*;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::ui_action::{real_spells, PlayerActions, Spells};
+use benilla_ui::script::UiScript;
 
-/// The view alone, for the cell tests; the feed keeps what it read beside it.
-fn spell_tooltip_view(
-    spell_id: u32,
-    spells: &Spells,
-    vctx: &mut ViewCtx,
-) -> Option<benilla_ui::script::SpellTooltipView> {
-    build_view(spell_id, spells, vctx).map(|(view, _)| view)
+/// The view alone, read through the shipped strings, for the cell tests; the feed keeps what it
+/// read beside it.
+fn spell_tooltip_view(spell_id: u32, spells: &Spells, vctx: &mut ViewCtx) -> Option<Shown> {
+    build_view(spell_id, spells, vctx).map(|(view, _)| Shown::of(&view))
+}
+
+thread_local! {
+    /// A VM holding the shipped `GlobalStrings.lua`, which the render reads a view's cells through.
+    static STRINGS: benilla_ui::script::UiScript = {
+        let vm = benilla_ui::script::UiScript::new().expect("VM");
+        crate::ui_script::load_ui_for_test(&vm, "Interface\\FrameXML\\GlobalStrings.lua");
+        vm
+    };
+}
+
+/// A key's shipped string, as the render reads it.
+pub(super) fn shipped(key: &str) -> Option<String> {
+    STRINGS.with(|vm| benilla_ui::strings::global(vm.lua(), key))
+}
+
+/// A view's cells as the render shows them with the shipped strings.
+#[derive(Debug)]
+pub(super) struct Shown {
+    pub(super) name: String,
+    pub(super) rank: Option<String>,
+    pub(super) cost: Option<String>,
+    pub(super) range: Option<String>,
+    pub(super) cast_time: Option<String>,
+    pub(super) cooldown: Option<String>,
+    pub(super) recovery_ms: u32,
+    pub(super) requires_item: Option<String>,
+    pub(super) item_met: bool,
+    pub(super) requires_form: Option<String>,
+    pub(super) form_met: bool,
+    pub(super) totems: Option<String>,
+    pub(super) totems_met: bool,
+    pub(super) reagents: Option<String>,
+    pub(super) reagents_met: bool,
+    pub(super) chance: Option<String>,
+    pub(super) use_all: Option<String>,
+    pub(super) description: String,
+}
+
+impl Shown {
+    pub(super) fn of(v: &benilla_ui::script::SpellTooltipView) -> Self {
+        let text = |t: &benilla_ui::script::TooltipText| t.text(&shipped);
+        let cell = |t: &Option<benilla_ui::script::TooltipText>| t.as_ref().map(text);
+        let line = |key: &str, name: &Option<String>| {
+            name.as_ref()
+                .map(|n| benilla_ui::strings::fill(&shipped(key).expect(key), &[Arg::S(n)]))
+        };
+        Self {
+            name: v.name.clone(),
+            rank: v.rank.clone(),
+            cost: cell(&v.cost),
+            range: cell(&v.range),
+            cast_time: cell(&v.cast_time),
+            cooldown: cell(&v.cooldown),
+            recovery_ms: v.recovery_ms,
+            requires_item: line("SPELL_EQUIPPED_ITEM", &v.requires_item),
+            item_met: v.item_met,
+            requires_form: line("SPELL_REQUIRED_FORM", &v.requires_form),
+            form_met: v.form_met,
+            totems: cell(&v.totems),
+            totems_met: v.totems_met,
+            reagents: cell(&v.reagents),
+            reagents_met: v.reagents_met,
+            chance: cell(&v.chance),
+            use_all: cell(&v.use_all),
+            description: text(&v.description),
+        }
+    }
 }
 
 /// A view context with no player state, the DBC-only half of the builder.
@@ -20,29 +86,26 @@ pub(super) struct TestCtx {
     pub(super) items: Items,
     pub(super) commands: NetCommands,
     _rx: crossbeam_channel::Receiver<crate::net::ClientCommand>,
-    /// The builder's lookup over the shipped `GlobalStrings.lua`: a stub would pass on wording
-    /// the client never shows.
-    get: Box<Getter>,
     /// Empty by default; modifier tests populate it explicitly.
     pub(super) spell_mods: crate::spell::SpellModifiers,
     /// Absent by default: every spell's skill level reads 0.
     pub(super) skill_lines: Option<benilla_formats::SkillLineCatalog>,
+    /// Absent by default: a reputation line names `UNKNOWN` at a standing of 0.
+    pub(super) factions: Option<benilla_formats::FactionCatalog>,
+    pub(super) reputations: crate::net::Reputations,
 }
-
-type Getter = dyn Fn(&str) -> Option<String>;
 
 impl TestCtx {
     pub(super) fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let vm = benilla_ui::script::UiScript::new().expect("VM");
-        crate::ui_script::load_ui_for_test(&vm, "Interface\\FrameXML\\GlobalStrings.lua");
         Self {
             items: Items::default(),
             commands: NetCommands(tx),
             _rx: rx,
-            get: Box::new(move |key| benilla_ui::strings::global(vm.lua(), key)),
             spell_mods: crate::spell::SpellModifiers::default(),
             skill_lines: None,
+            factions: None,
+            reputations: crate::net::Reputations::default(),
         }
     }
 
@@ -88,7 +151,8 @@ impl TestCtx {
             sub_classes,
             skill_lines: self.skill_lines.as_ref(),
             spell_mods: &self.spell_mods,
-            get: self.get.as_ref(),
+            factions: self.factions.as_ref(),
+            reputations: Some(&self.reputations),
         }
     }
 
@@ -121,7 +185,7 @@ fn a_pet_view_scales_sacrifice_by_the_pets_level() {
     let mut objs = no_objects();
     let objects = objs.get();
     let player = ObjectStore(unit(60, 1373));
-    let absorb = |v: benilla_ui::script::SpellTooltipView, n: u32| {
+    let absorb = |v: Shown, n: u32| {
         assert!(
             v.description.contains(&format!("absorb {n} damage")),
             "{n}: {}",
@@ -251,6 +315,43 @@ fn a_female_players_spell_tooltips_take_the_second_gender_form() {
     assert!(pets.contains("the mage and her allies"), "{pets}");
 }
 
+/// The aura view's text, read through the shipped strings, built for `spell_id` at `level` and
+/// `stack`.
+fn aura_text(spell_id: u32, level: u8, stack: u8, spells: &Spells, vctx: &ViewCtx) -> String {
+    let key = benilla_ui::script::AuraKey {
+        spell_id,
+        level,
+        stack,
+    };
+    let (view, _) = build_aura_view(key, spells, vctx).expect("an aura view");
+    view.description.text(&shipped)
+}
+
+/// The aura builder expands the aura text at the aura's level, and at its count when the spell
+/// stacks (`0x52f8ca`-`0x52f8dc`, `0x52f955`), on the real `Spell.dbc`. Rend Flesh (3147, 1 point
+/// and 1.3 a level over level 1) from a level-25 raptor reads 32 to 33, and at level 0 the
+/// player's skill, none here, reads the flat point. Three stacks of Combustion (28682,
+/// `StackAmount` 10) read three times one; a count on Arcane Intellect (1459, `StackAmount` 0)
+/// reads as one. Fire Blast (2136) has a description and no aura text, and its aura view has no
+/// text: the builder falls back to nothing (`0x52f929`).
+#[test]
+fn the_aura_text_takes_the_auras_level_and_stack_on_real_data() {
+    let Some(spells) = real_spells() else { return };
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let vctx = t.ctx(&objects, 0, None);
+    let text = |id, level, stack| aura_text(id, level, stack, &spells, &vctx);
+    assert_eq!(text(3147, 25, 1), "32 to 33 damage inflicted every 3 sec.");
+    assert_eq!(text(3147, 0, 1), "1 damage inflicted every 3 sec.");
+    let combustion =
+        |n| format!("Increases critical strike chance from Fire damage spells by {n}%.");
+    assert_eq!(text(28682, 0, 1), combustion(10));
+    assert_eq!(text(28682, 0, 3), combustion(30));
+    assert_eq!(text(1459, 60, 4), "Increases Intellect by 2.");
+    assert_eq!(text(2136, 0, 1), "");
+}
+
 /// An object index with nothing streamed: no worn item, and every reagent count 0.
 fn no_objects() -> crate::ui_items::TestObjects {
     crate::ui_items::TestObjects::new()
@@ -307,7 +408,53 @@ fn battle_shout_description_scales_by_the_skill_level() {
     }
 }
 
-/// Fireball rank 1 (133) end to end: description 138, cast index 18 (1500 ms), duration 30.
+/// The cast cell is `GetCastTime(1)`, which scales by the caster's `UNIT_MOD_CAST_SPEED`
+/// (`0x6e3426`-`0x6e3456`): Fireball rank 1 (133), 1.5 s, reads 2.25 s at Curse of Tongues rank
+/// 1's 1.5 (vmangos `Unit.cpp:9926-9945`). A pet view reads the pet's factor (`0x6e33e8`-
+/// `0x6e3416`), and a player with none sent reads the descriptor's 0, an instant cast.
+#[test]
+fn the_cast_cell_takes_the_casters_cast_speed() {
+    let Some(spells) = real_spells() else { return };
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let unit = |speed: Option<f32>| {
+        let mut pairs = vec![(22u16, 100u32), (34, 60)];
+        pairs.extend(speed.map(|v| (145u16, v.to_bits())));
+        benilla_protocol::ObjectFields::from_pairs(&pairs)
+    };
+    let player = |speed| ObjectStore(unit(speed));
+    let at = |t: &mut TestCtx, speed| {
+        let store = player(speed);
+        spell_tooltip_view(
+            133,
+            &spells,
+            &mut t.ctx_for(&objects, 0, None, Some(&store)),
+        )
+        .expect("Fireball view")
+        .cast_time
+    };
+    assert_eq!(at(&mut t, Some(1.0)).as_deref(), Some("1.5 sec cast"));
+    assert_eq!(at(&mut t, Some(1.5)).as_deref(), Some("2.25 sec cast"));
+    assert_eq!(at(&mut t, None).as_deref(), Some("Instant cast"));
+    let me = player(Some(1.0));
+    let pet = unit(Some(2.0));
+    let v = spell_tooltip_view(
+        133,
+        &spells,
+        &mut t.pet_ctx(&objects, Some(&me), Some(&pet)),
+    )
+    .expect("Fireball view");
+    assert_eq!(
+        v.cast_time.as_deref(),
+        Some("3 sec cast"),
+        "the pet's factor"
+    );
+}
+
+/// Fireball rank 1 (133) end to end, through the `Spell.dbc` columns the catalog reads: the
+/// description (column 138), `CastingTimeIndex` (column 18), whose row 16 is 1500 ms, and
+/// `DurationIndex` (column 30).
 #[test]
 fn fireball_view_on_real_data() {
     let data = benilla_formats::wow_data_or_skip!();
@@ -409,13 +556,15 @@ fn improved_devotion_aura_updates_the_description_but_not_the_aura_text() {
     let objects = objs.get();
     let base = spell_tooltip_view(465, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
     assert!(base.description.contains("55 additional armor"));
-    assert!(base.aura_description.contains("55"));
+    let base_aura = aura_text(465, 0, 1, &spells, &t.ctx(&objects, 0, None));
+    assert!(base_aura.contains("55"), "{base_aura}");
 
     t.spell_mods.set_class_family(devotion.spell_family);
     t.spell_mods.set(false, bit, 8, 25);
     let improved = spell_tooltip_view(465, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
     assert!(improved.description.contains("68 additional armor"));
-    assert_eq!(improved.aura_description, base.aura_description);
+    let improved_aura = aura_text(465, 0, 1, &spells, &t.ctx(&objects, 0, None));
+    assert_eq!(improved_aura, base_aura);
 }
 
 /// Fire Blast rank 1's 8 s is its category recovery, its own recovery 0; Improved Fire Blast's
@@ -596,6 +745,189 @@ fn cost_and_cast_cells_on_real_data() {
     .expect("Mind Flay view");
     assert_eq!(v.cost.as_deref(), Some("45 Mana"));
     assert_eq!(v.cast_time.as_deref(), Some("Channeled"));
+}
+
+/// The cost cell's gates test the quotients, signed, after the unsigned division
+/// (`0x52e8dd`-`0x52e923`): a rage cost under 10 has no cell, a per-second cost alone shows the
+/// `_PER_TIME` form with its 0, and the per-second cost scales by the level (`0x6e3300`).
+#[test]
+fn the_cost_cell_tests_the_divided_values() {
+    // The cells fill the install's `GlobalStrings.lua`.
+    let _data = benilla_formats::wow_data_or_skip!();
+    use benilla_formats::SpellDisplay;
+    use benilla_protocol::messages::FIELD_PLAYER_SKILL_INFO_1_1;
+    let mut spells = Spells::empty_for_tests();
+    let rage = |id: u32, mana_cost| {
+        (
+            id,
+            SpellDisplay {
+                id,
+                name: "Rage".into(),
+                power_type: 1,
+                mana_cost,
+                ..Default::default()
+            },
+        )
+    };
+    let drain = SpellDisplay {
+        id: 900_012,
+        name: "Drain".into(),
+        mana_per_second: 3,
+        mana_per_second_per_level: 2,
+        base_level: 10,
+        ..Default::default()
+    };
+    spells.catalog = benilla_formats::SpellCatalog::from_displays(
+        [rage(900_010, 5), rage(900_011, 10), (900_012, drain)].into(),
+    );
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // Skill 100 in the drain's line: level 20.
+    let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (34, 60),
+        (FIELD_PLAYER_SKILL_INFO_1_1, 7),
+        (FIELD_PLAYER_SKILL_INFO_1_1 + 1, 100 | 300 << 16),
+    ]));
+    let mut t = TestCtx::new();
+    t.skill_lines = Some(benilla_formats::SkillLineCatalog::from_spell_lines([(
+        900_012, 7,
+    )]));
+    let mut cost = |id| {
+        spell_tooltip_view(id, &spells, &mut t.ctx_for(&objects, 0, None, Some(&store)))
+            .unwrap()
+            .cost
+    };
+    assert_eq!(cost(900_010), None, "half a rage point");
+    assert_eq!(cost(900_011).as_deref(), Some("1 Rage"));
+    assert_eq!(
+        cost(900_012).as_deref(),
+        Some("0 Mana, plus 23 per sec"),
+        "3 + (20 - 10) × 2"
+    );
+}
+
+/// The reputation line's facts (`0x52f2ae`-`0x52f38e`) on the one 5875 row with a faction, 6994:
+/// Gadgetzan at Friendly, met from a standing of 3000 (`0x4d6370`, `0x80928c`), the label female
+/// for a female player, a read of the standings and the gender; a missing row names `UNKNOWN`.
+#[test]
+fn the_reputation_line_reads_the_players_standing() {
+    use benilla_ui::script::ReputationRequirement;
+    let Some(spells) = real_spells() else { return };
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let factions = benilla_formats::load_faction_catalog(&mut chain).expect("factions");
+    let index = factions
+        .reputation_faction(369)
+        .expect("Gadgetzan")
+        .rep_index as usize;
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // A female human warrior (race 1, class 1, gender byte 1).
+    let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (22, 100),
+        (36, 1 | 1 << 8 | 1 << 16),
+    ]));
+    let mut t = TestCtx::new();
+    let requirement = |t: &mut TestCtx, wire: i32| {
+        let mut slots = vec![(0u8, 0i32); 64];
+        slots[index] = (0, wire);
+        t.reputations = crate::net::Reputations::from_slots(slots);
+        let (view, deps) = build_view(
+            6994,
+            &spells,
+            &mut t.ctx_for(&objects, 0, None, Some(&store)),
+        )
+        .unwrap();
+        assert!(deps.reputation && deps.gender, "{deps:?}");
+        view.requires_reputation
+    };
+    assert_eq!(
+        requirement(&mut t, 0),
+        Some(ReputationRequirement {
+            faction: "UNKNOWN".into(),
+            rank: 4,
+            met: false,
+            female: true,
+        }),
+        "no Faction.dbc"
+    );
+    t.factions = Some(factions);
+    let base = t
+        .factions
+        .as_ref()
+        .unwrap()
+        .reputation_faction(369)
+        .unwrap()
+        .base_for(1, 1);
+    let at = |t: &mut TestCtx, standing: i32| requirement(t, standing - base).unwrap();
+    assert_eq!(at(&mut t, 2999).faction, "Gadgetzan");
+    assert!(!at(&mut t, 2999).met);
+    assert!(at(&mut t, 3000).met, "Friendly starts at 3000");
+}
+
+/// The per-level terms read `0x6e3130`, for the player `0x5ea690`: the skill in the spell's own
+/// line over 5, never the character level, and 0 with no line (`0x5ea6f0`). The cost, the
+/// per-second cost and the cast time alike, each a read of that line.
+#[test]
+fn the_per_level_terms_read_the_skill_not_the_level() {
+    // The cells fill the install's `GlobalStrings.lua`.
+    let _data = benilla_formats::wow_data_or_skip!();
+    use benilla_formats::SpellDisplay;
+    use benilla_protocol::messages::FIELD_PLAYER_SKILL_INFO_1_1;
+    let mut spells = Spells::empty_for_tests();
+    let spell = |id: u32| SpellDisplay {
+        id,
+        name: "Scaled".into(),
+        mana_cost: 10,
+        mana_cost_per_level: 3,
+        mana_per_second: 1,
+        mana_per_second_per_level: 1,
+        base_level: 5,
+        casting_time_index: 9,
+        ..Default::default()
+    };
+    spells.catalog = benilla_formats::SpellCatalog::from_displays(
+        [(900_020, spell(900_020)), (900_021, spell(900_021))].into(),
+    );
+    spells.cast_times = benilla_formats::SpellCastTimeCatalog::from_rows([(
+        9,
+        benilla_formats::SpellCastTime {
+            base_ms: 1000,
+            per_level_ms: 100,
+            minimum_ms: 0,
+        },
+    )]);
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // Level 60, skill 75 in line 7: level 15 for the spell in line 7, 0 for the one in none.
+    let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (34, 60),
+        (FIELD_PLAYER_SKILL_INFO_1_1, 7),
+        (FIELD_PLAYER_SKILL_INFO_1_1 + 1, 75 | 300 << 16),
+        (145, 1.0f32.to_bits()),
+    ]));
+    let mut t = TestCtx::new();
+    t.skill_lines = Some(benilla_formats::SkillLineCatalog::from_spell_lines([(
+        900_020, 7,
+    )]));
+    let (_, deps) = build_view(
+        900_020,
+        &spells,
+        &mut t.ctx_for(&objects, 0, None, Some(&store)),
+    )
+    .unwrap();
+    assert_eq!(deps.skill_lines, [7], "the line, the one read");
+    let mut lines = |id| {
+        spell_tooltip_view(id, &spells, &mut t.ctx_for(&objects, 0, None, Some(&store))).unwrap()
+    };
+    let scaled = lines(900_020);
+    // 10 + (15 - 5) × 3, plus 1 + (15 - 5) per second; 1000 + (15 - 5) × 100 ms.
+    assert_eq!(scaled.cost.as_deref(), Some("40 Mana, plus 11 per sec"));
+    assert_eq!(scaled.cast_time.as_deref(), Some("2 sec cast"));
+    // No line: 10 + (0 - 5) × 3 = -5, no cell; the cast time 1000 - 500.
+    let unlined = lines(900_021);
+    assert_eq!(unlined.cost, None);
+    assert_eq!(unlined.cast_time.as_deref(), Some("0.5 sec cast"));
 }
 
 /// The range cell (`0x52e9a2`-`0x52ea8c`): the melee row prints a number off the reaches, an
@@ -829,37 +1161,88 @@ fn the_required_item_chance_and_reagent_lines_on_real_data() {
         Some("Reagents: |cffff2020Light Feather|r"),
         "count 1 prints no (N); unowned wraps in the builder's inline red"
     );
+    assert!(!v.reagents_met);
 }
 
-/// Red only when the resolver finds no opener; a key, a known skill, no requirement and no
-/// `Lock.dbc` row all read green.
+/// Searing Totem (3599) names its tool, Fire Totem (5176), in `SPELL_TOTEMS`, red while it is not
+/// carried and absent until its template lands (`0x52ed43`-`0x52eea2`); Lay on Hands (633,
+/// `AttributesEx` `0x2`, mana) reads `SPELL_USE_ALL_MANA` (`0x52f697`), and Fireball none.
+#[test]
+fn the_tools_and_drain_all_lines_on_real_data() {
+    let Some(spells) = real_spells() else { return };
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let store = empty_player();
+    let d = spells.catalog.get(3599).expect("Searing Totem 3599");
+    assert_eq!(d.totems, [5176, 0], "the Fire Totem tool");
+    let view = |t: &mut TestCtx, id| {
+        spell_tooltip_view(id, &spells, &mut t.ctx_for(&objects, 0, None, Some(&store)))
+            .expect("a view")
+    };
+    assert_eq!(
+        view(&mut t, 3599).totems,
+        None,
+        "the template has not landed"
+    );
+    t.items
+        .insert_template(5176, Some(crate::items::test_template("Fire Totem")));
+    let v = view(&mut t, 3599);
+    assert_eq!(v.totems.as_deref(), Some("Tools: |cffff2020Fire Totem|r"));
+    assert!(!v.totems_met);
+    assert_eq!(v.use_all, None);
+    let lay_on_hands = spells.catalog.get(633).expect("Lay on Hands 633");
+    assert_eq!(lay_on_hands.attributes_ex & 0x2, 0x2);
+    assert_eq!(lay_on_hands.power_type, 0);
+    assert_eq!(view(&mut t, 633).use_all.as_deref(), Some("Uses 100% mana"));
+    assert_eq!(view(&mut t, 133).use_all, None);
+}
+
+/// Red only when the resolver finds no opener; a key, no requirement and no `Lock.dbc` row read
+/// green, and a known skill opener the margin ramp of its value against the requirement
+/// (`0x52ab2b`-`0x52ab38`).
 #[test]
 fn the_locked_line_greens_when_the_lock_can_be_opened() {
-    use crate::target::lock::LockOutcome;
+    use crate::target::lock::{LockMatch, LockOutcome};
 
-    // The Scarlet Key in hand at the Armory Door.
+    // The Scarlet Key in hand at the Armory Door, a lockpicking match tried before it.
+    let tried = Some(LockMatch {
+        spell: 1804,
+        points: 100,
+        required: 280,
+    });
     assert_eq!(
-        locked_line_tint(Some(LockOutcome::OpenByKey(7146))),
+        locked_line_tint(Some(LockOutcome::OpenByKey(7146)), tried),
         TooltipTint::LockOpen,
         "holding the key must read green"
     );
     // The same door without the key.
     assert_eq!(
-        locked_line_tint(Some(LockOutcome::Unmet)),
+        locked_line_tint(Some(LockOutcome::Unmet), tried),
         TooltipTint::Red,
         "no key still reads red"
     );
-    // A known skill opener: green, where the reference ramps by margin (`locked_line_tint`).
+    // A known skill opener: the ramp of its value against the requirement.
     assert_eq!(
-        locked_line_tint(Some(LockOutcome::OpenBySpell(2575))),
-        TooltipTint::LockOpen
+        locked_line_tint(
+            Some(LockOutcome::OpenBySpell(1804)),
+            Some(LockMatch {
+                spell: 1804,
+                points: 300,
+                required: 280,
+            })
+        ),
+        TooltipTint::Skill {
+            required: 280,
+            value: 300
+        }
     );
     // A lock row that imposes nothing, and a flag-locked object with no row at all.
     assert_eq!(
-        locked_line_tint(Some(LockOutcome::Unlocked)),
+        locked_line_tint(Some(LockOutcome::Unlocked), None),
         TooltipTint::LockOpen
     );
-    assert_eq!(locked_line_tint(None), TooltipTint::LockOpen);
+    assert_eq!(locked_line_tint(None, None), TooltipTint::LockOpen);
 }
 
 /// A trainer list that lands this frame is hoverable in this frame's tick: the trainer feed derives
@@ -894,6 +1277,7 @@ pub(super) fn mouseover_app() -> (App, Entity, Entity) {
         .init_resource::<crate::go_templates::GameObjectTemplates>()
         .init_resource::<Items>()
         .init_resource::<PlayerActions>()
+        .init_resource::<crate::ui_guild::GuildState>()
         .add_systems(Update, drive_mouseover_tooltip);
     app.world_mut()
         .spawn((SelfPlayer, ObjectStore(ObjectFields::default())));
@@ -971,6 +1355,125 @@ fn the_mouseover_token_carries_the_hovered_guid() {
         is_unit(&mut app, "mouseover"),
         Some(1),
         "the token is itself"
+    );
+}
+
+/// `GetGuildInfo("mouseover")` (`0x4c9330`) reads the hovered player's guild from the cache
+/// (`0x4c93d2`), as any token does, from the frame the record lands.
+#[test]
+fn the_mouseover_answers_get_guild_info_from_the_cache() {
+    use benilla_protocol::ObjectFields;
+    let (mut app, _, boar) = mouseover_app();
+    // A player now, in guild 7 at rank 2 (`OBJECT_FIELD_TYPE`, `PLAYER_GUILDID`, `_GUILDRANK`).
+    app.world_mut()
+        .get_mut::<ObjectStore>(boar)
+        .unwrap()
+        .0
+        .merge(ObjectFields::from_pairs(&[(2, 0x19), (191, 7), (192, 2)]));
+    let info = |app: &mut App| -> (Option<String>, i64) {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<(Option<String>, Option<String>, i64)>(r#"return GetGuildInfo("mouseover")"#)
+            .map(|(name, _, rank)| (name, rank))
+            .unwrap()
+    };
+    hover_unit(&mut app, boar, BOAR);
+    assert_eq!(info(&mut app), (None, 0), "not cached");
+    app.world_mut()
+        .resource_mut::<crate::ui_guild::GuildState>()
+        .land_for_test(7, "Probe Guild");
+    hover_unit(&mut app, boar, BOAR);
+    assert_eq!(info(&mut app), (Some("Probe Guild".to_string()), 2));
+}
+
+/// A player hovered for the first time answers inside its own `UPDATE_MOUSEOVER_UNIT`: the
+/// publisher writes the mouseover pair (`0x492890`) before it signals (`0x4929b3`), and
+/// `CanInspect` (`0x48a1b0`), `CheckInteractDistance` (`0x48ba00`) and the slot getters
+/// (`0x4c8328`) read the object it names at once. The hover twin of the target's case.
+#[test]
+fn a_fresh_hovers_reach_and_slots_answer_inside_its_mouseover_event() {
+    use crate::net::{Guid, GuidIndex};
+    use crate::target::relations::fixture::{factions, HUMAN};
+    use benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR;
+    use benilla_protocol::ObjectFields;
+    const OTHER: u64 = 0x1002;
+    const HELM: u32 = 7366;
+    /// `OBJECT_FIELD_TYPE` and `UNIT_FIELD_FACTIONTEMPLATE`.
+    const OBJECT_TYPE: u16 = 2;
+    const TEMPLATE: u16 = 35;
+    let (mut app, _, _) = mouseover_app();
+    app.insert_resource(factions())
+        .insert_resource(crate::net::SelfGuid(Some(ME)));
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(HELM, Some(crate::items::test_template("Helm")));
+    let me = app
+        .world_mut()
+        .query_filtered::<Entity, With<SelfPlayer>>()
+        .single(app.world())
+        .unwrap();
+    app.world_mut().entity_mut(me).insert((
+        Guid(ME),
+        ObjectStore(ObjectFields::from_pairs(&[
+            (OBJECT_TYPE, 0x19),
+            (TEMPLATE, HUMAN),
+        ])),
+        Transform::default(),
+    ));
+    // A Human 3 yards off wearing the helm, whom no token names.
+    let other = app
+        .world_mut()
+        .spawn((
+            Guid(OTHER),
+            ObjectStore(ObjectFields::from_pairs(&[
+                (OBJECT_TYPE, 0x19),
+                (TEMPLATE, HUMAN),
+                (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 2, HELM),
+            ])),
+            Transform::from_xyz(3.0, 0.0, 0.0),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<GuidIndex>()
+        .0
+        .insert(OTHER, other);
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_unit_guids(&benilla_ui::script::UnitGuids {
+            player: ME,
+            held: [(ME, 0)].into_iter().collect(),
+            ..Default::default()
+        });
+        crate::ui_script::test_ui::load_tooltip_template(&script);
+        script
+            .run(
+                r#"
+                UIParent = CreateFrame("Frame", "UIParent"); UIParent:SetAllPoints()
+                local tt = CreateFrame("GameTooltip", "GameTooltip", UIParent, "TestTooltipTemplate")
+                tt:Hide()
+                tt:SetScript("OnTooltipSetDefaultAnchor", function()
+                    GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+                end)
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, tostring(CanInspect("mouseover")) .. " "
+                        .. tostring(CheckInteractDistance("mouseover", 1)) .. " "
+                        .. tostring(GetInventoryItemLink("mouseover", 1)))
+                end)
+            "#,
+            )
+            .unwrap();
+        script.resolve();
+    }
+    hover_unit(&mut app, other, OTHER);
+    let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+    s.resolve();
+    let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+    assert!(
+        matches!(seen.as_slice(), [one] if one.starts_with("1 1 ") && one.contains("[Helm]")),
+        "{seen:?}"
     );
 }
 
@@ -1107,7 +1610,14 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
     let catalog = std::collections::HashMap::from([
         (3110, spell("Firebolt", "Deals Fire damage.")),
         (17253, spell("Bite", "Bite the enemy.")),
-        (589, spell("Shadow Word: Pain", "Shadow damage over time.")),
+        // The aura builder reads the aura text alone (`0x52f929`).
+        (
+            589,
+            benilla_formats::SpellDisplay {
+                aura_description: Some("Shadow damage over time.".into()),
+                ..spell("Shadow Word: Pain", "Not the aura's text.")
+            },
+        ),
     ]);
     let (tx, _rx) = crossbeam_channel::unbounded();
     let mut app = App::new();
@@ -1167,11 +1677,14 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
     });
     script.set_unit_auras(
         TOT,
-        Some(vec![AuraState {
-            spell_id: 589,
-            name: Some("Shadow Word: Pain".into()),
-            ..Default::default()
-        }]),
+        Some(
+            vec![AuraState {
+                spell_id: 589,
+                name: Some("Shadow Word: Pain".into()),
+                ..Default::default()
+            }]
+            .into(),
+        ),
     );
     app.insert_non_send_resource(script);
     app.update();

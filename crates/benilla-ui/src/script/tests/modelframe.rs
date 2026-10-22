@@ -402,6 +402,44 @@ fn the_light_tuple_is_opaque_and_survives_the_round_trip() {
 
 /// `SetCamera(n)` picks by raw index, checked against the file's camera count once the file is
 /// known, and the pane waits to draw until then (`0x76cec0`, `0x76ce80`, `0x76ce00`, `0x76d5f0`).
+/// `SetCamera` resolves the camera on the file held then (`0x76ceef` → `0x713590`) and the pane
+/// holds it: `SetModel` leaves `+0x31c` (`0x76cd30`) and the new file's ready hook installs
+/// nothing while none is pending (`0x76ce44`-`0x76ce47`), so the pane keeps aiming through the
+/// old file's camera until the next `SetCamera`.
+#[test]
+fn set_model_without_set_camera_keeps_the_old_files_camera() {
+    use super::model_clock::pane;
+    use crate::widget::{InstalledCamera, ModelFileFacts};
+
+    let facts = |cameras: u32| ModelFileFacts {
+        sequences: Vec::new(),
+        bbox: ([0.0; 3], [0.0; 3]),
+        cameras,
+    };
+    let camera = |s: &UiScript| pane(s, "MSwap").camera;
+    let on = |file: &str, index| {
+        Some(InstalledCamera {
+            file: file.to_string(),
+            index,
+        })
+    };
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_model_facts("a.mdx", facts(2));
+    s.set_model_facts("b.mdx", facts(3));
+    s.run(r#"m = CreateFrame("Model", "MSwap", UIParent) m:SetModel("a.mdx") m:SetCamera(1)"#)
+        .unwrap();
+    assert_eq!(camera(&s), on("a.mdx", 1));
+    s.run(r#"MSwap:SetModel("b.mdx")"#).unwrap();
+    assert_eq!(
+        camera(&s),
+        on("a.mdx", 1),
+        "b's ready hook installs nothing"
+    );
+    s.run("MSwap:SetCamera(2)").unwrap();
+    assert_eq!(camera(&s), on("b.mdx", 2));
+}
+
 /// A camera draws in perspective; none, or an index past the count, draws orthographic.
 #[test]
 fn set_camera_is_a_raw_index_bounds_checked_against_the_file() {
@@ -419,7 +457,7 @@ fn set_camera_is_a_raw_index_bounds_checked_against_the_file() {
     };
     let state = |s: &UiScript, name: &str| {
         let m = pane(s, name);
-        (m.camera_pending, m.camera)
+        (m.camera_pending, m.camera.as_ref().map(|c| c.index))
     };
     const FILE: &str = r"Creature\Wolf\Wolf.mdx";
 
@@ -749,6 +787,42 @@ fn an_arm_waits_for_the_copy_on_its_way_and_a_missed_unit_is_spent() {
     );
 }
 
+/// A `SetCamera` or an arm held for build 1 is not build 2's: the second request's copy arrives
+/// with the pane's own camera (`0x505b30` → `0x50589c`) and Stand (`0x505a2f`). Build 1 answered
+/// before build 2 is asked still takes both.
+#[test]
+fn a_held_camera_and_arm_die_with_the_request_they_wait_for() {
+    use crate::widget::{CopyCamera, ANIM_STAND};
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_unit_guids(&guids(ORC, 0));
+    s.run(r#"p = CreateFrame("PlayerModel", "Held", UIParent) p:SetUnit("target") p:SetCamera(0) p:SetSequence(60) p:RefreshUnit()"#)
+        .unwrap();
+    let h = s.frame_handle("Held").unwrap();
+    assert_eq!(char_state(&s, "Held").builds, 2);
+    assert_eq!(row_camera(&s, "Held"), CopyCamera::Pane);
+    s.character_copy_built(h, 1);
+    assert!(char_state(&s, "Held").copy.is_none(), "build 1 is stale");
+    s.character_copy_built(h, 2);
+    let c = char_state(&s, "Held");
+    assert_eq!(c.camera, CopyCamera::Pane);
+    assert_eq!(c.copy.unwrap().arm.anim_id, ANIM_STAND);
+
+    // Answered before the next request, a build takes what it waited for.
+    s.run("p:SetUnit('target') p:SetCamera(0) p:SetSequence(61)")
+        .unwrap();
+    let b = char_state(&s, "Held").builds;
+    s.character_copy_built(h, b);
+    let c = char_state(&s, "Held");
+    assert_eq!(c.camera, CopyCamera::Raw(0));
+    assert_eq!(c.copy.unwrap().arm.anim_id, 61);
+    s.run("p:RefreshUnit()").unwrap();
+    s.character_copy_built(h, b + 1);
+    let c = char_state(&s, "Held");
+    assert_eq!(c.camera, CopyCamera::Pane);
+    assert_eq!(c.copy.unwrap().arm.anim_id, ANIM_STAND);
+}
+
 /// Hiding drops the copy and keeps the subject (`0x505ce0`); showing asks for a fresh copy
 /// (`0x505d00`); a build answered for a replaced request is dropped.
 #[test]
@@ -925,4 +999,66 @@ fn on_update_model_waits_for_the_copy() {
         1,
         "the shown pane waits for its new copy"
     );
+}
+
+/// The camera a character pane's feed row carries, the one its copy draws through.
+fn row_camera(s: &UiScript, name: &str) -> crate::widget::CopyCamera {
+    let h = s.frame_handle(name).unwrap();
+    s.character_panes()
+        .into_iter()
+        .find(|p| p.handle == h)
+        .expect("a visible pane is a row")
+        .camera
+}
+
+/// `PlayerModel` adds no `SetCamera` (`0x84f1fc`), so `Model`'s (`0x76e0e0` → `0x76cec0`)
+/// installs raw camera `n` on the resident copy; the copy `SetUnit` builds is resident inside the
+/// call (`0x505b99`, ready at once through `0x710560`), so `SetCamera(0)` after it takes. Every
+/// build's ready hook installs the pane's own camera again (`0x505b30` → `0x50589c`).
+#[test]
+fn set_camera_installs_a_raw_camera_on_the_copy_until_the_next_build() {
+    use crate::widget::CopyCamera;
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_unit_guids(&guids(ORC, 0));
+    s.run(r#"p = CreateFrame("PlayerModel", "Portrait3D", UIParent) p:SetUnit("target") p:SetCamera(0)"#)
+        .unwrap();
+    let h = s.frame_handle("Portrait3D").unwrap();
+    assert_eq!(
+        row_camera(&s, "Portrait3D"),
+        CopyCamera::Raw(0),
+        "the copy on its way draws through the camera named after its build"
+    );
+    s.character_copy_built(h, 1);
+    assert_eq!(char_state(&s, "Portrait3D").camera, CopyCamera::Raw(0));
+    assert_eq!(row_camera(&s, "Portrait3D"), CopyCamera::Raw(0));
+
+    // `RefreshUnit` builds again, and the ready hook installs camera 1 over it.
+    s.run("p:RefreshUnit()").unwrap();
+    assert_eq!(row_camera(&s, "Portrait3D"), CopyCamera::Pane);
+    s.character_copy_built(h, 2);
+    assert_eq!(char_state(&s, "Portrait3D").camera, CopyCamera::Pane);
+
+    // On the copy that stands, at once; past the table, and below it, no camera.
+    s.run("p:SetCamera(99)").unwrap();
+    assert_eq!(row_camera(&s, "Portrait3D"), CopyCamera::Raw(99));
+    s.run("p:SetCamera(-1)").unwrap();
+    assert_eq!(
+        row_camera(&s, "Portrait3D"),
+        CopyCamera::Raw(u32::MAX),
+        "the bound is an unsigned compare (`0x76ceeb`)"
+    );
+
+    // A hidden pane holds no copy: the index waits for the show's build, which overwrites it.
+    s.run("p:Hide() p:SetCamera(0) p:Show()").unwrap();
+    assert_eq!(row_camera(&s, "Portrait3D"), CopyCamera::Pane);
+    s.character_copy_built(h, 3);
+    assert_eq!(row_camera(&s, "Portrait3D"), CopyCamera::Pane);
+
+    // A unit the client does not hold builds nothing, so the camera lands on the copy that stays.
+    s.set_unit_guids(&guids(WOLF, 0));
+    s.run("p:SetUnit('target') p:SetCamera(0)").unwrap();
+    let builds = char_state(&s, "Portrait3D").builds;
+    s.character_copy_missed(h, builds);
+    assert_eq!(char_state(&s, "Portrait3D").camera, CopyCamera::Raw(0));
 }

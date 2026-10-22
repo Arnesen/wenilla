@@ -48,6 +48,8 @@ pub(crate) struct Roster {
     /// The realm-list entry this session connected to, refreshed with each roster.
     pub(crate) realm: Option<benilla_protocol::RealmInfo>,
     env_read: bool,
+    /// The last race whose intro eye was looked up for a new character's entry, with what it found.
+    entry_eye: Option<(u8, Option<[f32; 3]>)>,
 }
 
 impl Roster {
@@ -93,17 +95,43 @@ impl Roster {
         self.pending_row().map(|c| c.map)
     }
 
-    /// The pending pick's level: the reference suppresses the loading tip when it arrived as 0 in
-    /// `SMSG_CHAR_ENUM` (`0x5b42a0` sets `[selChar+0x10a]`); vmangos always sends a real level.
-    pub(crate) fn pending_level(&self) -> Option<u8> {
-        self.pending_row().map(|c| c.level)
+    /// Whether the pending pick's record has its new-character byte (`+0x10a`) set: the list parse
+    /// sets it for a wire level of 0 (`0x5b44e8`-`0x5b44f9`), and the reference then enters at the
+    /// race's intro eye (`0x46c203`) and picks no loading tip (`0x46b671`); vmangos never sends
+    /// level 0.
+    pub(crate) fn pending_new_character(&self) -> bool {
+        self.pending_row().is_some_and(|c| c.new_character)
+    }
+
+    /// The race of a pending new character whose intro eye is yet to be looked up.
+    fn unresolved_entry_race(&self) -> Option<u8> {
+        let c = self.pending_row().filter(|c| c.new_character)?;
+        (self.entry_eye.map(|(race, _)| race) != Some(c.race)).then_some(c.race)
+    }
+
+    /// Look up, once per race, the eye `0x46c2c0` writes over a new character's entry position
+    /// (`0x46c214`); a miss is kept, as the reference leaves the position and moves on.
+    pub(crate) fn resolve_entry_eye(&mut self, eye: impl FnOnce(u8) -> Option<[f32; 3]>) {
+        if let Some(race) = self.unresolved_entry_race() {
+            self.entry_eye = Some((race, eye(race)));
+        }
     }
 
     /// The picked character's `(map, wow xyz)`, a round trip before `SMSG_LOGIN_VERIFY_WORLD`; the
-    /// streamers aim at it during world entry.
+    /// streamers aim at it during world entry. `ClientInitializeGame` opens the map around the
+    /// record's position (`0x46c1ef`-`0x46c236`), or around the race's intro eye for a new
+    /// character the lookup found one for.
     pub(crate) fn pending_entry(&self) -> Option<(u32, [f32; 3])> {
-        self.pending_row()
-            .map(|c| (c.map, [c.position.x, c.position.y, c.position.z]))
+        self.pending_row().map(|c| {
+            let eye = self
+                .entry_eye
+                .filter(|(race, _)| c.new_character && *race == c.race)
+                .and_then(|(_, eye)| eye);
+            (
+                c.map,
+                eye.unwrap_or([c.position.x, c.position.y, c.position.z]),
+            )
+        })
     }
 
     /// The roster row for the pick in flight: the only description of the character until the
@@ -119,10 +147,36 @@ impl Roster {
 /// (`0x46b5fa`), named by no GlueXML.
 pub(crate) const CVAR_LAST_CHARACTER: &str = "lastCharacterIndex";
 
+/// The tables and files `0x46c2c0` reads to find a new character's intro eye.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct IntroEyes<'w> {
+    races: Option<Res<'w, crate::chr_classes::ChrRaceTable>>,
+    cinematics: Option<Res<'w, crate::cinematic::Cinematics>>,
+    assets: Option<Res<'w, benilla_assets::WorldAssets>>,
+}
+
+impl IntroEyes<'_> {
+    /// The eye the race's intro shot opens on, read off the patch chain on the spot as the
+    /// reference loads the shot's model (`0x46c36c`); `None` where the tables or the file are
+    /// missing.
+    fn eye(&self, race: u8) -> Option<[f32; 3]> {
+        use benilla_assets::LockRecover;
+        let (races, cinematics, assets) = (
+            self.races.as_deref()?,
+            self.cinematics.as_deref()?,
+            self.assets.as_deref()?,
+        );
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::first_login_eye(&mut chain, &cinematics.0, &races.0, race)
+    }
+}
+
 /// Ask the parked IO thread to log in as `guid` and remember it as pending, so a reconnect
-/// re-answers with its character.
-pub(crate) fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64) {
+/// re-answers with its character. A new character's entry opens at its race's intro eye
+/// (`0x46c203`-`0x46c214`), looked up here, where the entry begins.
+pub(crate) fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64, eyes: &IntroEyes) {
     roster.pending_pick = Some(guid);
+    roster.resolve_entry_eye(|race| eyes.eye(race));
     let _ = pick.0.send(CharRequest::Enter(guid));
 }
 
@@ -133,6 +187,7 @@ pub(super) fn apply_roster_policy(
     mut msgs: MessageReader<CharListMessage>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
+    eyes: IntroEyes,
     mut run_pick: ResMut<RunPick>,
     // Present only when a rig drives the run and picks its own character.
     rig: Option<Res<crate::run_mode::RigCharacter>>,
@@ -173,7 +228,7 @@ pub(super) fn apply_roster_policy(
         }
         if let Some(guid) = roster.pending_pick {
             // A reconnect, or a pick that raced a dying socket: re-answer without the screen.
-            send_pick(&mut roster, &pick, guid);
+            send_pick(&mut roster, &pick, guid, &eyes);
         } else if let Some(name) = roster.env_char.take() {
             match roster
                 .chars
@@ -260,6 +315,7 @@ pub(crate) fn test_character(guid: u64, name: &str) -> Character {
         hair_color: 0,
         facial_hair: 0,
         level: 1,
+        new_character: false,
         zone: 0,
         map: 0,
         position: benilla_protocol::wire::Vector3d {
@@ -272,5 +328,105 @@ pub(crate) fn test_character(guid: u64, name: &str) -> Character {
         pet_display_id: 0,
         pet_level: 0,
         pet_family: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(mut c: Character, map: u32, xyz: [f32; 3]) -> Character {
+        c.map = map;
+        c.position = benilla_protocol::wire::Vector3d {
+            x: xyz[0],
+            y: xyz[1],
+            z: xyz[2],
+        };
+        c
+    }
+
+    /// World entry opens the map around the record's position, and for a record with `+0x10a` set
+    /// around the race's intro eye instead (`0x46c203`-`0x46c214`, which writes the eye over the
+    /// local copy of `+0x44`-`+0x4c`); a record that sets none, or a race the lookup misses,
+    /// keeps its own position (`0x46c4e6` returns 0 and leaves it).
+    #[test]
+    fn a_new_characters_entry_is_the_intro_eye_and_any_other_keeps_its_position() {
+        let own = [10.0, 20.0, 30.0];
+        let eye = [-5041.0, -824.0, 541.0];
+        let mut new = at(test_character(7, "New"), 1, own);
+        new.race = 3;
+        new.new_character = true;
+        let old = at(test_character(8, "Old"), 1, own);
+
+        let mut roster = Roster::with_pending_pick(vec![new.clone(), old.clone()], 7);
+        assert_eq!(roster.pending_entry(), Some((1, own)), "before the lookup");
+        let mut asked = Vec::new();
+        roster.resolve_entry_eye(|race| {
+            asked.push(race);
+            Some(eye)
+        });
+        assert_eq!(roster.pending_entry(), Some((1, eye)));
+        roster.resolve_entry_eye(|_| panic!("the race is looked up once"));
+        assert_eq!(asked, [3]);
+
+        // The pick moving to a record that is not new takes the record's position again.
+        roster.pending_pick = Some(8);
+        roster.resolve_entry_eye(|_| panic!("a record without +0x10a asks nothing"));
+        assert_eq!(roster.pending_entry(), Some((1, own)));
+
+        // A lookup that found nothing leaves the position and is not repeated.
+        let mut roster = Roster::with_pending_pick(vec![new], 7);
+        roster.resolve_entry_eye(|_| None);
+        assert_eq!(roster.pending_entry(), Some((1, own)));
+        roster.resolve_entry_eye(|_| panic!("a miss is not retried"));
+    }
+
+    /// The pick the roster policy re-answers after a reconnect begins the entry, so a new
+    /// character's intro eye is asked for there as it is for a pick from the screen
+    /// ([`send_pick`]); with no tables to answer, the lookup is a miss and the position stands.
+    #[test]
+    fn a_re_answered_pick_of_a_new_character_looks_up_its_eye() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut new = test_character(7, "Seven");
+        new.race = 3;
+        new.new_character = true;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(Roster::with_pending_pick(Vec::new(), 7).env_settled())
+            .insert_resource(CharPick(tx.into()))
+            .init_resource::<RunPick>()
+            .add_message::<CharListMessage>()
+            .add_systems(Update, apply_roster_policy);
+        app.world_mut().write_message(CharListMessage {
+            characters: vec![new],
+            realm: None,
+            cause: benilla_protocol::RosterCause::Asked,
+            epoch: 1,
+        });
+        app.update();
+
+        assert!(rx.try_recv().is_ok(), "the kept pick is sent again");
+        assert_eq!(
+            app.world().resource::<Roster>().entry_eye,
+            Some((3, None)),
+            "the race was looked up once, and found nothing without its tables"
+        );
+    }
+
+    /// The eye is the race's, found once: another new character of another race looks up its own.
+    #[test]
+    fn each_race_is_looked_up_for_its_own_eye() {
+        let mut gnome = test_character(1, "Gnome");
+        gnome.race = 7;
+        gnome.new_character = true;
+        let mut troll = test_character(2, "Troll");
+        troll.race = 8;
+        troll.new_character = true;
+        let mut roster = Roster::with_pending_pick(vec![gnome, troll], 1);
+        roster.resolve_entry_eye(|race| Some([f32::from(race), 0.0, 0.0]));
+        assert_eq!(roster.pending_entry().map(|e| e.1[0]), Some(7.0));
+        roster.pending_pick = Some(2);
+        roster.resolve_entry_eye(|race| Some([f32::from(race), 0.0, 0.0]));
+        assert_eq!(roster.pending_entry().map(|e| e.1[0]), Some(8.0));
     }
 }

@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 
-use mlua::{LightUserData, Lua, ObjectLike, Table, Value};
+use mlua::{LightUserData, Lua, MultiValue, ObjectLike, Table, Value};
 
 use super::binding_abi::optional_string;
 use super::glue::VmKind;
@@ -22,7 +22,7 @@ pub(crate) mod anchor_args;
 mod events_regions;
 mod frame_state;
 mod layout_methods;
-pub(crate) use layout_methods::eff_scale;
+pub(crate) use layout_methods::{eff_scale, layout_scale};
 pub(in crate::script) use layout_methods::{settle_frame, settle_region};
 pub(crate) mod movable;
 pub(crate) mod toplevel;
@@ -173,7 +173,7 @@ pub(crate) fn frame_parent_token_base(model: &Model, h: FrameHandle) -> String {
 // String → enum parsing
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-pub(super) fn point_from_str(s: &str) -> Option<Point> {
+pub(crate) fn point_from_str(s: &str) -> Option<Point> {
     Some(match s.to_ascii_uppercase().as_str() {
         "TOPLEFT" => Point::TopLeft,
         "TOP" => Point::Top,
@@ -203,11 +203,11 @@ pub(super) fn point_name(p: Point) -> &'static str {
     }
 }
 
-/// An enum token, trimmed and uppercased; trimmed here rather than at the attribute read, since a
-/// `text=` value's spaces count. The reference's strata lookup compares the whole token,
-/// case-insensitively (`0x6f17ee`), so a padded `"BACKGROUND "` misses there.
+/// An enum token, uppercased for a case-blind match of the whole string: the strata, draw-layer
+/// and frame-type lookups each compare with `SStrCmpI` to the end (`0x6f17ee`, `0x6f18ce`,
+/// `0x6ee32c`), so a padded `"HIGH "` misses.
 fn enum_token(s: &str) -> String {
-    s.trim().to_ascii_uppercase()
+    s.to_ascii_uppercase()
 }
 
 /// A strata name, from the reference's eight-row table (`0x8119f8`), `BACKGROUND`..`TOOLTIP`, walked
@@ -341,13 +341,36 @@ pub(super) fn tonumber_f32(lua: &Lua, v: &Value) -> f32 {
     super::binding_abi::coerced_number(lua, Some(v.clone())) as f32
 }
 
-/// A colour's alpha argument: `lua_isnumber`-gated (`0x781037`, `0x79f5a2`, ...), so a numeric
-/// string counts and anything else, a table or boolean included, stages 1.0 without raising.
-pub(super) fn alpha_f32(lua: &Lua, v: &Value) -> f32 {
-    lua.coerce_number(v.clone())
-        .ok()
-        .flatten()
-        .map_or(1.0, |n| n as f32)
+/// A colour setter's four arguments as every one reads them: r, g and b by [`tonumber_f64`],
+/// alpha by [`alpha_arg`] over a staged 1.0 (`0x79f59b`), packed
+/// ([`crate::color::Rgba8::pack`]).
+pub(crate) fn colour_args(
+    lua: &Lua,
+    r: &Value,
+    g: &Value,
+    b: &Value,
+    a: &Value,
+) -> crate::color::Rgba8 {
+    crate::color::Rgba8::pack(
+        tonumber_f64(lua, r),
+        tonumber_f64(lua, g),
+        tonumber_f64(lua, b),
+        alpha_arg(lua, a).unwrap_or(1.0),
+    )
+}
+
+/// A colour's alpha argument as a double: `lua_isnumber`-gated (`0x781037`, `0x79f5a2`, ...), so a
+/// numeric string counts, and `None` for anything else, a table or boolean included, which never
+/// raises.
+pub(crate) fn alpha_arg(lua: &Lua, a: &Value) -> Option<f64> {
+    lua.coerce_number(a.clone()).ok().flatten()
+}
+
+/// The four values a colour getter pushes: each byte times the float at `0x81c6b4`, red first
+/// ([`crate::color::Rgba8::channels`]).
+pub(crate) fn colour_values(c: crate::color::Rgba8) -> MultiValue {
+    let (r, g, b, a) = c.channels();
+    MultiValue::from_vec([r, g, b, a].into_iter().map(Value::Number).collect())
 }
 
 /// [`tonumber_f32`] in `f64`, for `ColorSelect:SetColorRGB`, whose quantizer an `f32` detour could
@@ -393,20 +416,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// state's `GetScreenWidth`/`GetScreenHeight` are other bindings (`0x46dd30`/`0x46dd80`), and it
 /// has no modifier-key or fullscreen-scale verb.
 pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
-    // `GetScreenWidth`/`GetScreenHeight` (`0x48b480`/`0x48b4d0`): the screen root's size divided by
-    // `UIParent`'s scale (`GetUiScale`, `0x494590`), so they answer in `UIParent`'s units.
+    // `GetScreenWidth`/`GetScreenHeight` (`0x48b480`/`0x48b4d0`): the screen root's layout extent
+    // divided by `UIParent`'s scale (`GetUiScale`, `0x494590`) as a float, through the getter steps,
+    // so they answer in `UIParent`'s units ([`crate::layout::LayoutSpace::screen_size`]).
     lua.globals().set(
         "GetScreenWidth",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.width() / super::ui_scale::ui_parent_scale(&model))
+            let u = super::ui_scale::ui_parent_scale(&model);
+            Ok(model.layout_space().screen_size(Some(u)).0)
         })?,
     )?;
     lua.globals().set(
         "GetScreenHeight",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.screen.height() / super::ui_scale::ui_parent_scale(&model))
+            let u = super::ui_scale::ui_parent_scale(&model);
+            Ok(model.layout_space().screen_size(Some(u)).1)
         })?,
     )?;
 
@@ -432,7 +458,7 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
             }
             let scale = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                fullscreen_scale(model.screen.width() / model.screen.height())
+                fullscreen_scale(model.screen_aspect())
             };
             frame.call_method::<()>("SetScale", scale)
         })?,
@@ -546,17 +572,24 @@ fn kind_method_registries(kind: Option<FrameKind>) -> &'static [&'static str] {
 /// `CreateFrame(kind, name?, parent?, inherits?)` (`0x7060b0`), the runtime frame factory.
 /// `inherits` names one template, applied after the frame is made
 /// ([`crate::loader::apply_template`]) so its `OnLoad` sees the frame's real name and its `$parent`
-/// resolves against the caller's name. An unknown template raises `Couldn't find inherited node`
-/// and creates nothing (`0x7061dd`); a known but unusable one (not virtual, or the wrong shape)
-/// only warns, since the lookup itself succeeded.
+/// resolves against the caller's name. The gates run in the reference's order, each a raise that
+/// creates nothing: the type and the parent's tag (the usage line), a table parent that is no
+/// frame, an unknown template (`Couldn't find inherited node`, `0x7061dd`), then an unknown type
+/// (`0x7062a0`). A known but unusable template (not virtual, or the wrong shape) only warns, since
+/// the lookup itself succeeded.
 pub(super) fn create_frame(
     lua: &Lua,
-    (kind, name, parent, inherits): (String, Option<Value>, Option<Value>, Option<Value>),
+    (kind, name, parent, inherits): (Option<Value>, Option<Value>, Option<Value>, Option<Value>),
 ) -> mlua::Result<Table> {
-    // An unknown type raises. The reference's message (`0x872fa8`) capitalises `Unknown`, and it
-    // tests the template first (`0x7061dd`), raising for the type only at `0x7062a0`.
-    let frame_kind = registered_frame_kind(lua, &kind)
-        .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
+    const USAGE: &str = r#"Usage: CreateFrame("frameType" [, "name"] [, parent] [, "template"])"#;
+    // `lua_isstring(1)` (`0x7060d5`), then the parent's tag must be none, nil or a table
+    // (`0x7060e9`-`0x706112`): a parent given by name raises.
+    let Some(kind) = kind.as_ref().and_then(|v| optional_string(lua, v)) else {
+        return Err(mlua::Error::runtime(USAGE));
+    };
+    if !matches!(parent, None | Some(Value::Nil) | Some(Value::Table(_))) {
+        return Err(mlua::Error::runtime(USAGE));
+    }
     // `name` and `inherits` go through `lua_tostring` (`0x6f3690`) unguarded, so a number is a
     // string: `CreateFrame("Frame", 5)` names the frame "5". For `inherits` the conversion runs
     // before the string-type gate and retags the slot (`0x70613f`, `0x6f7cb1`), so a number there
@@ -564,18 +597,32 @@ pub(super) fn create_frame(
     let name: Option<String> = name.as_ref().and_then(|v| optional_string(lua, v));
     let template: Option<String> = inherits.as_ref().and_then(|v| optional_string(lua, v));
 
-    // A table is the parent and a name string is looked up; anything else is no parent. The
-    // reference raises `Usage: CreateFrame(...)` (`0x872f60`) for anything but a table or nil
-    // (`0x706112`).
-    let parent_handle: Option<FrameHandle> = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        match &parent {
-            Some(Value::Table(t)) => decode_id(t)
-                .ok()
-                .and_then(|id| model.id_to_frame.get(&id).copied()),
-            Some(Value::String(s)) => s.to_str().ok().and_then(|n| model.arena.lookup(n.as_ref())),
-            _ => None,
+    // A table parent is the object in its `[0]` (`0x706162`): none raises `Couldn't find 'this'
+    // in parent object` (`0x87303c`), and an object that is no frame (a region, a Font object)
+    // `Wrong parent object type, expected frame` (`0x7061ab`, `0x873004`).
+    let parent_handle: Option<FrameHandle> = match &parent {
+        Some(Value::Table(t)) => {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            match t.raw_get::<Value>(0)? {
+                Value::LightUserData(l) => Some(
+                    model
+                        .id_to_frame
+                        .get(&(l.0 as usize as u32))
+                        .copied()
+                        .ok_or_else(|| {
+                            mlua::Error::runtime(
+                                "CreateFrame: Wrong parent object type, expected frame",
+                            )
+                        })?,
+                ),
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "CreateFrame: Couldn't find 'this' in parent object",
+                    ))
+                }
+            }
         }
+        _ => None,
     };
 
     // The reference silently ignores a fourth argument that is neither string nor number
@@ -587,7 +634,7 @@ pub(super) fn create_frame(
                 "CreateFrame: the 4th argument (inherits) must be a template-name string, got {}; \
                  ignored for '{}'",
                 v.type_name(),
-                name.as_deref().unwrap_or("<unnamed>")
+                name.as_deref().unwrap_or(super::binding_abi::UNNAMED)
             ));
         }
     }
@@ -595,8 +642,9 @@ pub(super) fn create_frame(
     // The template lookup comes before anything is built: a miss (`0x7061dd` → `0x6ee6f0`) raises
     // at `0x7061ed`, before the node build (`0x706208`) and the name store (`0x70622d`), so it
     // leaves no partial widget and no global. The raise never returns and `pcall` catches it, as
-    // the widget dispatcher (`0x704f10`) does for every handler.
-    if let Some(t) = template.as_deref().filter(|t| !t.is_empty()) {
+    // the widget dispatcher (`0x704f10`) does for every handler. Any string fourth argument is
+    // looked up (`lua_type` 4, `0x7061cb`), the empty one included, which no template names.
+    if let Some(t) = template.as_deref() {
         // One name, verbatim, case-folded, as `framexml::expand` resolves it.
         let known = lua
             .app_data_ref::<Model>()
@@ -611,6 +659,10 @@ pub(super) fn create_frame(
         }
     }
 
+    // The node build fails for a type no factory knows (`0x70628b` → `0x7062a0`, `0x872fa8`).
+    let frame_kind = registered_frame_kind(lua, &kind)
+        .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: Unknown frame type '{kind}'")))?;
+
     // A leading `$parent` in the name expands as in XML: `CreateFrame` sets `name=` on a synthetic
     // node (`0x70622d`) for the XML builder `0x6ee280`, so the name reaches `SetName` (`0x76c650`),
     // whose `0x76c691` call expands it against the parent's first named ancestor.
@@ -620,7 +672,7 @@ pub(super) fn create_frame(
     });
 
     // Create in the arena, mint the id, seed a default layout input. All under one write borrow.
-    let id = {
+    let (id, h) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let h = model.arena.create(frame_kind, name, parent_handle);
         if frame_kind == FrameKind::WorldFrame {
@@ -646,8 +698,13 @@ pub(super) fn create_frame(
         model.layout_load_begin(h);
         // No handler is bound yet, so the resolve this owes fires nothing.
         let _ = model.layout_load_end(h);
-        id
+        (id, h)
     };
+    // The `CMinimap` ctor's last act, so a `CreateFrame("Minimap")` has its nine children before
+    // its `OnLoad` too.
+    if frame_kind == FrameKind::Minimap {
+        super::minimap::build_engine_children(lua, h);
+    }
 
     // The wrapper exists, published under its name, before the template's `OnLoad` runs inside
     // this call, so the handler can reach the frame by name.
@@ -663,6 +720,25 @@ pub(super) fn create_frame(
         }
     } else {
         super::tooltip_post_load(lua, &wrapper);
+    }
+    // The builder's post-load hook (`0x6ee4ea`) is `CMinimap::LoadXML` (`0x4ee2b0`) for a Minimap:
+    // after the `OnLoad`, the two model attributes, which the synthetic node never carries, so
+    // the stock models (`0x84c768`, `0x8453c0`).
+    let xml = lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .xml_creating;
+    if frame_kind == FrameKind::Minimap && !xml {
+        let failed = super::minimap::apply_model_attrs(
+            lua,
+            &wrapper,
+            crate::widget::MINIMAP_DEFAULT_ARROW_MODEL,
+            crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+        )?;
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        for line in failed {
+            model.record_warning(line.to_string());
+        }
     }
     Ok(wrapper)
 }

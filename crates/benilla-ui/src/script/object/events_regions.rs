@@ -7,9 +7,30 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 use crate::script::binding_abi::optional_string;
 use crate::script::region::region_wrapper;
 use crate::script::{Model, RegionData, REG_SCRIPTS, SCRIPT_KINDS};
-use crate::widget::RegionKind;
+use crate::widget::{FrameHandle, RegionKind};
 
 use super::{decode_id, draw_layer_from_str, frame_handle_of, publish_global};
+
+/// Append `h` to `event`'s listener list unless it is there (`0x7021a8` → `0x702264`): the walk
+/// (`0x703e50`) follows registration order, and a re-register keeps its place and never fires twice.
+fn register(model: &mut Model, h: FrameHandle, event: &'static str) {
+    if !model.event_to_frames.contains_key(event) {
+        model.event_to_frames.insert(event.to_string(), Vec::new());
+    }
+    let list = model
+        .event_to_frames
+        .get_mut(event)
+        .expect("list just made");
+    if list.contains(&h) {
+        return;
+    }
+    list.push(h);
+    model
+        .frame_events
+        .entry(h)
+        .or_default()
+        .insert(event.to_string());
+}
 
 /// Populate `m`'s event, script and region-creation methods.
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
@@ -20,16 +41,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             // A name the VM's event table lacks registers nothing and raises nothing (`0x702140`).
-            let Some(event) = model.vm.event_key(&event).map(str::to_string) else {
+            let Some(event) = model.vm.event_key(&event) else {
                 return Ok(());
             };
-            // Dispatch follows registration order, as the reference's listener list does; a
-            // re-register keeps its place and never fires twice.
-            let list = model.event_to_frames.entry(event.clone()).or_default();
-            if !list.contains(&h) {
-                list.push(h);
-            }
-            model.frame_events.entry(h).or_default().insert(event);
+            register(&mut model, h, event);
             Ok(())
         })?,
     )?;
@@ -51,15 +66,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    // `RegisterAllEvents()` (`0x774c20`): the frame's `OnEvent` receives every event until
-    // `UnregisterAllEvents`, the only way out. A flag (`Model::all_event_frames`), not a name list.
+    // `RegisterAllEvents()` (`0x774c20` → `0x7023e0`): appends the frame to every event's list
+    // where it is absent (scan `0x702428`, skip `0x7024c7`, append `0x7052d0` at `0x702440`), as
+    // a `RegisterEvent` per event would; there is no all-events flag.
     m.set(
         "RegisterAllEvents",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            if !model.all_event_frames.contains(&h) {
-                model.all_event_frames.push(h);
+            for &event in model.vm.events() {
+                register(&mut model, h, event);
             }
             Ok(())
         })?,
@@ -76,8 +92,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     list.retain(|x| x != &h);
                 }
             }
-            // All-events mode too: AceEvent-2.0 leaves it through this call.
-            model.all_event_frames.retain(|x| x != &h);
             Ok(())
         })?,
     )?;
@@ -218,11 +232,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `SetScript(name, func)`: stores the closure under one of [`SCRIPT_KINDS`], else raises.
-/// Deviation: real 1.12 kinds nothing fires yet raise too (`OnMessageScrollChanged`,
-/// `OnInputLanguageChanged`), because an accepted handler that never runs fails silently. The movie
-/// frame's three are accepted all the same: the stock XML sets them, and its player ([`super::super::movieframe`])
-/// is the one thing that fires them. `OnAttributeChanged` is 2.0's, with no 1.12 slot.
+/// `SetScript(name, func)`: stores the closure under one of [`SCRIPT_KINDS`], else raises. The
+/// movie frame's three are accepted: the stock XML sets them, and its player
+/// ([`super::super::movieframe`]) is the one thing that fires them. `OnAttributeChanged` is 2.0's,
+/// with no 1.12 slot.
 fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> mlua::Result<()> {
     let kind = SCRIPT_KINDS
         .iter()

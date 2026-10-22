@@ -14,14 +14,10 @@ impl Loader<'_> {
         dbg: &str,
     ) -> Option<Function> {
         let mut onload = None;
-        // A handler's chunk name is `"<GetName()>:<Handler>"` off the wrapper, `<unnamed>` for a
-        // nameless frame (`0x7025fd`-`0x70263c`), never the loader's `dbg`.
+        // A handler's chunk name is `"<name>:<Handler>"`, the frame's own name or `<unnamed>`
+        // (`0x7025fd`-`0x70263c`), never the loader's `dbg`.
         for scripts in children_named(el, "Scripts") {
-            let owner = wrapper
-                .call_method::<Option<String>>("GetName", ())
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "<unnamed>".to_string());
+            let owner = crate::script::binding_abi::name_of(self.lua, wrapper);
             for handler in &scripts.children {
                 let name = handler.tag.clone();
                 // An empty body clears the handler to nil, but a whitespace one is an empty
@@ -148,6 +144,22 @@ impl Loader<'_> {
             crate::script::install_loaded_texture(self.lua, wrapper, tag, texture, layer)
         {
             self.report.fault(format!("{dbg}: <{tag}>: {e}"));
+        }
+    }
+
+    /// [`Self::call_region`] on a region wrapper, else [`Self::call`].
+    pub(super) fn call_on(
+        &mut self,
+        wrapper: &Table,
+        region: bool,
+        method: &str,
+        args: impl mlua::IntoLuaMulti,
+        dbg: &str,
+    ) {
+        if region {
+            self.call_region(wrapper, method, args, dbg);
+        } else {
+            self.call(wrapper, method, args, dbg);
         }
     }
 

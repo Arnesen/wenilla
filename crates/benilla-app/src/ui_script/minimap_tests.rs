@@ -114,7 +114,7 @@ fn tracking_frame_follows_get_tracking_texture_across_player_auras_changed() {
 }
 
 /// The cluster and the stock `GameTime.xml`, the clock at `hour:minute` as the app pushes it.
-fn game_time_session(hour: u32, minute: u32) -> UiScript {
+fn game_time_session(hour: i32, minute: i32) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run("function GetMinimapZoneText() return '' end")
@@ -216,9 +216,10 @@ fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
     );
 }
 
-/// A real click reaches `Minimap_OnClick` via `OnMouseUp` and parks centre-relative UI units.
+/// A real click reaches `Minimap_OnClick` via `OnMouseUp`, whose `PingLocation` pings the world
+/// point its offsets name as fractions of the 140-unit widget times the zoom diameter.
 #[test]
-fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
+fn a_click_on_the_minimap_pings_the_world_point_under_it() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -244,26 +245,37 @@ fn a_click_on_the_minimap_parks_a_centre_relative_ping_request() {
         .unwrap();
     assert!(cx > 0.0 && cy > 0.0, "the widget resolved: ({cx}, {cy})");
 
-    assert_eq!(s.take_minimap_ping_request(), None);
+    s.set_minimap_player(Some((1000.0, 2000.0)));
+    assert!(s.take_minimap_pings_sent().is_empty());
 
     // 20 right and 12 up, inside the 70-unit disc; stock `Minimap_OnClick` first adds
-    // `CURSOR_OFFSET_X/Y`, -7 and -9 (`Minimap.lua:3-4`, `:133-134`).
+    // `CURSOR_OFFSET_X/Y`, -7 and -9 (`Minimap.lua:3-4`, `:133-134`), so 13 right and 3 up reach
+    // `PingLocation`: world X grows by 3/140 of the diameter, world Y falls by 13/140 of it.
     s.mouse_button(cx + 20.0, cy + 12.0, "LeftButton", true);
     s.mouse_button(cx + 20.0, cy + 12.0, "LeftButton", false);
-    let (dx, dy) = s
-        .take_minimap_ping_request()
-        .expect("OnMouseUp → Minimap_OnClick → PingLocation");
-    assert!((dx - 13.0).abs() < 0.01, "x right of centre, less 7: {dx}");
-    assert!((dy - 3.0).abs() < 0.01, "y UP from centre, less 9: {dy}");
-    assert_eq!(s.take_minimap_ping_request(), None);
+    let sent = s.take_minimap_pings_sent();
+    assert_eq!(sent.len(), 1, "OnMouseUp → Minimap_OnClick → PingLocation");
+    let d = 2.0 * benilla_ui::widget::minimap_radius_yd(3, 3, false);
+    let (x, y) = sent[0];
+    assert!(
+        (x - (1000.0 + 3.0 / 140.0 * d)).abs() < 0.01,
+        "north by the up offset: {x}"
+    );
+    assert!(
+        (y - (2000.0 - 13.0 / 140.0 * d)).abs() < 0.01,
+        "east by the right one: {y}"
+    );
 
     s.mouse_button(10.0, 10.0, "LeftButton", true);
     s.mouse_button(10.0, 10.0, "LeftButton", false);
-    assert_eq!(s.take_minimap_ping_request(), None, "off-widget is no ping");
+    assert!(
+        s.take_minimap_pings_sent().is_empty(),
+        "off-widget is no ping"
+    );
 }
 
 /// The reference answers from statics nothing clears (`0x4eefd0`), and stock `Minimap_OnUpdate`
-/// uses the pair with no nil test; here it is the app's last publish, `(0, 0)` before any.
+/// uses the pair with no nil test: two numbers always, recomputed from the stored point.
 #[test]
 fn get_ping_position_answers_two_numbers_always() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -288,7 +300,10 @@ fn get_ping_position_answers_two_numbers_always() {
         0.0,
         "before any ping: a number, not nil"
     );
-    s.set_minimap_ping((0.25, -0.125));
+    // A member's ping a quarter of the diameter west and an eighth south of the player.
+    s.set_minimap_player(Some((0.0, 0.0)));
+    let d = 2.0 * benilla_ui::widget::minimap_radius_yd(3, 3, false);
+    s.set_minimap_ping_point((-0.125 * d, -0.25 * d));
     let x = s
         .eval::<f32>("local x = Minimap:GetPingPosition(); return x")
         .unwrap();
@@ -306,14 +321,7 @@ fn get_ping_position_answers_two_numbers_always() {
         !s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap(),
         "hidden until a ping"
     );
-    s.fire_event(
-        "MINIMAP_PING",
-        vec![
-            benilla_ui::script::ScriptValue::Str("player".into()),
-            benilla_ui::script::ScriptValue::Number(0.25),
-            benilla_ui::script::ScriptValue::Number(-0.125),
-        ],
-    );
+    s.apply_minimap_ping((-0.125 * d, -0.25 * d), "player");
     assert!(s.eval::<bool>("return MiniMapPing:IsVisible()").unwrap());
     s.tick(1.0);
     assert!(
@@ -447,15 +455,12 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
         s.visible_model_panes().is_empty(),
         "hidden until a ping: nothing to paint"
     );
-    let ping_at = |s: &mut UiScript, nx: f64, ny: f64| {
-        s.fire_event(
-            "MINIMAP_PING",
-            vec![
-                benilla_ui::script::ScriptValue::Str("player".into()),
-                benilla_ui::script::ScriptValue::Number(nx),
-                benilla_ui::script::ScriptValue::Number(ny),
-            ],
-        );
+    // A ping whose `GetPingPosition` is `(nx, ny)`, the player at the origin: `nx = −dy/D` and
+    // `ny = dx/D`.
+    let ping_at = |s: &mut UiScript, nx: f32, ny: f32| {
+        let d = 2.0 * benilla_ui::widget::minimap_radius_yd(3, 3, false);
+        s.set_minimap_player(Some((0.0, 0.0)));
+        s.apply_minimap_ping((ny * d, -nx * d), "player");
     };
     ping_at(&mut s, 0.25, -0.125);
     let panes = s.visible_model_panes();
@@ -483,6 +488,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     app.init_resource::<Time>();
     app.init_resource::<Time<Real>>();
     app.init_resource::<crate::ui_script::UiClock>();
+    app.init_resource::<benilla_world::frame_pace::FrameStep>();
     app.init_resource::<crate::ui_script::UiScaleCvar>();
     app.world_mut().spawn((
         Window {
@@ -595,11 +601,127 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     {
         let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
         // `Minimap_OnUpdate` re-seats the frame from `GetPingPosition()` (`Minimap.lua:74`).
-        script.set_minimap_ping((-0.125, 0.25));
         ping_at(&mut script, -0.125, 0.25);
     }
     next_frame(&mut app);
     let moved = premultiplied(&app);
     assert_eq!(moved.len(), 1, "one quad after the pane moved");
     assert_ne!(moved[0].rect, q.rect, "the composite followed the pane");
+}
+
+/// The stock `Minimap.xml`'s arrows are its engine children drawn as model panes: the player
+/// arrow sized by its file and centred 0.001 layout units off the disc's centre (`0x4edfd1`), the
+/// rim arrows disc-sized frames the arrow push shows and aims. Each is a child, a level above the
+/// minimap, so its pane paints after the minimap's own draw, the tiles and dots included: the
+/// draw pass submits levels in ascending order (`0x7657d0`), and the minimap's render is a
+/// callback on its own level's first layer (`0x4ebe70`).
+#[test]
+fn the_stock_minimaps_arrows_are_its_children_s_panes_above_its_own_draw() {
+    use benilla_ui::script::{MinimapRimArrow, QuadContent};
+    use benilla_ui::widget::{ModelFileFacts, SequenceFacts};
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run("function GetMinimapZoneText() return '' end")
+        .unwrap();
+    s.run("function PlaySound() end").unwrap();
+    for file in [
+        "Interface\\FrameXML\\Fonts.xml",
+        r"Interface\FrameXML\MoneyFrame.lua",
+        r"Interface\FrameXML\MoneyFrame.xml",
+        "Interface\\FrameXML\\GameTooltip.xml",
+        "Interface\\FrameXML\\UIDropDownMenu.xml",
+        r"Interface\FrameXML\UIPanelTemplates.lua",
+        r"Interface\FrameXML\UIPanelTemplates.xml",
+        "Interface\\FrameXML\\BattlefieldFrame.xml",
+        "Interface\\FrameXML\\Minimap.xml",
+    ] {
+        load_xml(&s, file);
+    }
+    // `MinimapArrow.m2`'s box, as the app hands it over; the rim model's sequences.
+    s.set_model_facts(
+        r"Interface\Minimap\MinimapArrow.mdx",
+        ModelFileFacts {
+            sequences: vec![SequenceFacts {
+                anim_id: 0,
+                duration_ms: 3333,
+                looping: true,
+            }],
+            bbox: ([-0.0127, -0.0118, 0.0], [0.0135, 0.0145, 0.0]),
+            cameras: 0,
+        },
+    );
+    s.set_model_facts(
+        r"Interface\Minimap\Rotating-MinimapArrow.mdl",
+        ModelFileFacts {
+            sequences: (0xa5..=0xa8)
+                .map(|anim_id| SequenceFacts {
+                    anim_id,
+                    duration_ms: 1000,
+                    looping: true,
+                })
+                .collect(),
+            bbox: ([-0.025, -0.025, 0.0], [0.025, 0.025, 0.0]),
+            cameras: 0,
+        },
+    );
+    s.set_minimap_player_facing(0.5);
+    s.set_minimap_arrows(
+        &[MinimapRimArrow {
+            bearing: 0.0,
+            slot: -2,
+            indoors: false,
+        }],
+        true,
+        false,
+        &[None; 5],
+    );
+    s.resolve();
+    let quads = s.extract();
+    let minimap = quads
+        .iter()
+        .find(|q| matches!(q.content, QuadContent::Minimap { .. }))
+        .expect("the minimap's own draw");
+    let mm = minimap.rect.expect("resolved");
+    let centre = ((mm.left + mm.right) / 2.0, (mm.top + mm.bottom) / 2.0);
+    let panes: Vec<_> = quads
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::ModelPane {
+                model: Some(m),
+                facing,
+                position,
+                ..
+            } => Some((q, m.clone(), *facing, *position)),
+            _ => None,
+        })
+        .filter(|(_, m, _, _)| m.contains("MinimapArrow"))
+        .collect();
+    assert_eq!(
+        panes.len(),
+        2,
+        "the player arrow and one rim arrow: {panes:?}"
+    );
+    for (q, m, facing, position) in &panes {
+        assert!(q.z > minimap.z, "{m} paints above the minimap's own draw");
+        let r = q.rect.expect("a resolved rect");
+        let c = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        if m.ends_with("MinimapArrow.mdx") {
+            assert!(
+                (c.0 - (centre.0 + 1.28)).abs() < 0.01 && (c.1 - (centre.1 + 1.28)).abs() < 0.01,
+                "0.001 layout units up and right: {c:?} vs {centre:?}"
+            );
+            assert!((facing - 0.5).abs() < 1e-6);
+            // Centred on its own box, half the extent each way (`0x4ee100`).
+            assert!(
+                (position.0 - 0.0131).abs() < 1e-4 && (position.1 - 0.01315).abs() < 1e-4,
+                "{position:?}"
+            );
+        } else {
+            assert!((r.right - r.left - 140.8).abs() < 0.01, "disc-sized: {r:?}");
+            assert!((c.0 - centre.0).abs() < 0.01 && (c.1 - centre.1).abs() < 0.01);
+            // Due north: the top of the disc, 0.8 of the half disc out.
+            assert!((position.0 - 0.055).abs() < 1e-6 && (position.1 - 0.099).abs() < 1e-6);
+        }
+    }
 }

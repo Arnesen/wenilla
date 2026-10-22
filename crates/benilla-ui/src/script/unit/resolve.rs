@@ -299,6 +299,33 @@ impl UnitGuids {
         out
     }
 
+    /// The base token of the first group row naming `guid`, as a member or its pet, or `None`
+    /// off the roster: party rows 1 to 4, then raid rows. These are the units a getter answers
+    /// from a record when it holds no object (the party record, then the raid's, `0x496400`, then
+    /// the pet record, `0x496420`), so a chain ending on one reads what its own token reads.
+    pub(crate) fn roster_token(&self, guid: u64) -> Option<String> {
+        if guid == 0 {
+            return None;
+        }
+        let row = |members: &[u64], pets: &[u64], member: &str, pet: &str| {
+            members
+                .iter()
+                .zip(pets.iter().chain(std::iter::repeat(&0)))
+                .enumerate()
+                .find_map(|(i, (&m, &p))| {
+                    if m == guid {
+                        Some(format!("{member}{}", i + 1))
+                    } else if p == guid {
+                        Some(format!("{pet}{}", i + 1))
+                    } else {
+                        None
+                    }
+                })
+        };
+        row(&self.party, &self.party_pets, "party", "partypet")
+            .or_else(|| row(&self.raid, &self.raid_pets, "raid", "raidpet"))
+    }
+
     /// Whether `guid` carries the unit-field watchers: `0x51bbb0` registers them while the unit's
     /// token flags are nonzero (`0x60c4a0`), and `0x60c520` sets those for the active player,
     /// its pet, a party member or its pet, a raid member or its pet, and the target. `npc` and
@@ -345,8 +372,9 @@ mod tests {
     const R3: u64 = 0x33;
     const FAR: u64 = 0x44;
 
-    /// Us targeting a mob that targets party1, who targets us; party1's pet and raid row 3 held,
-    /// `FAR` a roster member out of range.
+    /// Us targeting a mob that targets party1, who targets us; party1's pet and raid row 2 held,
+    /// `FAR` a roster member out of range. The raid rows are the list's members, then us
+    /// (`0x5e6e73`).
     fn guids() -> UnitGuids {
         UnitGuids {
             player: ME,
@@ -356,8 +384,8 @@ mod tests {
             npc: MOB,
             party: [P1, FAR, 0, 0],
             party_pets: [P1_PET, 0, 0, 0],
-            raid: vec![ME, P1, R3],
-            raid_pets: vec![PET, P1_PET, 0],
+            raid: vec![P1, R3, ME],
+            raid_pets: vec![P1_PET, 0, PET],
             held: HashMap::from([
                 (ME, MOB),
                 (PET, 0),
@@ -384,8 +412,8 @@ mod tests {
         // Not held, but a roster member: the base needs no object.
         assert_eq!(at("party2"), Some(FAR));
         assert_eq!(at("partypet1"), Some(P1_PET));
-        assert_eq!(at("raid3"), Some(R3));
-        assert_eq!(at("raidpet2"), Some(P1_PET));
+        assert_eq!(at("raid2"), Some(R3));
+        assert_eq!(at("raidpet1"), Some(P1_PET));
     }
 
     /// The tokens naming a unit, in the fan-out's order: the five globals that hold a guid, then
@@ -407,14 +435,14 @@ mod tests {
                 "raid2",
                 "raid3",
                 "raidpet1",
-                "raidpet2",
+                "raidpet3",
             ]
         );
-        // Every listed token resolves to a unit, and the omitted `raidpet3` to nobody.
+        // Every listed token resolves to a unit, and the omitted `raidpet2` to nobody.
         for token in guids().bound_tokens() {
             assert!(guids().resolve(&token).unwrap().is_some(), "{token}");
         }
-        assert_eq!(guids().resolve("raidpet3"), Ok(None));
+        assert_eq!(guids().resolve("raidpet2"), Ok(None));
         // Nothing seated, nothing named; no mouseover held, no mouseover.
         assert!(UnitGuids::default().bound_tokens().is_empty());
         let unheld = UnitGuids {
@@ -430,12 +458,12 @@ mod tests {
     fn tokens_of_lists_one_units_names_in_the_fan_out_order() {
         // The mob is the target, the mouseover and the NPC: target first, npc before mouseover.
         assert_eq!(guids().tokens_of(MOB), ["target", "npc", "mouseover"]);
-        // We are raid row 1 and in no party table.
-        assert_eq!(guids().tokens_of(ME), ["player", "raid1"]);
-        assert_eq!(guids().tokens_of(PET), ["pet", "raidpet1"]);
-        // Party row 1's pet is also raid row 2's pet: one party row, one raid row.
-        assert_eq!(guids().tokens_of(P1_PET), ["partypet1", "raidpet2"]);
-        assert_eq!(guids().tokens_of(P1), ["party1", "raid2"]);
+        // We are the last raid row and in no party table.
+        assert_eq!(guids().tokens_of(ME), ["player", "raid3"]);
+        assert_eq!(guids().tokens_of(PET), ["pet", "raidpet3"]);
+        // Party row 1's pet is also raid row 1's pet: one party row, one raid row.
+        assert_eq!(guids().tokens_of(P1_PET), ["partypet1", "raidpet1"]);
+        assert_eq!(guids().tokens_of(P1), ["party1", "raid1"]);
         assert!(guids().tokens_of(0).is_empty());
         let no_player = UnitGuids {
             player: 0,
@@ -490,8 +518,8 @@ mod tests {
         assert_eq!(at("playertarget"), Some(MOB));
         assert_eq!(at("party1target"), Some(ME));
         assert_eq!(at("partypet1target"), Some(MOB));
-        assert_eq!(at("raid2target"), Some(ME));
-        assert_eq!(at("raid2targettarget"), Some(MOB));
+        assert_eq!(at("raid1target"), Some(ME));
+        assert_eq!(at("raid1targettarget"), Some(MOB));
         assert_eq!(at("mouseovertarget"), Some(P1));
         // A hop to nobody ends the chain (`0x515a2e`), as does a hop off a unit not held.
         assert_eq!(at("pettarget"), None);
@@ -574,7 +602,7 @@ mod tests {
             "partyX",
             "raid0",
             "raid4",
-            "raidpet3",
+            "raidpet2",
             "playerfoo",
             "targetfoo",
             "partypet5",
@@ -609,13 +637,32 @@ mod tests {
     #[test]
     fn the_index_parse_wraps_and_stops_at_the_first_non_digit() {
         assert_eq!(at("party01"), Some(P1));
-        assert_eq!(at("raid03"), Some(R3));
-        assert_eq!(at("raid03target"), None, "raid3 targets nobody");
+        assert_eq!(at("raid02"), Some(R3));
+        assert_eq!(at("raid02target"), None, "raid2 targets nobody");
         assert_eq!(
             index_of(b"4294967297"),
             (0, 10),
             "2^32 + 1 wraps to 1, index 0"
         );
         assert_eq!(index_of(b"x"), (u32::MAX, 0));
+    }
+
+    /// The group row a guid answers from without its object: a party row before a raid row, a
+    /// member or its pet, and nothing off the roster.
+    #[test]
+    fn a_roster_guid_names_its_first_group_row() {
+        let g = guids();
+        assert_eq!(
+            g.roster_token(P1).as_deref(),
+            Some("party1"),
+            "before raid1"
+        );
+        assert_eq!(g.roster_token(P1_PET).as_deref(), Some("partypet1"));
+        assert_eq!(g.roster_token(FAR).as_deref(), Some("party2"));
+        assert_eq!(g.roster_token(R3).as_deref(), Some("raid2"));
+        assert_eq!(g.roster_token(PET).as_deref(), Some("raidpet3"));
+        assert_eq!(g.roster_token(ME).as_deref(), Some("raid3"));
+        assert_eq!(g.roster_token(MOB), None);
+        assert_eq!(g.roster_token(0), None, "an empty row is nobody's");
     }
 }

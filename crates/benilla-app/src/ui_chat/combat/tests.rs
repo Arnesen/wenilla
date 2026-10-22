@@ -3,22 +3,106 @@
 
 use super::*;
 
-/// A template's `%s`/`%d` conversions in order; two templates with the same one take the same
-/// arguments.
+/// A template's `%s`/`%d` conversions by argument, bound as `vsnoprintf` binds them (`0x669892`):
+/// a numbered hole (`%2$d`, deDE's) at its number, a plain one at the running index, which every
+/// hole leaves one past its own; two templates with the same one take the same arguments.
 fn signature(template: &str) -> Vec<char> {
     let mut out = Vec::new();
+    let mut cursor = 0;
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
-        if c != '%' {
+        if c != '%' || chars.next_if_eq(&'%').is_some() {
             continue;
         }
-        match chars.next() {
-            Some('%') => {}
-            Some(k) => out.push(k),
-            None => {}
+        let mut number = String::new();
+        while let Some(d) = chars.next_if(char::is_ascii_digit) {
+            number.push(d);
+        }
+        let index = if number.is_empty() {
+            cursor
+        } else {
+            chars.next_if_eq(&'$');
+            number
+                .parse::<usize>()
+                .map_or(usize::MAX, |n| n.saturating_sub(1))
+        };
+        cursor = index.saturating_add(1);
+        let Some(k) = chars.next() else { break };
+        if index >= out.len() {
+            out.resize(index.saturating_add(1).min(64), '?');
+        }
+        if let Some(slot) = out.get_mut(index) {
+            *slot = k;
         }
     }
     out
+}
+
+/// deDE numbers its holes in the argument order enUS fills in sequence, so both read one list; a
+/// hole past the list or of the wrong type stays a mismatch, an argument no hole names does not.
+#[test]
+fn numbered_holes_fill_from_the_same_argument_list() {
+    let hit = [Arg::S("Ragnaros"), Arg::D(1000)];
+    assert_eq!(
+        fill_exact("You hit %s for %d.", &hit).as_deref(),
+        Some("You hit Ragnaros for 1000.")
+    );
+    assert_eq!(
+        fill_exact("Ihr trefft %1$s. Schaden: %2$d.", &hit).as_deref(),
+        Some("Ihr trefft Ragnaros. Schaden: 1000.")
+    );
+    let reflect = [Arg::D(50), Arg::S("Feuer"), Arg::S("Ragnaros")];
+    assert_eq!(
+        fill_exact("Ihr reflektiert %1$d %2$sschaden auf %3$s.", &reflect).as_deref(),
+        Some("Ihr reflektiert 50 Feuerschaden auf Ragnaros.")
+    );
+    assert_eq!(
+        fill_exact("%2$s von %1$s", &[Arg::S("A"), Arg::S("B")]).as_deref(),
+        Some("B von A")
+    );
+    assert_eq!(
+        fill_exact("100%% %1$s", &[Arg::S("x")]).as_deref(),
+        Some("100% x")
+    );
+    assert_eq!(fill_exact("%3$s", &[Arg::S("a")]), None);
+    assert_eq!(fill_exact("%1$d", &[Arg::S("a")]), None);
+    assert_eq!(
+        fill_exact("%1$s", &[Arg::S("a"), Arg::D(1)]).as_deref(),
+        Some("a"),
+        "an argument no hole names is skipped"
+    );
+    assert_eq!(fill_exact("%0$s", &[Arg::S("a")]).as_deref(), Some("a"));
+}
+
+/// `vsnoprintf` prints the arguments the template names, in the template's own binding, and
+/// skips one no hole takes (`0x6698b5`-`0x669919`); a plain hole after `%N$` takes argument N + 1
+/// (`0x669892`). So a template that leaves a name out, or mixes the two hole forms, still prints.
+#[test]
+fn a_template_that_omits_an_argument_or_mixes_hole_forms_still_prints() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    script
+        .run(
+            r#"
+            COMBATHITSELFOTHER = "You land a blow for %2$d."
+            COMBATHITOTHERSELF = "%1$s hits you for %d."
+        "#,
+        )
+        .unwrap();
+    let fills = Fills {
+        attacker: "Ragnaros".into(),
+        victim: "Ragnaros".into(),
+        amount: 12,
+        ..Default::default()
+    };
+    let line = |variant| compose_line(&script, COMBATHIT, variant, &fills);
+    assert_eq!(
+        line(Variant::SelfOther).as_deref(),
+        Some("You land a blow for 12.")
+    );
+    assert_eq!(
+        line(Variant::OtherSelf).as_deref(),
+        Some("Ragnaros hits you for 12.")
+    );
 }
 
 /// The signature a family's declared slots give for one variant; `Attacker` and `Victim` count
@@ -222,69 +306,26 @@ fn the_reported_sentences_read_correctly() {
     );
 }
 
+/// The fill refuses a hole with nothing to print (`fill_exact`), and skips an argument no hole
+/// names (`0x6698b5`-`0x669919`).
 #[test]
-fn the_fill_is_vsnprintf_and_refuses_a_mismatch() {
+fn the_fill_is_vsnoprintf_and_refuses_a_hole_it_cannot_print() {
     fn s(v: &str) -> Arg<'_> {
-        Arg::Str(v)
+        Arg::S(v)
     }
     assert_eq!(
-        fill("%s hits %s for %d.", &[s("A"), s("B"), Arg::Num(7)]).as_deref(),
+        fill_exact("%s hits %s for %d.", &[s("A"), s("B"), Arg::D(7)]).as_deref(),
         Some("A hits B for 7.")
     );
-    assert_eq!(fill("100%% sure", &[]).as_deref(), Some("100% sure"));
+    assert_eq!(fill_exact("100%% sure", &[]).as_deref(), Some("100% sure"));
     // A `%d` where a string is queued, and vice versa.
-    assert_eq!(fill("%d", &[s("A")]), None);
-    assert_eq!(fill("%s", &[Arg::Num(1)]), None);
-    // Too few, and too many.
-    assert_eq!(fill("%s %s", &[s("A")]), None);
-    assert_eq!(fill("%s", &[s("A"), s("B")]), None);
+    assert_eq!(fill_exact("%d", &[s("A")]), None);
+    assert_eq!(fill_exact("%s", &[Arg::D(1)]), None);
+    // Too few holes' arguments is a mismatch; too many is not.
+    assert_eq!(fill_exact("%s %s", &[s("A")]), None);
+    assert_eq!(fill_exact("%s", &[s("A"), s("B")]).as_deref(), Some("A"));
     // A conversion outside the vocabulary is a mismatch, not a passthrough.
-    assert_eq!(fill("%f", &[Arg::Num(1)]), None);
-}
-
-/// `0x629b60`'s arm order: a blocked swing with damage is `VSBLOCK`, and a fully absorbed one
-/// `VSABSORB`, not `MISSED`.
-#[test]
-fn the_melee_dispatcher_follows_the_reference_order() {
-    let f = |h, v, d, s| melee_family(h, v, d, s).expect("a family").stem;
-    // A plain landed swing, and its crit and school variants.
-    assert_eq!(f(0, 1, 120, 0), "COMBATHIT");
-    assert_eq!(f(0x80, 1, 120, 0), "COMBATHITCRIT");
-    assert_eq!(f(0, 1, 120, 2), "COMBATHITSCHOOL");
-    assert_eq!(f(0x80, 1, 120, 2), "COMBATHITCRITSCHOOL");
-    // MISS wins over everything, including a VictimState that would say otherwise.
-    assert_eq!(f(0x10, 2, 0, 0), "MISSED");
-    // BLOCKS wins over the damage test: a partial block still lands damage.
-    assert_eq!(f(0, 5, 90, 0), "VSBLOCK");
-    // Zero damage + the absorb/resist bits.
-    assert_eq!(f(0x20, 1, 0, 0), "VSABSORB");
-    assert_eq!(f(0x40, 1, 0, 0), "VSRESIST");
-    // ...but the same bits with damage through are a landed hit, not a full absorb.
-    assert_eq!(f(0x20, 1, 90, 0), "COMBATHIT");
-    // The VictimState words.
-    assert_eq!(f(0, 2, 0, 0), "VSDODGE");
-    assert_eq!(f(0, 3, 0, 0), "VSPARRY");
-    assert_eq!(f(0, 6, 0, 0), "VSEVADE");
-    assert_eq!(f(0, 7, 0, 0), "VSIMMUNE");
-    assert_eq!(f(0, 8, 0, 0), "VSDEFLECT");
-}
-
-/// `0x62a710` prints nothing for a VictimState whose byte in `0x8628f8`, `[0,0,1,1,0,1,1,1,1,0]`,
-/// is 0. State 1 words a hit only with damage through, in arm 5.
-#[test]
-fn the_silent_victim_states_emit_no_melee_line() {
-    for state in [0, 1, 4, 9] {
-        assert!(
-            melee_family(0, state, 0, 0).is_none(),
-            "VictimState {state} must emit no line"
-        );
-    }
-    // The same states still word normally when an earlier arm claims them: the MISS bit, and
-    // state 1 with damage through.
-    assert!(melee_family(0x10, 0, 0, 0).is_some(), "the MISS bit wins");
-    assert!(melee_family(0, 1, 120, 0).is_some(), "a landed hit wins");
-    // Index 5 of the table is a 1, and unreachable: arm 2 claims a block.
-    assert_eq!(melee_family(0, 5, 0, 0).map(|f| f.stem), Some("VSBLOCK"));
+    assert_eq!(fill_exact("%f", &[Arg::D(1)]), None);
 }
 
 /// The melee msgType matrix of `0x62a0d0`/`0x62a2e0`, through the 94-entry type table at
@@ -504,4 +545,306 @@ fn a_set_cvar_moves_the_range_the_gate_compares_against() {
     assert!(!r.set("CombatLogRangeMe", 10.0));
     assert!(!r.set("mousespeed", 10.0));
     assert_eq!(r.class(C::Me), 100_000.0);
+}
+
+// ── the unit classifier, `0x5efea0` ─────────────────────────────────────────────────────────
+
+impl Stores for std::collections::HashMap<Entity, ObjectStore> {
+    fn store(&self, entity: Entity) -> Option<&ObjectStore> {
+        self.get(&entity)
+    }
+}
+
+/// Descriptors held by guid, each at an entity of its own, for [`classify`].
+struct Held {
+    world: World,
+    index: GuidIndex,
+    stores: std::collections::HashMap<Entity, ObjectStore>,
+}
+
+impl Held {
+    fn new() -> Self {
+        Self {
+            world: World::new(),
+            index: GuidIndex::default(),
+            stores: Default::default(),
+        }
+    }
+
+    fn hold(&mut self, guid: u64, store: ObjectStore) {
+        let e = self.world.spawn_empty().id();
+        self.index.0.insert(guid, e);
+        self.stores.insert(e, store);
+    }
+
+    fn unit(&mut self, u: &RelUnit) {
+        self.hold(u.guid, crate::target::relations::fixture::store_of(u));
+    }
+
+    /// The class of `guid` to the active player `me`, with `party` in the party slots.
+    fn class(&self, me: u64, party: &[u64], guid: u64) -> UnitClass {
+        let group = GroupState {
+            in_group: !party.is_empty(),
+            members: party
+                .iter()
+                .map(|&guid| benilla_protocol::messages::GroupMemberEntry {
+                    name: String::new(),
+                    guid,
+                    status: 1,
+                    flags: 0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let factions = crate::target::relations::fixture::factions();
+        classify(
+            guid,
+            &SelfGuid(Some(me)),
+            Some(&group),
+            &self.index,
+            &self.stores,
+            Some(&factions),
+            &Reputations::default(),
+            None,
+        )
+    }
+}
+
+/// `0x5eff85`-`0x5effad`: a player is hostile only when each can attack the other. An enemy who is
+/// PvP-flagged while you are not is one you can attack and who cannot attack you: a friendly
+/// player's lines, 4, until you flag too.
+#[test]
+fn a_player_is_hostile_only_when_each_can_attack_the_other() {
+    use crate::target::relations::fixture::{player, with_flags, HUMAN, ORC, PVP};
+    let me = player(1, HUMAN);
+    let flagged_orc = with_flags(player(2, ORC), PVP);
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&flagged_orc);
+    assert_eq!(held.class(1, &[], 2), UnitClass::FriendlyPlayer);
+
+    let mut held = Held::new();
+    held.unit(&with_flags(me, PVP));
+    held.unit(&flagged_orc);
+    assert_eq!(held.class(1, &[], 2), UnitClass::HostilePlayer);
+}
+
+/// `0x5effcd` comes after the mutual `CanAttack`: a party member you are duelling is a hostile
+/// player, 6, and the same member out of the duel is a party member, 2.
+#[test]
+fn a_party_member_in_a_duel_with_you_is_a_hostile_player() {
+    use crate::target::relations::fixture::{duelling, player, HUMAN};
+    let mut held = Held::new();
+    held.unit(&duelling(player(1, HUMAN), 99, 1));
+    held.unit(&duelling(player(2, HUMAN), 99, 2));
+    assert_eq!(held.class(1, &[2], 2), UnitClass::HostilePlayer);
+
+    let mut held = Held::new();
+    held.unit(&player(1, HUMAN));
+    held.unit(&player(2, HUMAN));
+    assert_eq!(held.class(1, &[2], 2), UnitClass::Party);
+}
+
+/// `0x5f0006` is reached only for a unit that is not a player: a player you mind-control is judged
+/// as a player, never as your pet; a creature you charm is your pet, 1.
+#[test]
+fn a_charmed_player_is_never_classified_by_its_controller() {
+    use crate::target::relations::fixture::{creature, player, HUMAN, ORC};
+    let me = player(1, HUMAN);
+    let charmed = RelUnit {
+        charmed_by: 1,
+        ..player(2, ORC)
+    };
+    let charmed_mob = RelUnit {
+        charmed_by: 1,
+        ..creature(3, ORC)
+    };
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&charmed);
+    held.unit(&charmed_mob);
+    assert_eq!(held.class(1, &[], 2), UnitClass::FriendlyPlayer);
+    assert_eq!(held.class(1, &[], 3), UnitClass::MyPet);
+}
+
+/// `0x5f00e3`-`0x5f00fd`: another player's pet is hostile, 7, when the pet and you can each
+/// attack the other, else friendly, 5; a pet whose owner is not held is a creature, 8.
+#[test]
+fn another_players_pet_takes_the_mutual_test_on_itself() {
+    use crate::target::relations::fixture::{pet_of, player, with_flags, HUMAN, ORC, PVP};
+    let me = with_flags(player(1, HUMAN), PVP);
+    let owner = with_flags(player(2, ORC), PVP);
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&owner);
+    held.unit(&pet_of(3, &owner));
+    assert_eq!(held.class(1, &[], 3), UnitClass::HostilePet);
+
+    let mut held = Held::new();
+    held.unit(&player(1, HUMAN));
+    held.unit(&owner);
+    held.unit(&pet_of(3, &owner));
+    assert_eq!(held.class(1, &[], 3), UnitClass::FriendlyPet);
+
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&pet_of(3, &owner));
+    assert_eq!(held.class(1, &[], 3), UnitClass::Creature);
+}
+
+/// `0x5eff1e`-`0x5eff45`: a game object stands for its creator, one class up on the player arms:
+/// your own is 1, a party member's 3; a creature's object takes the creature's 8.
+#[test]
+fn a_game_object_classifies_as_its_creator_one_class_up() {
+    use crate::target::relations::fixture::{creature, player, HUMAN};
+    let object = |creator: u64| {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (2, 0x21),
+            (6, creator as u32),
+            (7, (creator >> 32) as u32),
+        ]))
+    };
+    let mut held = Held::new();
+    held.unit(&player(1, HUMAN));
+    held.unit(&player(2, HUMAN));
+    held.unit(&creature(3, HUMAN));
+    held.hold(10, object(1));
+    held.hold(11, object(2));
+    held.hold(12, object(3));
+    held.hold(13, object(77));
+    assert_eq!(held.class(1, &[2], 10), UnitClass::MyPet);
+    assert_eq!(held.class(1, &[2], 11), UnitClass::PartyPet);
+    assert_eq!(held.class(1, &[], 11), UnitClass::FriendlyPet);
+    assert_eq!(held.class(1, &[], 12), UnitClass::Creature);
+    assert_eq!(
+        held.class(1, &[], 13),
+        UnitClass::Unknown,
+        "no creator held"
+    );
+}
+
+/// `0x6264e0` never waits: a unit no cache names prints its miss at once, and only an item the
+/// item cache has not answered holds the line (`0x55ba30`).
+#[test]
+fn a_unit_name_never_holds_a_line_and_an_item_name_does() {
+    let mut line = queue(
+        ChatEventKind::CombatCreatureVsSelfHits,
+        COMBATHIT,
+        (7, UnitClass::Creature),
+        (1, UnitClass::Me),
+        Fills::default(),
+        Named::Ready,
+    )
+    .unwrap();
+    let named = |guid: u64| if guid == 1 { "Pat" } else { "Unknown" }.to_string();
+    assert!(line.fill_names(named, |_| ItemName::Waiting));
+    assert_eq!(
+        (line.fills.attacker.as_str(), line.fills.victim.as_str()),
+        ("Unknown", "Pat")
+    );
+
+    let mut pet = PendingCombat {
+        named: Named::Unit(9),
+        ..line.clone()
+    };
+    assert!(pet.fill_names(|_| "Unknown".into(), |_| ItemName::Waiting));
+    assert_eq!(pet.fills.named, "Unknown");
+
+    let mut made = PendingCombat {
+        named: Named::Item(2589),
+        ..line.clone()
+    };
+    assert!(!made.fill_names(named, |_| ItemName::Waiting));
+    assert!(made.fill_names(named, |_| ItemName::Named("Linen Cloth".into())));
+    assert_eq!(made.fills.named, "Linen Cloth");
+}
+
+/// A name nothing holds prints the miss of the getter `0x6264e0` went through: a held unit's
+/// `GetUnitName` (`0x626531`) falls to "Unknown Being" (`0x60933c`), anything else to
+/// `UKNOWNOBJECT` (`0x62660c`), each only once `UNKNOWNOBJECT` is missing.
+#[test]
+fn an_unnamed_held_unit_prints_the_unit_getters_miss() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    let names = NameCache::default();
+    let (gameobjects, items) = (GameObjectTemplates::default(), Items::default());
+    let sources = NameSources {
+        names: &names,
+        gameobjects: &gameobjects,
+        items: &items,
+    };
+    let store = |kind: u32| ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, kind)]));
+    let name = |store: Option<&ObjectStore>| logged_name(7, store, &sources, Ask::Read, &script);
+    assert_eq!(name(Some(&store(0x19))), "Unknown Being", "a held player");
+    assert_eq!(name(Some(&store(0x9))), "Unknown Being", "a held creature");
+    assert_eq!(name(Some(&store(0x21))), "UKNOWNOBJECT", "a game object");
+    assert_eq!(name(None), "UKNOWNOBJECT", "nothing held");
+
+    script
+        .lua()
+        .load("UNKNOWNOBJECT = \"Unknown\"")
+        .exec()
+        .expect("set");
+    assert_eq!(name(Some(&store(0x19))), "Unknown");
+    assert_eq!(name(None), "Unknown");
+}
+
+/// `GetObjectName` (`0x6264e0`) names a held object by its type mask: a game object by the record
+/// it holds (`0x5f8100`), an item, a bag included, from the item cache without asking
+/// (`0x55ba30` with no callback). No record, or an empty name (`0x6265ef`), is the miss.
+#[test]
+fn a_held_game_object_or_item_is_named_from_its_record() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    let names = NameCache::default();
+    let mut gameobjects = GameObjectTemplates::default();
+    gameobjects.insert(1731, 3, "Copper Vein".into(), &[0; 24]);
+    gameobjects.insert(1732, 3, String::new(), &[0; 24]);
+    let mut items = Items::default();
+    items.insert_template(2589, Some(crate::items::test_template("Junkbox")));
+    let sources = NameSources {
+        names: &names,
+        gameobjects: &gameobjects,
+        items: &items,
+    };
+    let held = |mask: u32, entry: u32| {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (2, mask),
+            (benilla_protocol::field::FIELD_OBJECT_ENTRY, entry),
+        ]))
+    };
+    let name = |store: &ObjectStore| logged_name(7, Some(store), &sources, Ask::Read, &script);
+    assert_eq!(name(&held(0x21, 1731)), "Copper Vein");
+    assert_eq!(name(&held(0x3, 2589)), "Junkbox", "an item");
+    assert_eq!(name(&held(0x7, 2589)), "Junkbox", "a bag");
+    assert_eq!(name(&held(0x21, 9)), "UKNOWNOBJECT", "no record");
+    assert_eq!(name(&held(0x3, 9)), "UKNOWNOBJECT", "no record");
+    assert_eq!(name(&held(0x21, 1732)), "UKNOWNOBJECT", "an empty name");
+    assert_eq!(
+        name(&held(0x21, 2589)),
+        "UKNOWNOBJECT",
+        "an object's entry names no item"
+    );
+}
+
+/// A school with no name writes no line, even where the template names none: each formatter that
+/// takes a school returns on its name first (`0x62cd99`, `0x628117`), before the line and its word.
+#[test]
+fn a_school_with_no_name_writes_no_line() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    script
+        .run(r#"SPELLLOGABSORBOTHERSELF = "You absorb %s's %s."; SPELL_SCHOOL2_CAP = "Fire""#)
+        .expect("strings");
+    let fills = |school| Fills {
+        attacker: "Imp".into(),
+        spell: "Firebolt".into(),
+        school: Some(school),
+        ..Default::default()
+    };
+    assert_eq!(
+        compose_line(&script, SPELLLOGABSORB, Variant::OtherSelf, &fills(2)).as_deref(),
+        Some("You absorb Imp's Firebolt.")
+    );
+    assert_eq!(
+        compose_line(&script, SPELLLOGABSORB, Variant::OtherSelf, &fills(9)),
+        None
+    );
 }

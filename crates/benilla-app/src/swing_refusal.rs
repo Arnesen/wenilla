@@ -133,7 +133,7 @@ fn show_swing_refusal(
     time: Res<Time>,
     mut refusal: ResMut<SwingRefusal>,
     engaged: Query<(), (With<SelfPlayer>, With<Engaged>)>,
-    mut errors: ResMut<UiErrorKeys>,
+    errors: Res<UiErrorKeys>,
 ) {
     let Some((code, due)) = refusal.0 else {
         return;
@@ -146,7 +146,7 @@ fn show_swing_refusal(
         return;
     }
     refusal.0 = Some((code, now + REPEAT));
-    errors.0.push(UiError::key(code.key()));
+    errors.push(UiError::key(code.key()));
 }
 
 /// Entering the world drops the latch: the reference's `0x5e2510`, from `ClientInitializeGame`
@@ -164,8 +164,12 @@ impl Plugin for SwingRefusalPlugin {
             .add_systems(
                 Update,
                 // After the drain that writes the edges and before the unit feeds, so a queued
-                // key shows the same frame; chained so a refusal is latched before the tick.
-                (apply_swing_refusals, show_swing_refusal)
+                // key shows the same frame; chained so a refusal is latched before the tick. The
+                // stop's cancel reaches the targeting word, which the UI feed publishes after it.
+                (
+                    apply_swing_refusals.before(crate::ui_script::UiFeed),
+                    show_swing_refusal,
+                )
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Net)
                     .before(crate::ui_unit::UnitFeed),

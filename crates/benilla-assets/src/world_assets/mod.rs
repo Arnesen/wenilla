@@ -12,7 +12,10 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
-use benilla_formats::{blp_to_rgba, read_texture_native_chain, tga_to_rgba, Chain, ModelBlend};
+use benilla_formats::{
+    blp_to_rgba, read_texture_native_chain, tga_texture_size, tga_to_rgba, Chain, ModelBlend,
+    TGA_GATE_PREFIX,
+};
 pub use benilla_formats::{LooseFile, LooseIndex, LooseIndexCell, LooseOpen};
 
 /// BLP and RGBA to `Image` helpers, re-exported.
@@ -92,7 +95,7 @@ pub fn sprite_dimensions(
     loose: &LooseFiles,
     path: &str,
 ) -> Option<(u32, u32)> {
-    decode_sprite(chain, loose, path, LooseOpen::Index).map(|(w, h, _)| (w, h))
+    decode_texture(chain, loose, path, LooseOpen::Index).map(|(w, h, _)| (w, h))
 }
 
 /// Decode the first of [`sprite_candidates`] that reads and decodes, each read by
@@ -105,6 +108,43 @@ fn decode_sprite(
     path: &str,
     open: LooseOpen,
 ) -> Option<(u32, u32, Vec<u8>)> {
+    decode_sprite_as(chain, loose, path, open, OnRefusal::Miss)
+}
+
+/// [`decode_sprite`] for a load that `TextureCreate` (`0x449d90`) makes: a `.tga` whose header
+/// opens is the texture, and a decode that refuses it leaves the opaque white default
+/// ([`OnRefusal::WhiteDefault`]).
+fn decode_texture(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    open: LooseOpen,
+) -> Option<(u32, u32, Vec<u8>)> {
+    decode_sprite_as(chain, loose, path, open, OnRefusal::WhiteDefault)
+}
+
+/// What a candidate file that opens but will not decode becomes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnRefusal {
+    /// Nothing: the next candidate is tried, then the sprite is a miss.
+    Miss,
+    /// `TextureCreate`'s TGA loader `0x44a140` returns the texture once the header opens
+    /// (`0x44a169`) and decodes later, in the callback `0x44a260`; a refused decode fills opaque
+    /// white at the header's size (`0x44a2eb` into `0x448920`) and logs the reference's line
+    /// (`0x835538`), with no next candidate. A header that makes no texture (`0x448450`, see
+    /// [`tga_texture_size`]) fails the candidate as a missing file does, whether the pixels would
+    /// decode or not. A BLP candidate takes another callback (`0x44a500`), whose failure is a
+    /// solid green 8 by 8 texture instead.
+    WhiteDefault,
+}
+
+fn decode_sprite_as(
+    chain: &Mutex<Chain>,
+    loose: &LooseFiles,
+    path: &str,
+    open: LooseOpen,
+    on_refusal: OnRefusal,
+) -> Option<(u32, u32, Vec<u8>)> {
     let open = loose_open_for(path, open);
     let candidates = sprite_candidates(path);
     // Asked before the chain's lock, so an index build never stalls an archive reader.
@@ -116,8 +156,10 @@ fn decode_sprite(
             Some(file) => file.read(),
             None => chain.read_file(candidate).ok(),
         };
-        if let Some(Ok(decoded)) = bytes.map(|b| decode_sprite_bytes(&b)) {
-            return Some(decoded);
+        match bytes.map(|b| decode_candidate(candidate, &b, on_refusal)) {
+            Some(Candidate::Pixels(width, height, rgba)) => return Some((width, height, rgba)),
+            Some(Candidate::Nothing) => return None,
+            Some(Candidate::Next) | None => {}
         }
     }
     // "Not there" and "there but would not decode" are different faults; say which.
@@ -162,14 +204,127 @@ fn loose_open_for(path: &str, open: LooseOpen) -> LooseOpen {
     }
 }
 
-/// Whether an interface texture's open of `path` finds a file, in the loose files or the chain,
-/// for the probes that answer `SetTexture`'s 1|nil before anything decodes.
+/// Whether an interface texture's open of `path` makes a texture, in the loose files or the chain,
+/// for the probes that answer `SetTexture`'s 1|nil before anything decodes: a candidate that opens
+/// and, if it is a TGA, whose header passes the size gate ([`makes_texture`]). A fresh
+/// [`SpriteProbe`] answers it, reading a TGA each time; a host asked per frame keeps one.
 pub fn sprite_found(chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> bool {
-    let open = loose_open_for(path, LooseOpen::Index);
-    let candidates = sprite_candidates(path);
-    // The loose files first, outside the chain's lock.
-    candidates.iter().any(|c| loose.find(c, open).is_some())
-        || candidates.iter().any(|c| chain.lock_recover().contains(c))
+    SpriteProbe::default().found(chain, loose, path)
+}
+
+/// `SetTexture`'s 1|nil probe ([`sprite_found`]), which keeps the size gate's answer for each
+/// resolved file it has read: an addon sets an icon from its `OnUpdate`, every frame. The host
+/// makes one probe per UI load, so an answer lasts that load and a `/reload` asks again; a file
+/// edited meanwhile is not read again. A file that will not read is asked again, and whether a
+/// name opens at all is asked each time, since the loose index can change.
+#[derive(Default)]
+pub struct SpriteProbe {
+    /// The gate's answer by resolved file ([`source_key`]).
+    gate: std::cell::RefCell<HashMap<String, bool>>,
+    /// How many TGA headers [`Self::found`] has read.
+    header_reads: std::cell::Cell<usize>,
+}
+
+impl SpriteProbe {
+    /// See [`sprite_found`].
+    pub fn found(&self, chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> bool {
+        let open = loose_open_for(path, LooseOpen::Index);
+        let candidates = sprite_candidates(path);
+        // The loose files first, outside the chain's lock.
+        let hits: Vec<Option<LooseFile>> = candidates.iter().map(|c| loose.find(c, open)).collect();
+        candidates.iter().zip(hits).any(|(candidate, hit)| {
+            let opens = hit.is_some() || chain.lock_recover().contains(candidate);
+            if !opens || !candidate.ends_with(".tga") {
+                return opens;
+            }
+            let key = match &hit {
+                Some(file) => source_key(file),
+                None => format!("chain:{candidate}"),
+            };
+            self.gate(&key, candidate, || match hit {
+                Some(file) => file.read_prefix(TGA_GATE_PREFIX),
+                None => chain.lock_recover().read_file(candidate).ok(),
+            })
+        })
+    }
+
+    /// Whether a `.tga` candidate makes a texture, from the bytes `read` gives, for the resolved
+    /// file `key` names.
+    fn gate(&self, key: &str, candidate: &str, read: impl FnOnce() -> Option<Vec<u8>>) -> bool {
+        if let Some(&answer) = self.gate.borrow().get(key) {
+            return answer;
+        }
+        self.header_reads.set(self.header_reads.get() + 1);
+        let Some(bytes) = read() else {
+            return false;
+        };
+        let answer = makes_texture(candidate, &bytes);
+        self.gate.borrow_mut().insert(key.to_string(), answer);
+        answer
+    }
+}
+
+/// The file an entry opens, as a key: the path on disk, and an archive's member.
+fn source_key(file: &LooseFile) -> String {
+    match file {
+        LooseFile::Plain(path) => path.display().to_string(),
+        LooseFile::Archive { archive, member } => format!("{}!{member}", archive.display()),
+    }
+}
+
+/// Whether `TextureCreate` (`0x449d90`) makes a texture of a candidate's bytes: a TGA the loader
+/// `0x44a140` reads needs a header that `0x448450` makes a device texture at ([`tga_texture_size`]),
+/// decoded or not. A `.blp` candidate, or bytes that are a BLP under a `.tga` name, are not gated
+/// here.
+fn makes_texture(candidate: &str, bytes: &[u8]) -> bool {
+    !is_tga_load(candidate, bytes) || tga_texture_size(bytes).is_some()
+}
+
+/// Whether `candidate` is read by the TGA loader: its name is `.tga` and its bytes are no BLP, which
+/// the content sniff ([`decode_sprite_bytes`]) sends to the BLP decoder.
+fn is_tga_load(candidate: &str, bytes: &[u8]) -> bool {
+    candidate.ends_with(".tga") && !bytes.starts_with(b"BLP2")
+}
+
+/// What one candidate file yields for a load.
+#[derive(Debug, PartialEq)]
+enum Candidate {
+    /// Pixels to draw.
+    Pixels(u32, u32, Vec<u8>),
+    /// A texture of no size, which draws nothing and ends the search: the size gate lets a zero
+    /// through (`0x44849d`, `test ebx, ebx-1`).
+    Nothing,
+    /// No texture: the next candidate is tried.
+    Next,
+}
+
+/// One candidate's bytes through [`decode_sprite_bytes`]. By `on_refusal`, a TGA load gates its
+/// header's size first ([`makes_texture`]), decoded or not, and a refused decode of one that
+/// passes leaves that size of opaque white.
+fn decode_candidate(candidate: &str, bytes: &[u8], on_refusal: OnRefusal) -> Candidate {
+    let size = if on_refusal == OnRefusal::WhiteDefault && is_tga_load(candidate, bytes) {
+        match tga_texture_size(bytes) {
+            Some(size) => Some(size),
+            None => return Candidate::Next,
+        }
+    } else {
+        None
+    };
+    if let Ok((width, height, rgba)) = decode_sprite_bytes(bytes) {
+        return Candidate::Pixels(width, height, rgba);
+    }
+    match size {
+        None => Candidate::Next,
+        Some((0, _) | (_, 0)) => Candidate::Nothing,
+        Some((width, height)) => {
+            warn!("Texture {candidate} not loaded -- replaced with default.");
+            Candidate::Pixels(
+                width,
+                height,
+                vec![0xff; width as usize * height as usize * 4],
+            )
+        }
+    }
 }
 
 /// Decode by content, not extension, since addon folders mislabel both ways: a `BLP2` magic is a
@@ -511,7 +666,7 @@ impl WorldAssets {
         if let Some(cached) = self.cache.sprites.get(&key) {
             return cached;
         }
-        let loaded = decode_sprite(&self.chain, &self.loose, path, open)
+        let loaded = decode_texture(&self.chain, &self.loose, path, open)
             .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
         let open = loose_open_for(path, open);
         self.cache.sprites.insert(key, open, loaded.clone());
@@ -539,7 +694,7 @@ impl WorldAssets {
             return cached.clone();
         }
         if !self.cache.resample_sources.contains_key(path) {
-            let decoded = decode_sprite(&self.chain, &self.loose, path, LooseOpen::Index);
+            let decoded = decode_texture(&self.chain, &self.loose, path, LooseOpen::Index);
             self.cache
                 .resample_sources
                 .insert(path.to_string(), decoded);
@@ -562,7 +717,7 @@ impl WorldAssets {
         if let Some(cached) = self.cache.tiled.get(&key) {
             return cached;
         }
-        let loaded = decode_sprite(&self.chain, &self.loose, path, LooseOpen::Index)
+        let loaded = decode_texture(&self.chain, &self.loose, path, LooseOpen::Index)
             .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
         let open = loose_open_for(path, LooseOpen::Index);
         self.cache.tiled.insert(key, open, loaded.clone());
@@ -1126,5 +1281,213 @@ mod tests {
             get("Interface\\AddOns\\MyBlizzard\\Mine.lua").as_deref(),
             Some("mine")
         );
+    }
+    /// A TGA header of `w` by `h` at 32 bits with no alpha bits and `data` after it. `0x5a37e0`
+    /// refuses the pixels, and `0x44a140` still makes the texture.
+    fn refused_tga(w: u16, h: u16, data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; 18];
+        out[2] = 2;
+        out[12..14].copy_from_slice(&w.to_le_bytes());
+        out[14..16].copy_from_slice(&h.to_le_bytes());
+        out[16] = 32;
+        out[17] = 0x20;
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// `0x44a140` returns the texture once the header opens, and the refused decode in `0x44a260`
+    /// fills it opaque white (`0x44a2eb` into `0x448920`) at the size `0x448450` made it. A header
+    /// that makes no texture fails the candidate as a missing file does, whether the pixels would
+    /// decode or not, and so does a candidate the TGA loader does not read, or any load that is not
+    /// `TextureCreate`'s.
+    #[test]
+    fn a_refused_tga_texture_is_opaque_white_at_its_headers_size() {
+        let tga = "interface\\addons\\foo\\icon.tga";
+        let blp = "interface\\addons\\foo\\icon.blp";
+        let white =
+            |candidate, bytes: &[u8]| decode_candidate(candidate, bytes, OnRefusal::WhiteDefault);
+        let bytes = refused_tga(4, 2, &[0; 32]);
+        assert!(
+            decode_sprite_bytes(&bytes).is_err(),
+            "the decoder refuses it"
+        );
+        assert_eq!(
+            white(tga, &bytes),
+            Candidate::Pixels(4, 2, vec![0xff; 4 * 2 * 4])
+        );
+        // The pixels need not be there at all.
+        assert_eq!(
+            white(tga, &refused_tga(1, 512, &[])),
+            Candidate::Pixels(1, 512, vec![0xff; 512 * 4])
+        );
+
+        // Next candidate: not a size `0x448450` makes (decoded or not), a header that does not
+        // open, a BLP candidate (`0x44a500` substitutes a green texture instead), BLP bytes.
+        let mut wide = refused_tga(6, 1, &[9; 24]);
+        wide[17] = 0x28;
+        assert!(
+            decode_sprite_bytes(&wide).is_ok(),
+            "it decodes, and still fails the gate"
+        );
+        for (candidate, bytes) in [
+            (tga, refused_tga(3, 2, &[0; 24])),
+            (tga, refused_tga(2048, 2, &[0; 24])),
+            (tga, wide),
+            (tga, vec![2, 0, 2]),
+            (blp, refused_tga(4, 2, &[0; 32])),
+            (
+                tga,
+                [&b"BLP2"[..], &refused_tga(4, 2, &[0; 32])[4..]].concat(),
+            ),
+        ] {
+            assert_eq!(white(candidate, &bytes), Candidate::Next, "{candidate}");
+        }
+        // A load that is no `TextureCreate`'s leaves them all to the next candidate.
+        for bytes in [&bytes, &refused_tga(3, 2, &[0; 24])] {
+            assert_eq!(
+                decode_candidate(tga, bytes, OnRefusal::Miss),
+                Candidate::Next
+            );
+        }
+
+        // A zero size passes the gate (`0x44849d`) and draws nothing, trying no other candidate.
+        assert_eq!(white(tga, &refused_tga(0, 2, &[])), Candidate::Nothing);
+
+        // A TGA that decodes is its pixels, white or not.
+        let mut ok = refused_tga(2, 1, &[1, 2, 3, 77, 4, 5, 6, 88]);
+        ok[17] = 0x28;
+        assert_eq!(
+            white(tga, &ok),
+            Candidate::Pixels(2, 1, vec![3, 2, 1, 77, 6, 5, 4, 88])
+        );
+    }
+
+    /// The addon corpus' three `BigWigs` ready-check icons are 32-bit TGAs with no alpha bits:
+    /// `0x44a140` returns each as a texture of its header's size once the header opens, and the
+    /// refused decode leaves it white (`0x44a2eb`).
+    #[test]
+    fn the_corpus_ready_check_icons_are_textures_of_their_size() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let corpus = benilla_formats::addon_corpus_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let loose = LooseFiles {
+            addons: Some(corpus),
+            install: None,
+        };
+        for name in ["Ready", "Waiting", "NotReady"] {
+            let path = format!("Interface\\AddOns\\BigWigs\\Icons\\ReadyCheck-{name}");
+            assert!(sprite_found(&chain, &loose, &path), "{name}");
+            assert_eq!(
+                sprite_dimensions(&chain, &loose, &path),
+                Some((64, 64)),
+                "{name}"
+            );
+            let (_, _, rgba) = decode_texture(&chain, &loose, &path, LooseOpen::Index).unwrap();
+            assert!(rgba.iter().all(|&b| b == 0xff), "{name}: opaque white");
+        }
+    }
+
+    /// Through the store: a refused `.tga` in the AddOns folder is a texture of its header's size
+    /// for `SetTexture`'s loads. A header that makes no texture (`0x448450` takes powers of two
+    /// below 1024) is a miss, its pixels decoded or not, and a zero size passes.
+    #[test]
+    fn a_refused_tga_in_the_addons_folder_is_a_texture_of_its_size() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("white");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Icon.tga"), refused_tga(8, 4, &[0; 128])).unwrap();
+        std::fs::write(dir.join("Odd.tga"), refused_tga(6, 4, &[0; 96])).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let icon = "Interface\\AddOns\\Foo\\Icon";
+        assert!(sprite_found(&chain, &loose, icon));
+        assert_eq!(sprite_dimensions(&chain, &loose, icon), Some((8, 4)));
+        let (w, h, rgba) = decode_texture(&chain, &loose, icon, LooseOpen::Index).unwrap();
+        assert_eq!((w, h, rgba.len()), (8, 4, 8 * 4 * 4));
+        assert!(rgba.iter().all(|&b| b == 0xff));
+        // A load that is not `TextureCreate`'s still gets no pixels.
+        assert!(decode_sprite(&chain, &loose, icon, LooseOpen::Index).is_none());
+        // Not a size `0x448450` makes (`0x4484ae`-`0x4484d0`): `TextureCreate` fails the candidate
+        // whether its pixels decode or not, and `SetTexture` answers nil.
+        std::fs::write(dir.join("Wide.tga"), decodable_tga(6, 1)).unwrap();
+        std::fs::write(dir.join("Fine.tga"), decodable_tga(2, 1)).unwrap();
+        for (name, found, size) in [
+            ("Odd", false, None),
+            ("Wide", false, None),
+            ("Fine", true, Some((2, 1))),
+        ] {
+            let path = format!("Interface\\AddOns\\Foo\\{name}");
+            assert_eq!(sprite_found(&chain, &loose, &path), found, "{name}");
+            assert_eq!(sprite_dimensions(&chain, &loose, &path), size, "{name}");
+        }
+        // A zero size passes the gate (`0x44849d`, `test ebx, ebx-1`), and draws nothing.
+        std::fs::write(dir.join("Zero.tga"), refused_tga(0, 4, &[])).unwrap();
+        let zero = "Interface\\AddOns\\Foo\\Zero";
+        assert!(sprite_found(&chain, &loose, zero));
+        assert_eq!(sprite_dimensions(&chain, &loose, zero), None);
+    }
+
+    /// A 32-bit TGA with 8 alpha bits, `w` by `h`, that the decoder reads.
+    fn decodable_tga(w: u16, h: u16) -> Vec<u8> {
+        let mut out = refused_tga(w, h, &vec![9; usize::from(w) * usize::from(h) * 4]);
+        out[17] = 0x28;
+        out
+    }
+    /// `SetTexture` runs per frame in the addons that set an icon every `OnUpdate`: a TGA's header
+    /// is read once for a resolved file, and a read that fails is asked again.
+    #[test]
+    fn the_size_gate_reads_a_resolved_file_once() {
+        let probe = SpriteProbe::default();
+        let tga = "interface\\addons\\foo\\icon.tga";
+        let good = refused_tga(8, 4, &[]);
+        let reads = std::cell::Cell::new(0);
+        let read = |bytes: Option<&Vec<u8>>| {
+            reads.set(reads.get() + 1);
+            bytes.cloned()
+        };
+        for _ in 0..3 {
+            assert!(probe.gate("loose", tga, || read(Some(&good))));
+        }
+        assert_eq!(reads.get(), 1, "the same file answered from the memo");
+        assert_eq!(probe.header_reads.get(), 1);
+
+        // Another resolved file under the same name is its own question: the chain's copy, once a
+        // loose one shadows it, or the other way round.
+        assert!(!probe.gate("chain", tga, || read(Some(&refused_tga(3, 4, &[])))));
+        assert!(!probe.gate("chain", tga, || read(Some(&good))));
+        assert_eq!(reads.get(), 2);
+
+        // A file that will not read says no and is asked again.
+        assert!(!probe.gate("gone", tga, || read(None)));
+        assert!(probe.gate("gone", tga, || read(Some(&good))));
+        assert_eq!(reads.get(), 4);
+    }
+
+    /// The same, through the store: a second `SetTexture` of the path reads no file.
+    #[test]
+    fn a_second_probe_of_a_tga_reads_no_file() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
+        let addons = Tree::new("probe");
+        let dir = addons.0.join("Foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Icon.tga"), refused_tga(8, 4, &[0; 128])).unwrap();
+        std::fs::write(dir.join("Odd.tga"), refused_tga(6, 4, &[0; 96])).unwrap();
+        let loose = LooseFiles {
+            addons: Some(addons.0.clone()),
+            install: None,
+        };
+        let probe = SpriteProbe::default();
+        for _ in 0..3 {
+            assert!(probe.found(&chain, &loose, "Interface\\AddOns\\Foo\\Icon"));
+            assert!(!probe.found(&chain, &loose, "Interface\\AddOns\\Foo\\Odd"));
+            assert!(!probe.found(&chain, &loose, "Interface\\AddOns\\Foo\\Missing"));
+        }
+        // One read each of the two files, and none of a name that is not there.
+        assert_eq!(probe.header_reads.get(), 2);
     }
 }

@@ -25,19 +25,30 @@ pub struct TaxiPath {
 /// `TaxiPath.dbc` rows by id, plus a `(from, to)` lookup.
 pub struct TaxiPaths {
     rows: HashMap<u32, TaxiPath>,
-    by_pair: HashMap<(u32, u32), u32>,
+    by_pair: HashMap<(u32, u32), TaxiPath>,
 }
 
 impl TaxiPaths {
+    /// A catalog of these hops in file order, a later row replacing an earlier one with its id. A
+    /// pair keeps its first row: the reference's pair table walks the rows from the last, each
+    /// overwriting its pair's cell (`0x4db387`-`0x4db3e2`).
+    pub fn from_rows(hops: impl IntoIterator<Item = TaxiPath>) -> Self {
+        let mut rows = HashMap::new();
+        let mut by_pair = HashMap::new();
+        for hop in hops {
+            rows.insert(hop.id, hop);
+            by_pair.entry((hop.from, hop.to)).or_insert(hop);
+        }
+        Self { rows, by_pair }
+    }
+
     pub fn get(&self, id: u32) -> Option<&TaxiPath> {
         self.rows.get(&id)
     }
 
     /// The direct hop from `from` to `to`; the table is directed, one row per direction.
     pub fn between(&self, from: u32, to: u32) -> Option<&TaxiPath> {
-        self.by_pair
-            .get(&(from, to))
-            .and_then(|id| self.rows.get(id))
+        self.by_pair.get(&(from, to))
     }
 
     /// Every direct hop leaving `node`, in no order.
@@ -66,22 +77,34 @@ fn schema() -> Schema {
 pub fn load_taxi_paths(chain: &mut Chain) -> Result<TaxiPaths> {
     let bytes = chain.read_file(TAXI_PATH).context("reading TaxiPath.dbc")?;
     let rs = parse(&bytes, schema(), "TaxiPath")?;
-    let mut rows = HashMap::with_capacity(rs.records().len());
-    let mut by_pair = HashMap::with_capacity(rs.records().len());
-    for r in rs.records() {
-        let Some(id) = u32_at(r, 0) else { continue };
-        let Some(from) = u32_at(r, 1) else { continue };
-        let Some(to) = u32_at(r, 2) else { continue };
-        let cost = u32_at(r, 3).unwrap_or(0);
-        rows.insert(id, TaxiPath { id, from, to, cost });
-        by_pair.insert((from, to), id);
-    }
-    Ok(TaxiPaths { rows, by_pair })
+    let hops = rs.records().iter().filter_map(|r| {
+        Some(TaxiPath {
+            id: u32_at(r, 0)?,
+            from: u32_at(r, 1)?,
+            to: u32_at(r, 2)?,
+            cost: u32_at(r, 3).unwrap_or(0),
+        })
+    });
+    Ok(TaxiPaths::from_rows(hops))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The path table keeps the first row of a pair: `0x4db387` walks the rows from the last, each
+    /// overwriting the pair's cell (`0x4db3e2`).
+    #[test]
+    fn a_duplicated_pair_keeps_its_first_row() {
+        let hop = |id, cost| TaxiPath {
+            id,
+            from: 1,
+            to: 2,
+            cost,
+        };
+        let cat = TaxiPaths::from_rows([hop(7, 10), hop(9, 20)]);
+        assert_eq!(cat.between(1, 2).map(|p| (p.id, p.cost)), Some((7, 10)));
+    }
 
     /// Hop 6 runs Stormwind (node 2) to Sentinel Hill (node 4) for 110 copper.
     #[test]

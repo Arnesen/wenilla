@@ -1,7 +1,7 @@
 //! The engine verbs stock `ChatFrame.lua`'s slash handlers call that are not sends, channels or
 //! window state: `DoEmote` (`0x49fd30`), `RandomRoll` (`0x48c7b0`), `AssistByName` (`0x489c40`),
-//! `UninviteByName` (`0x48a610`), `ConsoleExec`, `LoggingChat` and `LoggingCombat`. Each is a
-//! queue or a flag the app drains.
+//! `UninviteByName` (`0x48a610`), `LoggingChat` and `LoggingCombat`. The first four apply inside
+//! the call ([`super::ScriptCall`]); the logging pair is a flag the app drains.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -17,38 +17,33 @@ pub struct EmoteRequest {
     pub target: Option<String>,
 }
 
-/// The reference's `lua_tonumber` coercion: a number or a numeric string; anything else is 0.
-fn to_u32(v: &Value) -> u32 {
-    match v {
-        Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
-        Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as u32,
-        Value::String(s) => s
-            .to_str()
-            .ok()
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|n| n.is_finite() && *n >= 0.0)
-            .map_or(0, |n| n as u32),
-        _ => 0,
-    }
-}
-
 impl super::UiScript {
-    /// `DoEmote` calls since the last drain.
+    /// The `DoEmote` calls a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_emote_requests(&mut self) -> Vec<EmoteRequest> {
-        std::mem::take(&mut self.model_mut().emote_requests)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::DoEmote(e) => Some(e.clone()),
+            _ => None,
+        })
     }
 
-    /// `RandomRoll(min, max)` calls since the last drain, each a `CMSG_RANDOM_ROLL`.
+    /// The `RandomRoll(min, max)` sends a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_roll_requests(&mut self) -> Vec<(u32, u32)> {
-        std::mem::take(&mut self.model_mut().roll_requests)
+        self.take_calls_where(|call| match *call {
+            super::ScriptCall::RandomRoll { min, max } => Some((min, max)),
+            _ => None,
+        })
     }
 
-    /// `UninviteByName` calls since the last drain.
+    /// The `UninviteByName` calls a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_uninvite_requests(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().uninvite_requests)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Uninvite(name) => Some(name.clone()),
+            _ => None,
+        })
     }
 
-    /// `ConsoleExec` lines that write no CVar: the app's console commands (`reloadui`, …).
+    /// `ConsoleExec` lines its own CVar commands did not run ([`super::console_exec`]): the app's
+    /// console commands (`reloadui`, …), a bare CVar name, an unknown word.
     pub fn take_console_lines(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().console_lines)
     }
@@ -65,41 +60,11 @@ impl super::UiScript {
     }
 }
 
-/// `ConsoleExec` (`0x515f10`) is in the registrar both states call (`0x51bb20`, from the glue
-/// registrar `0x46abb0` and the in-game `0x51bb60`), so it installs apart from this file's in-game
-/// verbs.
-pub(super) fn install_console_exec(lua: &Lua) -> mlua::Result<()> {
-    // `ConsoleExec("name value")`: a registered CVar with a value is written at once, as `SetCVar`
-    // writes it; anything else, a bare CVar name included (the reference answers it with
-    // `CVar "%s" is "%s"`, `0x63dde0`), goes to the app's command registry.
-    lua.globals().set(
-        "ConsoleExec",
-        lua.create_function(|lua, line: Option<String>| {
-            let Some(line) = line.map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) else {
-                return Ok(());
-            };
-            let (name, value) = line
-                .split_once(char::is_whitespace)
-                .map_or((line.as_str(), ""), |(n, v)| (n, v.trim()));
-            // `reloadUI` is `ReloadUiCommand` (`0x4035f0`), which asks `CGGameUI::Reload`'s gate,
-            // tag 10 (`0x4035fa` → `0x491380`), inside the call: refused, it does nothing.
-            if name.eq_ignore_ascii_case("reloadui")
-                && !super::protected::gate(lua, super::protected::Tag::RELOAD)
-            {
-                return Ok(());
-            }
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let is_cvar = model.cvars.contains_key(&name.to_ascii_lowercase());
-            if is_cvar && !value.is_empty() {
-                super::cvars::write_cvar(&mut model, name, value.to_string());
-            } else {
-                model.console_lines.push(line.clone());
-            }
-            Ok(())
-        })?,
-    )?;
-    Ok(())
-}
+/// `Usage: RandomRoll("max") or RandomRoll("min", "max")`, `0x842a94`.
+const USAGE_RANDOM_ROLL: &str = r#"Usage: RandomRoll("max") or RandomRoll("min", "max")"#;
+
+/// `cmp edi,0xf4240` (`0x48c82a`): the highest `max` that rolls.
+const MAX_ROLL: i32 = 1_000_000;
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
@@ -110,56 +75,70 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(token) = token.filter(|t| !t.is_empty()) else {
                 return Ok(());
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.emote_requests.push(EmoteRequest {
+            let request = EmoteRequest {
                 token: token.to_ascii_uppercase(),
-                target: match target {
-                    Value::String(s) => Some(s.to_string_lossy()),
-                    Value::Integer(i) => Some(i.to_string()),
-                    Value::Number(n) => Some(n.to_string()),
-                    _ => None,
-                }
-                .filter(|t| !t.is_empty()),
-            });
-            Ok(())
+                // `lua_tostring(2)` (`0x49fdc5`): a number is its `%.14g` text.
+                target: crate::script::binding_abi::optional_string(lua, &target)
+                    .filter(|t| !t.is_empty()),
+            };
+            super::calls::submit(lua, super::ScriptCall::DoEmote(request))
         })?,
     )?;
 
     g.set(
         "RandomRoll",
         lua.create_function(|lua, (min, max): (Value, Value)| {
-            let (min, max) = (to_u32(&min), to_u32(&max));
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.roll_requests.push((min, max));
-            Ok(())
+            // Both must be a string or a number (`lua_isstring`, `0x48c7c0`, `0x48c7d4`), else the
+            // usage error (`0x842a94`, at `0x48c8a1`); each is read with `SStrToInt` (`0x64ac60`).
+            let min = super::binding_abi::string_arg(lua, min, USAGE_RANDOM_ROLL)?;
+            let max = super::binding_abi::string_arg(lua, max, USAGE_RANDOM_ROLL)?;
+            let (min, max) = (
+                super::binding_abi::s_str_to_int(&min),
+                super::binding_abi::s_str_to_int(&max),
+            );
+            // `0x48c807`-`0x48c830`: nothing for `(0, 0)`, a negative `min`, `max` below `min` or
+            // `max` past 1000000, compared signed.
+            if (min == 0 && max == 0) || min < 0 || max < min || max > MAX_ROLL {
+                return Ok(());
+            }
+            super::calls::submit(
+                lua,
+                super::ScriptCall::RandomRoll {
+                    min: min as u32,
+                    max: max as u32,
+                },
+            )
         })?,
     )?;
 
+    // AssistByName(name) (`0x489c40`): a non-string raises `Usage:` (`0x489d3f`); any string,
+    // the empty one included, goes to the host, which assists the named player or, for an empty
+    // name, the selection (`0x489c89`), and shows the line its miss owes (`0x489d17`, `0x489d2b`).
     g.set(
         "AssistByName",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
-                return Ok(());
-            };
+        lua.create_function(|lua, name: Value| {
+            let name = super::binding_abi::string_arg(lua, name, r#"Usage: AssistByName("name")"#)?;
             let may_cast = super::protected::select_may_cast(lua);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.queue_call(super::ScriptCall::Select {
-                request: super::SelectionRequest::AssistByName(name),
-                may_cast,
-            });
+            super::calls::submit(
+                lua,
+                super::ScriptCall::Select {
+                    request: super::SelectionRequest::AssistByName(name),
+                    may_cast,
+                },
+            )?;
             Ok(())
         })?,
     )?;
 
+    // UninviteByName(name) (`0x48a610`): `lua_isstring` (`0x6f3510` at `0x48a61e`) else
+    // `Usage: UninviteByName("name")` (`0x48a698`, the string at `0x8427c0`); any string, the
+    // empty one included, goes into `CMSG_GROUP_UNINVITE` as it is (`0x48a65e`), with no trim.
     g.set(
         "UninviteByName",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
-                return Ok(());
-            };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.uninvite_requests.push(name);
-            Ok(())
+        lua.create_function(|lua, name: Value| {
+            let name =
+                super::binding_abi::string_arg(lua, name, r#"Usage: UninviteByName("name")"#)?;
+            super::calls::submit(lua, super::ScriptCall::Uninvite(name))
         })?,
     )?;
 
@@ -205,6 +184,7 @@ mod tests {
     #[test]
     fn do_emote_queues_the_uppercased_token_and_a_non_empty_target() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("DoEmote('wave', 'Bob') DoEmote('DANCE', '') DoEmote('') DoEmote()")
             .unwrap();
         assert_eq!(
@@ -228,6 +208,7 @@ mod tests {
     #[test]
     fn do_emote_second_argument_is_passed_as_a_string() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("DoEmote('WAVE', 'target') DoEmote('WAVE', '%t') DoEmote('WAVE', {})")
             .unwrap();
         let targets: Vec<_> = s
@@ -241,61 +222,96 @@ mod tests {
         );
     }
 
+    /// `RandomRoll` reads both arguments as text (`0x48c7c0`, `0x48c7d4`) through `SStrToInt`
+    /// (`0x64ac60`), so a number is its text and `"12x"` is 12.
     #[test]
-    fn random_roll_coerces_the_strings_the_stock_handler_passes() {
+    fn random_roll_reads_the_strings_the_stock_handler_passes() {
         let mut s = UiScript::new().unwrap();
-        s.run("RandomRoll('1', '100') RandomRoll(5, 10) RandomRoll('x', nil)")
-            .unwrap();
-        assert_eq!(s.take_roll_requests(), vec![(1, 100), (5, 10), (0, 0)]);
+        s.keep_calls();
+        s.run(
+            "RandomRoll('1', '100') RandomRoll(5, 10) RandomRoll('1', '12x') RandomRoll(' 1', 2)",
+        )
+        .unwrap();
+        assert_eq!(
+            s.take_roll_requests(),
+            vec![(1, 100), (5, 10), (1, 12), (0, 2)]
+        );
     }
 
+    /// Both arguments must be a string or a number, else the usage error (`0x842a94`, at
+    /// `0x48c8a1`): `RandomRoll("100")` raises, though its usage text names that form.
+    #[test]
+    fn random_roll_raises_its_usage_without_two_strings() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        for bad in [
+            "RandomRoll()",
+            "RandomRoll('100')",
+            "RandomRoll(nil, 100)",
+            "RandomRoll(1, {})",
+            "RandomRoll(true, 2)",
+        ] {
+            let err = s.run(bad).expect_err(bad).to_string();
+            assert!(
+                err.contains(r#"Usage: RandomRoll("max") or RandomRoll("min", "max")"#),
+                "{bad}: {err}"
+            );
+        }
+        assert!(s.take_roll_requests().is_empty());
+    }
+
+    /// `0x48c807`-`0x48c830`: no roll for `(0, 0)`, a negative `min`, `max` below `min` or `max`
+    /// past 1000000; `(0, max)` and `(n, n)` roll.
+    #[test]
+    fn random_roll_sends_only_an_ordered_range_up_to_a_million() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.run(
+            "RandomRoll(0, 0) RandomRoll(-1, 5) RandomRoll(10, 5) RandomRoll(1, 1000001) \
+             RandomRoll('x', 'y') RandomRoll('1', 'x') RandomRoll(0, 1000000) RandomRoll(7, 7) \
+             RandomRoll('x', 3)",
+        )
+        .unwrap();
+        assert_eq!(s.take_roll_requests(), vec![(0, 1_000_000), (7, 7), (0, 3)]);
+    }
+
+    /// `AssistByName` hands the host any string, the empty one included, which assists the
+    /// selection (`0x489c89`).
     #[test]
     fn assist_and_uninvite_by_name_queue_their_names() {
         let mut s = UiScript::new().unwrap();
-        s.run("AssistByName('Alice') AssistByName('') UninviteByName('Carol') UninviteByName()")
+        s.keep_calls();
+        s.run("AssistByName('Alice') AssistByName('') UninviteByName('Carol')")
             .unwrap();
         assert_eq!(
             s.take_selection_requests(),
-            vec![SelectionRequest::AssistByName("Alice".into())]
+            vec![
+                SelectionRequest::AssistByName("Alice".into()),
+                SelectionRequest::AssistByName(String::new()),
+            ]
         );
         assert_eq!(s.take_uninvite_requests(), vec!["Carol".to_string()]);
     }
 
+    /// `UninviteByName` (`0x48a610`) tests its argument with `lua_isstring` (`0x6f3510` at
+    /// `0x48a61e`): a non-string, nil and no argument included, raises `Usage:
+    /// UninviteByName("name")` (`0x48a625` → `0x48a698`, the string at `0x8427c0`). Any string,
+    /// a number's text among them, goes into `CMSG_GROUP_UNINVITE` as it is (`0x48a655`,
+    /// `0x48a65e`) and is sent (`0x48a669`): no trim and no empty test.
     #[test]
-    fn console_exec_writes_a_registered_cvar_and_queues_anything_else() {
+    fn uninvite_by_name_raises_for_a_non_string_and_sends_any_string() {
         let mut s = UiScript::new().unwrap();
-        s.register_cvars([("uiScale", "1")]);
-        s.run("ConsoleExec('uiscale 0.8') ConsoleExec('reloadui') ConsoleExec('  ') ConsoleExec('uiScale')")
+        s.keep_calls();
+        for arg in ["", "nil", "true", "{}"] {
+            let e = s
+                .run(&format!("UninviteByName({arg})"))
+                .expect_err(arg)
+                .to_string();
+            assert!(e.contains(r#"Usage: UninviteByName("name")"#), "{arg}: {e}");
+        }
+        s.run("UninviteByName('') UninviteByName('  ') UninviteByName(5) UninviteByName('Carol')")
             .unwrap();
-        assert_eq!(
-            s.eval::<String>("return GetCVar('uiScale')").unwrap(),
-            "0.8",
-            "the CVar store is the same one SetCVar writes, matched case-insensitively"
-        );
-        // A bare CVar name, whose value the reference prints, goes to the command lane.
-        assert_eq!(
-            s.take_console_lines(),
-            vec!["reloadui".to_string(), "uiScale".to_string()]
-        );
-        assert_eq!(
-            s.take_cvar_changes(),
-            vec![("uiScale".to_string(), "0.8".to_string())],
-            "a bare name writes nothing"
-        );
-    }
-
-    /// `reloadUI` is `ReloadUiCommand` (`0x4035f0`), which asks the gate's tag 10 (`0x4035fa`): a
-    /// macro's line outside an input event is ignored, a key's body or the client's own passes.
-    #[test]
-    fn console_exec_reload_ui_asks_the_gate() {
-        let mut s = UiScript::new().unwrap();
-        s.run(r#"RunScript("ConsoleExec('reloadUI')")"#).unwrap();
-        assert!(s.take_console_lines().is_empty());
-        s.run_binding(r#"RunScript("ConsoleExec('ReloadUI')")"#)
-            .unwrap();
-        assert_eq!(s.take_console_lines(), vec!["ReloadUI".to_string()]);
-        s.run("ConsoleExec('reloadui')").unwrap();
-        assert_eq!(s.take_console_lines(), vec!["reloadui".to_string()]);
+        assert_eq!(s.take_uninvite_requests(), ["", "  ", "5", "Carol"]);
     }
 
     #[test]
@@ -323,5 +339,18 @@ mod tests {
         assert_eq!(s.eval::<i64>("return LoggingChat(true)").unwrap(), 1);
         assert_eq!(s.arity("LoggingChat(nil)").unwrap(), 1);
         assert!(s.eval::<bool>("return LoggingChat(nil) == nil").unwrap());
+    }
+
+    /// `AssistByName` (`0x489c40`) selects inside its call with a host lent.
+    #[test]
+    fn assist_by_name_applies_in_the_call_with_a_host_lent() {
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(
+            crate::script::host::test_support::applied_in_call(&mut s, "AssistByName('Alice')"),
+            vec![crate::script::ScriptCall::Select {
+                request: SelectionRequest::AssistByName("Alice".into()),
+                may_cast: true,
+            }]
+        );
     }
 }

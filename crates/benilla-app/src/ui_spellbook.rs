@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::prelude::*;
 
 use benilla_formats::{SkillLineCatalog, SpellCatalog};
-use benilla_ui::script::{ScriptValue, SpellBookState, SpellSlotView, SpellTabView, UiScript};
+use benilla_ui::script::{
+    ScriptValue, SpellBookState, SpellSlotView, SpellTabName, SpellTabView, UiScript,
+};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -57,7 +59,8 @@ impl Plugin for UiSpellbookPlugin {
                 // re-read its cooldowns. A click's cast is a script call (`cast_spell`).
                 feed_spellbook
                     .in_set(UnitFeed)
-                    .before(crate::ui_action::CooldownEvents),
+                    .before(crate::ui_action::CooldownEvents)
+                    .before(crate::ui_cast::feed_cast_reports),
             );
     }
 }
@@ -95,183 +98,191 @@ struct FeedMemory {
 }
 
 fn feed_spellbook(
-    script: Option<NonSendMut<UiScript>>,
+    mut vm: crate::script_calls::VmWith<Res<'static, crate::spell::Cooldowns>>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
     mut inv: crate::items::Inventory,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
-    cooldowns: Res<crate::spell::Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
     mut learned: ResMut<LearnedInTab>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let (memory, vm_reset) = memory.get_reset(&script);
-    // The book depends on these inputs alone. `UiClock` is not one: a running read's `ui_triple`
-    // is frame-stable per arm (a held read's start is the query's `anchor`, so it moves with
-    // `ui_now`, but nothing held moves an input), and expiry moves the store's `feed_epoch`.
-    let objects_moved = inv.changes.moved();
-    let templates_moved = memory.items_templates.moved(items.template_epoch());
-    let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
-    let presence_moved = memory
-        .self_present
-        .moved(u64::from(!inv.self_store.is_empty()));
-    // The frame a timer crosses zero, before the prune moves the epoch.
-    let sweep = cooldowns.sweep_pending(clock.anchor);
-    let self_changed = !inv.self_changed.is_empty();
-    let actions_changed = actions.is_changed();
-    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
-    let lines_changed = skill_lines.as_ref().is_some_and(|r| r.is_changed());
-    // `is_added`: only the load-once icon column is read; the model cache churns every frame.
-    let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
-    gate::trace(
-        "feed_spellbook",
-        &[
-            ("vm_reset", vm_reset),
-            ("objects", objects_moved),
-            ("templates", templates_moved),
-            ("cooldowns", cooldowns_moved),
-            ("sweep", sweep),
-            ("presence", presence_moved),
-            ("self", self_changed),
-            ("actions", actions_changed),
-            ("spells", spells_changed),
-            ("skill_lines", lines_changed),
-            ("icons", icons_added),
-            // A queued learn never waits behind a skipped frame.
-            ("learned", !learned.0.is_empty()),
-        ],
-    );
-    let gate = gate::Gate::new(
-        vm_reset
-            || objects_moved
-            || templates_moved
-            || cooldowns_moved
-            || sweep
-            || presence_moved
-            || self_changed
-            || actions_changed
-            || spells_changed
-            || lines_changed
-            || icons_added
-            || !learned.0.is_empty(),
-    );
-    if gate.skip() {
-        return;
-    }
-    // Drained before a later return can strand it; an unresolved id fires nothing, as in 1.12.
-    let learned = std::mem::take(&mut learned.0);
-    let Some(spells) = spells.as_deref() else {
-        return;
-    };
-    // Race and class drive the General collapse; 0/0 before the descriptor skips it.
-    let store = inv.self_store.single().ok();
-    let (race, class) = store
-        .map(|s| (s.0.unit_race().unwrap_or(0), s.0.unit_class().unwrap_or(0)))
-        .unwrap_or((0, 0));
-    // The melee auto-attack shows the main-hand weapon, or Spell-Reset unarmed, not its `Temp`.
-    let attack_icon = store
-        .map(|s| melee_auto_attack_icon(s, &spells.forms, &inv.objects, &items, icons.as_deref()));
-    // Auto Shot and wand Shoot show the ranged weapon; without one, their own icon.
-    let ranged_icon =
-        store.and_then(|s| ranged_weapon_icon(s, &inv.objects, &items, icons.as_deref()));
-    let (mut fresh, tab_lines) = build_book(
-        &actions.spells,
-        &spells.catalog,
-        skill_lines.as_deref().map(|s| &s.catalog),
-        race,
-        class,
-        attack_icon,
-        ranged_icon,
-    );
-    // The face the action bar paints for a weapon-face or `ActiveIconID` spell, where it is not
-    // the book's: a drop writes it, so the slot's in-place event reads what the bar feed would.
-    for slot in &mut fresh.slots {
-        let Some(d) = spells
-            .catalog
-            .get(slot.spell_id)
-            .filter(|d| crate::ui_action::substitutes_weapon_icon(d) || d.active_icon_id != 0)
-        else {
-            continue;
-        };
-        let face = crate::ui_action::spell_action_icon(
-            slot.spell_id,
-            d,
-            spells,
-            store,
-            &inv.objects,
-            &items,
-            icons.as_deref(),
-        );
-        if face != slot.texture {
-            slot.bar_texture = Some(face);
-        }
-    }
-    // The book's `IsCurrentCast` is `0x4b3600`, not the action bar's `0x4e53a0`, with two arms: a
-    // form spell is current while the form byte is its form, and the open trade-skill window, not
-    // built. It has no casting-now arm, so a book slot never lights during a cast.
-    let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
-    if form_byte != 0 {
-        for slot in &mut fresh.slots {
-            slot.current = spells
-                .catalog
-                .get(slot.spell_id)
-                .is_some_and(|d| d.shapeshift_form == Some(u32::from(form_byte)));
-        }
-    }
-    // Each slot's cooldown (`GetCooldownInfo` `0x6e13e0`: id, category and GCD alike) on the
-    // `GetTime` clock, frame-stable per arm while it runs, so a running cooldown never churns the
-    // diff; a held read starts at `anchor`, so it differs per push.
-    let (anchor, ui_now) = (clock.anchor, clock.ui_now);
-    for slot in &mut fresh.slots {
-        slot.cooldown = cooldowns
-            .info(slot.spell_id, 0, spells.catalog.get(slot.spell_id), anchor)
-            .ui_triple(anchor, ui_now);
-    }
-    if fresh != memory.pushed {
-        gate.audit("feed_spellbook", "the spellbook snapshot");
-        // A checked-ring move fires `CURRENT_SPELL_CAST_CHANGED`, a book change `SPELLS_CHANGED`.
-        let ring_moved = fresh.slots.len() != memory.pushed.slots.len()
-            || fresh
-                .slots
-                .iter()
-                .zip(&memory.pushed.slots)
-                .any(|(a, b)| a.current != b.current);
-        let book_changed = fresh.tabs != memory.pushed.tabs
-            || fresh.slots.len() != memory.pushed.slots.len()
-            || fresh.slots.iter().zip(&memory.pushed.slots).any(|(a, b)| {
-                (a.spell_id, &a.name, &a.rank, &a.texture, a.passive)
-                    != (b.spell_id, &b.name, &b.rank, &b.texture, b.passive)
+    // The book, read off the host's cooldowns and pushed; its events signal with the host lent.
+    let Some((book_changed, learned, tab_lines, race, class)) =
+        vm.turn(|script, cooldowns| {
+            let script = script?;
+            let (memory, vm_reset) = memory.get_reset(script);
+            // The book depends on these inputs alone. `UiClock` is not one: a running read's
+            // `ui_triple` is frame-stable per arm (a held read's start is the query's `anchor`, so
+            // it moves with `ui_now`, but nothing held moves an input), and expiry moves the
+            // store's `feed_epoch`.
+            let objects_moved = inv.changes.moved();
+            let templates_moved = memory.items_templates.moved(items.template_epoch());
+            let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
+            let presence_moved = memory
+                .self_present
+                .moved(u64::from(!inv.self_store.is_empty()));
+            // The frame a timer crosses zero, before the prune moves the epoch.
+            let sweep = cooldowns.sweep_pending(clock.anchor);
+            let self_changed = !inv.self_changed.is_empty();
+            let actions_changed = actions.is_changed();
+            let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+            let lines_changed = skill_lines.as_ref().is_some_and(|r| r.is_changed());
+            // `is_added`: only the load-once icon column is read; the model cache churns every
+            // frame.
+            let icons_added = icons.as_ref().is_some_and(|r| r.is_added());
+            gate::trace(
+                "feed_spellbook",
+                &[
+                    ("vm_reset", vm_reset),
+                    ("objects", objects_moved),
+                    ("templates", templates_moved),
+                    ("cooldowns", cooldowns_moved),
+                    ("sweep", sweep),
+                    ("presence", presence_moved),
+                    ("self", self_changed),
+                    ("actions", actions_changed),
+                    ("spells", spells_changed),
+                    ("skill_lines", lines_changed),
+                    ("icons", icons_added),
+                    // A queued learn never waits behind a skipped frame.
+                    ("learned", !learned.0.is_empty()),
+                ],
+            );
+            let gate = gate::Gate::new(
+                vm_reset
+                    || objects_moved
+                    || templates_moved
+                    || cooldowns_moved
+                    || sweep
+                    || presence_moved
+                    || self_changed
+                    || actions_changed
+                    || spells_changed
+                    || lines_changed
+                    || icons_added
+                    || !learned.0.is_empty(),
+            );
+            if gate.skip() {
+                return None;
+            }
+            // Drained before a later return can strand it; an unresolved id fires nothing, as in
+            // 1.12.
+            let learned = std::mem::take(&mut learned.0);
+            let spells = spells.as_deref()?;
+            // Race and class drive the General collapse; 0/0 before the descriptor skips it.
+            let store = inv.self_store.single().ok();
+            let (race, class) = store
+                .map(|s| (s.0.unit_race().unwrap_or(0), s.0.unit_class().unwrap_or(0)))
+                .unwrap_or((0, 0));
+            // The melee auto-attack shows the main-hand weapon, or Spell-Reset unarmed, not its
+            // `Temp`.
+            let attack_icon = store.map(|s| {
+                melee_auto_attack_icon(s, &spells.forms, &inv.objects, &items, icons.as_deref())
             });
-        debug!(
-            "ui_spellbook: fed {} tab(s), {} spell(s) (book {book_changed}, ring {ring_moved})",
-            fresh.tabs.len(),
-            fresh.slots.len()
-        );
-        script.set_spellbook(fresh.clone());
-        memory.pushed = fresh;
+            // Auto Shot and wand Shoot show the ranged weapon; without one, their own icon.
+            let ranged_icon =
+                store.and_then(|s| ranged_weapon_icon(s, &inv.objects, &items, icons.as_deref()));
+            let (mut fresh, tab_lines) = build_book(
+                &actions.spells,
+                &spells.catalog,
+                skill_lines.as_deref().map(|s| &s.catalog),
+                race,
+                class,
+                attack_icon,
+                ranged_icon,
+            );
+            // The face the action bar paints for a weapon-face or `ActiveIconID` spell, where it is
+            // not the book's: a drop writes it, so the slot's in-place event reads what the bar
+            // feed would.
+            for slot in &mut fresh.slots {
+                let Some(d) = spells.catalog.get(slot.spell_id).filter(|d| {
+                    crate::ui_action::substitutes_weapon_icon(d) || d.active_icon_id != 0
+                }) else {
+                    continue;
+                };
+                let face = crate::ui_action::spell_action_icon(
+                    slot.spell_id,
+                    d,
+                    spells,
+                    store,
+                    &inv.objects,
+                    &items,
+                    icons.as_deref(),
+                );
+                if face != slot.texture {
+                    slot.bar_texture = Some(face);
+                }
+            }
+            // The book's `IsCurrentCast` is `0x4b3600`, not the action bar's `0x4e53a0`, with two
+            // arms: a form spell is current while the form byte is its form, and the open
+            // trade-skill window, not built. It has no casting-now arm, so a book slot never lights
+            // during a cast.
+            let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
+            if form_byte != 0 {
+                for slot in &mut fresh.slots {
+                    slot.current = spells
+                        .catalog
+                        .get(slot.spell_id)
+                        .is_some_and(|d| d.shapeshift_form == Some(u32::from(form_byte)));
+                }
+            }
+            // Each slot's cooldown (`GetCooldownInfo` `0x6e13e0`: id, category and GCD alike) on
+            // the `GetTime` clock, frame-stable per arm while it runs, so a running cooldown never
+            // churns the diff; a held read starts at `anchor`, so it differs per push.
+            let (anchor, ui_now) = (clock.anchor, clock.ui_now);
+            for slot in &mut fresh.slots {
+                slot.cooldown = cooldowns
+                    .info(slot.spell_id, 0, spells.catalog.get(slot.spell_id), anchor)
+                    .ui_triple(anchor, ui_now);
+            }
+            let mut changed = false;
+            if fresh != memory.pushed {
+                gate.audit("feed_spellbook", "the spellbook snapshot");
+                // A book change fires `SPELLS_CHANGED`. The checked ring follows the form byte,
+                // whose change signals `CURRENT_SPELL_CAST_CHANGED` (`0x5de016`,
+                // [`crate::ui_cast`]) after this push.
+                let book_changed = fresh.tabs != memory.pushed.tabs
+                    || fresh.slots.len() != memory.pushed.slots.len()
+                    || fresh.slots.iter().zip(&memory.pushed.slots).any(|(a, b)| {
+                        (a.spell_id, &a.name, &a.rank, &a.texture, a.passive)
+                            != (b.spell_id, &b.name, &b.rank, &b.texture, b.passive)
+                    });
+                debug!(
+                    "ui_spellbook: fed {} tab(s), {} spell(s) (book {book_changed})",
+                    fresh.tabs.len(),
+                    fresh.slots.len()
+                );
+                script.set_spellbook(fresh.clone());
+                memory.pushed = fresh;
+                changed = book_changed;
+            }
+            Some((changed, learned, tab_lines, race, class))
+        })
+    else {
+        return;
+    };
+    vm.run(|script| {
+        let (Some(script), Some(spells)) = (script, spells.as_deref()) else {
+            return;
+        };
         if book_changed {
             script.fire_event("SPELLS_CHANGED", vec![]);
         }
-        if ring_moved {
-            script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
-        }
-    }
-    // The tab flash after `SPELLS_CHANGED` (`0x4b2b5a` before `0x4b2b92`), outside the diff: the
-    // reference fires on the packet, so a re-learn that changes nothing still flashes.
-    fire_tab_flashes(
-        &mut script,
-        &learned,
-        &tab_lines,
-        spells,
-        skill_lines.as_deref().map(|s| &s.catalog),
-        race,
-        class,
-    );
+        // The tab flash after `SPELLS_CHANGED` (`0x4b2b5a` before `0x4b2b92`), outside the diff:
+        // the reference fires on the packet, so a re-learn that changes nothing still flashes.
+        fire_tab_flashes(
+            script,
+            &learned,
+            &tab_lines,
+            spells,
+            skill_lines.as_deref().map(|s| &s.catalog),
+            race,
+            class,
+        );
+    })
 }
 
 /// Fire `LEARNED_SPELL_IN_TAB` with the 1-based index of each learned spell's tab in the strip
@@ -341,23 +352,32 @@ fn build_book(
         by_line.entry(tab).or_default().push(spell_id);
     }
 
-    // General first with its fixed name and icon, then by `SkillLine.dbc` name; an unresolved
-    // line reads "General" with no icon.
-    let mut lines: Vec<(u32, String, Option<String>, Vec<u32>)> = by_line
+    // General first with its fixed icon, named by `GENERAL` when `GetSpellTabInfo` asks, then by
+    // `SkillLine.dbc` name; an unresolved line answers no name and no icon (`0x4b3dbd`) and sorts
+    // where a line named "General" would.
+    let mut lines: Vec<(u32, SpellTabName, Option<String>, Vec<u32>)> = by_line
         .into_iter()
         .map(|(line_id, spell_ids)| {
             let (name, texture) = if line_id == NO_LINE {
-                ("General".to_string(), Some(GENERAL_TAB_ICON.to_string()))
+                (SpellTabName::General, Some(GENERAL_TAB_ICON.to_string()))
             } else {
                 match skill_lines.and_then(|c| c.line(line_id)) {
-                    Some(info) => (info.name.clone(), info.icon.clone()),
-                    None => ("General".to_string(), None),
+                    Some(info) => (SpellTabName::Line(info.name.clone()), info.icon.clone()),
+                    None => (SpellTabName::Missing, None),
                 }
             };
             (line_id, name, texture, spell_ids)
         })
         .collect();
-    lines.sort_by(|a, b| (a.0 != NO_LINE).cmp(&(b.0 != NO_LINE)).then(a.1.cmp(&b.1)));
+    let sort_name = |n: &SpellTabName| match n {
+        SpellTabName::Line(name) => name.clone(),
+        SpellTabName::General | SpellTabName::Missing => "General".to_string(),
+    };
+    lines.sort_by(|a, b| {
+        (a.0 != NO_LINE)
+            .cmp(&(b.0 != NO_LINE))
+            .then(sort_name(&a.1).cmp(&sort_name(&b.1)))
+    });
 
     let mut tabs = Vec::with_capacity(lines.len());
     let mut tab_lines = Vec::with_capacity(lines.len());
@@ -465,7 +485,7 @@ pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_
     // nothing. Any other spell's cursor is aborted by the cast itself (`TryCast`, `0x6e4d62`).
     if ladder.ground.spell() == Some(spell_id) {
         debug!("ui_spellbook: cast {spell_id} re-pressed — targeting toggles off");
-        ladder.ground.cancel();
+        ladder.stop_targeting();
         return;
     }
     if let Some((sp, store, d)) = catalog_row {
@@ -589,7 +609,7 @@ mod tests {
         let book = build_book(&known, &catalog, None, 1, 1, None, None).0;
 
         assert_eq!(book.tabs.len(), 1);
-        assert_eq!(book.tabs[0].name, "General");
+        assert_eq!(book.tabs[0].name, SpellTabName::General);
         assert_eq!(book.tabs[0].texture.as_deref(), Some(GENERAL_TAB_ICON));
         assert_eq!(book.tabs[0].num_spells, 3);
         let order: Vec<(&str, Option<&str>)> = book
@@ -634,6 +654,72 @@ mod tests {
             bare.slots[0].texture.as_deref(),
             Some("Interface\\Icons\\Temp")
         );
+    }
+
+    /// `StartCooldown 0x6e2c60` inserts with no flush (`0x6e2dcc`), so a login's
+    /// `SMSG_INITIAL_SPELLS` seed moves no [`crate::spell::Cooldowns::generation`]; the book's
+    /// next frame still reads it, as `GetSpellCooldown` queries the list itself (`0x6e13e0`).
+    #[test]
+    fn an_initial_cooldown_alone_reaches_the_book() {
+        const LAST_STAND: u32 = 12975;
+        fn last_stand() -> SpellDisplay {
+            SpellDisplay {
+                recovery_ms: 60_000,
+                ..spell("Last Stand", None, 0x10000)
+            }
+        }
+        let now = std::time::Instant::now();
+        let mut app = App::new();
+        app.insert_resource(Spells {
+            catalog: SpellCatalog::from_displays(HashMap::from([(LAST_STAND, last_stand())])),
+            ..Spells::empty_for_tests()
+        })
+        .init_resource::<PlayerActions>()
+        .init_resource::<Items>()
+        .init_resource::<LearnedInTab>()
+        .init_resource::<crate::spell::Cooldowns>()
+        .init_resource::<crate::net::GuidIndex>()
+        .insert_resource(crate::ui_script::UiClock {
+            anchor: now,
+            ui_now: 1000.0,
+        })
+        .add_systems(Update, feed_spellbook);
+        app.world_mut()
+            .resource_mut::<PlayerActions>()
+            .spells
+            .insert(LAST_STAND);
+        let mut script = UiScript::new().unwrap();
+        script.set_now(1000.0);
+        app.insert_non_send_resource(script);
+        app.update();
+        let duration = |app: &mut App| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<f64>("local _, d = GetSpellCooldown(1, 'spell') return d")
+                .unwrap()
+        };
+        assert_eq!(duration(&mut app), 0.0, "booked, cold");
+
+        // Half of Last Stand's minute still to run at login.
+        let wire = benilla_protocol::messages::SpellCooldown {
+            spell_id: LAST_STAND as u16,
+            item_id: 0,
+            category: 0,
+            spell_cd_ms: 30_000,
+            category_cd_ms: 0,
+        };
+        app.world_mut()
+            .resource_mut::<crate::spell::Cooldowns>()
+            .seed_initial(
+                &wire,
+                Some(&last_stand()),
+                None,
+                &crate::spell::SpellModifiers::default(),
+                crate::spell::CategoryPad::NoPlayer,
+                now,
+            );
+        app.update();
+        assert_eq!(duration(&mut app), 60.0, "the seeded record, read");
     }
 
     /// Both bits (`Attributes & 0x2`, `AttributesEx2 & 0x20`) substitute; Throw's `0x2` alone

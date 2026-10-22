@@ -4,6 +4,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::justify;
+use crate::script::binding_abi;
 use crate::script::Model;
 
 use super::region_handle_of;
@@ -53,7 +54,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             if !fonted {
                 return Err(mlua::Error::runtime(format!(
                     "{}:SetText(): Font not set",
-                    crate::script::font_block::usage_name(&this)
+                    crate::script::binding_abi::name_of(lua, &this)
                 )));
             }
             // `text_arg`, since a Lua string is bytes and a slice of one need not be valid UTF-8.
@@ -88,11 +89,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetStringWidth (`0x79e510`): the natural, unwrapped width of the current text, 0 until
-    // measured. Never the declared width, which `PanelTemplates_TabResize` sets from this; on an
-    // axis sized 0, `GetWidth` reads the same cell (`[fs+0xfc]`, `0x772890`). 1.12 has no
-    // `GetStringHeight`; `GetHeight` (`0x7a2030`) serves.
-    fn natural_w(lua: &Lua, this: &Table) -> mlua::Result<f32> {
+    // GetStringWidth (`0x79e510`): the natural, unwrapped width of the current text through the
+    // getter steps, 0 until measured. Never the declared width, which `PanelTemplates_TabResize`
+    // sets from this; on an axis sized 0, `GetWidth` reads the same cell (`[fs+0xfc]`,
+    // `0x772890`), so the two agree. 1.12 has no `GetStringHeight`; `GetHeight` (`0x7a2030`)
+    // serves.
+    fn natural_w(lua: &Lua, this: &Table) -> mlua::Result<f64> {
         let rh = region_handle_of(lua, this)?;
         // Measure now when a host font engine is installed, as the reference measures inline, so
         // `SetText` then `GetStringWidth` works in one tick; without one it is 0 until the host
@@ -108,10 +110,15 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             .and_then(|r| model.arena.frame(r.owner))
             .map(|f| f.effective_scale)
             .unwrap_or(1.0);
-        Ok(d.measured
-            .filter(|m| m.key == d.measure_key(scale))
-            .map(|m| m.natural_w)
-            .unwrap_or(0.0))
+        let units = model.layout_units();
+        Ok(units.load(
+            units.store(
+                d.measured
+                    .filter(|m| m.key == d.measure_key(scale, units))
+                    .map(|m| m.natural_w)
+                    .unwrap_or(0.0),
+            ),
+        ))
     }
     m.set(
         "GetStringWidth",
@@ -122,11 +129,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // `crate::justify`'s, shared with the `<Font>` object.
     m.set(
         "SetJustifyH",
-        lua.create_function(|lua, (this, j): (Table, String)| {
+        lua.create_function(|lua, (this, j): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
-            let parsed = justify::parse_h(&j);
+            let parsed = binding_abi::optional_string(lua, &j)
+                .map_or(justify::Set::NoMatch, |j| justify::parse_h(&j));
             if parsed == justify::Set::NoMatch {
-                return Err(justify::usage_h("FontString"));
+                return Err(justify::usage_h(&binding_abi::name_of(lua, &this)));
             }
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
@@ -138,8 +146,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 justify::Set::NoMatch => unreachable!("returned above"),
             }
             // Every successful parse overrides the font object, the erasing one too: `0x79e6b0`
-            // sets the per-axis mask (`+0x124`) at `0x79e780`, before the branch.
-            d.font_explicit.justify_h = true;
+            // clears the axis of the per-bit mask (`+0x124`, `0x79e779`) and the group bit
+            // (`0x79e7a5`), so the font no longer reaches the other axis either.
+            d.justify_mask.0 &= !crate::justify::H_MASK;
+            d.font_mask.clear(super::super::FontMask::JUSTIFY);
             Ok(())
         })?,
     )?;
@@ -147,11 +157,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // SetJustifyV (XML `justifyV`), as SetJustifyH.
     m.set(
         "SetJustifyV",
-        lua.create_function(|lua, (this, j): (Table, String)| {
+        lua.create_function(|lua, (this, j): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
-            let parsed = justify::parse_v(&j);
+            let parsed = binding_abi::optional_string(lua, &j)
+                .map_or(justify::Set::NoMatch, |j| justify::parse_v(&j));
             if parsed == justify::Set::NoMatch {
-                return Err(justify::usage_v("FontString"));
+                return Err(justify::usage_v(&binding_abi::name_of(lua, &this)));
             }
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
@@ -161,7 +172,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 justify::Set::Clears => d.justify.clear_v(),
                 justify::Set::NoMatch => unreachable!("returned above"),
             }
-            d.font_explicit.justify_v = true;
+            d.justify_mask.0 &= !crate::justify::V_MASK;
+            d.font_mask.clear(super::super::FontMask::JUSTIFY);
             Ok(())
         })?,
     )?;
@@ -214,14 +226,38 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // SetTextHeight: the scaled-string mode (`0x771600` alone clears the one-to-one bit `0x200`),
-    // the size magnified from the raster, uncapped. The font is untouched, so GetFont keeps the
-    // face's own height.
+    // the size magnified from the raster, uncapped. It writes the text height a font load writes
+    // (`+0xe4`, `0x77163b`), so `GetFont` answers it and the next font push replaces it; a height
+    // within 2^-22 of the current one changes nothing (`0x77161c`), the bit included. No inherit
+    // bit is cleared. A `lua_isnumber` miss raises `Usage: %s:SetTextHeight(pixelHeight)`
+    // (`0x87c728`, `0x79e4f9`); a height that compares not above 0 (`0x79e469`, `fcomp` against
+    // `0x7ffd74` = 0.0, taken on greater or unordered only) raises `%s:SetTextHeight(): invalid
+    // text height: %f` (`0x87c750`, `0x79e49f`), the `%f` a Lua number printed `%.14g`.
     m.set(
         "SetTextHeight",
-        lua.create_function(|lua, (this, height): (Table, f32)| {
+        lua.create_function(|lua, (this, height): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
+            let wide =
+                binding_abi::method_number(lua, &this, height, "SetTextHeight(pixelHeight)")?;
+            // The compare reads the double (`0x79e466` `fst` stores a float copy, `fcomp` tests the
+            // register), so a height too small for a float still passes; the text prints the copy.
+            let height = wide as f32;
+            if wide <= 0.0 {
+                return Err(mlua::Error::runtime(format!(
+                    "{}:SetTextHeight(): invalid text height: {}",
+                    binding_abi::name_of(lua, &this),
+                    binding_abi::lua_number_text(f64::from(height))
+                )));
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.region_data.entry(rh).or_default().text_height = Some(height);
+            let model_units = model.layout_units();
+            let d = model.region_data.entry(rh).or_default();
+            let held = d.font_height.map_or(0.0, |h| h.script(model_units));
+            if (height - held).abs() < f32::from_bits(0x3480_0000) {
+                return Ok(());
+            }
+            d.font_height = Some(crate::layout::Len::Script(height));
+            d.text_scaled = true;
             model.touch_measure(rh);
             Ok(())
         })?,

@@ -432,11 +432,12 @@ pub(crate) fn seat_text_measurer(script: &mut UiScript, atlas: &UiFontAtlas, sea
 /// screen size, `tick`, the measure round-trip, `resolve` and the script errors. The quads are
 /// [`paint_script`]'s, after the camera that places the `WorldFrame` nameplates.
 pub(super) fn tick_script(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     window: Query<&Window, With<PrimaryWindow>>,
-    // Real time: the reference's `GetTime` is the OS tick count, and virtual time clamps each
-    // delta to 250 ms, so a stall would leave every GetTime-anchored timer running long.
-    time: Res<Time<Real>>,
+    // The paced frame step, unclamped, as 1.12.1 hands `OnUpdate` its frame time (`0x76b2c0`):
+    // not `Time<Real>`, which pipelined rendering mis-splits, nor `Time<Virtual>`, which clamps a
+    // stall to 250 ms and which the capture harness pauses.
+    step: Res<benilla_world::frame_pace::FrameStep>,
     mut ui_clock: ResMut<super::UiClock>,
     mut font_atlas: Option<ResMut<UiFontAtlas>>,
     // The booth seam's DPI, and the pane map cleared when the VM or the window is gone.
@@ -455,193 +456,192 @@ pub(super) fn tick_script(
     mut ui_cost: ResMut<super::UiFrameCost>,
     mut pass: ResMut<super::UiPassState>,
 ) {
-    pass.live = false;
-    let Some(mut script) = script else {
-        // No VM, no UI sampling a booth pane: a stranded pane would keep its camera rendering
-        // behind a dead UI.
-        booths.panes.0.clear();
-        booths.character.reset(0);
-        return;
-    };
-    let Ok(window) = window.single() else {
-        booths.panes.0.clear();
-        booths.character.reset(0);
-        return;
-    };
-    let (w, h) = (window.width(), window.height());
-    // The client's UI space is 768 units tall at every aspect (`f(screenH) = 768`, `0x41ad10`; the
-    // caret's `H_px/192`, `0x77b8c0`), the dial being `UIParent`'s scale inside it. The VM lives in
-    // it: quads scale ×s out, and the mouse and the measures ÷s in.
-    let s = super::seam_scale(h);
-    // A moved seam scale or DPI stales every text metric the engine caches: integer-stepped
-    // advances do not rescale, and the size snap moves a string's width by several percent,
-    // enough for the ellipsis to eat fitting text. A monitor hop moves the DPI alone.
-    let dpi = window.scale_factor();
-    // The tile renderer sizes its cells in device pixels off this.
-    booths.tiles.dpi = dpi;
-    let seam_moved = *last_seam != s || *last_dpi != dpi;
-    if seam_moved {
-        if *last_seam != 0.0 {
-            script.invalidate_text_measures();
-        }
-        *last_seam = s;
-        *last_dpi = dpi;
-    }
-    // Re-seat the VM's measurer on the same edge, before the tick so the first update has it.
-    if let Some(atlas) = font_atlas.as_deref() {
-        if seam_moved || !script.has_text_measurer() {
-            seat_text_measurer(&mut script, atlas, s);
-        }
-    }
-    // The phase marks feed the `[ui-cost]` line and the hover recorder (`hover_log`).
-    let printing = ui_cost_enabled();
-    let cost_on = printing || ui_cost_wanted.0;
-    let solves_before = cost_on.then(|| script.layout_solves());
-    let derives_before = cost_on.then(|| script.layout_derivations());
-    // Per frame: both halves' measure passes add to these, and only this zeroes them.
-    ui_cost.measured = 0;
-    ui_cost.measured_texts.clear();
-    let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
-    // μs since the previous mark, re-armed; nothing with the meter off.
-    let mut lap = move || -> u128 {
-        if !cost_on {
-            return 0;
-        }
-        t_mark
-            .replace(bevy::platform::time::Instant::now())
-            .map_or(0, |t| t.elapsed().as_micros())
-    };
-    {
-        let _span = bevy::log::info_span!("ui_script: tick").entered();
-        let resized = script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-        // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
-        // the root alone (`0x46dd30`).
-        if script.vm_kind() == benilla_ui::script::VmKind::InGame {
-            // A display change re-applies the UI scale (`0x492e90`), whose narrow-aspect cap
-            // follows the window; a moved dial applies once, as its CVar callback does
-            // (`0x490770`). Deviation: the reference then re-reads the aspect (`0x492f13`), and on
-            // a change of 0.001 or more calls `0x491380`, which sets the reload trigger
-            // (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a
-            // resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry`
-            // with it, because the window resizes freely and a reload on each resize would tear
-            // down every addon's state mid-play.
-            if resized {
-                let display = (w.round() as u32, h.round() as u32);
-                let mut none = None;
-                let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
-                script.apply_ui_scale(display, cache);
+    hosted_vm.run(|script| {
+        pass.live = false;
+        let Some(script) = script else {
+            // No VM, no UI sampling a booth pane: a stranded pane would keep its camera rendering
+            // behind a dead UI.
+            booths.panes.0.clear();
+            booths.character.reset(0);
+            return;
+        };
+        let Ok(window) = window.single() else {
+            booths.panes.0.clear();
+            booths.character.reset(0);
+            return;
+        };
+        let (w, h) = (window.width(), window.height());
+        // The client's UI space is 768 units tall at every aspect (`f(screenH) = 768`, `0x41ad10`;
+        // the caret's `H_px/192`, `0x77b8c0`), the dial being `UIParent`'s scale inside it. The VM
+        // lives in it: quads scale ×s out, and the mouse and the measures ÷s in.
+        let s = super::seam_scale(h);
+        // A moved seam scale or DPI stales every text metric the engine caches: integer-stepped
+        // advances do not rescale, and the size snap moves a string's width by several percent,
+        // enough for the ellipsis to eat fitting text. A monitor hop moves the DPI alone.
+        let dpi = window.scale_factor();
+        // The tile renderer sizes its cells in device pixels off this.
+        booths.tiles.dpi = dpi;
+        let seam_moved = *last_seam != s || *last_dpi != dpi;
+        if seam_moved {
+            if *last_seam != 0.0 {
+                script.invalidate_text_measures();
             }
-            let rescaled = script.set_ui_scale(ui_scale.0);
-            // Either re-runs what the interface computed from the old `GetScreenHeight()`.
-            if resized || rescaled {
-                super::manifest::on_screen_resized(&script);
+            *last_seam = s;
+            *last_dpi = dpi;
+        }
+        // Re-seat the VM's measurer on the same edge, before the tick so the first update has it.
+        if let Some(atlas) = font_atlas.as_deref() {
+            if seam_moved || !script.has_text_measurer() {
+                seat_text_measurer(script, atlas, s);
             }
         }
-        script.tick(time.delta_secs());
-    }
-    // The VM's clock anchored at `Time<Real>`'s last update, whose deltas it accumulates; every
-    // `Instant` to `GetTime` conversion goes through this pair, never `Instant::now()`.
-    *ui_clock = super::UiClock {
-        // `Time<Real>::last_update()` returns `bevy_platform::time::Instant`, which on wasm32 is
-        // `web_time::Instant` (the `web` Bevy feature default_platform pulls in) — a distinct
-        // type from `bevy::platform::time::Instant` there, unlike on native where they're the same type by
-        // alias. Fall back with Bevy's own `Instant::now` so this compiles on both.
-        anchor: time
-            .last_update()
-            .unwrap_or_else(bevy::platform::time::Instant::now),
-        ui_now: script.now(),
-    };
-    let us_tick = lap();
-    // ── The FontString measure round-trip, before the resolve ────────────────────────────────
-    // A request reads only region data, never a resolved rect, and `resolve` writes no region's
-    // size, so measuring first lets the resolve below see the answers. The tick drained the layout
-    // after its walk; this resolve takes the measures and what the tick's tail moved.
-    let mut measured_any = false;
-    if let Some(atlas) = font_atlas.as_deref_mut() {
-        measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
-    }
-    {
-        let _span = bevy::log::info_span!("ui_script: resolve").entered();
-        script.resolve();
-    }
-    // Only a frame that measured can have a fresh request the pass above missed.
-    if measured_any {
+        // The phase marks feed the `[ui-cost]` line and the hover recorder (`hover_log`).
+        let printing = ui_cost_enabled();
+        let cost_on = printing || ui_cost_wanted.0;
+        let solves_before = cost_on.then(|| script.layout_solves());
+        let derives_before = cost_on.then(|| script.layout_derivations());
+        // Per frame: both halves' measure passes add to these, and only this zeroes them.
+        ui_cost.measured = 0;
+        ui_cost.measured_texts.clear();
+        let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
+        // μs since the previous mark, re-armed; nothing with the meter off.
+        let mut lap = move || -> u128 {
+            if !cost_on {
+                return 0;
+            }
+            t_mark
+                .replace(bevy::platform::time::Instant::now())
+                .map_or(0, |t| t.elapsed().as_micros())
+        };
+        {
+            let _span = bevy::log::info_span!("ui_script: tick").entered();
+            let resized = script.set_window_size(w, h);
+            // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
+            // the root alone (`0x46dd30`).
+            if script.vm_kind() == benilla_ui::script::VmKind::InGame {
+                // A display change re-applies the UI scale (`0x492e90`), whose narrow-aspect cap
+                // follows the window; a moved dial applies once, as its CVar callback does
+                // (`0x490770`). Deviation: the reference then re-reads the aspect (`0x492f13`), and
+                // on a change of 0.001 or more calls `0x491380`, which sets the reload trigger
+                // (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a
+                // resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry`
+                // with it, because the window resizes freely and a reload on each resize would tear
+                // down every addon's state mid-play.
+                if resized {
+                    let display = (w.round() as u32, h.round() as u32);
+                    let mut none = None;
+                    let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
+                    script.apply_ui_scale(display, cache);
+                }
+                let rescaled = script.set_ui_scale(ui_scale.0);
+                // Either re-runs what the interface computed from the old `GetScreenHeight()`.
+                if resized || rescaled {
+                    super::manifest::on_screen_resized(script);
+                }
+            } else if resized && script.vm_kind() == benilla_ui::script::VmKind::Glue {
+                super::glue::on_glue_screen_resized(script);
+            }
+            script.tick(step.delta.as_secs_f32());
+        }
+        // The VM's clock anchored at the instant the paced clock stands at, which moves by the same
+        // steps; every `Instant` to `GetTime` conversion goes through this pair, never
+        // `Instant::now()`.
+        *ui_clock = super::UiClock {
+            anchor: step.at,
+            ui_now: script.now(),
+        };
+        let us_tick = lap();
+        // ── The FontString measure round-trip, before the resolve ────────────────────────────────
+        // A request reads only region data, never a resolved rect, and `resolve` writes no region's
+        // size, so measuring first lets the resolve below see the answers. The tick drained the
+        // layout after its walk; this resolve takes the measures and what the tick's tail moved.
+        let mut measured_any = false;
         if let Some(atlas) = font_atlas.as_deref_mut() {
-            if measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0) {
-                script.resolve();
+            measured_any = measure_fontstrings(script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
+        }
+        {
+            let _span = bevy::log::info_span!("ui_script: resolve").entered();
+            script.resolve();
+        }
+        // Only a frame that measured can have a fresh request the pass above missed.
+        if measured_any {
+            if let Some(atlas) = font_atlas.as_deref_mut() {
+                if measure_fontstrings(script, atlas, s, &mut ui_cost, ui_cost_wanted.0) {
+                    script.resolve();
+                }
             }
         }
-    }
-    let us_resolve = lap();
-    let measure_span = bevy::log::info_span!("ui_script: measure").entered();
-    // Message lines ask for their wrapped row count at the frame's width, so a long line pushes
-    // older ones up; no re-resolve, as rows move only the bands, never the anchors.
-    if let Some(atlas) = font_atlas.as_deref_mut() {
-        let requests = script.message_lines_needing_measure();
-        if !requests.is_empty() {
-            let rows: Vec<(u32, u32, u16, u64)> = requests
-                .iter()
-                .map(|r| {
-                    let n = crate::ui_text::measure_wrapped_rows(
-                        &mut atlas.lock(),
-                        &r.text,
-                        // The resolved width carries the frame scale; the font height does not.
-                        r.wrap_width * s,
-                        crate::ui_text::FontSpec {
-                            path: r.font.as_deref(),
-                            height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
-                            outline: r.outline, // the outline biases the stepped width
-                            monochrome: false,
-                            spacing: 0.0, // the gap moves rows, never counts them
-                            // The drawn shadow seeds each row, as the draw's does.
-                            shadow_x: r.shadow_x * s * r.scale,
-                            alpha_gradient: None,
-                            non_space_wrap: false,
-                            max_lines: 0,
-                        },
-                    );
-                    (r.frame, r.index, n, r.key)
-                })
-                .collect();
-            script.set_message_line_rows(&rows);
+        let us_resolve = lap();
+        let measure_span = bevy::log::info_span!("ui_script: measure").entered();
+        // Message lines ask for their wrapped row count at the frame's width, so a long line pushes
+        // older ones up; no re-resolve, as rows move only the bands, never the anchors.
+        if let Some(atlas) = font_atlas.as_deref_mut() {
+            let requests = script.message_lines_needing_measure();
+            if !requests.is_empty() {
+                let rows: Vec<(u32, u32, u16, u64)> = requests
+                    .iter()
+                    .map(|r| {
+                        let n = crate::ui_text::measure_wrapped_rows(
+                            &mut atlas.lock(),
+                            &r.text,
+                            // The resolved width carries the frame scale; the font height does not.
+                            r.wrap_width * s,
+                            crate::ui_text::FontSpec {
+                                path: r.font.as_deref(),
+                                height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
+                                outline: r.outline, // the outline biases the stepped width
+                                monochrome: false,
+                                spacing: 0.0, // the gap moves rows, never counts them
+                                // The drawn shadow seeds each row, as the draw's does.
+                                shadow_x: r.shadow_x * s * r.scale,
+                                alpha_gradient: None,
+                                non_space_wrap: false,
+                                max_lines: 0,
+                            },
+                        );
+                        (r.frame, r.index, n, r.key)
+                    })
+                    .collect();
+                script.set_message_line_rows(&rows);
+            }
         }
-    }
-    drop(measure_span);
-    let us_measure = lap();
-    // Script errors reach the Lua handler (`_ERRORMESSAGE`, `BasicControls.xml:16`) before the
-    // log, so a failing handler lands in this frame's drain.
-    script.dispatch_script_errors_to_handler();
-    for err in script.take_errors() {
-        warn!("ui_script: {err}");
-    }
-    for w in script.take_warnings() {
-        warn!("ui_script: {w}");
-    }
-    // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`; the glue has none, but
-    // whatever its VM drains is the glue log's.
-    let writes = script.take_load_log_writes();
-    match script.vm_kind() {
-        benilla_ui::script::VmKind::InGame => super::load_log::write(writes),
-        benilla_ui::script::VmKind::Glue => super::load_log::write_glue(writes),
-    }
+        drop(measure_span);
+        let us_measure = lap();
+        // Script errors reach the Lua handler (`_ERRORMESSAGE`, `BasicControls.xml:16`) before the
+        // log, so a failing handler lands in this frame's drain.
+        script.dispatch_script_errors_to_handler();
+        for err in script.take_errors() {
+            warn!("ui_script: {err}");
+        }
+        for w in script.take_warnings() {
+            warn!("ui_script: {w}");
+        }
+        // A runtime `LoadAddOn`'s record, appended to `Logs\FrameXML.log`; the glue has none, but
+        // whatever its VM drains is the glue log's.
+        let writes = script.take_load_log_writes();
+        match script.vm_kind() {
+            benilla_ui::script::VmKind::InGame => super::load_log::write(writes),
+            benilla_ui::script::VmKind::Glue => super::load_log::write_glue(writes),
+        }
 
-    // ── The handover ────────────────────────────────────────────────────────────────────────
-    *pass = super::UiPassState {
-        live: true,
-        seam: s,
-        dpi,
-        us_tick,
-        us_resolve,
-        us_measure,
-        solves_before: solves_before.unwrap_or(0),
-        derives_before: derives_before.unwrap_or(0),
-    };
+        // ── The handover ────────────────────────────────────────────────────────────────────────
+        *pass = super::UiPassState {
+            live: true,
+            seam: s,
+            dpi,
+            us_tick,
+            us_resolve,
+            us_measure,
+            solves_before: solves_before.unwrap_or(0),
+            derives_before: derives_before.unwrap_or(0),
+        };
+    })
 }
 
 /// The UI pass's second half, after the camera and the plate driver: an incremental measure and
 /// `resolve` for what was written since the tick, the walk, and the conversion into [`UiQuads`].
 pub(super) fn paint_script(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     window: Query<&Window, With<PrimaryWindow>>,
     mut quads: ResMut<UiQuads>,
     world_assets: Option<ResMut<WorldAssets>>,
@@ -665,297 +665,365 @@ pub(super) fn paint_script(
     mut ui_cost: ResMut<super::UiFrameCost>,
     pass: Res<super::UiPassState>,
 ) {
-    let (capture, ui_cost_wanted) = run;
-    // Stand down with the tick half, which already cleared the booth panes.
-    if !pass.live {
-        return;
-    }
-    let Some(mut script) = script else {
-        return;
-    };
-    let prev = prev.get(&script);
-    let Ok(window) = window.single() else {
-        return;
-    };
-    let (w, h) = (window.width(), window.height());
-    let (s, dpi) = (pass.seam, pass.dpi);
-    let (us_tick, us_resolve) = (pass.us_tick, pass.us_resolve);
-    let (solves_before, derives_before) = (Some(pass.solves_before), Some(pass.derives_before));
-    let printing = ui_cost_enabled();
-    let cost_on = printing || ui_cost_wanted.0;
-    let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
-    let mut lap = move || -> u128 {
-        if !cost_on {
-            return 0;
+    hosted_vm.run(|script| {
+        let (capture, ui_cost_wanted) = run;
+        // Stand down with the tick half, which already cleared the booth panes.
+        if !pass.live {
+            return;
         }
-        t_mark
-            .replace(bevy::platform::time::Instant::now())
-            .map_or(0, |t| t.elapsed().as_micros())
-    };
-    // ── The second measure and resolve ───────────────────────────────────────────────────────
-    // What was written since the tick half, above all the nameplate anchors from this frame's
-    // camera (`vplates::drive_vplates`); a renamed plate needs its measure too.
-    let mut measured_any = false;
-    if let Some(atlas) = font_atlas.as_deref_mut() {
-        measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
-    }
-    {
-        let _span = bevy::log::info_span!("ui_script: resolve").entered();
-        script.resolve();
-    }
-    if measured_any {
+        let Some(script) = script else {
+            return;
+        };
+        let prev = prev.get(script);
+        let Ok(window) = window.single() else {
+            return;
+        };
+        let (w, h) = (window.width(), window.height());
+        let (s, dpi) = (pass.seam, pass.dpi);
+        let (us_tick, us_resolve) = (pass.us_tick, pass.us_resolve);
+        let (solves_before, derives_before) = (Some(pass.solves_before), Some(pass.derives_before));
+        let printing = ui_cost_enabled();
+        let cost_on = printing || ui_cost_wanted.0;
+        let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
+        let mut lap = move || -> u128 {
+            if !cost_on {
+                return 0;
+            }
+            t_mark
+                .replace(bevy::platform::time::Instant::now())
+                .map_or(0, |t| t.elapsed().as_micros())
+        };
+        // ── The second measure and resolve ───────────────────────────────────────────────────────
+        // What was written since the tick half, above all the nameplate anchors from this frame's
+        // camera (`vplates::drive_vplates`); a renamed plate needs its measure too.
+        let mut measured_any = false;
         if let Some(atlas) = font_atlas.as_deref_mut() {
-            if measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0) {
-                script.resolve();
+            measured_any = measure_fontstrings(script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
+        }
+        {
+            let _span = bevy::log::info_span!("ui_script: resolve").entered();
+            script.resolve();
+        }
+        if measured_any {
+            if let Some(atlas) = font_atlas.as_deref_mut() {
+                if measure_fontstrings(script, atlas, s, &mut ui_cost, ui_cost_wanted.0) {
+                    script.resolve();
+                }
             }
         }
-    }
-    // Folded into the tick half's own measure figure: one frame, one row.
-    let us_measure = pass.us_measure + lap();
-    // The glyph sheet's repack counter: a repack moves every cached cell's UV.
-    let generation = font_atlas.as_deref().map(|a| a.generation);
-    let extract_span = bevy::log::info_span!("ui_script: extract").entered();
-    let mut out = Vec::new();
-    let mut assets = world_assets;
-    let mut minimap_slot = None;
-    // Message lines' link spans for the click hit-test; region FontStrings' are not collected.
-    let mut link_spans: Vec<(
-        benilla_ui::widget::FrameHandle,
-        benilla_ui::layout::Rect,
-        String,
-        String,
-    )> = Vec::new();
-    // The focused editbox's per-byte advances, measured as it draws, for click and scroll.
-    if let Some(atlas) = font_atlas.as_deref_mut() {
-        if let Some(req) = script.editbox_advances_request() {
-            let (cum, rows, cell_h) = crate::ui_text::editbox_advances(&mut atlas.lock(), s, &req);
-            script.set_editbox_advances(req.id, req.key, cum, rows, cell_h);
+        // Folded into the tick half's own measure figure: one frame, one row.
+        let us_measure = pass.us_measure + lap();
+        // The glyph sheet's repack counter: a repack moves every cached cell's UV.
+        let generation = font_atlas.as_deref().map(|a| a.generation);
+        let extract_span = bevy::log::info_span!("ui_script: extract").entered();
+        let mut out = Vec::new();
+        let mut assets = world_assets;
+        let mut minimap_slot = None;
+        // The link spans of text with a link owner, scrolling message lines and SimpleHTML blocks,
+        // for the click hit-test; other text's are not collected.
+        let mut link_spans: Vec<(
+            benilla_ui::widget::FrameHandle,
+            benilla_ui::layout::Rect,
+            String,
+            String,
+        )> = Vec::new();
+        // The focused editbox's per-byte advances, measured as it draws, for click and scroll.
+        if let Some(atlas) = font_atlas.as_deref_mut() {
+            if let Some(req) = script.editbox_advances_request() {
+                let (cum, rows, cell_h) =
+                    crate::ui_text::editbox_advances(&mut atlas.lock(), s, &req);
+                script.set_editbox_advances(req.id, req.key, cum, rows, cell_h);
+            }
         }
-    }
-    // The focused editbox's text UI: its Text quad, scroll window, caret and selection spans,
-    // and the blink phase (0.5 s, `0x77a790`).
-    let text_ui = script.focused_editbox_text_ui();
-    let _ = lap(); // re-arm: the editbox seam above is not the walk's cost
-    let extracted = script.extract();
-    let us_exm = lap();
-    let n_extracted = extracted.len();
-    // ── The extract gate ──────────────────────────────────────────────────────
-    // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they are.
-    let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
-    let settled = capture.is_none()
-        && prev.dims == Some(dims)
-        && prev.generation == generation
-        && text_ui == prev.text_ui
-        && booths.images.0 == prev.portraits
-        && extracted == prev.extracted;
-    if settled {
-        drop(extract_span);
-        let us_cmp = lap();
-        if cost_on {
-            let solves = script.layout_solves() - solves_before.unwrap_or(0);
-            *ui_cost = super::UiFrameCost {
-                measured: ui_cost.measured,
-                measured_texts: std::mem::take(&mut ui_cost.measured_texts),
-                tick: us_tick,
-                resolve: us_resolve,
-                measure: us_measure,
-                extract: us_exm,
-                convert: us_cmp,
-                diff: 0,
-                quads: quads.quads.len(),
-                solves,
-                derives: script.layout_derivations() - derives_before.unwrap_or(0),
-                skipped: true,
-                spliced: 0,
-                dropped: 0,
-            };
+        // The focused editbox's text UI: its Text quad, scroll window, caret and selection spans,
+        // and the blink phase (0.5 s, `0x77a790`).
+        let text_ui = script.focused_editbox_text_ui();
+        let _ = lap(); // re-arm: the editbox seam above is not the walk's cost
+        let extracted = script.extract();
+        let us_exm = lap();
+        let n_extracted = extracted.len();
+        // ── The extract gate ──────────────────────────────────────────────────────
+        // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they
+        // are.
+        let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
+        let settled = capture.is_none()
+            && prev.dims == Some(dims)
+            && prev.generation == generation
+            && text_ui == prev.text_ui
+            && booths.images.0 == prev.portraits
+            && extracted == prev.extracted;
+        if settled {
+            drop(extract_span);
+            let us_cmp = lap();
+            if cost_on {
+                let solves = script.layout_solves() - solves_before.unwrap_or(0);
+                *ui_cost = super::UiFrameCost {
+                    measured: ui_cost.measured,
+                    measured_texts: std::mem::take(&mut ui_cost.measured_texts),
+                    tick: us_tick,
+                    resolve: us_resolve,
+                    measure: us_measure,
+                    extract: us_exm,
+                    convert: us_cmp,
+                    diff: 0,
+                    quads: quads.quads.len(),
+                    solves,
+                    derives: script.layout_derivations() - derives_before.unwrap_or(0),
+                    skipped: true,
+                    spliced: 0,
+                    dropped: 0,
+                };
+            }
+            if printing {
+                let solves = script.layout_solves() - solves_before.unwrap_or(0);
+                eprintln!(
+                    "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+                     exm={us_exm} exa={us_cmp} diff=0 eq={n_extracted} quads={} \
+                     solves={solves} changed=0 skip=1",
+                    quads.quads.len()
+                );
+            }
+            return;
         }
-        if printing {
-            let solves = script.layout_solves() - solves_before.unwrap_or(0);
-            eprintln!(
-                "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-                 exm={us_exm} exa={us_cmp} diff=0 eq={n_extracted} quads={} \
-                 solves={solves} changed=0 skip=1",
-                quads.quads.len()
+        if gate_log_enabled() {
+            report_gate_miss(
+                script,
+                &extracted,
+                &prev.extracted,
+                prev.dims == Some(dims),
+                prev.generation == generation,
+                text_ui == prev.text_ui,
+                booths.images.0 == prev.portraits,
             );
         }
-        return;
-    }
-    if gate_log_enabled() {
-        report_gate_miss(
-            &script,
-            &extracted,
-            &prev.extracted,
-            prev.dims == Some(dims),
-            prev.generation == generation,
-            text_ui == prev.text_ui,
-            booths.images.0 == prev.portraits,
-        );
-    }
-    // ── The per-entry splice ─────────────────────────────────────────────────────────────────
-    // When only the list moved and the few changed entries write only quads, they re-convert
-    // alone and stitch into last frame's `UiQuads` at the ranges `prev.spans` holds.
-    'splice: {
-        macro_rules! no_splice {
-            ($($arg:tt)*) => {{
-                if gate_log_enabled() {
-                    eprintln!("[ui-splice] miss: {}", format_args!($($arg)*));
-                }
-                break 'splice;
-            }};
-        }
-        if capture.is_some() {
-            no_splice!("capture mode");
-        }
-        if ui_diff_enabled() {
-            no_splice!("WOW_UI_DIFF pins the full path");
-        }
-        if prev.dims != Some(dims) {
-            no_splice!("window dims moved");
-        }
-        if prev.generation != generation {
-            no_splice!("font atlas generation moved");
-        }
-        // The caret blink is wall-clock state in no entry, the Text arm's one time input.
-        if text_ui != prev.text_ui {
-            no_splice!("focused editbox text-ui moved");
-        }
-        if booths.images.0 != prev.portraits {
-            no_splice!("portrait sources moved");
-        }
-        // The spans describe last conversion's list; if anything replaced it, convert in full.
-        if prev.spans.len() != prev.extracted.len()
-            || prev.spans.last().copied().unwrap_or(0) as usize != quads.quads.len()
-        {
-            no_splice!("span table stale");
-        }
-        let align = align_entries(&prev.extracted, &extracted);
-        // A window opening moves many entries, which the full conversion serves.
-        const SPLICE_MAX: usize = 64;
-        let changed: Vec<usize> = align
-            .source
-            .iter()
-            .enumerate()
-            .filter_map(|(j, s)| s.is_none().then_some(j))
-            .collect();
-        if changed.len() + align.dropped.len() > SPLICE_MAX {
-            no_splice!(
-                "{} entries changed and {} dropped, over the {SPLICE_MAX} bound",
-                changed.len(),
-                align.dropped.len()
-            );
-        }
-        // All-equal belongs to the gate above; reaching here means two comparisons disagree.
-        if changed.is_empty() && align.dropped.is_empty() {
-            no_splice!("no entry differs (a comparison razor slipped)");
-        }
-        // Departing entries too: the splice cannot un-park a departing minimap slot.
-        if let Some(eq) = changed
-            .iter()
-            .map(|&j| &extracted[j])
-            .chain(align.dropped.iter().map(|&i| &prev.extracted[i]))
-            .find(|eq| !splice_simple(eq))
-        {
-            no_splice!(
-                "a {} entry ({}) is not spliceable",
-                content_kind(&eq.content),
-                script.target_owner_name(eq.target).unwrap_or_default()
-            );
-        }
-        // The scratch side channels are a tripwire: an entry that writes one takes the full path.
-        let mut scratch: Vec<UiQuad> = Vec::new();
-        let mut scratch_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(changed.len());
-        let mut scratch_links = Vec::new();
-        let mut scratch_slot = None;
-        for &j in &changed {
-            let at = scratch.len();
-            convert_entry(
-                extracted[j].clone(),
-                s,
-                w,
-                h,
-                dpi,
-                &mut assets,
-                &mut images,
-                &mut font_atlas,
-                &mut booths,
-                text_ui.as_ref(),
-                capture.is_some(),
-                &mut scratch,
-                &mut scratch_links,
-                &mut scratch_slot,
-            );
-            scratch_ranges.push(at..scratch.len());
-        }
-        if !scratch_links.is_empty() || scratch_slot.is_some() {
-            no_splice!("a re-converted entry wrote a side channel");
-        }
-        // In place: nothing inserted or removed, and each changed entry keeps its quad count.
-        let identity = prev.extracted.len() == extracted.len()
-            && align
+        // ── The per-entry splice ─────────────────────────────────────────────────────────────────
+        // When only the list moved and the few changed entries write only quads, they re-convert
+        // alone and stitch into last frame's `UiQuads` at the ranges `prev.spans` holds.
+        'splice: {
+            macro_rules! no_splice {
+                ($($arg:tt)*) => {{
+                    if gate_log_enabled() {
+                        eprintln!("[ui-splice] miss: {}", format_args!($($arg)*));
+                    }
+                    break 'splice;
+                }};
+            }
+            if capture.is_some() {
+                no_splice!("capture mode");
+            }
+            if ui_diff_enabled() {
+                no_splice!("WOW_UI_DIFF pins the full path");
+            }
+            if prev.dims != Some(dims) {
+                no_splice!("window dims moved");
+            }
+            if prev.generation != generation {
+                no_splice!("font atlas generation moved");
+            }
+            // The caret blink is wall-clock state in no entry, the Text arm's one time input.
+            if text_ui != prev.text_ui {
+                no_splice!("focused editbox text-ui moved");
+            }
+            if booths.images.0 != prev.portraits {
+                no_splice!("portrait sources moved");
+            }
+            // The spans describe last conversion's list; if anything replaced it, convert in full.
+            if prev.spans.len() != prev.extracted.len()
+                || prev.spans.last().copied().unwrap_or(0) as usize != quads.quads.len()
+            {
+                no_splice!("span table stale");
+            }
+            let align = align_entries(&prev.extracted, &extracted);
+            // A window opening moves many entries, which the full conversion serves.
+            const SPLICE_MAX: usize = 64;
+            let changed: Vec<usize> = align
                 .source
                 .iter()
                 .enumerate()
-                .all(|(j, s)| s.is_none_or(|i| i == j));
-        let counts_stable = identity
-            && changed.iter().zip(&scratch_ranges).all(|(&j, r)| {
-                let (a, b) = span_bounds(&prev.spans, j);
-                b - a == r.len()
-            });
-        let mut dirtied = false;
-        if counts_stable {
-            for (&j, r) in changed.iter().zip(&scratch_ranges) {
-                let (a, b) = span_bounds(&prev.spans, j);
-                if quads.quads[a..b] != scratch[r.clone()] {
-                    quads.quads[a..b].clone_from_slice(&scratch[r.clone()]);
-                    dirtied = true;
-                }
+                .filter_map(|(j, s)| s.is_none().then_some(j))
+                .collect();
+            if changed.len() + align.dropped.len() > SPLICE_MAX {
+                no_splice!(
+                    "{} entries changed and {} dropped, over the {SPLICE_MAX} bound",
+                    changed.len(),
+                    align.dropped.len()
+                );
             }
-        } else {
-            // Stitch a fresh list: kept runs moved out of last frame's (no `Arc` clones), the
-            // re-converted entries from the scratch, new spans; `prev.held` keeps the allocation.
-            let mut old = std::mem::take(&mut prev.held);
-            std::mem::swap(&mut old, &mut quads.quads);
-            quads.quads.clear();
-            quads.quads.reserve(old.len() + scratch.len());
-            let mut new_spans: Vec<u32> = Vec::with_capacity(extracted.len());
+            // All-equal belongs to the gate above; reaching here means two comparisons disagree.
+            if changed.is_empty() && align.dropped.is_empty() {
+                no_splice!("no entry differs (a comparison razor slipped)");
+            }
+            // Departing entries too: the splice cannot un-park a departing minimap slot.
+            if let Some(eq) = changed
+                .iter()
+                .map(|&j| &extracted[j])
+                .chain(align.dropped.iter().map(|&i| &prev.extracted[i]))
+                .find(|eq| !splice_simple(eq))
             {
-                let mut src = old.drain(..);
-                // Quads the drain has yielded; kept runs strictly increase, so one pass does it.
-                let mut cursor = 0usize;
-                let mut ci = 0usize;
-                for s in &align.source {
-                    match s {
-                        Some(i) => {
-                            let (a, b) = span_bounds(&prev.spans, *i);
-                            if a > cursor {
-                                src.by_ref().nth(a - cursor - 1);
-                            }
-                            quads.quads.extend(src.by_ref().take(b - a));
-                            cursor = b;
-                        }
-                        None => {
-                            quads
-                                .quads
-                                .extend_from_slice(&scratch[scratch_ranges[ci].clone()]);
-                            ci += 1;
-                        }
-                    }
-                    new_spans.push(quads.quads.len() as u32);
-                }
+                no_splice!(
+                    "a {} entry ({}) is not spliceable",
+                    content_kind(&eq.content),
+                    script.target_owner_name(eq.target).unwrap_or_default()
+                );
             }
-            prev.held = old;
-            prev.spans = new_spans;
-            dirtied = true;
+            // The scratch side channels are a tripwire: an entry that writes one takes the full
+            // path.
+            let mut scratch: Vec<UiQuad> = Vec::new();
+            let mut scratch_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(changed.len());
+            let mut scratch_links = Vec::new();
+            let mut scratch_slot = None;
+            for &j in &changed {
+                let at = scratch.len();
+                convert_entry(
+                    extracted[j].clone(),
+                    s,
+                    w,
+                    h,
+                    dpi,
+                    &mut assets,
+                    &mut images,
+                    &mut font_atlas,
+                    &mut booths,
+                    text_ui.as_ref(),
+                    capture.is_some(),
+                    &mut scratch,
+                    &mut scratch_links,
+                    &mut scratch_slot,
+                );
+                scratch_ranges.push(at..scratch.len());
+            }
+            if !scratch_links.is_empty() || scratch_slot.is_some() {
+                no_splice!("a re-converted entry wrote a side channel");
+            }
+            // In place: nothing inserted or removed, and each changed entry keeps its quad count.
+            let identity = prev.extracted.len() == extracted.len()
+                && align
+                    .source
+                    .iter()
+                    .enumerate()
+                    .all(|(j, s)| s.is_none_or(|i| i == j));
+            let counts_stable = identity
+                && changed.iter().zip(&scratch_ranges).all(|(&j, r)| {
+                    let (a, b) = span_bounds(&prev.spans, j);
+                    b - a == r.len()
+                });
+            let mut dirtied = false;
+            if counts_stable {
+                for (&j, r) in changed.iter().zip(&scratch_ranges) {
+                    let (a, b) = span_bounds(&prev.spans, j);
+                    if quads.quads[a..b] != scratch[r.clone()] {
+                        quads.quads[a..b].clone_from_slice(&scratch[r.clone()]);
+                        dirtied = true;
+                    }
+                }
+            } else {
+                // Stitch a fresh list: kept runs moved out of last frame's (no `Arc` clones), the
+                // re-converted entries from the scratch, new spans; `prev.held` keeps the
+                // allocation.
+                let mut old = std::mem::take(&mut prev.held);
+                std::mem::swap(&mut old, &mut quads.quads);
+                quads.quads.clear();
+                quads.quads.reserve(old.len() + scratch.len());
+                let mut new_spans: Vec<u32> = Vec::with_capacity(extracted.len());
+                {
+                    let mut src = old.drain(..);
+                    // Quads the drain has yielded; kept runs strictly increase, so one pass does
+                    // it.
+                    let mut cursor = 0usize;
+                    let mut ci = 0usize;
+                    for s in &align.source {
+                        match s {
+                            Some(i) => {
+                                let (a, b) = span_bounds(&prev.spans, *i);
+                                if a > cursor {
+                                    src.by_ref().nth(a - cursor - 1);
+                                }
+                                quads.quads.extend(src.by_ref().take(b - a));
+                                cursor = b;
+                            }
+                            None => {
+                                quads
+                                    .quads
+                                    .extend_from_slice(&scratch[scratch_ranges[ci].clone()]);
+                                ci += 1;
+                            }
+                        }
+                        new_spans.push(quads.quads.len() as u32);
+                    }
+                }
+                prev.held = old;
+                prev.spans = new_spans;
+                dirtied = true;
+            }
+            if dirtied {
+                quads.dirty = true;
+            }
+            prev.extracted = extracted;
+            if splice_verify_enabled() {
+                verify_splice(
+                    prev,
+                    &quads,
+                    s,
+                    w,
+                    h,
+                    dpi,
+                    &mut assets,
+                    &mut images,
+                    &mut font_atlas,
+                    &mut booths,
+                    text_ui.as_ref(),
+                    capture.is_some(),
+                    script,
+                );
+            }
+            drop(extract_span);
+            let us_spl = lap();
+            if cost_on {
+                let solves = script.layout_solves() - solves_before.unwrap_or(0);
+                *ui_cost = super::UiFrameCost {
+                    measured: ui_cost.measured,
+                    measured_texts: std::mem::take(&mut ui_cost.measured_texts),
+                    tick: us_tick,
+                    resolve: us_resolve,
+                    measure: us_measure,
+                    extract: us_exm,
+                    convert: us_spl,
+                    diff: 0,
+                    quads: quads.quads.len(),
+                    solves,
+                    derives: script.layout_derivations() - derives_before.unwrap_or(0),
+                    skipped: false,
+                    spliced: changed.len(),
+                    dropped: align.dropped.len(),
+                };
+            }
+            if printing {
+                let solves = script.layout_solves() - solves_before.unwrap_or(0);
+                eprintln!(
+                    "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+                     exm={us_exm} exa={us_spl} diff=0 eq={n_extracted} quads={} \
+                     solves={solves} changed={} skip=0 spliced={} dropped={}",
+                    quads.quads.len(),
+                    u8::from(dirtied),
+                    changed.len(),
+                    align.dropped.len()
+                );
+            }
+            return;
         }
-        if dirtied {
-            quads.dirty = true;
-        }
-        prev.extracted = extracted;
-        if splice_verify_enabled() {
-            verify_splice(
-                prev,
-                &quads,
+        prev.dims = Some(dims);
+        prev.generation = generation;
+        prev.text_ui = text_ui.clone();
+        prev.portraits = booths.images.0.clone();
+        prev.extracted = extracted.clone();
+        // Cleared only on the full-conversion path: a settled frame's maps are still true, and
+        // clearing them would put the character panes' cameras to sleep.
+        booths.panes.0.clear();
+        booths.character.reset(script.session());
+        let mut spans: Vec<u32> = Vec::with_capacity(prev.extracted.len());
+        for eq in extracted {
+            convert_entry(
+                eq,
                 s,
                 w,
                 h,
@@ -966,12 +1034,78 @@ pub(super) fn paint_script(
                 &mut booths,
                 text_ui.as_ref(),
                 capture.is_some(),
-                &script,
+                &mut out,
+                &mut link_spans,
+                &mut minimap_slot,
             );
+            spans.push(out.len() as u32);
         }
+        prev.spans = spans;
+        // Capture mode only: the held payload's icon at the mouse, for the hardware cursor a
+        // capture cannot show; every payload kind, as `crate::cursor`'s `payload_icon`.
+        if capture.is_some() {
+            use benilla_ui::script::CursorPayload;
+            let texture = script.cursor_payload().and_then(|p| match p {
+                CursorPayload::Item(i) => i.texture,
+                CursorPayload::Spell(s) => s.texture,
+                CursorPayload::Action(a) => a.texture,
+                CursorPayload::Macro(m) => m.texture,
+                CursorPayload::PetAction(p) => p.texture,
+                CursorPayload::StablePet(p) => Some(p.texture),
+                CursorPayload::Merchant(m) => m.texture,
+                CursorPayload::Money(m) => {
+                    Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
+                }
+            });
+            if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
+                if let Some(handle) = assets
+                    .as_mut()
+                    .and_then(|a| a.sprite_texture(&texture, &mut images))
+                {
+                    out.push(cursor_icon_quad(pos, handle));
+                }
+            }
+        }
+
+        // The link spans replace last frame's set, so `OnHyperlinkClick` hit-tests what is on
+        // screen.
+        script.set_link_spans(link_spans);
+
+        // Park the slot for `minimap::emit_minimap`; `None` when the minimap is hidden.
+        parked_minimap.0 = minimap_slot;
         drop(extract_span);
-        let us_spl = lap();
+        let us_exa = lap();
+
+        let _span = bevy::log::info_span!("ui_script: diff").entered();
+        let n_quads = out.len();
+        let changed = quads.quads != out;
+        if changed {
+            if ui_diff_enabled() {
+                match quads.quads.iter().zip(&out).position(|(a, b)| a != b) {
+                    Some(i) => {
+                        let (b, a) = (&quads.quads[i], &out[i]);
+                        eprintln!(
+                            "[ui-diff-base] quad {i}/{n_quads}: tex={:?} rect {:?} -> {:?} \
+                             uv_changed={} color_changed={}",
+                            a.texture.as_ref().and_then(|t| t.path()),
+                            b.rect,
+                            a.rect,
+                            a.uv != b.uv,
+                            a.color != b.color,
+                        );
+                    }
+                    None => eprintln!(
+                        "[ui-diff-base] quad COUNT changed: {} -> {}",
+                        quads.quads.len(),
+                        out.len()
+                    ),
+                }
+            }
+            quads.quads = out;
+            quads.dirty = true;
+        }
         if cost_on {
+            let us_diff = lap();
             let solves = script.layout_solves() - solves_before.unwrap_or(0);
             *ui_cost = super::UiFrameCost {
                 measured: ui_cost.measured,
@@ -980,149 +1114,25 @@ pub(super) fn paint_script(
                 resolve: us_resolve,
                 measure: us_measure,
                 extract: us_exm,
-                convert: us_spl,
-                diff: 0,
-                quads: quads.quads.len(),
+                convert: us_exa,
+                diff: us_diff,
+                quads: n_quads,
                 solves,
                 derives: script.layout_derivations() - derives_before.unwrap_or(0),
                 skipped: false,
-                spliced: changed.len(),
-                dropped: align.dropped.len(),
+                spliced: 0,
+                dropped: 0,
             };
-        }
-        if printing {
-            let solves = script.layout_solves() - solves_before.unwrap_or(0);
-            eprintln!(
-                "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-                 exm={us_exm} exa={us_spl} diff=0 eq={n_extracted} quads={} \
-                 solves={solves} changed={} skip=0 spliced={} dropped={}",
-                quads.quads.len(),
-                u8::from(dirtied),
-                changed.len(),
-                align.dropped.len()
-            );
-        }
-        return;
-    }
-    prev.dims = Some(dims);
-    prev.generation = generation;
-    prev.text_ui = text_ui.clone();
-    prev.portraits = booths.images.0.clone();
-    prev.extracted = extracted.clone();
-    // Cleared only on the full-conversion path: a settled frame's maps are still true, and
-    // clearing them would put the character panes' cameras to sleep.
-    booths.panes.0.clear();
-    booths.character.reset(script.session());
-    let mut spans: Vec<u32> = Vec::with_capacity(prev.extracted.len());
-    for eq in extracted {
-        convert_entry(
-            eq,
-            s,
-            w,
-            h,
-            dpi,
-            &mut assets,
-            &mut images,
-            &mut font_atlas,
-            &mut booths,
-            text_ui.as_ref(),
-            capture.is_some(),
-            &mut out,
-            &mut link_spans,
-            &mut minimap_slot,
-        );
-        spans.push(out.len() as u32);
-    }
-    prev.spans = spans;
-    // Capture mode only: the held payload's icon at the mouse, for the hardware cursor a capture
-    // cannot show; every payload kind, as `crate::cursor`'s `payload_icon`.
-    if capture.is_some() {
-        use benilla_ui::script::CursorPayload;
-        let texture = script.cursor_payload().and_then(|p| match p {
-            CursorPayload::Item(i) => i.texture,
-            CursorPayload::Spell(s) => s.texture,
-            CursorPayload::Action(a) => a.texture,
-            CursorPayload::Macro(m) => m.texture,
-            CursorPayload::PetAction(p) => p.texture,
-            CursorPayload::StablePet(p) => Some(p.texture),
-            CursorPayload::Merchant(m) => m.texture,
-            CursorPayload::Money(m) => {
-                Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
-            }
-        });
-        if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
-            if let Some(handle) = assets
-                .as_mut()
-                .and_then(|a| a.sprite_texture(&texture, &mut images))
-            {
-                out.push(cursor_icon_quad(pos, handle));
+            if printing {
+                eprintln!(
+                    "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+                     exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
+                     solves={solves} changed={} skip=0",
+                    u8::from(changed)
+                );
             }
         }
-    }
-
-    // The link spans replace last frame's set, so `OnHyperlinkClick` hit-tests what is on screen.
-    script.set_link_spans(link_spans);
-
-    // Park the slot for `minimap::emit_minimap`; `None` when the minimap is hidden.
-    parked_minimap.0 = minimap_slot;
-    drop(extract_span);
-    let us_exa = lap();
-
-    let _span = bevy::log::info_span!("ui_script: diff").entered();
-    let n_quads = out.len();
-    let changed = quads.quads != out;
-    if changed {
-        if ui_diff_enabled() {
-            match quads.quads.iter().zip(&out).position(|(a, b)| a != b) {
-                Some(i) => {
-                    let (b, a) = (&quads.quads[i], &out[i]);
-                    eprintln!(
-                        "[ui-diff-base] quad {i}/{n_quads}: tex={:?} rect {:?} -> {:?} uv_changed={} color_changed={}",
-                        a.texture.as_ref().and_then(|t| t.path()),
-                        b.rect,
-                        a.rect,
-                        a.uv != b.uv,
-                        a.color != b.color,
-                    );
-                }
-                None => eprintln!(
-                    "[ui-diff-base] quad COUNT changed: {} -> {}",
-                    quads.quads.len(),
-                    out.len()
-                ),
-            }
-        }
-        quads.quads = out;
-        quads.dirty = true;
-    }
-    if cost_on {
-        let us_diff = lap();
-        let solves = script.layout_solves() - solves_before.unwrap_or(0);
-        *ui_cost = super::UiFrameCost {
-            measured: ui_cost.measured,
-            measured_texts: std::mem::take(&mut ui_cost.measured_texts),
-            tick: us_tick,
-            resolve: us_resolve,
-            measure: us_measure,
-            extract: us_exm,
-            convert: us_exa,
-            diff: us_diff,
-            quads: n_quads,
-            solves,
-            derives: script.layout_derivations() - derives_before.unwrap_or(0),
-            skipped: false,
-            spliced: 0,
-            dropped: 0,
-        };
-        if printing {
-            eprintln!(
-                "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-                 exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
-                 solves={solves} changed={} skip=0",
-                u8::from(changed)
-            );
-        }
-    }
+    })
 }
 
 /// One extracted entry to its screen quads, plus the side channels some arms write: link spans,
@@ -1226,12 +1236,32 @@ fn convert_entry(
                 });
                 return;
             }
+            // The model-unit ladder `0x76d1a0` derives, shared by a file's tile and a copy's
+            // booth.
+            let dpi = booths.tiles.dpi.max(0.01);
+            let aspect = if h > 0.0 { w / h } else { 4.0 / 3.0 };
+            let diag = (aspect * aspect + 1.0).sqrt();
+            let layout = eq.scale;
+            let units = crate::portrait::PaneUnits {
+                // 1 model unit is `1280 · modelScale · layoutScale` FrameXML units (`0x76d1a0`).
+                px_per_unit: 1280.0 * model_scale * layout * s * dpi,
+                // `SetPosition` is in layout units: `768 · √(a²+1)` FrameXML per unit.
+                pos_px_per_unit: 768.0 * diag * layout * s * dpi,
+                // A particle's half-extent: eye space, neither scale (`0x7b2a50`).
+                star_px_per_unit: 768.0 * diag * s * dpi,
+                position: Vec3::new(position.0, position.1, position.2),
+                // The perspective root, in model units: translate `pos · layoutScale`, rotate
+                // `facing`, scale `G48 · (5/3) · modelScale · layoutScale`, where `G48 · (5/3)` is
+                // the 4:3 renormalizer `√((4/3)²+1)/√(a²+1)` (`0x80655c`); the near and far planes
+                // do not scale with it.
+                root_scale: (5.0 / 3.0) / diag * model_scale * layout,
+                root_pos: Vec3::new(position.0, position.1, position.2) * layout,
+            };
             // A character pane publishes an idempotent request; `portrait::panes` builds the
             // pane's booth and draws its quad each frame the engine lists the pane with a copy.
             // Published with a file too: a `SetUnit` pending over it builds the copy that
             // replaces the file.
             if character && rect.width() > 0.0 && rect.height() > 0.0 {
-                let dpi = booths.tiles.dpi.max(0.01);
                 booths.character.insert(
                     handle,
                     crate::portrait::PaneRequest {
@@ -1244,6 +1274,7 @@ fn convert_entry(
                             (rect.width() * dpi).round().max(1.0) as u32,
                             (rect.height() * dpi).round().max(1.0) as u32,
                         ),
+                        units,
                     },
                 );
             }
@@ -1251,10 +1282,6 @@ fn convert_entry(
             // its quad each frame, so a cell packed later needs no re-conversion.
             if let Some(path) = model.as_deref() {
                 let tiles = &mut booths.tiles;
-                let dpi = tiles.dpi.max(0.01);
-                let aspect = if h > 0.0 { w / h } else { 4.0 / 3.0 };
-                let diag = (aspect * aspect + 1.0).sqrt();
-                let layout = eq.scale;
                 let size_px = UVec2::new(
                     (rect.width() * dpi).round().max(1.0) as u32,
                     (rect.height() * dpi).round().max(1.0) as u32,
@@ -1264,21 +1291,13 @@ fn convert_entry(
                     crate::ui_models::TileRequest {
                         path: path.to_string(),
                         size_px,
-                        // 1 model unit is `1280 · modelScale · layoutScale` FrameXML units
-                        // (`0x76d1a0`).
-                        px_per_unit: 1280.0 * model_scale * layout * s * dpi,
-                        // `SetPosition` is in layout units: `768 · √(a²+1)` FrameXML per unit.
-                        pos_px_per_unit: 768.0 * diag * layout * s * dpi,
-                        // A particle's half-extent: eye space, neither scale (`0x7b2a50`).
-                        star_px_per_unit: 768.0 * diag * s * dpi,
+                        px_per_unit: units.px_per_unit,
+                        pos_px_per_unit: units.pos_px_per_unit,
+                        star_px_per_unit: units.star_px_per_unit,
                         facing,
-                        position: Vec3::new(position.0, position.1, position.2),
-                        // The perspective root, in model units: translate `pos · layoutScale`,
-                        // rotate `facing`, scale `G48 · (5/3) · modelScale · layoutScale`, where
-                        // `G48 · (5/3)` is the 4:3 renormalizer `√((4/3)²+1)/√(a²+1)`
-                        // (`0x80655c`); the near and far planes do not scale with it.
-                        root_scale: (5.0 / 3.0) / diag * model_scale * layout,
-                        root_pos: Vec3::new(position.0, position.1, position.2) * layout,
+                        position: units.position,
+                        root_scale: units.root_scale,
+                        root_pos: units.root_pos,
                         camera,
                         light,
                         fog,
@@ -1311,7 +1330,7 @@ fn convert_entry(
             path,
             color,
             gradient,
-            additive,
+            blend,
             tex_coords,
             wrap,
             circular,
@@ -1442,7 +1461,7 @@ fn convert_entry(
                 uv_clamp,
                 color,
                 corner_colors,
-                additive,
+                blend,
                 clip,
                 // `SetRotation` is counter-clockwise-positive, `UiQuad::rotation` clockwise.
                 rotation: -rotation,
@@ -1501,6 +1520,7 @@ fn convert_entry(
             edit_line,
             non_space_wrap,
             max_lines,
+            link_owner,
         } => {
             // No atlas (no client data, or an unreadable font) draws no text.
             let (Some(atlas), Some(text)) = (font_atlas.as_deref_mut(), text) else {
@@ -1525,6 +1545,7 @@ fn convert_entry(
                     edit_line,
                     non_space_wrap,
                     max_lines,
+                    link_owner,
                 },
                 text::TextHost {
                     z: eq.z,
@@ -1661,7 +1682,7 @@ mod cursor_quad_tests {
         assert_eq!(q.rect.height(), 32.0);
         assert_eq!(q.z_key, u128::MAX);
         assert!(q.texture.is_some());
-        assert!(!q.additive);
+        assert_eq!(q.blend, benilla_ui::script::BlendMode::Blend);
     }
 }
 
@@ -1711,6 +1732,7 @@ mod clip_plumb_tests {
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
+        app.init_resource::<benilla_world::frame_pace::FrameStep>();
         // The uiScale dial at 1.0, the identity.
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
@@ -1738,10 +1760,13 @@ mod clip_plumb_tests {
 
         // WoW space: bottom 468, left 0, top 668, right 300; y-down through the 768 window, the
         // top is 100 and the bottom 300.
-        assert_eq!(
-            marker.clip,
-            Some(Rect::new(0.0, 100.0, 300.0, 300.0)),
-            "the engine's ScrollFrame clip survives the y-up→y-down flip into UiQuad::clip"
+        // Within the getters' sub-unit drift (`benilla_ui::test_support::TOL`).
+        let clip = marker.clip.expect("clipped");
+        let want = Rect::new(0.0, 100.0, 300.0, 300.0);
+        assert!(
+            (clip.min - want.min).abs().max_element() < 1e-3
+                && (clip.max - want.max).abs().max_element() < 1e-3,
+            "the engine's ScrollFrame clip survives the y-up→y-down flip into UiQuad::clip: {clip:?}"
         );
     }
 
@@ -1759,10 +1784,12 @@ mod clip_plumb_tests {
             .find(|q| q.color[0] == 1.0 && q.color[1] == 0.0 && q.color[2] == 0.0)
             .expect("the colored marker quad extracted");
 
-        assert_eq!(
-            marker.clip,
-            Some(Rect::new(0.0, 100.0, 300.0, 300.0)),
-            "dial 0.5 moves nothing outside UIParent"
+        let clip = marker.clip.expect("clipped");
+        let want = Rect::new(0.0, 100.0, 300.0, 300.0);
+        assert!(
+            (clip.min - want.min).abs().max_element() < 1e-3
+                && (clip.max - want.max).abs().max_element() < 1e-3,
+            "dial 0.5 moves nothing outside UIParent: {clip:?}"
         );
     }
 
@@ -1797,6 +1824,7 @@ mod clip_plumb_tests {
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
+        app.init_resource::<benilla_world::frame_pace::FrameStep>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {
@@ -2007,7 +2035,8 @@ mod extract_gate_tests {
             .iter()
             .find(|q| q.texture.is_none() && q.corner_colors.is_some())
             .expect("the fade draws, with its corners");
-        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.5]);
+        let half = benilla_ui::color::alpha_f32(benilla_ui::color::frame_alpha_byte(0.5));
+        let (top, bottom) = ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, half]);
         assert_eq!(fade.corner_colors, Some([top, top, bottom, bottom]));
     }
 
@@ -2028,6 +2057,7 @@ mod extract_gate_tests {
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
+        app.init_resource::<benilla_world::frame_pace::FrameStep>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {

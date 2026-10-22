@@ -5,12 +5,17 @@
 
 use bevy::prelude::*;
 
+use benilla_ui::strings::{fill_exact, Arg};
+
+use crate::go_templates::GameObjectTemplates;
+use crate::items::Items;
 use crate::names::NameCache;
 use crate::ui_chat::event::ChatEventKind;
 
 use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid};
 use crate::query_cache::Ask;
 use crate::target::ring::Factions;
+use crate::target::{RelUnit, Relations, UnitLookup};
 use crate::ui_party::GroupState;
 
 /// Read-only `ObjectStore` lookup by entity, the one thing [`classify`] needs from the world.
@@ -24,10 +29,36 @@ impl Stores for Query<'_, '_, &mut ObjectStore> {
     }
 }
 
+impl Stores for Query<'_, '_, &ObjectStore> {
+    fn store(&self, entity: Entity) -> Option<&ObjectStore> {
+        self.get(entity).ok()
+    }
+}
+
 impl Stores for Query<'_, '_, (Entity, &ObjectStore)> {
     fn store(&self, entity: Entity) -> Option<&ObjectStore> {
         self.get(entity).ok().map(|(_, s)| s)
     }
+}
+
+/// Whether the client holds `guid` as a unit, the `0x468460` lookup with type mask 8 that the
+/// handlers make before a flash anchor, a float or a full block: a player or a creature, never a
+/// game object.
+pub(crate) fn holds_unit(guid: u64, index: &GuidIndex, stores: &impl Stores) -> bool {
+    index
+        .0
+        .get(&guid)
+        .and_then(|&e| stores.store(e))
+        .is_some_and(is_unit)
+}
+
+/// Whether a held object is a unit, type bit 3 of `OBJECT_FIELD_TYPE`: a player or a creature.
+pub(crate) fn is_unit(store: &ObjectStore) -> bool {
+    use benilla_protocol::messages::ObjectType;
+    matches!(
+        store.0.object_type(),
+        Some(ObjectType::Unit | ObjectType::Player)
+    )
 }
 
 /// A world position by entity, for the range gate.
@@ -237,12 +268,45 @@ impl UnitClass {
     }
 }
 
-/// Classify one guid against the active player, the reference's `0x5efea0`. This reads the owner
-/// (`UNIT_FIELD_CHARMEDBY`, then `UNIT_FIELD_CREATEDBY`) for every unit, tests party (your own
-/// subgroup) before hostility, and runs `CanAttack` (`0x606980`) only with the player attacking
-/// ([`crate::target::ring::can_attack_from_player`]). The reference reads the owner only for a
-/// unit that is not a player (`0x5f0006`-`0x5f0019`); a player is hostile only if each can attack
-/// the other (`0x5eff85`-`0x5effad`), and that test comes before party (`0x5effcd`).
+/// The object manager as [`classify`] asks it: a guid's descriptor through the index, and a unit
+/// read with its creature record, as [`crate::target::RelationWorld::unit`] reads one.
+struct Objects<'a, S: Stores> {
+    index: &'a GuidIndex,
+    stores: &'a S,
+    names: Option<&'a NameCache>,
+}
+
+impl<S: Stores> Objects<'_, S> {
+    fn store(&self, guid: u64) -> Option<&ObjectStore> {
+        self.stores.store(*self.index.0.get(&guid)?)
+    }
+}
+
+impl<S: Stores> UnitLookup for Objects<'_, S> {
+    fn unit(&self, guid: u64) -> Option<RelUnit> {
+        let store = self.store(guid).filter(|s| s.is_unit())?;
+        let unit = RelUnit::of(guid, store);
+        Some(match self.names {
+            Some(names) => unit.with_record(store, names),
+            None => unit,
+        })
+    }
+}
+
+/// `ClassifyGuidForPlayer 0x5efea0`, one guid's standing to the active player. Both the active
+/// player and the guid's object must be held (`0x5efefc`, `0x5eff04`); a game object stands for
+/// the unit that created it (`GAMEOBJECT_CREATED_BY`, `0x5eff1e`-`0x5eff45`).
+/// - The active player is 0 (`0x5eff5c`).
+/// - A player is hostile, 6, when it and the active player can each attack the other
+///   (`0x5eff85`-`0x5effad`), before any party test; else a party member, 2 (`0x5effcd`); else
+///   friendly, 4. A game object's creator takes the class one up (`0x5effa1`-`0x5effad`).
+/// - Any other unit goes by its charmer, else its creator (`0x5f0006`-`0x5f0019`), never a
+///   player's: none is a creature, 8; the active player 1; a party member 3; any other held
+///   player 7 when the unit itself and the active player can each attack the other
+///   (`0x5f00e3`-`0x5f00fd`), else 5; an owner that is no held player, 8.
+///
+/// [`Relations::can_attack`] is `CanAttack 0x606980` with its argument order kept: the unit
+/// attacking the player is asked first.
 pub(crate) fn classify(
     guid: u64,
     self_guid: &SelfGuid,
@@ -251,72 +315,121 @@ pub(crate) fn classify(
     stores: &impl Stores,
     factions: Option<&Factions>,
     reputations: &Reputations,
+    names: Option<&NameCache>,
 ) -> UnitClass {
-    let Some(me) = self_guid.0 else {
-        return UnitClass::Unknown;
+    let objects = Objects {
+        index,
+        stores,
+        names,
     };
-    if guid == me {
-        return UnitClass::Me;
-    }
-    let Some(entity) = index.0.get(&guid).copied() else {
-        return UnitClass::Unknown;
+    let roster = group.map(crate::spell::group_relation::GroupRoster::party_of);
+    let rel = Relations {
+        factions,
+        reputations,
+        me: self_guid.0,
+        roster: roster.as_ref(),
+        units: &objects,
     };
-    let Some(store) = stores.store(entity) else {
-        return UnitClass::Unknown;
-    };
-    // CHARMEDBY first, then CREATEDBY (`0x5f000c`/`0x5f0019`): an owned unit classifies by owner.
-    let owner = store
-        .0
-        .unit_charmed_by()
-        .or_else(|| store.0.unit_created_by());
-    let owned_by = |g: u64| owner == Some(g);
+    classify_in(&rel, guid, |g| objects.store(g))
+}
 
-    if owned_by(me) {
-        return UnitClass::MyPet;
-    }
-    // The party slots hold your own subgroup only; `flags` bits 0-2 are the subgroup on both sides.
-    let in_party = |g: u64| {
-        group.is_some_and(|s| {
-            s.in_group
-                && s.members
-                    .iter()
-                    .any(|m| m.guid == g && m.flags & 0x7 == s.own_flags & 0x7)
-        })
+/// [`classify`] over the relation inputs and a guid's descriptor of any object type.
+fn classify_in<'a>(
+    rel: &Relations,
+    guid: u64,
+    object: impl Fn(u64) -> Option<&'a ObjectStore>,
+) -> UnitClass {
+    use benilla_protocol::messages::ObjectType;
+    use UnitClass as C;
+    let (Some(me), Some(store)) = (rel.me.and_then(|g| rel.units.unit(g)), object(guid)) else {
+        return C::Unknown;
     };
-    if in_party(guid) {
-        return UnitClass::Party;
-    }
-    if owner.is_some_and(in_party) {
-        return UnitClass::PartyPet;
-    }
-
-    // Friend or foe is `CanAttack` on this unit itself, never its owner (`0x5f00e3`/`0x5f00f2`).
-    let hostile = {
-        let me_store = index.0.get(&me).copied().and_then(|e| stores.store(e));
-        crate::target::ring::can_attack_from_player(
-            factions,
-            reputations,
-            Some(store),
-            me_store,
-            benilla_protocol::guid::is_player(guid),
-        )
+    let (unit, from_object) = match store.0.object_type() {
+        Some(ObjectType::Unit | ObjectType::Player) => (rel.units.unit(guid), false),
+        Some(ObjectType::GameObject) => (
+            store
+                .0
+                .gameobject_created_by()
+                .and_then(|g| rel.units.unit(g)),
+            true,
+        ),
+        _ => (None, false),
     };
-
-    if benilla_protocol::guid::is_player(guid) {
-        return if hostile {
-            UnitClass::HostilePlayer
+    let Some(unit) = unit else {
+        return C::Unknown;
+    };
+    let up = |class: C| {
+        if from_object {
+            C::from_index(class as usize + 1)
         } else {
-            UnitClass::FriendlyPlayer
-        };
+            class
+        }
+    };
+    if unit.guid == me.guid {
+        return up(C::Me);
     }
-    if owner.is_some_and(benilla_protocol::guid::is_player) {
-        return if hostile {
-            UnitClass::HostilePet
+    let mutual = |unit: &RelUnit| rel.can_attack(unit, &me) && rel.can_attack(&me, unit);
+    if unit.is_player {
+        return up(if mutual(&unit) {
+            C::HostilePlayer
+        } else if rel.in_party(unit.guid) {
+            C::Party
         } else {
-            UnitClass::FriendlyPet
-        };
+            C::FriendlyPlayer
+        });
     }
-    UnitClass::Creature
+    let owner = if unit.charmed_by != 0 {
+        unit.charmed_by
+    } else {
+        unit.created_by
+    };
+    if owner == 0 {
+        return C::Creature;
+    }
+    if owner == me.guid {
+        return C::MyPet;
+    }
+    if rel.in_party(owner) {
+        return C::PartyPet;
+    }
+    match rel.units.unit(owner) {
+        Some(o) if o.is_player && mutual(&unit) => C::HostilePet,
+        Some(o) if o.is_player => C::FriendlyPet,
+        _ => C::Creature,
+    }
+}
+
+/// `SPELL_ATTR_DO_NOT_DISPLAY | SPELL_ATTR_DO_NOT_LOG`, `Attributes` (`SpellRec+0x18`) bits 7 and
+/// 8 (vmangos `SpellDefines.h:799-800`).
+const ATTR_DO_NOT_DISPLAY_OR_LOG: u32 = 0x180;
+
+/// The spell a combat-log formatter names, or `None` where it writes no line: each of the 24
+/// formatters that index the Spell store (`0xc0d788`), `0x626a10` to `0x62e190`, returns for an
+/// id out of range or with no record, for `Attributes & 0x180` and for an empty name in the
+/// client's locale, as the miss line's `0x62bac3`-`0x62bb07` does.
+pub(crate) fn logged_spell(
+    spells: Option<&crate::ui_action::Spells>,
+    spell_id: u32,
+) -> Option<&benilla_formats::SpellDisplay> {
+    let display = spells?.catalog.get(spell_id)?;
+    (display.attributes & ATTR_DO_NOT_DISPLAY_OR_LOG == 0 && !display.name.is_empty())
+        .then_some(display)
+}
+
+/// `SPELL_ATTR_DO_NOT_LOG`, `Attributes` bit 8 (vmangos `SpellDefines.h:800`).
+const ATTR_DO_NOT_LOG: u32 = 0x100;
+
+/// The spell record a packet's `UNIT_COMBAT` and floating text need: the handlers test for a
+/// record without `Attributes & 0x100` before either (`0x5e87e3`-`0x5e87f4`, `0x626f1b`,
+/// `0x5e7f0b`-`0x5e7f18`), apart from the line's own test, [`logged_spell`].
+pub(crate) fn feedback_spell(
+    spells: Option<&crate::ui_action::Spells>,
+    spell_id: u32,
+) -> Option<&benilla_formats::SpellDisplay> {
+    spells?
+        .catalog
+        .get(spell_id)
+        .filter(|d| d.attributes & ATTR_DO_NOT_LOG == 0)
 }
 
 // ─────────────────────────────── the msgType selectors ────────────────────────────────
@@ -622,10 +735,10 @@ fn append_trailers(lua: &benilla_ui::script::UiScript, line: &mut String, t: Tra
             return;
         };
         let args = match arg {
-            Some(n) => vec![Arg::Num(n)],
+            Some(n) => vec![Arg::D(n)],
             None => Vec::new(),
         };
-        match fill(&template, &args) {
+        match fill_exact(&template, &args) {
             Some(text) => line.push_str(&text),
             None => warn!("combat log: {key} does not match its trailer shape"),
         }
@@ -672,7 +785,12 @@ pub(crate) struct Fills {
 
 /// Resolve a family and variant to a finished line; `None`, silently, when the key is absent,
 /// where the reference prints a not-found warning line (`0x6269f0`) for any key but a missing
-/// `…SELFSELF`. The fill is `vsnprintf` over a fixed argument list, as at `0x626850`.
+/// `…SELFSELF`. The fill is Storm's ordered printf over a fixed argument list
+/// ([`benilla_ui::strings::fill_exact`]): `0x626850` formats through `SStrVPrintf` (`0x64a8b0`),
+/// which takes `vsnoprintf` (`0x6697d0`) once option `0xa` is set, as the client does at start
+/// (`0x402141`, `0x64ede9`). It binds a numbered hole (`%2$d`, the deDE templates': `Ihr trefft
+/// %1$s. Schaden: %2$d.`) to its argument in the list enUS fills in sequence, and prints a
+/// template that leaves an argument out.
 pub(crate) fn compose_line(
     lua: &benilla_ui::script::UiScript,
     family: Family,
@@ -681,26 +799,31 @@ pub(crate) fn compose_line(
 ) -> Option<String> {
     let key = family.key(variant);
     let template = global_string(lua, &key)?;
-    // Resolved before the walk so the borrows outlive it.
-    let school = fills.school.and_then(|s| school_word(lua, s));
+    // Resolved before the walk so the borrows outlive it. A school with no name writes no line,
+    // whatever the template takes: each formatter that names a school returns first on it
+    // (`0x62cd99`, `0x628117`, `0x629d50`, `0x62ca3e`).
+    let school = match fills.school {
+        Some(s) => Some(school_word(lua, s)?),
+        None => None,
+    };
     let power = fills.power.and_then(|p| power_word(lua, p));
     let power2 = fills.power2.and_then(|p| power_word(lua, p));
     let mut args: Vec<Arg> = Vec::with_capacity(family.slots.len());
     for slot in family.slots {
         match slot {
-            Slot::Attacker if family.names_subject(variant) => args.push(Arg::Str(&fills.attacker)),
-            Slot::Victim if family.names_object(variant) => args.push(Arg::Str(&fills.victim)),
+            Slot::Attacker if family.names_subject(variant) => args.push(Arg::S(&fills.attacker)),
+            Slot::Victim if family.names_object(variant) => args.push(Arg::S(&fills.victim)),
             Slot::Attacker | Slot::Victim => {}
-            Slot::Named => args.push(Arg::Str(&fills.named)),
-            Slot::Spell => args.push(Arg::Str(&fills.spell)),
-            Slot::School => args.push(Arg::Str(school.as_deref()?)),
-            Slot::Power => args.push(Arg::Str(power.as_deref()?)),
-            Slot::Power2 => args.push(Arg::Str(power2.as_deref()?)),
-            Slot::Amount => args.push(Arg::Num(fills.amount)),
-            Slot::Amount2 => args.push(Arg::Num(fills.amount2)),
+            Slot::Named => args.push(Arg::S(&fills.named)),
+            Slot::Spell => args.push(Arg::S(&fills.spell)),
+            Slot::School => args.push(Arg::S(school.as_deref()?)),
+            Slot::Power => args.push(Arg::S(power.as_deref()?)),
+            Slot::Power2 => args.push(Arg::S(power2.as_deref()?)),
+            Slot::Amount => args.push(Arg::D(fills.amount)),
+            Slot::Amount2 => args.push(Arg::D(fills.amount2)),
         }
     }
-    match fill(&template, &args) {
+    match fill_exact(&template, &args) {
         Some(mut line) => {
             if let Some(t) = fills.trailers {
                 append_trailers(lua, &mut line, t);
@@ -716,39 +839,6 @@ pub(crate) fn compose_line(
             None
         }
     }
-}
-
-/// One `vsnprintf` argument.
-enum Arg<'a> {
-    Str(&'a str),
-    Num(i64),
-}
-
-/// `vsnprintf` over the `%s`/`%d` subset the combat-log templates use; `None` on any mismatch.
-fn fill(template: &str, args: &[Arg<'_>]) -> Option<String> {
-    let mut out = String::with_capacity(template.len() + 32);
-    let mut next = args.iter();
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('%') => out.push('%'),
-            Some('s') => match next.next()? {
-                Arg::Str(s) => out.push_str(s),
-                Arg::Num(_) => return None,
-            },
-            Some('d') => match next.next()? {
-                Arg::Num(n) => out.push_str(&n.to_string()),
-                Arg::Str(_) => return None,
-            },
-            // Any other conversion is a mismatch, never a half-filled sentence.
-            _ => return None,
-        }
-    }
-    next.next().is_none().then_some(out)
 }
 
 /// A GlobalString off the VM's globals, `None` when absent or empty: the two tests `0x703bf0`'s
@@ -795,11 +885,11 @@ pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> O
     global_string(script, power_key(power)?)
 }
 
-/// One endpoint's display name, the reference's `GetObjectName` (`0x6264e0`); `None` until the
-/// name cache answers, and the caller retries, where the reference never waits and prints
-/// `UNKNOWNOBJECT`. A streamed unit names through its descriptor (`GetUnitName`, `0x609210`), which
-/// is how a pet is named.
-pub(crate) fn object_name(
+/// A unit's name as `GetUnitName 0x609210` finds it: what the caches hold now, a lookup asked for
+/// what they do not (`0x6265a7`, `0x6265e0`, with an empty callback), and `None` for that. A
+/// streamed unit names through its descriptor, which is how a pet is named. The XP and honor lines
+/// name their victim here (`0x637ac0`, `0x625387`).
+pub(crate) fn unit_name(
     guid: u64,
     unit: Option<&ObjectStore>,
     names: &NameCache,
@@ -812,751 +902,80 @@ pub(crate) fn object_name(
     names.resolve_unit(guid, unit, ask).map(str::to_owned)
 }
 
-// ────────────────────────────────── the families ──────────────────────────────────────
-
-/// Declare a four-way family: its key stem and its slots in the order the enUS template consumes
-/// them, with that template and its `GlobalStrings.lua` line as the doc.
-macro_rules! family {
-    ($name:ident, $stem:literal, [$($slot:ident),* $(,)?], $doc:literal) => {
-        #[doc = $doc]
-        pub(crate) const $name: Family = Family {
-            stem: $stem,
-            keying: Keying::Quad,
-            tail: "",
-            slots: &[$(Slot::$slot),*],
-        };
-    };
+/// The caches `GetObjectName` (`0x6264e0`) reads: the name caches, the game object cache
+/// (`0xc0e318`) and the item cache (`0xc0e2a0`).
+#[derive(Clone, Copy)]
+pub(crate) struct NameSources<'a> {
+    pub names: &'a NameCache,
+    pub gameobjects: &'a GameObjectTemplates,
+    pub items: &'a Items,
 }
 
-/// Declare a two-way family, keyed on the subject alone, with an optional `tail`.
-macro_rules! duo {
-    ($name:ident, $stem:literal, $me:literal, $other:literal, [$($slot:ident),* $(,)?], $doc:literal) => {
-        duo!($name, $stem, $me, $other, tail "", [$($slot),*], $doc);
+/// One endpoint's display name as `GetObjectName 0x6264e0` finds it. A guid the client holds goes
+/// by its object's type mask (`0x626513`-`0x626557`): a unit (bit 3) through `GetUnitName`
+/// ([`unit_name`]), a game object (bit 5) by the record name it holds (`0x5f8100`, the cache by
+/// the descriptor's entry), an item (bit 1) from the item cache by its entry, read without asking
+/// (`0x55ba30` with no callback); any other object has no name. A guid not held goes to the name
+/// caches (`0x6265a7`, `0x6265e0`, with an empty callback). `None` for a miss, and for a record
+/// with an empty name (`0x6265ef`), which [`logged_name`] prints.
+pub(crate) fn object_name(
+    guid: u64,
+    held: Option<&ObjectStore>,
+    sources: &NameSources<'_>,
+    ask: Ask<'_>,
+) -> Option<String> {
+    use benilla_protocol::messages::ObjectType;
+    if guid == 0 {
+        return None;
+    }
+    let name = match held {
+        None => return unit_name(guid, None, sources.names, ask),
+        Some(store) if is_unit(store) => return unit_name(guid, Some(store), sources.names, ask),
+        Some(store) if store.0.object_type() == Some(ObjectType::GameObject) => sources
+            .gameobjects
+            .of(&store.0)
+            .map(|template| template.name.as_str()),
+        Some(store) if store.0.is_item() => store
+            .0
+            .object_entry()
+            .and_then(|entry| sources.items.template(entry, 0, Ask::Read))
+            .map(|item| item.name.as_str()),
+        Some(_) => None,
     };
-    ($name:ident, $stem:literal, $me:literal, $other:literal, tail $tail:literal, [$($slot:ident),* $(,)?], $doc:literal) => {
-        #[doc = $doc]
-        pub(crate) const $name: Family = Family {
-            stem: $stem,
-            keying: Keying::Duo { me: $me, other: $other },
-            tail: $tail,
-            slots: &[$(Slot::$slot),*],
-        };
-    };
+    name.filter(|name| !name.is_empty()).map(str::to_owned)
 }
 
-/// Declare a family with no variant: the key is the whole name.
-macro_rules! single {
-    ($name:ident, $key:literal, [$($slot:ident),* $(,)?], $doc:literal) => {
-        #[doc = $doc]
-        pub(crate) const $name: Family = Family {
-            stem: $key,
-            keying: Keying::Single,
-            tail: "",
-            slots: &[$(Slot::$slot),*],
-        };
-    };
+/// The name `GetObjectName` prints for an object nothing names: the `UNKNOWNOBJECT` string, else
+/// the literal `UKNOWNOBJECT` (`0x6265f4`-`0x62660c`).
+pub(crate) fn unknown_object(script: &benilla_ui::script::UiScript) -> String {
+    global_string(script, "UNKNOWNOBJECT").unwrap_or_else(|| "UKNOWNOBJECT".into())
 }
 
-// ── melee: the swing that landed ───────────────────────────────────────────────────────
-family!(
-    COMBATHIT,
-    "COMBATHIT",
-    [Attacker, Victim, Amount],
-    "`\"%s hits %s for %d.\"` (GlobalStrings.lua:777)"
-);
-family!(
-    COMBATHITCRIT,
-    "COMBATHITCRIT",
-    [Attacker, Victim, Amount],
-    "`\"%s crits %s for %d.\"` (:771)"
-);
-family!(
-    COMBATHITSCHOOL,
-    "COMBATHITSCHOOL",
-    [Attacker, Victim, Amount, School],
-    "`\"%s hits %s for %d %s damage.\"` (:779)"
-);
-family!(
-    COMBATHITCRITSCHOOL,
-    "COMBATHITCRITSCHOOL",
-    [Attacker, Victim, Amount, School],
-    "`\"%s crits %s for %d %s damage.\"` (:773)"
-);
-
-// ── melee: the swing that did not ──────────────────────────────────────────────────────
-family!(
-    MISSED,
-    "MISSED",
-    [Attacker, Victim],
-    "`\"%s misses %s.\"` (:2698)"
-);
-family!(
-    VSDODGE,
-    "VSDODGE",
-    [Attacker, Victim],
-    "`\"%s attacks. %s dodges.\"` (:5400)"
-);
-family!(
-    VSPARRY,
-    "VSPARRY",
-    [Attacker, Victim],
-    "`\"%s attacks. %s parries.\"` (:5421)"
-);
-family!(
-    VSBLOCK,
-    "VSBLOCK",
-    [Attacker, Victim],
-    "`\"%s attacks. %s blocks.\"` (:5394)"
-);
-family!(
-    VSABSORB,
-    "VSABSORB",
-    [Attacker, Victim],
-    "`\"%s attacks. %s absorbs all the damage.\"` (:5391)"
-);
-family!(
-    VSRESIST,
-    "VSRESIST",
-    [Attacker, Victim],
-    "`\"%s attacks. %s resists all the damage.\"` (:5424)"
-);
-family!(
-    VSIMMUNE,
-    "VSIMMUNE",
-    [Attacker, Victim],
-    "`\"%s attacks but %s is immune.\"` (:5418)"
-);
-family!(
-    VSEVADE,
-    "VSEVADE",
-    [Attacker, Victim],
-    "`\"%s attacks. %s evades.\"` (:5415)"
-);
-family!(
-    VSDEFLECT,
-    "VSDEFLECT",
-    [Attacker, Victim],
-    "`\"%s attacks. %s deflects.\"` (:5397)"
-);
-
-// ── a spell's direct damage ────────────────────────────────────────────────────────────
-family!(
-    SPELLLOG,
-    "SPELLLOG",
-    [Attacker, Spell, Victim, Amount],
-    "`\"%s's %s hits %s for %d.\"` (:3878)"
-);
-family!(
-    SPELLLOGCRIT,
-    "SPELLLOGCRIT",
-    [Attacker, Spell, Victim, Amount],
-    "`\"%s's %s crits %s for %d.\"` (:3870)"
-);
-family!(
-    SPELLLOGSCHOOL,
-    "SPELLLOGSCHOOL",
-    [Attacker, Spell, Victim, Amount, School],
-    "`\"%s's %s hits %s for %d %s damage.\"` (:3880)"
-);
-family!(
-    SPELLLOGCRITSCHOOL,
-    "SPELLLOGCRITSCHOOL",
-    [Attacker, Spell, Victim, Amount, School],
-    "`\"%s's %s crits %s for %d %s damage.\"` (:3872)"
-);
-
-// ── a spell that did not land ──────────────────────────────────────────────────────────
-family!(
-    SPELLMISS,
-    "SPELLMISS",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s missed %s.\"` (:3886)"
-);
-family!(
-    SPELLRESIST,
-    "SPELLRESIST",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s was resisted by %s.\"` (:3911)"
-);
-family!(
-    SPELLDODGED,
-    "SPELLDODGED",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s was dodged by %s.\"` (:3835)"
-);
-family!(
-    SPELLPARRIED,
-    "SPELLPARRIED",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s was parried by %s.\"` (:3890)"
-);
-family!(
-    SPELLBLOCKED,
-    "SPELLBLOCKED",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s was blocked by %s.\"` (:3817)"
-);
-family!(
-    SPELLEVADED,
-    "SPELLEVADED",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s was evaded by %s.\"` (:3845)"
-);
-family!(
-    SPELLIMMUNE,
-    "SPELLIMMUNE",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s fails. %s is immune.\"` (:3859)"
-);
-family!(
-    SPELLDEFLECTED,
-    "SPELLDEFLECTED",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s was deflected by %s.\"` (:3829)"
-);
-family!(
-    SPELLLOGABSORB,
-    "SPELLLOGABSORB",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s is absorbed by %s.\"` (:3866)"
-);
-family!(
-    SPELLREFLECT,
-    "SPELLREFLECT",
-    [Attacker, Spell, Victim],
-    "`\"%s's %s is reflected back by %s.\"` (:3907)"
-);
-
-// ── heals and power ────────────────────────────────────────────────────────────────────
-family!(
-    HEALED,
-    "HEALED",
-    [Attacker, Spell, Victim, Amount],
-    "`\"%s's %s heals %s for %d.\"` (:2129)"
-);
-family!(
-    HEALEDCRIT,
-    "HEALEDCRIT",
-    [Attacker, Spell, Victim, Amount],
-    "`\"%s's %s critically heals %s for %d.\"` (:2125)"
-);
-family!(
-    POWERGAIN,
-    "POWERGAIN",
-    [Victim, Amount, Power, Attacker, Spell],
-    "`\"%s gains %d %s from %s's %s.\"` (:3091)"
-);
-family!(SPELLPOWERLEECH, "SPELLPOWERLEECH",
-    [Attacker, Spell, Amount, Power, Victim, Attacker, Amount2, Power2],
-    "`\"%s's %s drains %d %s from %s. %s gains %d %s.\"` (:3904) — the only family that spells the \
-     subject TWICE, and the second one is the same name as the first (the drainer is the gainer).");
-
-// ── periodic ticks ─────────────────────────────────────────────────────────────────────
-family!(
-    PERIODICAURADAMAGE,
-    "PERIODICAURADAMAGE",
-    [Victim, Amount, School, Attacker, Spell],
-    "`\"%s suffers %d %s damage from %s's %s.\"` (:3001)"
-);
-family!(
-    PERIODICAURAHEAL,
-    "PERIODICAURAHEAL",
-    [Victim, Amount, Attacker, Spell],
-    "`\"%s gains %d health from %s's %s.\"` (:3005)"
-);
-
-// ── a damage shield firing back ────────────────────────────────────────────────────────
-family!(
-    DAMAGESHIELD,
-    "DAMAGESHIELD",
-    [Attacker, Amount, School, Victim],
-    "`\"%s reflects %d %s damage to %s.\"` (:884) — the SUBJECT is the shield's BEARER and the \
-     object is whoever struck them, which is the reverse of the packet's own field names."
-);
-
-// ── a unit dying ───────────────────────────────────────────────────────────────────────
-duo!(
-    UNITDIES,
-    "UNITDIES",
-    "SELF",
-    "OTHER",
-    [Attacker],
-    "`\"You die.\"` (:4426) / `\"%s dies.\"` (:4425) — the death reflex's ordinary line. The SUBJECT \
-     is the unit that died; there is no second endpoint."
-);
-single!(
-    UNITDESTROYEDOTHER,
-    "UNITDESTROYEDOTHER",
-    [Attacker],
-    "`\"%s is destroyed.\"` (:4424) — what a SUMMONED thing does instead of dying. There is no \
-     `…SELF` twin: you are never a summon."
-);
-single!(
-    SELFKILLOTHER,
-    "SELFKILLOTHER",
-    [Attacker],
-    "`\"You have slain %s!\"` (:3408) — `SMSG_PARTYKILLLOG` when the killer is YOU. The reference \
-     pushes (victim, killer) and the string consumes only the first, so the subject is the VICTIM."
-);
-single!(
-    PARTYKILLOTHER,
-    "PARTYKILLOTHER",
-    [Attacker, Victim],
-    "`\"%s is slain by %s!\"` (:2988) — the same packet when the killer is a party member. \
-     (victim, killer), in that order."
-);
-
-// ── an aura landing, stacking, leaving, being dispelled or stolen ──────────────────────
-duo!(
-    AURAADDED_HARMFUL,
-    "AURAADDED",
-    "SELF",
-    "OTHER",
-    tail "HARMFUL",
-    [Attacker, Spell],
-    "`\"You are afflicted by %s.\"` (:102) / `\"%s is afflicted by %s.\"` (:100) — UNIT first."
-);
-duo!(
-    AURAADDED_HELPFUL,
-    "AURAADDED",
-    "SELF",
-    "OTHER",
-    tail "HELPFUL",
-    [Attacker, Spell],
-    "`\"You gain %s.\"` (:103) / `\"%s gains %s.\"` (:101)"
-);
-duo!(
-    AURAAPPLICATIONADDED_HARMFUL,
-    "AURAAPPLICATIONADDED",
-    "SELF",
-    "OTHER",
-    tail "HARMFUL",
-    [Attacker, Spell, Amount],
-    "`\"You are afflicted by %s (%d).\"` (:106) / `\"%s is afflicted by %s (%d).\"` (:104)"
-);
-duo!(
-    AURAAPPLICATIONADDED_HELPFUL,
-    "AURAAPPLICATIONADDED",
-    "SELF",
-    "OTHER",
-    tail "HELPFUL",
-    [Attacker, Spell, Amount],
-    "`\"You gain %s (%d).\"` (:107) / `\"%s gains %s (%d).\"` (:105)"
-);
-duo!(
-    AURAREMOVED,
-    "AURAREMOVED",
-    "SELF",
-    "OTHER",
-    [Spell, Attacker],
-    "`\"%s fades from you.\"` (:113) / `\"%s fades from %s.\"` (:112) — AURA first, which is the \
-     other way round from `AURAADDED*`. The flip is the reference's own (`0x62b480`) and is \
-     exactly the kind of thing a single ordered slot list per family exists to pin."
-);
-duo!(
-    AURADISPEL,
-    "AURADISPEL",
-    "SELF",
-    "OTHER",
-    [Attacker, Spell],
-    "`\"Your %s is removed.\"` (:111) / `\"%s's %s is removed.\"` (:110) — the subject is the aura's \
-     BEARER, not the dispeller, who the sentence never names."
-);
-
-// ── an enchant landing on or fading from an item ───────────────────────────────────────
-family!(
-    ITEMENCHANTMENTADD,
-    "ITEMENCHANTMENTADD",
-    [Attacker, Spell, Victim, Named],
-    "`\"%s casts %s on %s's %s.\"` (:2378) — caster, enchant, owner, ITEM. The item name is always \
-     last and always spelled."
-);
-duo!(
-    ITEMENCHANTMENTREMOVE,
-    "ITEMENCHANTMENTREMOVE",
-    "SELF",
-    "OTHER",
-    [Spell, Attacker, Named],
-    "`\"%s has faded from your %s.\"` (:2383) / `\"%s has faded from %s's %s.\"` (:2382) — enchant, \
-     owner, item. A fade names no caster, which is why it drops to two keys."
-);
-
-// ── what a cast made, fed or opened ────────────────────────────────────────────────────
-duo!(
-    TRADESKILL_LOG,
-    "TRADESKILL_LOG",
-    "_FIRSTPERSON",
-    "_THIRDPERSON",
-    [Attacker, Named],
-    "`\"You create %s.\"` (:4273) / `\"%s creates %s.\"` (:4274) — the one family pair whose two-way \
-     words are not SELF/OTHER."
-);
-duo!(
-    FEEDPET_LOG,
-    "FEEDPET_LOG",
-    "_FIRSTPERSON",
-    "_THIRDPERSON",
-    [Attacker, Named],
-    "`\"Your pet begins eating the %s.\"` (:1965) / `\"%s's pet begins eating a %s.\"` (:1966)"
-);
-
-// ── the spell-outcome leaves ───────────────────────────────────────────────────────────
-family!(
-    PROCRESIST,
-    "PROCRESIST",
-    [Victim, Attacker, Spell],
-    "`\"%s resists %s's %s.\"` (:3100) — TARGET first, then caster (the reference's convention B)."
-);
-family!(
-    IMMUNESPELL,
-    "IMMUNESPELL",
-    [Victim, Attacker, Spell],
-    "`\"%s is immune to %s's %s.\"` (:2317) — convention B."
-);
-family!(
-    DISPELFAILED,
-    "DISPELFAILED",
-    [Attacker, Victim, Spell],
-    "`\"%s fails to dispel %s's %s.\"` (:933) — convention C: caster, target, spell."
-);
-family!(
-    SPELLINTERRUPT,
-    "SPELLINTERRUPT",
-    [Attacker, Victim, Spell],
-    "`\"%s interrupts %s's %s.\"` (:3863) — convention C. No `…SELFSELF`."
-);
-duo!(
-    INSTAKILL,
-    "INSTAKILL",
-    "SELF",
-    "OTHER",
-    [Attacker, Spell],
-    "`\"You are killed by %s.\"` (:2330) / `\"%s is killed by %s.\"` (:2329) — subject is the unit \
-     killed."
-);
-family!(
-    SPELLSPLITDAMAGE,
-    "SPELLSPLITDAMAGE",
-    [Attacker, Spell, Victim, Amount],
-    "`\"%s's %s causes %s %d damage.\"` (:3916) — the `hit_info & 8` split-damage form of \
-     `SMSG_SPELLNONMELEEDAMAGELOG`. No `…SELFSELF`."
-);
-family!(
-    SPELLPOWERDRAIN,
-    "SPELLPOWERDRAIN",
-    [Attacker, Spell, Amount, Power, Victim],
-    "`\"%s's %s drains %d %s from %s.\"` (:3900) — [`SPELLPOWERLEECH`]'s twin, chosen when the \
-     leech multiplier is effectively zero: the same push block, three slots shorter."
-);
-duo!(
-    SPELLEXTRAATTACKS,
-    "SPELLEXTRAATTACKS",
-    "SELF",
-    "OTHER",
-    [Attacker, Amount, Spell],
-    "`\"You gain %d extra attacks through %s.\"` (:3851) / `\"%s gains %d extra attacks through \
-     %s.\"` (:3849)"
-);
-duo!(
-    SPELLEXTRAATTACKS_SINGULAR,
-    "SPELLEXTRAATTACKS",
-    "SELF",
-    "OTHER",
-    tail "_SINGULAR",
-    [Attacker, Amount, Spell],
-    "`\"You gain %d extra attack through %s.\"` (:3852) — the reference `SStrCat`s `_SINGULAR` onto \
-     the same key when the count is 1, so this is the same family with a tail rather than a fifth \
-     name."
-);
-family!(
-    SPELLDURABILITYDAMAGE,
-    "SPELLDURABILITYDAMAGE",
-    [Attacker, Spell, Victim, Named],
-    "`\"%s casts %s on %s: %s damaged.\"` (:3842) — the trailing name is the ITEM. No `…SELFSELF`."
-);
-family!(
-    SPELLDURABILITYDAMAGEALL,
-    "SPELLDURABILITYDAMAGEALL",
-    [Attacker, Spell, Victim],
-    "`\"%s casts %s on %s: all items damaged.\"` (:3839) — what the same effect says when its slot \
-     and item id are both `-1`. No `…SELFSELF`."
-);
-duo!(
-    SPELLDISMISSPET,
-    "SPELLDISMISSPET",
-    "SELF",
-    "OTHER",
-    [Attacker, Named],
-    "`\"Your %s is dismissed.\"` (:3834) / `\"%s's %s is dismissed.\"` (:3833) — the trailing name \
-     is the PET."
-);
-duo!(
-    SPELLHAPPINESSDRAIN,
-    "SPELLHAPPINESSDRAIN",
-    "SELF",
-    "OTHER",
-    [Attacker, Named, Amount],
-    "`\"Your %s loses %d happiness.\"` (:3858) / `\"%s's %s loses %d happiness.\"` (:3857) — power \
-     type 4 has no `…_POINTS` noun, so happiness gets its own family instead of a `POWERGAIN` row."
-);
-
-// ── a cast that failed ─────────────────────────────────────────────────────────────────
-duo!(
-    SPELLFAILCAST,
-    "SPELLFAILCAST",
-    "SELF",
-    "OTHER",
-    [Attacker, Spell, Named],
-    "`\"You fail to cast %s: %s.\"` (:3854) / `\"%s fails to cast %s: %s.\"` (:3853) — the trailing \
-     name is the REASON, already localized."
-);
-duo!(
-    SPELLFAILPERFORM,
-    "SPELLFAILPERFORM",
-    "SELF",
-    "OTHER",
-    [Attacker, Spell, Named],
-    "`\"You fail to perform %s: %s.\"` (:3856) / `\"%s fails to perform %s: %s.\"` (:3855)"
-);
-
-// ── the miscellaneous 0x19 leaves and the reputation line ──────────────────────────────
-single!(
-    DURABILITYDAMAGE_DEATH,
-    "DURABILITYDAMAGE_DEATH",
-    [],
-    "`\"Your equipped items suffer a 10%% durability loss.\"` (:963) — `SMSG_DURABILITY_DAMAGE_DEATH` \
-     carries an EMPTY body, so the line has no arguments at all."
-);
-single!(
-    PET_LOYALTY_GAIN,
-    "PET_LOYALTY_GAIN",
-    [],
-    "`\"Your pet's loyalty has increased.\"` (:3043). The reference emits it as `(\"%s\", GetText(key))`; \
-     a no-slot family is the same sentence by a shorter road."
-);
-single!(
-    PET_LOYALTY_LOSS,
-    "PET_LOYALTY_LOSS",
-    [],
-    "`\"Your pet's loyalty has decreased.\"` (:3044)"
-);
-single!(
-    FACTION_STANDING_INCREASED,
-    "FACTION_STANDING_INCREASED",
-    [Named, Amount],
-    "`\"Your %s reputation has increased by %d.\"` (:1946) — the name is the FACTION's."
-);
-single!(
-    FACTION_STANDING_DECREASED,
-    "FACTION_STANDING_DECREASED",
-    [Named, Amount],
-    "`\"Your %s reputation has decreased by %d.\"` (:1945)"
-);
-
-// ── environmental damage ───────────────────────────────────────────────────────────────
-/// Declare one `VSENVIRONMENTALDAMAGE_<TYPE>_{SELF,OTHER}` pair, the key the reference builds with
-/// `snprintf` over the six type names at `0x80dcac`.
-macro_rules! env_family {
-    ($name:ident, $stem:literal, $doc:literal) => {
-        duo!($name, $stem, "SELF", "OTHER", [Attacker, Amount], $doc);
-    };
-}
-env_family!(
-    VSENV_FATIGUE,
-    "VSENVIRONMENTALDAMAGE_FATIGUE_",
-    "`\"You are exhausted and lose %d health.\"` (:5408) — damage type 0."
-);
-env_family!(
-    VSENV_DROWNING,
-    "VSENVIRONMENTALDAMAGE_DROWNING_",
-    "`\"You are drowning and lose %d health.\"` (:5404) — type 1."
-);
-env_family!(
-    VSENV_FALLING,
-    "VSENVIRONMENTALDAMAGE_FALLING_",
-    "`\"You fall and lose %d health.\"` (:5406) — type 2."
-);
-env_family!(
-    VSENV_LAVA,
-    "VSENVIRONMENTALDAMAGE_LAVA_",
-    "`\"You lose %d health for swimming in lava.\"` (:5412) — type 3."
-);
-env_family!(
-    VSENV_SLIME,
-    "VSENVIRONMENTALDAMAGE_SLIME_",
-    "`\"You lose %d health for swimming in slime.\"` (:5414) — type 4."
-);
-env_family!(
-    VSENV_FIRE,
-    "VSENVIRONMENTALDAMAGE_FIRE_",
-    "`\"You suffer %d points of fire damage.\"` (:5410) — type 5."
-);
-
-/// The environmental family for a `SMSG_ENVIRONMENTALDAMAGELOG` damage type; `None` past the six,
-/// where the reference indexes its table unguarded (`0x62abc5`).
-pub(crate) fn env_family(damage_type: u8) -> Option<Family> {
-    Some(match damage_type {
-        0 => VSENV_FATIGUE,
-        1 => VSENV_DROWNING,
-        2 => VSENV_FALLING,
-        3 => VSENV_LAVA,
-        4 => VSENV_SLIME,
-        5 => VSENV_FIRE,
-        _ => return None,
+/// One endpoint's name as `GetObjectName 0x6264e0` prints it: [`object_name`], else the miss of
+/// the getter it went through. A unit the client holds (type bit 3, `0x626526`) goes through
+/// `GetUnitName` (`0x626531`), whose miss is `UNKNOWNOBJECT` else the literal "Unknown Being"
+/// (`0x609324`-`0x60933c`); anything else misses as [`unknown_object`].
+pub(crate) fn logged_name(
+    guid: u64,
+    store: Option<&ObjectStore>,
+    sources: &NameSources<'_>,
+    ask: Ask<'_>,
+    script: &benilla_ui::script::UiScript,
+) -> String {
+    object_name(guid, store, sources, ask).unwrap_or_else(|| {
+        if store.is_some_and(is_unit) {
+            script.unknown_object_text()
+        } else {
+            unknown_object(script)
+        }
     })
-}
-
-/// Every family this module emits, for the sweep against the shipped templates; a family left out
-/// goes unchecked.
-#[cfg(test)]
-pub(crate) const ALL_FAMILIES: &[Family] = &[
-    COMBATHIT,
-    COMBATHITCRIT,
-    COMBATHITSCHOOL,
-    COMBATHITCRITSCHOOL,
-    MISSED,
-    VSDODGE,
-    VSPARRY,
-    VSBLOCK,
-    VSABSORB,
-    VSRESIST,
-    VSIMMUNE,
-    VSEVADE,
-    VSDEFLECT,
-    SPELLLOG,
-    SPELLLOGCRIT,
-    SPELLLOGSCHOOL,
-    SPELLLOGCRITSCHOOL,
-    SPELLMISS,
-    SPELLRESIST,
-    SPELLDODGED,
-    SPELLPARRIED,
-    SPELLBLOCKED,
-    SPELLEVADED,
-    SPELLIMMUNE,
-    SPELLDEFLECTED,
-    SPELLLOGABSORB,
-    SPELLREFLECT,
-    HEALED,
-    HEALEDCRIT,
-    POWERGAIN,
-    SPELLPOWERLEECH,
-    PERIODICAURADAMAGE,
-    PERIODICAURAHEAL,
-    DAMAGESHIELD,
-    UNITDIES,
-    UNITDESTROYEDOTHER,
-    SELFKILLOTHER,
-    PARTYKILLOTHER,
-    AURAADDED_HARMFUL,
-    AURAADDED_HELPFUL,
-    AURAAPPLICATIONADDED_HARMFUL,
-    AURAAPPLICATIONADDED_HELPFUL,
-    AURAREMOVED,
-    AURADISPEL,
-    ITEMENCHANTMENTADD,
-    ITEMENCHANTMENTREMOVE,
-    TRADESKILL_LOG,
-    FEEDPET_LOG,
-    PROCRESIST,
-    IMMUNESPELL,
-    DISPELFAILED,
-    SPELLINTERRUPT,
-    INSTAKILL,
-    SPELLSPLITDAMAGE,
-    SPELLPOWERDRAIN,
-    SPELLEXTRAATTACKS,
-    SPELLEXTRAATTACKS_SINGULAR,
-    SPELLDURABILITYDAMAGE,
-    SPELLDURABILITYDAMAGEALL,
-    SPELLDISMISSPET,
-    SPELLHAPPINESSDRAIN,
-    SPELLFAILCAST,
-    SPELLFAILPERFORM,
-    DURABILITYDAMAGE_DEATH,
-    PET_LOYALTY_GAIN,
-    PET_LOYALTY_LOSS,
-    FACTION_STANDING_INCREASED,
-    FACTION_STANDING_DECREASED,
-    VSENV_FATIGUE,
-    VSENV_DROWNING,
-    VSENV_FALLING,
-    VSENV_LAVA,
-    VSENV_SLIME,
-    VSENV_FIRE,
-];
-
-/// The family that words a `SpellMissInfo` byte (vmangos `SpellDefines.h:160-174`), as the
-/// reference's miss switch `0x62bb50` maps it.
-pub(crate) fn miss_family(miss_info: u8) -> Family {
-    match miss_info {
-        2 => SPELLRESIST,
-        3 => SPELLDODGED,
-        4 => SPELLPARRIED,
-        5 => SPELLBLOCKED,
-        6 => SPELLEVADED,
-        // 7 IMMUNE and 8 IMMUNE2 are one outcome with two server-side spellings.
-        7 | 8 => SPELLIMMUNE,
-        9 => SPELLDEFLECTED,
-        11 => SPELLREFLECT,
-        // 10 ABSORB, 0, 1 and anything out of range take the default arm `0x62c0e0`, not
-        // `SPELLLOGABSORB`, which belongs to the direct-damage path.
-        _ => SPELLMISS,
-    }
-}
-
-/// The melee family a swing selects, the reference's dispatcher `0x629b60` arm for arm; the order
-/// matters because the tests overlap. The bits are vmangos's `HitInfo` in its `> 1.9.4` branch
-/// (`Objects/UnitDefines.h:250-268`) and `VictimState` (`:237-248`).
-pub(crate) fn melee_family(
-    hit_info: u32,
-    victim_state: u32,
-    damage: u32,
-    school: u8,
-) -> Option<Family> {
-    const MISS: u32 = 0x10;
-    const ABSORB: u32 = 0x20;
-    const RESIST: u32 = 0x40;
-    const CRIT: u32 = 0x80;
-    if hit_info & MISS != 0 {
-        return Some(MISSED);
-    }
-    if victim_state == 5 {
-        return Some(VSBLOCK);
-    }
-    if damage == 0 {
-        if hit_info & ABSORB != 0 {
-            return Some(VSABSORB);
-        }
-        if hit_info & RESIST != 0 {
-            return Some(VSRESIST);
-        }
-    }
-    if victim_state == 1 && damage > 0 {
-        return Some(match (hit_info & CRIT != 0, school != 0) {
-            (false, false) => COMBATHIT,
-            (true, false) => COMBATHITCRIT,
-            (false, true) => COMBATHITSCHOOL,
-            (true, true) => COMBATHITCRITSCHOOL,
-        });
-    }
-    // `0x62a710` words only a state its flag table `0x8628f8` marks (`0x62a720`) and its jump
-    // table `0x62a8ec` covers: 0, 1 without damage, 4, 9 and 10 or more print nothing.
-    match victim_state {
-        2 => Some(VSDODGE),
-        3 => Some(VSPARRY),
-        6 => Some(VSEVADE),
-        7 => Some(VSIMMUNE),
-        8 => Some(VSDEFLECT),
-        _ => None,
-    }
 }
 
 // ────────────────────────── the queued line, awaiting its names ───────────────────────
 
-/// A combat-log line classified at the packet while both units are streamed, so a despawned
-/// creature still logs, with only its names outstanding. The reference's deferred queue
-/// (`0xc4e208`, replayed by `0x6294b0`) holds only a line waiting on an item name (`0x55ba30`).
+/// A combat-log line classified at the packet, composed at the drain with the names the caches
+/// hold then. The reference's deferred queue (`0xc4e208`, replayed by `0x6294b0`) holds only a
+/// line waiting on an item name (`0x55ba30`); a unit's name never holds one ([`Self::fill_names`]).
 #[derive(Clone, Debug)]
 pub(crate) struct PendingCombat {
     pub kind: ChatEventKind,
@@ -1569,7 +988,139 @@ pub(crate) struct PendingCombat {
     /// Everything the template needs but the names, which are filled at drain.
     pub fills: Fills,
     pub named: Named,
+    /// The drains that found the line waiting; the first asks for its names, the rest only read.
     pub tries: u16,
+    /// The `COMBAT_TEXT_UPDATE` the formatter raises once the line is written, and only then: a
+    /// missing template, range or spell writes neither.
+    pub word: Option<LineWord>,
+}
+
+/// One `COMBAT_TEXT_UPDATE` a line raises: a type name of the table `0x862920`, then `arg2` and
+/// `arg3` as the helpers `0x626890`-`0x6269d0` format them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LineWord {
+    pub message_type: &'static str,
+    pub data: WordText,
+    pub extra: Option<String>,
+}
+
+impl LineWord {
+    /// The type alone, as `0x6269d0` raises it.
+    pub(crate) fn bare(message_type: &'static str) -> Self {
+        Self {
+            message_type,
+            data: WordText::Text(None),
+            extra: None,
+        }
+    }
+
+    /// The type and one argument: a number (`0x626960`) or a name (`0x6269b0`).
+    pub(crate) fn with(message_type: &'static str, data: impl ToString) -> Self {
+        Self {
+            message_type,
+            data: WordText::Text(Some(data.to_string())),
+            extra: None,
+        }
+    }
+
+    /// The type, a text and a number (`0x626890`).
+    pub(crate) fn text_number(
+        message_type: &'static str,
+        text: impl ToString,
+        n: impl ToString,
+    ) -> Self {
+        Self {
+            message_type,
+            data: WordText::Text(Some(text.to_string())),
+            extra: Some(n.to_string()),
+        }
+    }
+
+    /// The type, the name the line gives its subject, and a number (`0x626890`).
+    pub(crate) fn named(message_type: &'static str, extra: impl ToString) -> Self {
+        Self {
+            message_type,
+            data: WordText::SubjectName,
+            extra: Some(extra.to_string()),
+        }
+    }
+
+    /// The type and two numbers (`0x6268f0`).
+    pub(crate) fn pair(
+        message_type: &'static str,
+        data: impl ToString,
+        extra: impl ToString,
+    ) -> Self {
+        Self {
+            message_type,
+            data: WordText::Text(Some(data.to_string())),
+            extra: Some(extra.to_string()),
+        }
+    }
+}
+
+/// A word's `arg2`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WordText {
+    /// This text, or nil.
+    Text(Option<String>),
+    /// The name the line gives its subject, the healer's or the caster's `GetObjectName`
+    /// (`0x62c8ea`, `0x627414`), filled with the line's own names.
+    SubjectName,
+}
+
+impl PendingCombat {
+    /// The word's `arg2` once the names are in.
+    pub(crate) fn word_data(&self, word: &LineWord) -> Option<String> {
+        match &word.data {
+            WordText::Text(text) => text.clone(),
+            WordText::SubjectName => Some(self.fills.attacker.clone()),
+        }
+    }
+}
+
+impl PendingCombat {
+    /// Fill the names as `GetObjectName 0x6264e0` names an object: a unit by what `name` prints
+    /// now ([`logged_name`]), never waiting. Only an item the item cache has not answered holds the
+    /// line (`0x628f40`, `0x629610`, `0x629760`, `0x6298a0` waiting through `0x55ba30`); `false`
+    /// while it holds. A guid of 0 is a name the fills already carry.
+    pub(crate) fn fill_names(
+        &mut self,
+        name: impl Fn(u64) -> String,
+        item: impl FnOnce(u32) -> ItemName,
+    ) -> bool {
+        if self.subject != 0 {
+            self.fills.attacker = name(self.subject);
+        }
+        if self.object != 0 {
+            self.fills.victim = name(self.object);
+        }
+        match self.named {
+            Named::Ready => true,
+            Named::Unit(guid) => {
+                self.fills.named = name(guid);
+                true
+            }
+            Named::Item(entry) => match item(entry) {
+                ItemName::Named(text) => {
+                    self.fills.named = text;
+                    true
+                }
+                // The server answered the item unknown: the line goes out with what the arm left.
+                ItemName::Unknown => true,
+                ItemName::Waiting => false,
+            },
+        }
+    }
+}
+
+/// What the item cache answers a line waiting on an item's name.
+pub(crate) enum ItemName {
+    Named(String),
+    /// The server answered that it has no such item.
+    Unknown,
+    /// No answer yet: the line keeps waiting.
+    Waiting,
 }
 
 /// What still has to be looked up before a line's [`Slot::Named`] can be filled: an item through
@@ -1607,8 +1158,14 @@ pub(crate) fn queue(
         fills,
         named,
         tries: 0,
+        word: None,
     })
 }
+
+mod families;
+pub(crate) use families::*;
+mod outcome;
+pub(crate) use outcome::*;
 
 pub(crate) mod watch;
 

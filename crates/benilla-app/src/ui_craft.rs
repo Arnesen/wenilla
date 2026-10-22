@@ -11,7 +11,7 @@ use benilla_formats::{
 };
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_protocol::{SessionEvent, SessionEventKind};
-use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip, UiScript};
+use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -20,7 +20,6 @@ use crate::query_cache::Ask;
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
-use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_tradeskill::SpellFocus;
 use crate::ui_unit::UnitFeed;
@@ -42,7 +41,10 @@ impl Plugin for UiCraftPlugin {
         app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<CraftOpen>().add_systems(
             Update,
-            (feed_craft.in_set(UnitFeed), drain_craft.after(UiInput)),
+            (
+                feed_craft.in_set(UnitFeed),
+                drain_craft.in_set(crate::ui_script::UiDrain),
+            ),
         );
     }
 }
@@ -94,7 +96,7 @@ fn craft_tooltip(spell_id: u32, d: &benilla_formats::SpellDisplay) -> CraftToolt
 
 /// Builds the craft snapshot, `None` while the window is closed or the catalogs are not loaded.
 fn feed_craft(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     open: Res<CraftOpen>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
@@ -108,203 +110,210 @@ fn feed_craft(
     commands: Res<NetCommands>,
     mut last: Local<crate::ui_script::VmMemo<Option<CraftState>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let last = last.get(&script);
-    // The show stands for the stock frame's getter calls, whose lookups pass the callback
-    // `0x4f7710` (`0x4f75f2`, `0x4f7a0a`); the rebuilds between read.
-    let ask = Ask::at(last.is_none() || open.is_changed(), &commands);
-    let fresh = (|| -> Option<CraftState> {
-        let line = open.line?;
-        let craft_type = open.craft_type;
-        let spells = spells.as_deref()?;
-        let skill_lines = skill_lines.as_deref()?;
-        let store = self_store.single().ok()?;
-        let (rank, max_rank, bonus) = skill_rank(store, line);
-        let effective = rank.saturating_add_signed(bonus);
-        let name = skill_lines
-            .catalog
-            .line(line)
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| format!("Skill {line}"));
-        let global = |key: &str| benilla_ui::strings::global(script.lua(), key);
-        let ctx = benilla_formats::TokenContext {
-            durations: &spells.durations,
-            radii: &spells.radii,
-            ranges: Some(&spells.ranges),
-            skill: &|id| {
-                crate::spell::spell_skill_value(Some(store), Some(&skill_lines.catalog), id)
-            },
-            lookup: &|id| spells.catalog.get(id),
-            mods: Some(&*spell_mods),
-            unmodified_points: false,
-            gender: &|| store.0.unit_gender().unwrap_or(0),
-            home_area: &|| None,
-            global: &global,
-            printf: &crate::ui_script::token_printf,
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
         };
-        // Admission (`0x5e9c20`): known, not hidden (`Attributes & 0x20`), and `castUI` equal to
-        // the craft type. The client walks its per-type list (`CGPlayer_C + 0x1cd0 + 0x10*type`)
-        // and never consults `SkillLineAbility` for membership.
-        let recipes: Vec<CraftRecipe> = actions
-            .spells
-            .iter()
-            .filter(|&&s| {
-                spells.catalog.get(s).is_some_and(|d| {
-                    d.cast_ui == craft_type && d.attributes & SPELL_ATTR_IS_TRADESKILL == 0
-                })
-            })
-            .filter_map(|&s| {
-                let d = spells.catalog.get(s)?;
-                let sla = skill_lines.catalog.ability(s)?;
-                let mut reagents = Vec::new();
-                let mut num_available = u32::MAX;
-                for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-                    let have = count_of(&store.0, &objects, entry, InventoryScope::DEFAULT);
-                    // A reagent's icon is the shared item chain (`0x5d88b0`) through its display.
-                    let (name, icon) = match items.template(entry, 0, ask) {
-                        Some(t) => (
-                            Some(t.name.clone()),
-                            item_icon(icons.as_deref(), t.display_info_id),
-                        ),
-                        None => (None, None),
-                    };
-                    reagents.push(CraftReagent {
-                        item: entry,
-                        name,
-                        icon,
-                        need,
-                        have,
-                    });
-                    num_available = num_available.min(have / need);
-                }
-                if reagents.is_empty() {
-                    num_available = 0;
-                }
-                // Focus first, then the totems (`0x4ff980`), the list `GetCraftSpellFocus`
-                // (`0x4f78b0`) returns. The focus's flag is a literal `1.0`, never reddened.
-                let mut tools = Vec::new();
-                if d.requires_spell_focus != 0 {
-                    if let Some(n) = focus
-                        .as_deref()
-                        .and_then(|f| f.catalog.name(d.requires_spell_focus))
-                    {
-                        tools.push((n.to_string(), true));
-                    }
-                }
-                for &t in d.totems.iter().filter(|&&t| t != 0) {
-                    let have = count_of(&store.0, &objects, t, InventoryScope::DEFAULT) > 0;
-                    if let Some(info) = items.template(t, 0, ask) {
-                        tools.push((info.name.clone(), have));
-                    }
-                }
-                let needs_item_target = matches!(
-                    d.effects[0],
-                    SPELL_EFFECT_ENCHANT_ITEM | SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
-                );
-                let icon = craft_icon(d);
-                Some(CraftRecipe {
-                    spell_id: s,
-                    name: d.name.clone(),
-                    sub_name: d.rank.clone().unwrap_or_default(),
-                    difficulty: crate::ui_tradeskill::difficulty(
-                        effective,
-                        sla.trivial_low,
-                        sla.trivial_high,
-                    ),
-                    num_available,
-                    icon,
-                    description: d
-                        .description
-                        .as_deref()
-                        .map(|t| benilla_formats::substitute(t, d, &ctx)),
-                    needs_item_target,
-                    reagents,
-                    tools,
-                    tooltip: craft_tooltip(s, d),
-                    // `spellLevel` at `+0x74` (column 29), not `baseLevel` (column 28).
-                    spell_level: d.spell_level,
-                    // The group key is the ability row's line (`0x4f61b1`).
-                    skill_line: skill_lines
-                        .catalog
-                        .line(sla.skill_id)
-                        .map(|l| l.name.clone()),
-                })
-            })
-            .collect();
-        // No sort here: the engine orders the rows by the craft type's own comparator
-        // (`benilla_ui::script::craft::recipe_order`).
-        Some(CraftState {
-            name,
-            rank,
-            max_rank,
-            craft_type,
-            recipes,
-        })
-    })();
-
-    // `CloseCraft` closes the VM's window and signals `CRAFT_CLOSE` in the verb (`0x4f5fef`).
-    let closed_in_place = !script.craft_open();
-    if fresh == *last {
-        return;
-    }
-    script.set_craft(fresh.clone());
-    // Pre-ask the reagent templates `GetCraftReagentItemLink` reads.
-    if let Some(f) = &fresh {
-        script.ask_item_templates(
-            f.recipes
+        let last = last.get(script);
+        // The show stands for the stock frame's getter calls, whose lookups pass the callback
+        // `0x4f7710` (`0x4f75f2`, `0x4f7a0a`); the rebuilds between read.
+        let ask = Ask::at(last.is_none() || open.is_changed(), &commands);
+        let fresh = (|| -> Option<CraftState> {
+            let line = open.line?;
+            let craft_type = open.craft_type;
+            let spells = spells.as_deref()?;
+            let skill_lines = skill_lines.as_deref()?;
+            let store = self_store.single().ok()?;
+            let (rank, max_rank, bonus) = skill_rank(store, line);
+            let effective = rank.saturating_add_signed(bonus);
+            let name = skill_lines
+                .catalog
+                .line(line)
+                .map(|l| l.name.clone())
+                .unwrap_or_else(|| format!("Skill {line}"));
+            let global = |key: &str| benilla_ui::strings::global(script.lua(), key);
+            let ctx = benilla_formats::TokenContext {
+                durations: &spells.durations,
+                radii: &spells.radii,
+                ranges: Some(&spells.ranges),
+                skill: &|id| {
+                    crate::spell::spell_skill_value(Some(store), Some(&skill_lines.catalog), id)
+                },
+                lookup: &|id| spells.catalog.get(id),
+                mods: Some(&*spell_mods),
+                unmodified_points: false,
+                gender: &|| store.0.unit_gender().unwrap_or(0),
+                home_area: &|| None,
+                global: &global,
+                printf: &crate::ui_script::token_printf,
+            };
+            // Admission (`0x5e9c20`): known, not hidden (`Attributes & 0x20`), and `castUI` equal
+            // to the craft type. The client walks its per-type list (`CGPlayer_C + 0x1cd0 +
+            // 0x10*type`) and never consults `SkillLineAbility` for membership.
+            let recipes: Vec<CraftRecipe> = actions
+                .spells
                 .iter()
-                .flat_map(|r| r.reagents.iter().map(|re| re.item)),
-        );
-    }
-    match (&*last, &fresh) {
-        (None, Some(f)) => {
-            debug!("ui_craft: window opens — {} recipe(s)", f.recipes.len());
-            script.fire_event("CRAFT_SHOW", vec![]);
+                .filter(|&&s| {
+                    spells.catalog.get(s).is_some_and(|d| {
+                        d.cast_ui == craft_type && d.attributes & SPELL_ATTR_IS_TRADESKILL == 0
+                    })
+                })
+                .filter_map(|&s| {
+                    let d = spells.catalog.get(s)?;
+                    let sla = skill_lines.catalog.ability(s)?;
+                    let mut reagents = Vec::new();
+                    let mut num_available = u32::MAX;
+                    for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
+                        let have = count_of(&store.0, &objects, entry, InventoryScope::DEFAULT);
+                        // A reagent's icon is the shared item chain (`0x5d88b0`) through its
+                        // display.
+                        let (name, icon) = match items.template(entry, 0, ask) {
+                            Some(t) => (
+                                Some(t.name.clone()),
+                                item_icon(icons.as_deref(), t.display_info_id),
+                            ),
+                            None => (None, None),
+                        };
+                        reagents.push(CraftReagent {
+                            item: entry,
+                            name,
+                            icon,
+                            need,
+                            have,
+                        });
+                        num_available = num_available.min(have / need);
+                    }
+                    if reagents.is_empty() {
+                        num_available = 0;
+                    }
+                    // Focus first, then the totems (`0x4ff980`), the list `GetCraftSpellFocus`
+                    // (`0x4f78b0`) returns. The focus's flag is a literal `1.0`, never reddened.
+                    let mut tools = Vec::new();
+                    if d.requires_spell_focus != 0 {
+                        if let Some(n) = focus
+                            .as_deref()
+                            .and_then(|f| f.catalog.name(d.requires_spell_focus))
+                        {
+                            tools.push((n.to_string(), true));
+                        }
+                    }
+                    for &t in d.totems.iter().filter(|&&t| t != 0) {
+                        let have = count_of(&store.0, &objects, t, InventoryScope::DEFAULT) > 0;
+                        if let Some(info) = items.template(t, 0, ask) {
+                            tools.push((info.name.clone(), have));
+                        }
+                    }
+                    let needs_item_target = matches!(
+                        d.effects[0],
+                        SPELL_EFFECT_ENCHANT_ITEM | SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
+                    );
+                    let icon = craft_icon(d);
+                    Some(CraftRecipe {
+                        spell_id: s,
+                        name: d.name.clone(),
+                        sub_name: d.rank.clone().unwrap_or_default(),
+                        difficulty: crate::ui_tradeskill::difficulty(
+                            effective,
+                            sla.trivial_low,
+                            sla.trivial_high,
+                        ),
+                        num_available,
+                        icon,
+                        description: d
+                            .description
+                            .as_deref()
+                            .map(|t| benilla_formats::substitute(t, d, &ctx)),
+                        needs_item_target,
+                        reagents,
+                        tools,
+                        tooltip: craft_tooltip(s, d),
+                        // `spellLevel` at `+0x74` (column 29), not `baseLevel` (column 28).
+                        spell_level: d.spell_level,
+                        // The group key is the ability row's line (`0x4f61b1`).
+                        skill_line: skill_lines
+                            .catalog
+                            .line(sla.skill_id)
+                            .map(|l| l.name.clone()),
+                    })
+                })
+                .collect();
+            // No sort here: the engine orders the rows by the craft type's own comparator
+            // (`benilla_ui::script::craft::recipe_order`).
+            Some(CraftState {
+                name,
+                rank,
+                max_rank,
+                craft_type,
+                recipes,
+            })
+        })();
+
+        // `CloseCraft` closes the VM's window and signals `CRAFT_CLOSE` in the verb (`0x4f5fef`).
+        let closed_in_place = !script.craft_open();
+        if fresh == *last {
+            return;
         }
-        (Some(_), Some(_)) => script.fire_event("CRAFT_UPDATE", vec![]),
-        (Some(_), None) if !closed_in_place => {
-            debug!("ui_craft: window closes");
-            script.fire_event("CRAFT_CLOSE", vec![]);
+        script.set_craft(fresh.clone());
+        // Pre-ask the reagent templates `GetCraftReagentItemLink` reads.
+        if let Some(f) = &fresh {
+            script.ask_item_templates(
+                f.recipes
+                    .iter()
+                    .flat_map(|r| r.reagents.iter().map(|re| re.item)),
+            );
         }
-        (Some(_), None) | (None, None) => {}
-    }
-    *last = fresh;
+        match (&*last, &fresh) {
+            (None, Some(f)) => {
+                debug!("ui_craft: window opens — {} recipe(s)", f.recipes.len());
+                script.fire_event("CRAFT_SHOW", vec![]);
+            }
+            (Some(_), Some(_)) => script.fire_event("CRAFT_UPDATE", vec![]),
+            (Some(_), None) if !closed_in_place => {
+                debug!("ui_craft: window closes");
+                script.fire_event("CRAFT_CLOSE", vec![]);
+            }
+            (Some(_), None) | (None, None) => {}
+        }
+        *last = fresh;
+    })
 }
 
 /// Drains the Lua intents. `DoCraft` goes down the cast ladder: an enchant's `Targets = 0x10` arms
 /// the cursor's item half, a rod craft commits at once. `CloseCraft` closes the window, sends no
 /// packet and leaves an armed pick to the ordinary cancels (Escape, right-click, a new cast).
 fn drain_craft(
-    script: Option<NonSendMut<UiScript>>,
+    mut vm: crate::script_calls::VmWith<(
+        cast_target::CastTargeting<'static, 'static>,
+        CastLadder<'static, 'static>,
+    )>,
     mut open: ResMut<CraftOpen>,
     skill_lines: Option<Res<SkillLines>>,
-    targeting: cast_target::CastTargeting,
-    mut ladder: CastLadder,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let _ = skill_lines; // the feed resolves lines; the drain just casts what it is handed
-    for spell_id in script.take_craft_dos() {
-        if open.line.is_none() {
-            debug!("ui_craft: DoCraft({spell_id}) with no open window — ignored");
-            continue;
+    vm.turn(|script, (targeting, mut ladder)| {
+        let Some(script) = script else {
+            return;
+        };
+        let _ = skill_lines; // the feed resolves lines; the drain just casts what it is handed
+        for spell_id in script.take_craft_dos() {
+            if open.line.is_none() {
+                debug!("ui_craft: DoCraft({spell_id}) with no open window — ignored");
+                continue;
+            }
+            debug!("ui_craft: DoCraft({spell_id})");
+            ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
         }
-        debug!("ui_craft: DoCraft({spell_id})");
-        ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
-    }
-    if script.take_craft_close() {
-        debug!("ui_craft: client-side close (no packet)");
-        open.line = None;
-    }
+        if script.take_craft_close() {
+            debug!("ui_craft: client-side close (no packet)");
+            open.line = None;
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use benilla_formats::SpellDisplay;
+    use benilla_ui::script::UiScript;
 
     /// `CloseCraft` signals `CRAFT_CLOSE` in the verb (`0x4f5fef`), so the feed that finds the
     /// window closed a frame later signals no second close.

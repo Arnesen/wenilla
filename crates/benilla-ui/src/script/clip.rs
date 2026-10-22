@@ -15,7 +15,8 @@ use super::FrameHandle;
 /// frame's own units; an over-shrunk rect collapses to empty rather than inverting.
 pub(super) fn hit_rect(model: &Model, fh: FrameHandle, r: Rect) -> Rect {
     let s = super::object::eff_scale(model, fh);
-    let [left, right, top, bottom] = model.arena.hit_rect_insets(fh).map(|i| i * s);
+    let u = model.layout_units();
+    let [left, right, top, bottom] = model.arena.hit_rect_insets(fh).map(|i| i.script(u) * s);
     Rect {
         left: r.left + left,
         right: (r.right - right).max(r.left + left),
@@ -68,9 +69,8 @@ impl<'a> DrawClips<'a> {
         }
         let own = self
             .model
-            .resolved
-            .get(&sf)
-            .map(|&r| hit_rect(self.model, sf, r));
+            .frame_rect(sf)
+            .map(|r| hit_rect(self.model, sf, r));
         let outer = self.scope_of.get(&sf).copied();
         let clip = match (own, outer) {
             (None, _) => None,
@@ -100,9 +100,8 @@ pub(super) fn hit_clip(model: &Model, h: FrameHandle) -> Option<Option<Rect>> {
         let pf = model.arena.frame(p)?;
         if !pf.scroll_member {
             let rect = model
-                .resolved
-                .get(&p)
-                .map_or(Rect::new(0.0, 0.0, 0.0, 0.0), |&r| hit_rect(model, p, r));
+                .frame_rect(p)
+                .map_or(Rect::new(0.0, 0.0, 0.0, 0.0), |r| hit_rect(model, p, r));
             return Some(Some(rect));
         }
         cur = pf.parent;

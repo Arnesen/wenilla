@@ -3,7 +3,9 @@
 //! where the C library decides it (`PLATFORM_CASES`), with mlua's `runtime error: ` and
 //! `stack traceback:` wrapper taken out. A new case's answer comes from the reference, written in
 //! by hand, and so does the answer of a case where benilla-lua follows 1.12.1's Lua 5.0 against
-//! 5.1: a comment at the case names the client's address.
+//! 5.1: a comment at the case names the client's address. One such rule spans many cases: a
+//! function the calling instruction does not name takes the name of a global holding it
+//! (`travglobals`, `0x6fbe11`), so `bad argument #1 to `strfind'' where 5.1 printed `?`.
 //!
 //! The cases that list every global answer with each binding the script host has, not with the
 //! VM, so they live in `vm_parity_surface.golden`, which `BENILLA_BLESS=1` rewrites when a
@@ -203,6 +205,7 @@ const CASES: &[(&str, &str)] = &[
     ("random", "math.randomseed(42) local a = math.random(100) math.randomseed(42) return S(a == math.random(100), math.random() < 1, math.random(5, 5))"),
     // ── What the current VM's 5.1 accepts, which 5.0 does not ──
     ("hex_literals", "return S(0x10, 0xff + 1, 0XA)"),
+    // The client's lexer has no long-bracket levels: `[=` is the token `[` (`0x6ff793`).
     ("long_brackets", "return S([=[a]]b]=], [==[x]=]y]==], [[plain]])"),
     ("string_dump", "return S(type(string.dump), E(function() return type(string.dump(function() end)) end))"),
     // A numeric `for`'s variable is its counter, one for the loop: the client's `fornum`
@@ -250,7 +253,8 @@ const CASES: &[(&str, &str)] = &[
     // ── Syntax errors and the lexer's edges, through `loadstring` ──
     // Input past the chunk's end is the client's bare `<eof> expected` (`0x6fca1a`). A control
     // byte is the lexer's `invalid control char` (`0x6ffabb`). `\n` alone ends a line
-    // (`0x6ffb94`): a `\r` is a blank, and a byte in a string (`0x700326`).
+    // (`0x6ffb94`): a `\r` is a blank, and a byte in a string (`0x700326`). `[=` is the token
+    // `[` (`0x6ff793`) and `--[==[` a line comment (`0x6ff6c9`).
     ("syntax_errors", r#"local o = {}
         for _, src in ipairs({"x = 1 +", "local function", "x = #t", "x = a % b",
             "return function(...) return ... end", "for x do end", "x = 1..2", "x = \"a\nb\"",
@@ -262,9 +266,10 @@ const CASES: &[(&str, &str)] = &[
           table.insert(o, (f and "ok" or e))
         end
         return table.concat(o, " | ")"#),
-    ("long_strings", r#"return S([[a [[b]] c]], [==[a ]] [[ ]=] b]==], [[
-first newline skipped]], [=[
-also]=], [[a
+    // `read_long_string` (`0x700010`) reads `=` as text.
+    ("long_strings", r#"return S([[a [[b]] c]], [[a [[ ]] ]=] b]], [[
+first newline skipped]], [[=[
+also]=]], [[a
 b]])"#),
     // ── Table layout, which `pairs` order shows ──
     // The orders of `pairs_constructors`, `pairs_mixed`, `fix-front_setlist_order` and
@@ -471,6 +476,8 @@ b]])"#),
     ("fix-libs deg_rad", r#"local bad = 0 for i = -720, 720 do if math.deg(math.rad(i)) ~= i then bad = bad + 1 end end
         local o = {} for _, x in {0.1, 1, 3, 0.7, 1e-300, 1e300, -2.5, 1/3} do table.insert(o, string.format("%.17g %.17g", math.deg(x), math.rad(x))) end
         return S(bad, math.deg(math.rad(3)) == 3, string.format("%.17g %.17g %.17g %.17g", asin(0.5), acos(0.3), atan(1), atan2(1, 2))) .. "|" .. table.concat(o, "|")"#),
+    // MSVC's `rand` (`0x7400e5`) on every platform, scaled as `math_random` (`0x7fb310`) does:
+    // the full range's width wraps to 0, so it answers its low end.
     ("fix-libs random_ranges", r#"math.randomseed(7) local o = {}
         for _ = 1, 4 do table.insert(o, math.random(-2^31, 2^31 - 1)) table.insert(o, math.random(2^31 - 2, 2^31 - 1)) table.insert(o, math.random(2^31 - 1)) table.insert(o, math.random(-5, 5)) end
         return table.concat(o, " ")"#),
@@ -489,6 +496,9 @@ b]])"#),
         local d = {} table.setn(d, 2) d[1] = 9 d[2] = 8 d[3] = 7 sort(d)
         local e = {4, 3, 2, 1} e[3] = nil local oke = pcall(table.sort, e)
         return S(E(f, 3, 1, nil), ok, t[1], t[2], t[3], oka, a[1], a[2], a[3], a[4]) .. "|" .. S(b[1], b[2], b[3], b[4], b[5], okc, c[1], c[2], c[4], d[1], d[2], d[3], oke, e[1], e[2], e[4])"#),
+    // 5.0's `setfenv` (`0x702be0`) answers nothing, takes its level as optional as `getfenv` does
+    // (`0x702b22`), and refuses a native as "given function" (`0x702c72`); `getfenv` answers an
+    // environment's raw `__fenv` (`0x702ba0`).
     ("fix-libs fenv", r#"local function f() end
         local t = {}
         local o = {S(setfenv(f, t) == f, getfenv(f) == t)}
@@ -783,6 +793,9 @@ const SWEEP_FNS: &[&str] = &[
     "math.ldexp",
     "math.deg",
     "math.rad",
+    // `math.sin`, `math.cos` and `math.tan` are the x87's `fsin`, `fcos` and `fptan` (`0x7fae1d`,
+    // `0x7fae4d`, `0x7fae7d`): `1e300` is past their range, so the sine and the cosine answer it
+    // unchanged and the tangent the indefinite, on every platform.
     "math.sin",
     "math.cos",
     "math.tan",
@@ -845,6 +858,7 @@ const SWEEP_FNS: &[&str] = &[
     "ldexp",
     "deg",
     "rad",
+    // The x87's range, as above.
     "sin",
     "cos",
     "tan",
@@ -927,17 +941,15 @@ fn unescape(s: &str) -> String {
 ///   benilla-lua checks them in the client's order on every platform (`pow`, `atan2` and `mod`
 ///   the first, `ldexp` the second), so the error items of the first three agree everywhere;
 /// - a `double` past the integer range cast to `ptrdiff_t` or `unsigned long` is undefined: x86-64
-///   answers `INT64_MIN`, arm64 saturates;
-/// - `math.random` is the host `rand`.
+///   answers `INT64_MIN`, arm64 saturates.
 ///
-/// benilla-lua pins the reference platform's answers for the compiler and `rand` cases, and runs
+/// benilla-lua pins the reference platform's answers for the compiler cases, and runs
 /// the host libm, so it answers a whole case as the C build only on the reference platform.
 /// Elsewhere, and on a platform no answer was blessed on, a case's answer is split into items at
 /// its separator, and each item every recorded platform answers alike is checked: only the items
 /// the platforms differ on go unchecked.
 const PLATFORM_CASES: &[&str] = &[
     "fix-libs deg_rad",
-    "fix-libs random_ranges",
     "sweep string.char",
     "sweep string.sub",
     "sweep strsub",

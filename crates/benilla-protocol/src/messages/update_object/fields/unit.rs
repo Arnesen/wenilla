@@ -63,6 +63,12 @@ impl ObjectFields {
     pub fn unit_channel_spell(&self) -> u32 {
         self.get_u32(FIELD_UNIT_CHANNEL_SPELL).unwrap_or(0)
     }
+    /// `UNIT_MOD_CAST_SPEED`, the factor `GetCastTime 0x6e3340` scales a cast time by, unit
+    /// block `+0x22c` (`0x6e342c`); vmangos keeps it at 1.0 and multiplies in each cast-speed
+    /// aura (`Unit.cpp:9926-9945`). `None` when never sent, where the descriptor holds 0.
+    pub fn unit_mod_cast_speed(&self) -> Option<f32> {
+        self.get_f32(FIELD_UNIT_MOD_CAST_SPEED)
+    }
     /// `UNIT_FIELD_SUMMON`: the unit this one summoned; on our own descriptor, the `"pet"` unit.
     pub fn unit_summon(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_SUMMON).filter(|&g| g != 0)
@@ -95,6 +101,11 @@ impl ObjectFields {
     /// `UNIT_FIELD_CREATEDBY`: the creator of a totem or created object.
     pub fn unit_created_by(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_CREATEDBY).filter(|&g| g != 0)
+    }
+    /// `UNIT_FIELD_PERSUADED`: the unit that persuaded this one, which `UnitReaction` compares
+    /// with its second unit (`0x606449`).
+    pub fn unit_persuaded(&self) -> Option<u64> {
+        self.get_guid(FIELD_UNIT_PERSUADED).filter(|&g| g != 0)
     }
     /// `UNIT_CREATED_BY_SPELL`: the summoning spell; `0x6ea1e0` requires it to feed a pet.
     pub fn unit_created_by_spell(&self) -> Option<u32> {
@@ -271,6 +282,17 @@ impl ObjectFields {
     /// `UNIT_FIELD_BASE_HEALTH` (field 163, owner only): the basis for percentage health costs.
     pub fn unit_base_health(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_BASE_HEALTH)
+    }
+    /// `UNIT_FIELD_POWER_COST_MODIFIER[school]` (fields 173-179, owner only): the flat amount the
+    /// cost of a spell of that school moves by (`GetPowerCost 0x6e32ad`). The index is not
+    /// bounded, as the reference's is not: past 6 it reads the fields after.
+    pub fn unit_power_cost_modifier(&self, school: u32) -> Option<i32> {
+        self.get_i32(FIELD_UNIT_POWER_COST_MODIFIER.wrapping_add(school as u16))
+    }
+    /// `UNIT_FIELD_POWER_COST_MULTIPLIER[school]` (fields 180-186, owner only, a float): the
+    /// multiplier less 1 (`GetPowerCost 0x6e32c0`-`0x6e32c7`), 0 on a fresh unit.
+    pub fn unit_power_cost_multiplier(&self, school: u32) -> Option<f32> {
+        self.get_f32(FIELD_UNIT_POWER_COST_MULTIPLIER.wrapping_add(school as u16))
     }
     /// `UNIT_FIELD_FACTIONTEMPLATE` (public, `+0x74`): the `FactionTemplate.dbc` row reactions use.
     pub fn unit_faction_template(&self) -> Option<u32> {
