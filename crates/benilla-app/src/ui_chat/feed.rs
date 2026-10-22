@@ -1257,7 +1257,7 @@ pub(super) struct ChatReads<'w, 's> {
     commands: Res<'w, NetCommands>,
     // The text-emote tables, and our guid for the "are you the performer?" test.
     emote_texts: Option<Res<'w, EmoteTexts>>,
-    // Our guid: `UNIT_COMBAT`'s `"player"` token.
+    // Our guid, for the lines that test or name the active player.
     self_guid: Res<'w, SelfGuid>,
     // The `$`-macro subject: monster and BG lines expand against their addressee's descriptors.
     guids: Res<'w, GuidIndex>,
@@ -1275,8 +1275,7 @@ pub(super) struct ChatReads<'w, 's> {
 }
 
 /// The chat lane's firing: the VM, the slots the channel notices write between their Lua and the
-/// host its calls apply through, whose selection `UNIT_COMBAT`'s `"target"` token reads between
-/// the queue's items; the log; and the rest of what a line reads.
+/// host its calls apply through; the log; and the rest of what a line reads.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct ChatFiring<'w, 's> {
     vm: crate::script_calls::VmWith<'w, 's, ResMut<'static, ChannelState>>,
@@ -1385,14 +1384,6 @@ fn fire_one(
         text_filter,
     } = reads;
     let windows: &mut ChatWindows = windows;
-    let is_target = match &item {
-        Pending::UnitCombat(ev) => set
-            .p1()
-            .as_mut()
-            .and_then(|h| h.target())
-            .is_some_and(|t| guids.0.get(&ev.guid) == Some(&t)),
-        _ => false,
-    };
     // A channel line's record, read as the composer reads it (`0x49aa1e`-`0x49aa48`) before
     // the line's Lua runs.
     let record = match &item {
@@ -1453,12 +1444,7 @@ fn fire_one(
     crate::script_calls::lent(script, set.p1().as_mut(), |script| {
         match item {
             Pending::UnitCombat(ev) => {
-                crate::ui_unit::fire_unit_combat(
-                    script,
-                    &ev,
-                    self_guid.0 == Some(ev.guid),
-                    is_target,
-                );
+                crate::ui_unit::fire_unit_combat(script, &ev);
             }
             Pending::CombatEdge { entered } => {
                 let combat_edge = if entered {

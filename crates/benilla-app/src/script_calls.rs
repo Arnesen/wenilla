@@ -38,10 +38,10 @@ macro_rules! attack_in_order {
 /// hands to the attempt (`0x4bd385`) casts through the ladder instead.
 macro_rules! pet_in_order {
     ($appliers:expr, $begin:ident($arg:expr)) => {{
-        let step = $appliers.p6().$begin($arg);
+        let step = $appliers.p6().p0().$begin($arg);
         $appliers.p1().bind_parked();
         match step {
-            Some(crate::ui_pet::PetStep::Order(send)) => $appliers.p6().finish_press(send),
+            Some(crate::ui_pet::PetStep::Order(send)) => $appliers.p6().p0().finish_press(send),
             Some(crate::ui_pet::PetStep::Cast(cast)) => {
                 crate::ui_pet::cast_pet_press(&mut $appliers.p3(), cast)
             }
@@ -123,18 +123,23 @@ pub(crate) struct ScriptCallHost<'w, 's> {
                     crate::ui_merchant::MerchantSteps<'w, 's>,
                 ),
             >,
-            crate::ui_pet::PetPress<'w, 's>,
+            // The pet's: the bar's presses, its other verbs and the menu's, and the stable. A
+            // further pet window's applier joins this set.
+            ParamSet<
+                'w,
+                's,
+                (
+                    crate::ui_pet::PetPress<'w, 's>,
+                    crate::ui_pet::PetSteps<'w, 's>,
+                    crate::ui_stable::StableSteps<'w, 's>,
+                ),
+            >,
             crate::ui_action::AttackPress<'w, 's>,
         ),
     >,
 }
 
 impl ScriptCallHost<'_, '_> {
-    /// The selected unit, as the calls applied so far left it.
-    pub(crate) fn target(&mut self) -> Option<Entity> {
-        self.appliers.p0().target()
-    }
-
     /// A probe line's text emote, run as `DoEmote` runs it inside its call (`0x5ef560`).
     pub(crate) fn emote(&mut self, text_id: u32, arg: Option<&str>) {
         self.appliers.p4().p2().emote(text_id, arg);
@@ -206,15 +211,18 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 .confirm_bind_on_use(script, may_cast),
             ScriptCall::Item(call) => appliers.p5().p0().p1().apply(script, call),
             ScriptCall::CastPetSpell { spell_id, on_self } => {
-                let send =
-                    crate::ui_pet_book::begin_pet_book_cast(&mut appliers.p6(), spell_id, on_self);
+                let send = crate::ui_pet_book::begin_pet_book_cast(
+                    &mut appliers.p6().p0(),
+                    spell_id,
+                    on_self,
+                );
                 if let Some(send) = send {
                     // `GetTargetingSpellId 0x6e48e0` is this spell: the press lowers the cursor
                     // and sends nothing (`0x4b3474`-`0x4b347d`).
                     if appliers.p3().ladder.ground.spell() == Some(spell_id) {
                         appliers.p3().ladder.stop_targeting();
                     } else {
-                        crate::ui_pet_book::finish_pet_book_cast(&mut appliers.p6(), send);
+                        crate::ui_pet_book::finish_pet_book_cast(&mut appliers.p6().p0(), send);
                     }
                 }
             }
@@ -254,6 +262,8 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Talent(call) => appliers.p2().p3().p0().apply(script, call),
             ScriptCall::Skill(call) => appliers.p2().p3().p1().apply(call),
             ScriptCall::Reputation(call) => tail = appliers.p2().p3().p2().apply(script, call),
+            ScriptCall::Pet(call) => appliers.p6().p1().apply(script, call),
+            ScriptCall::Stable(call) => appliers.p6().p2().apply(call),
         }
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.
@@ -273,7 +283,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 // The pet bar's unit as the pick's actor (`0x6e4ef4`), which settles the guid the
                 // attempt goes on with (`0x6e4ef7`).
                 Some(press) => {
-                    if let Some(guid) = appliers.p6().pick_for_unit_cast(press) {
+                    if let Some(guid) = appliers.p6().p0().pick_for_unit_cast(press) {
                         let mut cast = appliers.p3();
                         if let Some(ctx) =
                             cast.targeting.context_for_caster(press.caster, Some(guid))
@@ -3606,6 +3616,15 @@ mod tests {
     #[test]
     fn the_chat_drains_unit_combat_names_the_target_as_it_signals() {
         let mut f = frame(true);
+        // The VM shows the selection the frame's feed would have pushed.
+        f.app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_unit_guids(&benilla_ui::script::UnitGuids {
+                player: ME,
+                target: OLD,
+                ..Default::default()
+            });
         f.app
             .world_mut()
             .non_send_resource_mut::<UiScript>()

@@ -418,6 +418,12 @@ impl SpellTargeting {
         }
     }
 
+    /// The standing cast and its commit while its word wants an item, which `BindTarget
+    /// 0x6e5b40` binds a passed item to.
+    pub(crate) fn wanting_item(&self) -> Option<(u32, super::cast_send::CastCommit)> {
+        self.pending_for(TargetingWants::Item)
+    }
+
     /// The pending cast when the standing word answers `wants`, so no commit fires on a word its
     /// seam cannot bind.
     fn pending_for(&self, wants: TargetingWants) -> Option<(u32, super::cast_send::CastCommit)> {
