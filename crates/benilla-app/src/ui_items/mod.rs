@@ -811,7 +811,10 @@ pub(crate) fn object_name(
     template: &benilla_protocol::messages::ItemInfo,
     rolls: crate::items::RollCatalogs,
 ) -> String {
-    rolls.name(&template.name, object_link_numbers(fields, template).1)
+    rolls.name(
+        &template.name,
+        object_link_numbers(fields, Some(template)).1,
+    )
 }
 
 /// The three numbers `0x52ae00` passes `0x52adb0` for an item object: the permanent enchant
@@ -820,14 +823,16 @@ pub(crate) fn object_name(
 /// wrapped item (`ITEM_FIELD_FLAGS & 0x8`) passes 0 for all three (`0x52ae66`-`0x52ae80`).
 pub(crate) fn object_link_numbers(
     fields: &ObjectFields,
-    template: &benilla_protocol::messages::ItemInfo,
+    template: Option<&benilla_protocol::messages::ItemInfo>,
 ) -> (u32, u32, u32) {
+    // No record reads flags 0 (`0x5da2a0`): no charter.
+    let charter =
+        template.is_some_and(|t| t.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0);
     let wrapped =
         fields.item_flags().unwrap_or(0) & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED != 0;
     if wrapped {
         return (0, 0, 0);
     }
-    let charter = template.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0;
     let enchant = if charter {
         0
     } else {
@@ -840,25 +845,35 @@ pub(crate) fn object_link_numbers(
     )
 }
 
-/// `0x52ae00`, the link of an item object: its template's quality and [`object_name`], with
+/// `0x52ae00`, the link of an item object: its record's quality and [`object_name`], with
 /// [`object_link_numbers`]. Every link the client makes of an item it holds comes from here: the
 /// bag slot's (`GetContainerItemLink`, `0x4f997f`), the player's own equipped slot's
 /// (`GetInventoryItemLink`, `0x4c8ce2`) and our own trade slot's (`GetTradePlayerItemLink`,
-/// `0x4c06bc`).
+/// `0x4c06bc`). With no record the link is white (`0x52aec5`) and nameless (`0x5d8b40`), and the
+/// record's flags read 0 (`0x5da2a0`), so the enchant goes in.
 pub(crate) fn object_link(
     fields: &ObjectFields,
-    template: &benilla_protocol::messages::ItemInfo,
+    template: Option<&benilla_protocol::messages::ItemInfo>,
     rolls: crate::items::RollCatalogs,
 ) -> String {
-    let (enchant, roll, seed) = object_link_numbers(fields, template);
-    item_link_full(
-        fields.object_entry().unwrap_or(0),
-        enchant,
-        roll,
-        seed,
-        &object_name(fields, template, rolls),
-        template.quality,
-    )
+    let entry = fields.object_entry().unwrap_or(0);
+    match template {
+        Some(t) => {
+            let (enchant, roll, seed) = object_link_numbers(fields, Some(t));
+            item_link_full(
+                entry,
+                enchant,
+                roll,
+                seed,
+                &object_name(fields, t, rolls),
+                t.quality,
+            )
+        }
+        None => {
+            let (enchant, roll, seed) = object_link_numbers(fields, None);
+            item_link_full(entry, enchant, roll, seed, "", 1)
+        }
+    }
 }
 
 /// [`item_link_full`] with zero enchant, random-property and suffix ids, for a caller with no roll

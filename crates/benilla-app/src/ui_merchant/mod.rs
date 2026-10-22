@@ -289,7 +289,7 @@ fn resolve_buyback(
 
 /// One item's repair cost, by the reference's `0x4faf30` arithmetic
 /// ([`benilla_formats::DurabilityTables`]), after the price `discount` (`0x4faf8a`). The template
-/// is only read (`0x5da368`).
+/// is only read (`0x5da368`); a wrapped item costs 0 (`ITEM_FIELD_FLAGS & 0x8`, `0x5da387`).
 fn item_repair_cost(
     guid: u64,
     objects: &Objects,
@@ -300,6 +300,9 @@ fn item_repair_cost(
     let Some(obj) = objects.object(guid) else {
         return 0;
     };
+    if obj.item_flags().unwrap_or(0) & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED != 0 {
+        return 0;
+    }
     let cur = obj.item_durability().unwrap_or(0);
     let max = obj.item_max_durability().unwrap_or(0);
     let entry = obj.object_entry().unwrap_or(0);
@@ -1252,6 +1255,37 @@ mod tests {
             carried, want,
             "in the backpack: at the vendor, then with none open"
         );
+    }
+
+    /// A wrapped item costs nothing to repair: `0x5da330` answers 0 when `ITEM_FIELD_FLAGS` has
+    /// 0x8 (`0x5da387`), ahead of the durability arithmetic, so the displayed cost `0x4faf30` is 0.
+    #[test]
+    fn a_wrapped_items_repair_costs_nothing() {
+        use benilla_protocol::field::FIELD_PLAYER_INV_SLOT_HEAD;
+        use bevy::ecs::system::RunSystemOnce;
+        use purse_fixture::*;
+        /// `ITEM_FIELD_FLAGS`, and its wrapped bit.
+        const ITEM_FLAGS: u16 = 21;
+        const WRAPPED: u32 = 0x8;
+        let (mut app, _) = repair_app(FIELD_PLAYER_INV_SLOT_HEAD + 2 * 15);
+        app.insert_non_send_resource(sword_vm());
+        let cost = |app: &mut App| {
+            app.world_mut().run_system_once(feed_repair_costs).unwrap();
+            let script = app.world().non_send_resource::<UiScript>();
+            script
+                .eval::<i64>(r#"local _, _, c = TT:SetInventoryItem("player", 16) return c"#)
+                .unwrap()
+        };
+        assert!(cost(&mut app) > 0, "the damaged sword costs");
+        let sword = app.world().resource::<crate::net::GuidIndex>().0[&SWORD];
+        app.world_mut()
+            .get_mut::<ObjectStore>(sword)
+            .unwrap()
+            .0
+            .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+                ITEM_FLAGS, WRAPPED,
+            )]));
+        assert_eq!(cost(&mut app), 0, "wrapped, it costs nothing");
     }
 
     /// Each gate input alone reopens the feed, through `App::update` so the memo persists; a bank

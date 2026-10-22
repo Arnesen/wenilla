@@ -456,7 +456,7 @@ pub(super) fn feed_item_sets(
 /// has no hover loop to repaint a late answer.
 pub(super) fn feed_random_properties(
     mut hosted_vm: crate::script_calls::HostedVm,
-    props: Option<Res<crate::items::RandomProperties>>,
+    mut props: Option<ResMut<crate::items::RandomProperties>>,
     enchants: Option<Res<crate::items::Enchants>>,
     mut pushed: Local<crate::ui_script::VmMemo<bool>>,
     mut names_pushed: Local<crate::ui_script::VmMemo<bool>>,
@@ -465,6 +465,14 @@ pub(super) fn feed_random_properties(
         let Some(script) = script else {
             return;
         };
+        // The name formatter's `ITEM_SUFFIX_TEMPLATE` (`0x5d8b78`), as `FrameScript_GetText` reads
+        // it (`0x703bf0`); written only on a change, so the name feeds rebuild then alone.
+        if let Some(props) = props.as_mut() {
+            let template = script.global_text("ITEM_SUFFIX_TEMPLATE");
+            if props.suffix_template.as_deref() != Some(template.as_str()) {
+                props.suffix_template = Some(template);
+            }
+        }
         // The enchant names a link's bare id reads (`0x52c9f2`): every named row, as the builder's
         // loop tests no flag before it prints the name (`0x52ca23`..`0x52ca8b`).
         if let Some(enchants) = enchants.as_deref() {
@@ -482,10 +490,10 @@ pub(super) fn feed_random_properties(
             return;
         }
         // Without the enchant catalog every row would push empty, never to be retried.
-        let (Some(props), Some(enchants)) = (props, enchants) else {
+        let (Some(props), Some(enchants)) = (props.as_deref(), enchants) else {
             return;
         };
-        let rows = crate::items::random_property_views(&props, Some(&enchants));
+        let rows = crate::items::random_property_views(props, Some(&enchants));
         let with_lines = rows.values().filter(|v| !v.enchants.is_empty()).count();
         info!(
             "random-property table: {} rows pushed, {with_lines} with enchant lines",
@@ -875,6 +883,7 @@ fn resolve_slot(
         return Some(ContainerSlot {
             durability: None,
             guid,
+            uncached_link: Some(crate::ui_items::object_link(fields, None, rolls)),
             item_id: entry,
             count,
             readable,
@@ -892,6 +901,7 @@ fn resolve_slot(
         });
     };
     Some(ContainerSlot {
+        uncached_link: None,
         use_fork: super::drain::use_fork(&t, flags, fields.item_text_id().unwrap_or(0)),
         item_class: Some(t.class),
         bonding: t.bonding,
@@ -920,7 +930,7 @@ fn resolve_slot(
         item_id: entry,
         // `GetContainerItemLink` links the object (`0x4f997f` → `0x52ae00`); the tooltip reads its
         // name back off it.
-        link: Some(crate::ui_items::object_link(fields, &t, rolls)),
+        link: Some(crate::ui_items::object_link(fields, Some(&t), rolls)),
         guid,
         readable,
         creator,
@@ -2667,6 +2677,39 @@ mod ask_tests {
             )
             .unwrap();
         assert_eq!(line, "Rockbiter 3");
+    }
+
+    /// The name formatter's template is the VM's `ITEM_SUFFIX_TEMPLATE` (`0x5d8b78` →
+    /// `0x703bf0`), read off the VM into the catalog every surface names through, and read again
+    /// when it changes.
+    #[test]
+    fn the_suffix_template_is_read_off_the_vm() {
+        let mut app = App::new();
+        app.insert_resource(crate::items::RandomProperties::new(
+            benilla_formats::RandomPropertyCatalog::from_rows(std::collections::HashMap::from([(
+                862,
+                benilla_formats::RandomProperty {
+                    suffix: "of the Bear".into(),
+                    enchants: [0; 5],
+                },
+            )])),
+        ))
+        .add_systems(Update, super::feed_random_properties);
+        let script = benilla_ui::script::UiScript::new().unwrap();
+        script.run(r#"ITEM_SUFFIX_TEMPLATE = "%s -- %s""#).unwrap();
+        app.insert_non_send_resource(script);
+        app.update();
+        let name = |app: &App| {
+            let props = app.world().resource::<crate::items::RandomProperties>();
+            crate::items::item_display_name("Robe", 862, Some(props))
+        };
+        assert_eq!(name(&app), "Robe -- of the Bear");
+        app.world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .run(r#"ITEM_SUFFIX_TEMPLATE = nil"#)
+            .unwrap();
+        app.update();
+        assert_eq!(name(&app), "", "a missing key formats the empty string");
     }
 
     /// The requirement state carries `PLAYER_FIELD_PVP_MEDALS` and the whole known-spell book: a

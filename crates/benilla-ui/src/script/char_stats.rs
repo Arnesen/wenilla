@@ -226,17 +226,22 @@ pub struct InvSlotView {
     pub use_fork: super::container::UseFork,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
+    /// The link `0x52ae00` builds of an own item object whose record the cache lacks, white and
+    /// nameless (`0x52aec5`, `0x5d8b40`), which `GetInventoryItemLink` answers (`0x4c8ce2`); `None`
+    /// once [`Self::link`] is set, and for another player's visible item, which links nothing
+    /// without its record (`0x4c8d3d`).
+    pub uncached_link: Option<String>,
     /// The item object's guid, 0 while unresolved: `IsInventoryItemLocked` reads the client's lock
     /// on it.
     pub guid: u64,
     /// The 1-based live-API slots this item could be equipped into; empty if none.
     pub equip_slots: Vec<u8>,
-    /// The resolved `ITEM_FIELD_CREATOR` name, the tooltip's "<Made by %s>" line.
+    /// The resolved name of [`Self::creator_guid`], the tooltip's "<Made by %s>" line.
     pub creator: Option<String>,
     /// The resolved `ITEM_FIELD_GIFTCREATOR` name, the tooltip's `ITEM_WRAPPED_BY` line.
     pub gift_creator: Option<String>,
-    /// The `ITEM_FIELD_CREATOR` guid, 0 for none: with no [`Self::creator`] yet, the name the
-    /// tooltip waits for.
+    /// The `ITEM_FIELD_CREATOR` guid, or an inspected slot's `PLAYER_VISIBLE_ITEM_<slot>_CREATOR`
+    /// (`0x5333cd`), 0 for none: with no [`Self::creator`] yet, the name the tooltip waits for.
     pub creator_guid: u64,
     /// The `ITEM_FIELD_GIFTCREATOR` guid, 0 for none, as [`Self::creator_guid`].
     pub gift_creator_guid: u64,
@@ -706,6 +711,7 @@ impl InvSlotView {
             spell_0: slot.spell_0,
             spell_charges: slot.spell_charges,
             link: slot.link.clone(),
+            uncached_link: slot.uncached_link.clone(),
             guid: slot.guid,
             creator: slot.creator.clone(),
             gift_creator: slot.gift_creator.clone(),
@@ -1082,8 +1088,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetInventoryItemLink(unit, slot) → `|cff…|Hitem:…|h[Name]|h|r`, or nil until the template
-    // arrives with the name and quality.
+    // GetInventoryItemLink(unit, slot) → `|cff…|Hitem:…|h[Name]|h|r` (`0x4c8c10`). Every no-item
+    // exit pushes nothing (`0x4c8c56`): the reach gate, an empty slot, and a visible item whose
+    // record is not cached (`0x4c8d3d`); an own item links without its record (`0x4c8ce2`).
     g.set(
         "GetInventoryItemLink",
         lua.create_function(|lua, (unit, slot): (Value, Value)| {
@@ -1106,14 +1113,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             let token = Some(token);
             super::unit::check_unit_token(&token)?;
-            Ok(
-                match player_inv_slot(lua, &token, i64::from(slot0) + 1).and_then(|v| v.link) {
-                    Some(link) => {
-                        MultiValue::from_vec(vec![Value::String(lua.create_string(&link)?)])
-                    }
-                    None => MultiValue::from_vec(vec![Value::Nil]),
-                },
-            )
+            let link = player_inv_slot(lua, &token, i64::from(slot0) + 1)
+                .and_then(|v| v.link.or(v.uncached_link));
+            Ok(match link {
+                Some(link) => MultiValue::from_vec(vec![Value::String(lua.create_string(&link)?)]),
+                None => MultiValue::new(),
+            })
         })?,
     )?;
 
@@ -2263,6 +2268,61 @@ mod tests {
             r#"GetInventoryItemCooldown("bogus", 1)"#,
         ] {
             assert!(s.run(call).is_err(), "{call}");
+        }
+    }
+
+    /// Every no-item exit of `GetInventoryItemLink` jumps to `0x4c8c56` (`xor eax,eax`) and pushes
+    /// nothing, never a nil: the reach gate (`0x4c8cae`), an empty own slot (`0x4c8cda`) and a
+    /// visible item whose record the cache lacks (`0x4c8d3d`).
+    #[test]
+    fn the_inventory_link_answers_no_values_without_an_item() {
+        use crate::script::UnitReach;
+        use std::collections::HashMap;
+        const MATE: u64 = 0x20;
+        const FAR: u64 = 0x30;
+        let mut s = seated();
+        let mut own: crate::script::InventorySlots = Default::default();
+        own[1] = Some(InvSlotView {
+            item_id: 1,
+            name: Some("Helm".into()),
+            link: Some("|cffffffff|Hitem:1:0:0:0|h[Helm]|h|r".into()),
+            ..Default::default()
+        });
+        s.set_inventory_slots(own);
+        // The mate's helm, its record not cached: no name and no link.
+        let mut visible: crate::script::InventorySlots = Default::default();
+        visible[1] = Some(InvSlotView {
+            item_id: 2,
+            count: 1,
+            ..Default::default()
+        });
+        s.set_visible_equipment(MATE, Some(visible));
+        s.set_unit_guids(&UnitGuids {
+            player: ME,
+            target: MATE,
+            party: [FAR, 0, 0, 0],
+            held: HashMap::from([(ME, 0), (MATE, 0), (FAR, 0)]),
+            ..Default::default()
+        });
+        let near = UnitReach {
+            dist_sq: 16.0,
+            inspectable: true,
+        };
+        let far = UnitReach {
+            dist_sq: 400.0,
+            inspectable: true,
+        };
+        s.set_unit_reach(HashMap::from([(MATE, near), (FAR, far)]));
+        let count = |s: &UiScript, call: &str| s.arity(call).unwrap();
+        assert_eq!(count(&s, r#"GetInventoryItemLink("player", 1)"#), 1);
+        for call in [
+            r#"GetInventoryItemLink("player", 2)"#,
+            r#"GetInventoryItemLink("player", 20)"#,
+            r#"GetInventoryItemLink("target", 1)"#,
+            r#"GetInventoryItemLink("target", 2)"#,
+            r#"GetInventoryItemLink("party1", 1)"#,
+        ] {
+            assert_eq!(count(&s, call), 0, "{call}");
         }
     }
 

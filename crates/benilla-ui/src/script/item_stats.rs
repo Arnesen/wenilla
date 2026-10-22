@@ -480,7 +480,7 @@ fn equip_loc_token(inventory_type: u32) -> &'static str {
 /// string `lua_isnumber` (`0x6f34d0`) coerces, is the id alone; another string (`0x6f3510`) must
 /// pass `strnicmp(s, "item:", 5)` (`0x64a4c0`) for its four fields, else it is id 0, so a name or
 /// a hyperlink finds nothing; anything else raises the usage error (`0x842d24`, via `0x6f4940`).
-fn parse_item_arg(v: &Value) -> mlua::Result<(i64, u32, u32, u32)> {
+fn parse_item_arg(v: &Value) -> mlua::Result<(i64, i32, i32, i32)> {
     let as_number = match v {
         Value::Integer(i) => Some(*i as f64),
         Value::Number(n) => Some(*n),
@@ -510,8 +510,38 @@ fn parse_item_arg(v: &Value) -> mlua::Result<(i64, u32, u32, u32)> {
         .splitn(4, ':')
         .map(crate::script::binding_abi::s_str_to_int);
     let id = i64::from(fields.next().unwrap_or(0));
-    let mut next = || u32::try_from(fields.next().unwrap_or(0)).unwrap_or(0);
+    // Signed, as `SStrToInt` answers them (`0x48e11d`, `0x48e140`, `0x48e16a`).
+    let mut next = || fields.next().unwrap_or(0);
     Ok((id, next(), next(), next()))
+}
+
+/// `0x5d8b00`'s join: with an `ItemRandomProperties` row for `property` (a positive id in the
+/// table, `0x5d8b47`-`0x5d8b51`), whose suffix the app loads only when it is not empty (`0x5d8b6e`),
+/// `SStrPrintf(ITEM_SUFFIX_TEMPLATE, name, suffix)` (`0x5d8b78`-`0x5d8b8c`); else the name alone
+/// (`0x5d8ba5`).
+fn suffixed_name(lua: &Lua, name: &str, property: i32) -> String {
+    let suffix = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        u32::try_from(property)
+            .ok()
+            .filter(|&p| p != 0)
+            .and_then(|p| model.random_properties.get(&p))
+            .map(|row| row.suffix.clone())
+    };
+    match suffix {
+        Some(suffix) => {
+            // `FrameScript_GetText` (`0x703bf0`): "" for a missing key, which formats "".
+            let template = super::glue_core::global_text(lua, "ITEM_SUFFIX_TEMPLATE");
+            crate::strings::fill(
+                &template,
+                &[
+                    crate::strings::Arg::S(name),
+                    crate::strings::Arg::S(&suffix),
+                ],
+            )
+        }
+        None => name.to_string(),
+    }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -545,8 +575,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetItemInfo(itemID | "item:id:enchant:randomProperty:suffix") → itemName, itemLink,
     // itemQuality, itemMinLevel, itemType, itemSubType, itemStackCount, itemEquipLoc, itemTexture:
     // nine values (`0x48e070` ends `mov eax,0x9`); later clients insert `itemLevel` at 4. The name
-    // is the bare template name, where the reference appends the random suffix (`0x5d8b00`); the
-    // link is the item string (`0x48e1c9`, literal `0x842d4c`), not a hyperlink; the level is the
+    // is `0x5d8b00(entry, property)` (`0x48e1a7`), the record's name with the property row's
+    // suffix through `ITEM_SUFFIX_TEMPLATE` (`0x5d8b78`); the link is the item string (`0x48e1c9`, literal `0x842d4c`), not a hyperlink; the level is the
     // required one (`[record+0x3c]`; `ItemLevel` at `+0x38` is never pushed). An uncached
     // template answers no values and asks nothing: the lookup passes no callback (`0x48e172`), so
     // the cache (`0x55ba30`) returns null without a query (`0x55baac`), sending the binding to
@@ -569,9 +599,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(v) = view else {
                 return Ok(MultiValue::new());
             };
+            let name = suffixed_name(lua, &v.name, random_property);
             let str_or_empty = |s: &Option<String>| s.clone().unwrap_or_default();
             Ok(MultiValue::from_vec(vec![
-                Value::String(lua.create_string(&v.name)?),
+                Value::String(lua.create_string(&name)?),
                 Value::String(lua.create_string(format!(
                     "item:{item_id}:{enchant}:{random_property}:{suffix}"
                 ))?),
@@ -781,6 +812,54 @@ mod get_item_info_tests {
         assert_eq!(stack, 1);
         assert_eq!(equip, "INVTYPE_WEAPONMAINHAND");
         assert_eq!(texture.as_deref(), Some("Interface\\Icons\\INV_Sword_04"));
+    }
+
+    /// The name is `0x5d8b00(entry, property)` (`0x48e194`-`0x48e1a7`): an `ItemRandomProperties`
+    /// row with a suffix joins it through `ITEM_SUFFIX_TEMPLATE` (`0x5d8b78`); id 0, a negative id
+    /// and an unknown one take the plain name (`0x5d8b47`-`0x5d8b51`).
+    #[test]
+    fn get_item_info_names_the_links_random_suffix() {
+        let mut s = UiScript::new().unwrap();
+        s.set_item_template(25, worn_shortsword());
+        s.set_random_properties(std::collections::HashMap::from([(
+            584,
+            crate::script::RandomPropertyView {
+                suffix: "of the Monkey".into(),
+                enchants: Vec::new(),
+            },
+        )]));
+        s.run(r#"ITEM_SUFFIX_TEMPLATE = "%s %s""#).unwrap();
+        let name = |s: &UiScript, arg: &str| {
+            s.eval::<String>(&format!("return (GetItemInfo({arg:?}))"))
+                .unwrap()
+        };
+        assert_eq!(name(&s, "item:25:0:584:0"), "Worn Shortsword of the Monkey");
+        assert_eq!(
+            s.eval::<String>(r#"local _, l = GetItemInfo("item:25:0:584:0") return l"#)
+                .unwrap(),
+            "item:25:0:584:0"
+        );
+        for plain in ["item:25:0:0:0", "item:25:0:-584:0", "item:25:0:585:0", "25"] {
+            assert_eq!(name(&s, plain), "Worn Shortsword", "{plain}");
+        }
+    }
+
+    /// Each `item:` field is `SStrToInt`'s signed answer (`0x64ac60`), printed back through
+    /// `"item:%d:%d:%d:%d"` (`0x842d4c`, `0x48e1da`), so a negative field keeps its sign.
+    #[test]
+    fn get_item_info_keeps_the_links_signed_fields() {
+        let mut s = UiScript::new().unwrap();
+        s.set_item_template(5, worn_shortsword());
+        assert_eq!(
+            s.eval::<String>(r#"local _, l = GetItemInfo("item:5:-1:-3:0") return l"#)
+                .unwrap(),
+            "item:5:-1:-3:0"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"local _, l = GetItemInfo("item:5:7:0:-9") return l"#)
+                .unwrap(),
+            "item:5:7:0:-9"
+        );
     }
 
     /// Ashbringer, item 13262: required level 60, item level 76 in vmangos `item_template`.

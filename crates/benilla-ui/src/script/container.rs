@@ -48,6 +48,10 @@ pub struct ContainerSlot {
     pub item_id: u32,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
+    /// The link `0x52ae00` builds while the record is not cached, white and nameless (`0x52aec5`,
+    /// `0x5d8b40`); `None` once [`Self::link`] is set. `GetContainerItemLink` answers it
+    /// (`0x4f997f`), and `GetInventoryItemLink` for the vault and keyring bands (`0x4c8ce2`).
+    pub uncached_link: Option<String>,
     /// The item object's guid, 0 while unresolved: what the client's lock (`item+0x314`) and
     /// every lock read key on.
     pub guid: u64,
@@ -981,10 +985,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let key = container_key(lua, bag, slot, "Usage: GetContainerItemLink(index, slot)")?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                key.and_then(|(bag, slot)| model.bag_slot(bag, slot)?.link.clone())
+                key.and_then(|(bag, slot)| {
+                    let s = model.bag_slot(bag, slot)?;
+                    s.link.clone().or_else(|| s.uncached_link.clone())
+                })
             };
-            // Nothing at all on every miss: the resolver failing, no item object or no template
-            // name (`0x4f996b`, `0x4f9979`, `0x4f99a5`).
+            // Nothing at all when the resolver fails or finds no item object (`0x4f996b`,
+            // `0x4f997b`, both to `0x4f99a5`); any object links (`0x4f997f` → `0x52ae00`), with
+            // no record white and nameless.
             match link {
                 Some(l) => Ok(MultiValue::from_vec(vec![Value::String(
                     lua.create_string(&l)?,
@@ -1329,6 +1337,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                uncached_link: None,
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,
@@ -1580,6 +1589,37 @@ mod tests {
         assert!(s
             .eval::<bool>("return GetContainerItemInfo(0, 2) == nil")
             .unwrap());
+    }
+
+    /// A bag item whose record the cache lacks still links: `GetContainerItemLink` pushes nothing
+    /// only when it finds no item object (`0x4f996b`, `0x4f997b` → `0x4f99a5`), and `0x52ae00`
+    /// links any object (`0x4f997f`), white and nameless without a record (`0x52aec5`, `0x5d8b40`).
+    #[test]
+    fn an_uncached_bag_item_links_white_and_nameless() {
+        let mut s = UiScript::new().unwrap();
+        let mut bag = backpack();
+        let nameless = "|cffffffff|Hitem:2589:0:0:0|h[]|h|r";
+        bag.slots.insert(
+            3,
+            ContainerSlot {
+                item_id: 2589,
+                count: 1,
+                uncached_link: Some(nameless.into()),
+                ..Default::default()
+            },
+        );
+        s.set_container(0, Some(bag));
+        assert_eq!(
+            s.eval::<Option<String>>("return GetContainerItemLink(0, 3)")
+                .unwrap()
+                .as_deref(),
+            Some(nameless)
+        );
+        assert_eq!(
+            s.arity("GetContainerItemLink(0, 2)").unwrap(),
+            0,
+            "no object"
+        );
     }
 
     /// The keyring, the bank and an out-of-range id answer no slots and no name, however the
@@ -2158,6 +2198,7 @@ mod tests {
         state.slots.insert(
             5,
             ContainerSlot {
+                uncached_link: None,
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,

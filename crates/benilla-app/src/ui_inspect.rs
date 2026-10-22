@@ -41,6 +41,8 @@ struct InspectFeedMemo {
     /// What was last pushed, by player guid.
     pushed: HashMap<u64, Pushed>,
     templates: gate::Watch,
+    /// The name cache's generation: a creator's name that lands repaints its slot.
+    names: gate::Watch,
     /// How many players' views were built, the feed's cost.
     builds: u64,
 }
@@ -52,19 +54,23 @@ struct Pushed {
 }
 
 /// The fields of a player's visible-item block (`PLAYER_VISIBLE_ITEM_1_CREATOR` on, 12 a slot)
-/// that its views read: per slot the entry, the 7 enchants and the properties.
-type VisibleBlock = [u32; 19 * 9];
+/// that its views read: per slot the creator's two halves, the entry, the 7 enchants and the
+/// properties.
+type VisibleBlock = [u32; 19 * 11];
 
 fn visible_block(store: &ObjectStore) -> VisibleBlock {
-    let mut block = [0; 19 * 9];
+    let mut block = [0; 19 * 11];
     for slot0 in 0..19u8 {
-        let at = usize::from(slot0) * 9;
-        block[at] = store.0.player_visible_item_entry(slot0).unwrap_or(0);
+        let at = usize::from(slot0) * 11;
+        let creator = store.0.player_visible_item_creator(slot0);
+        block[at] = creator as u32;
+        block[at + 1] = (creator >> 32) as u32;
+        block[at + 2] = store.0.player_visible_item_entry(slot0).unwrap_or(0);
         for j in 0..7u8 {
-            block[at + 1 + usize::from(j)] =
+            block[at + 3 + usize::from(j)] =
                 store.0.player_visible_item_enchant(slot0, j).unwrap_or(0);
         }
-        block[at + 8] = store.0.player_visible_item_properties(slot0);
+        block[at + 10] = store.0.player_visible_item_properties(slot0);
     }
     block
 }
@@ -92,7 +98,9 @@ impl Plugin for InspectUiPlugin {
 
 /// One slot from a player's visible-item entry; `slot0` is the 0-based `EQUIPMENT_SLOT_*` index,
 /// `slot0 + 1` in Lua. With no item object the count is the reference's always-1 and durability,
-/// flags, locks and creator stay inert. Only the enchants broadcast, at
+/// flags and locks stay inert. The block's creator guid is the maker line's (`0x5333cd` copies it
+/// to the tooltip's `+0x410`, read at `0x52e1d5`); its name is read, and the tooltip build asks
+/// it. Only the enchants broadcast, at
 /// `PLAYER_VISIBLE_ITEM_<slot>_0 + 1 + j`, and 1.12 fills PERM and TEMP alone (vmangos
 /// `SetVisibleItemSlot`, `MAX_INSPECTED_ENCHANTMENT_SLOT`). The record is read, never asked: the
 /// getters' lookup passes no callback (`0x4c8420` → `0x5f0d60` → `0x62eb40`).
@@ -101,9 +109,15 @@ fn inspect_slot_view(
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
+    names: &crate::names::NameCache,
     slot0: u8,
 ) -> Option<InvSlotView> {
     let entry = store.0.player_visible_item_entry(slot0)?;
+    let creator_guid = store.0.player_visible_item_creator(slot0);
+    let creator = (creator_guid != 0)
+        .then(|| names.resolve_player(creator_guid, Ask::Read))
+        .flatten()
+        .map(str::to_string);
     // The roll, the properties field's low word as the reference's inspect leg reads it into
     // `+0x424`, names the suffix only: its stat lines would sit in enchant slots 2-6, which 1.12
     // servers leave empty.
@@ -134,6 +148,8 @@ fn inspect_slot_view(
         inventory_type: t.map(|t| t.inventory_type),
         name,
         link,
+        creator,
+        creator_guid,
         // `0x5da2c0` reads an item object's `ITEM_FIELD_FLAGS`, which inspected gear lacks, so the
         // tooltip prints the template's bind line, as the reference's does.
         already_bound: false,
@@ -151,14 +167,15 @@ fn inspect_slot_view(
 }
 
 /// What a player's visible-item views read beside the descriptor: the item records, the icons,
-/// and the `SpellItemEnchantment` and `ItemRandomProperties` catalogs that name the enchant lines
-/// and the roll suffix.
+/// the `SpellItemEnchantment` and `ItemRandomProperties` catalogs that name the enchant lines
+/// and the roll suffix, and the name cache that names the creator.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct VisibleItemTables<'w> {
     items: Res<'w, Items>,
     icons: Option<Res<'w, ItemDisplays>>,
     enchants: Option<Res<'w, crate::items::Enchants>>,
     props: Option<Res<'w, crate::items::RandomProperties>>,
+    names: Res<'w, crate::names::NameCache>,
 }
 
 impl VisibleItemTables<'_> {
@@ -170,17 +187,25 @@ impl VisibleItemTables<'_> {
         };
         let mut slots: InventorySlots = Default::default();
         for slot in 1..=19u8 {
-            slots[usize::from(slot)] =
-                inspect_slot_view(store, &self.items, self.icons.as_deref(), rolls, slot - 1);
+            slots[usize::from(slot)] = inspect_slot_view(
+                store,
+                &self.items,
+                self.icons.as_deref(),
+                rolls,
+                &self.names,
+                slot - 1,
+            );
         }
         slots
     }
 
-    /// Whether a landed record, a new icon or a new catalog can have changed any view since
-    /// `templates` last watched.
-    fn moved(&self, templates: &mut gate::Watch) -> bool {
+    /// Whether a landed record or name, a new icon or a new catalog can have changed any view
+    /// since `templates` and `names` last watched.
+    fn moved(&self, templates: &mut gate::Watch, names: &mut gate::Watch) -> bool {
         let templates_moved = templates.moved(self.items.template_epoch());
+        let names_moved = names.moved(self.names.generation());
         templates_moved
+            || names_moved
             || self.icons.as_ref().is_some_and(|i| i.is_changed())
             || self.enchants.as_ref().is_some_and(|c| c.is_changed())
             || self.props.as_ref().is_some_and(|c| c.is_changed())
@@ -225,7 +250,7 @@ pub(crate) fn feed_inspect(
             target.token = None;
         }
 
-        let tables_moved = tables.moved(&mut memo.templates);
+        let tables_moved = tables.moved(&mut memo.templates, &mut memo.names);
         // Every player a token can name, but the active one, whose own items the getters read.
         let mut held = HashSet::new();
         for guid in script.held_unit_guids() {
@@ -289,6 +314,7 @@ mod tests {
                 ..Default::default()
             })
             .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::names::NameCache>()
             .add_systems(Update, feed_inspect);
         for guid in guids {
             let e = app
@@ -422,6 +448,65 @@ mod tests {
             .eval::<String>(r#"return GetInventoryItemLink("target", 1)"#)
             .unwrap();
         assert!(link.contains("|Hitem:7366:1900:0:0|h"), "{link}");
+    }
+
+    /// A slot's creator is the first two words of its visible-item block, which the tooltip copies
+    /// to its `+0x410` (`0x5333cd`-`0x5333d5`) for the maker line (`0x52e1d5`), and which vmangos
+    /// fills from the item's creator (`Player.cpp:10589`). The view carries the guid, and the
+    /// name once the name cache holds it: a name that lands rebuilds the views.
+    #[test]
+    fn an_inspected_slot_carries_its_creator() {
+        use benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR;
+        const MATE: u64 = 0x2001;
+        const SMITH: u64 = 0x77;
+        const ROBE: u32 = 7366;
+        let (mut app, _rx) = world([MATE, 0x2002], ROBE);
+        let mate = app.world().resource::<GuidIndex>().0[&MATE];
+        app.world_mut()
+            .entity_mut(mate)
+            .get_mut::<ObjectStore>()
+            .unwrap()
+            .0
+            .merge(benilla_protocol::ObjectFields::from_pairs(&[
+                (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR, SMITH as u32),
+                (
+                    FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 1,
+                    (SMITH >> 32) as u32,
+                ),
+            ]));
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ROBE, Some(crate::items::test_template("Robe")));
+        let view = |app: &mut App| {
+            app.world_mut()
+                .run_system_once(
+                    move |tables: VisibleItemTables, stores: Query<&ObjectStore>| {
+                        tables.slots(stores.get(mate).unwrap())[1]
+                            .clone()
+                            .expect("the robe")
+                    },
+                )
+                .unwrap()
+        };
+        let v = view(&mut app);
+        assert_eq!((v.creator_guid, v.creator), (SMITH, None));
+        let builds = |app: &mut App| {
+            app.update();
+            app.world_mut()
+                .resource_scope(|world, mut feed: Mut<InspectFeedState>| {
+                    feed.vm.get(world.non_send_resource::<UiScript>()).builds
+                })
+        };
+        let before = builds(&mut app);
+        assert_eq!(builds(&mut app), before, "nothing moved");
+        app.world_mut()
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(SMITH, "Smith".into(), None);
+        assert_eq!(view(&mut app).creator.as_deref(), Some("Smith"));
+        assert!(
+            builds(&mut app) > before,
+            "the name's landing rebuilds the views"
+        );
     }
 
     /// A player's 19 views are rebuilt when their visible-item block moves, not on any write to
