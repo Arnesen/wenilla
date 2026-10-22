@@ -1,8 +1,10 @@
 //! `CGUnit_C::OnDied 0x605860`, which the health watcher runs on every unit's alive-to-dead edge
 //! (`0x6046f0` at `0x6047a3`: the new health not above 0, the old above). In its order:
 //!
-//! - a player's own leg first (`0x5e99b0` at `0x60588d`): a groupmate's death line, here, and
-//!   the active player's release latch and timer, [`crate::ui_session`]'s;
+//! - a player's own leg first (`0x5e99b0` at `0x60588d`): a groupmate's death line, here; for
+//!   the active player, in its order, the target cleared, the interaction latch released
+//!   ([`crate::ui_session`]'s), the loot window closed, the quest-giver statuses refreshed
+//!   ([`crate::quest_markers`]'), the cast cancelled and, on a taxi, the release asked;
 //! - the dying unit's attack words zeroed (`0x605896`-`0x6058a8`): its target ([`Engaged`],
 //!   `+0xc48`) and its stop in flight (`+0xc54`);
 //! - `PresentUnitDeath 0x625190` (`0x6058ae`), the death line, animation and sound, which the chat
@@ -49,10 +51,32 @@ pub(super) fn on_unit_died(
         // 0x4918d0` → `0x4e7f70` at `0x5e99f7`) shows the line under `GetUnitName`'s name, the
         // cache's with a callback or `UNKNOWNOBJECT` (`0x609210` at `0x5e9a08`, `0x496720` at
         // `0x5e9a10`).
-        if e.kind == ObjectType::Player
-            && me != Some(e.entity)
-            && group.party_slots().any(|m| m.guid == e.guid)
-        {
+        if e.kind == ObjectType::Player && me == Some(e.entity) {
+            // The active player's leg (`0x5e99d8`-`0x5e99e4` match): `SetSelection(0, 0)`
+            // (`0x5e9a45`), our attack target still set, as the unit leg below zeroes it after.
+            super::click::deselect(&mut selection, &mut seam, me_engaged);
+            // `0x48f200(1, 0, 0)` (`0x5e9a5c`): whatever loot window is open, with its release.
+            seam.close_loot();
+            // `CancelCast(1, 1, 0x1c)` (`0x5e9a6c`), asking nothing of the slot first.
+            let spells = seam.spells.as_deref();
+            seam.slots.core(&seam.net).cancel_reaping(
+                true,
+                true,
+                crate::spell::REASON_ERROR,
+                spells,
+                me,
+                &seam.edits,
+            );
+            // `UNIT_FIELD_FLAGS` bit 20 (`0x5e9a7d`): `0x5e0ae0` sends `CMSG_REPOP_REQUEST` at
+            // once while the player is dead or a ghost (`0x605f30`), as it is at its death edge.
+            let store = stores.get(e.entity).ok();
+            if store.is_some_and(|s| {
+                s.0.unit_flags() & crate::player::UNIT_FLAG_TAXI_FLIGHT != 0
+                    && (s.0.unit_is_dead() || s.0.player_is_ghost())
+            }) {
+                let _ = seam.net.0.send(crate::net::ClientCommand::RepopRequest);
+            }
+        } else if e.kind == ObjectType::Player && group.party_slots().any(|m| m.guid == e.guid) {
             let store = stores.get(e.entity).ok();
             errors.push(
                 match names.resolve_unit(e.guid, store, Ask::Event(&seam.net)) {
@@ -277,6 +301,66 @@ mod tests {
                     },
                 )
                 .expect("the slot reads")
+        }
+    }
+
+    /// Our own death runs `0x5e99b0`'s active-player leg first (`0x605860` at `0x60588d`), in its
+    /// order: the target cleared (`0x493540(0, 0)` at `0x5e9a45`), the loot window closed with its
+    /// release (`0x48f200(1, 0, 0)` at `0x5e9a5c`), the cast cancelled whatever it is bound to
+    /// (`CancelCast(1, 1, 0x1c)` at `0x5e9a6c`), and with `UNIT_FIELD_FLAGS` 0x100000 a release
+    /// asked at once (`0x5e9a7d` → `0x5e0ae0`, `CMSG_REPOP_REQUEST`); without it, none.
+    #[test]
+    fn our_own_death_clears_the_target_closes_the_loot_cancels_the_cast_and_releases() {
+        for flagged in [true, false] {
+            let mut c = client();
+            let (me, mob) = (c.me, c.mob);
+            c.select(MOB, mob);
+            c.cast(FIREBALL);
+            c.world()
+                .resource_mut::<crate::ui_loot::LootState>()
+                .open(OTHER, 1, 0, Vec::new());
+            if flagged {
+                c.world()
+                    .get_mut::<ObjectStore>(me)
+                    .unwrap()
+                    .0
+                    .merge(ObjectFields::from_pairs(&[(
+                        FIELD_UNIT_FLAGS,
+                        0x8 | 0x10_0000,
+                    )]));
+            }
+            c.sent();
+            c.reports();
+            // The health written, whose edge the handler reads.
+            c.world()
+                .get_mut::<ObjectStore>(me)
+                .unwrap()
+                .0
+                .merge(ObjectFields::from_pairs(&[(FIELD_UNIT_HEALTH, 0)]));
+
+            c.dies(me, ME, ObjectType::Player);
+            let mut want = vec![
+                "SetSelection { guid: 0 }".to_string(),
+                format!("LootRelease {{ guid: {OTHER} }}"),
+                format!("CancelCast {{ spell_id: {FIREBALL} }}"),
+            ];
+            if flagged {
+                want.push("RepopRequest".to_string());
+            }
+            let sent: Vec<String> = c.sent().iter().map(|s| format!("{s:?}")).collect();
+            assert_eq!(sent, want, "flagged: {flagged}");
+            assert_eq!(c.world().resource::<Selection>().guid, None);
+            assert_eq!(
+                c.world().resource::<crate::ui_loot::LootState>().source(),
+                None
+            );
+            assert_eq!(c.in_flight(), None, "the cast is popped");
+            assert!(
+                c.reports()
+                    .iter()
+                    .any(|r| matches!(r, CastReport::Bar(CastBarEdge::Failed))),
+                "and fails"
+            );
         }
     }
 

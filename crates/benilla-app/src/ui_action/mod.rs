@@ -45,6 +45,7 @@ mod reactive;
 mod reactive_tests;
 pub(crate) mod recount;
 mod state;
+pub(crate) use state::ActionStates;
 pub(crate) mod toggle;
 mod weapon_icon;
 
@@ -231,6 +232,7 @@ impl Spells {
 #[cfg(test)]
 pub(crate) fn run_feed_action_state_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
+    world.init_resource::<state::ActionStateMemory>();
     world
         .run_system_once(state::feed_action_state)
         .expect("the action-state feed runs as a one-shot system");
@@ -353,6 +355,7 @@ impl Plugin for UiActionPlugin {
         // A UI-only harness has no net stack; declaring a message twice is idempotent.
         app.add_message::<crate::net::FieldChanged>()
             .init_resource::<state::ActionEvents>()
+            .init_resource::<state::ActionStateMemory>()
             .add_message::<crate::net::WorldEnterCascadeMessage>()
             .init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()
@@ -386,15 +389,12 @@ impl Plugin for UiActionPlugin {
                         .before(crate::ui_aura::AuraEvents),
                     // A seat: the world-enter events' handlers read the slots' state, which the
                     // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
-                    // After the pet's old-target clear, which writes the bar a macro bound to a
-                    // pet spell reads the guid and history of. After the bag feed, a seat too: left
-                    // to the VM pass, the pair links through one more command barrier
-                    // ([`crate::vm_pass`]).
+                    // After the bag feed, a seat too: left to the VM pass, the pair links through
+                    // one more command barrier ([`crate::vm_pass`]).
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .in_set(crate::ui_unit::WorldEnterSeats)
                         .after(crate::player::ControlRestore)
-                        .after(crate::ui_pet::pet_stop_on_old_target_clear)
                         .after(crate::ui_items::feed::feed_containers)
                         .after(feed::feed_actions),
                     // After the unit snapshots, which its handlers read (the target stored at

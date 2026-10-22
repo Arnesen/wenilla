@@ -58,6 +58,8 @@ pub(super) struct Lookup<'a, 'w, 's, 'q> {
     /// `Spell.dbc`, which the tooltip's owner line reads a creating spell from.
     catalog: Option<&'a benilla_formats::SpellCatalog>,
     study: crate::ui_unit::tooltip_facts::StudySources<'a>,
+    /// `UnitIsPVPFreeForAll` per held unit, the owner's flag a pet answers with (`0x606170`).
+    ffa: &'a super::feed::FreeForAll,
 }
 
 impl<'a, 'w, 's, 'q> Lookup<'a, 'w, 's, 'q> {
@@ -68,6 +70,7 @@ impl<'a, 'w, 's, 'q> Lookup<'a, 'w, 's, 'q> {
         types: CreatureTypeSources<'a>,
         catalog: Option<&'a benilla_formats::SpellCatalog>,
         study: crate::ui_unit::tooltip_facts::StudySources<'a>,
+        ffa: &'a super::feed::FreeForAll,
     ) -> Self {
         Self {
             index,
@@ -77,6 +80,7 @@ impl<'a, 'w, 's, 'q> Lookup<'a, 'w, 's, 'q> {
             types,
             catalog,
             study,
+            ffa,
         }
     }
 
@@ -148,6 +152,7 @@ pub(super) fn member_pet(
                 .map(str::to_string);
             let mut s =
                 crate::ui_unit::snapshot(store, guid, name, 0, Default::default(), look.types);
+            s.is_pvp_ffa = look.ffa.get(&guid).copied().unwrap_or_default();
             let object = |g: u64| look.store(g);
             let sources = crate::ui_unit::tooltip_facts::TooltipSources {
                 names: look.names,
@@ -267,7 +272,8 @@ pub(in crate::ui_party) mod tests {
             .init_resource::<NameCache>()
             .init_resource::<crate::ui_guild::GuildState>()
             .init_resource::<crate::ui_chat::ChatLog>()
-            .init_resource::<crate::sound::MessageSounds>();
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::net::Reputations>();
         let (tx, rx) = crossbeam_channel::unbounded();
         // Kept alive for the run: a dropped receiver would fail the name queries.
         std::mem::forget(rx);
@@ -458,6 +464,43 @@ pub(in crate::ui_party) mod tests {
             flag(&mut app, "UnitExists('party1')"),
             Some(1.0),
             "the member is unchanged"
+        );
+    }
+
+    /// `UnitIsPVPFreeForAll` on a held pet reads its owner's `PLAYER_FLAGS` 0x80: the unit's
+    /// `UNIT_FIELD_FLAGS` 0x8 (`0x5165ad`), then the player that controls it, its charmer else its
+    /// creator (`0x606170` at `0x5165c3`), and that player's flag (`0x5165cc`).
+    #[test]
+    fn a_party_pets_free_for_all_is_its_owners() {
+        const OBJECT_TYPE: u16 = 2;
+        const CREATEDBY: u16 = 14;
+        const UNIT_FLAGS: u16 = 46;
+        const PLAYER_FLAGS: u16 = 190;
+        let mut app = app();
+        party(&mut app, 1, true);
+        let owner = stream(&mut app, member(1), &summon(pet(1)));
+        set_fields(&mut app, owner, &[(OBJECT_TYPE, 0x19)]);
+        stream(
+            &mut app,
+            pet(1),
+            &[
+                (OBJECT_TYPE, 0x9),
+                (HEALTH, 900),
+                (MAXHEALTH, 1000),
+                (UNIT_FLAGS, 0x8),
+                (CREATEDBY, member(1) as u32),
+                (CREATEDBY + 1, (member(1) >> 32) as u32),
+            ],
+        );
+        frame(&mut app);
+        assert_eq!(flag(&mut app, "UnitIsPVPFreeForAll('partypet1')"), None);
+
+        set_fields(&mut app, owner, &[(PLAYER_FLAGS, 0x80)]);
+        frame(&mut app);
+        assert_eq!(
+            flag(&mut app, "UnitIsPVPFreeForAll('partypet1')"),
+            Some(1.0),
+            "the owner's flag"
         );
     }
 

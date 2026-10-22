@@ -69,8 +69,8 @@ pub(super) fn control(
         Res<crate::loading_screen::LoadingScreen>,
         // Our own `[0xb4b3e4]`, which a control verdict on our character writes.
         ResMut<super::OwnControlLost>,
-        // The body's precast spell, which the posture verbs refuse on.
-        Query<Has<crate::creature_anim::Precast>, (With<Embodied>, Without<FlyCam>)>,
+        // The active player, whom the posture verbs read and act on whichever body is driven.
+        SelfPosture,
         // `ChrClasses.dbc`, whose relic flag the sheath toggle's ranged candidate reads.
         Option<Res<crate::chr_classes::ChrClassTable>>,
         // The predicted stand state `[player+0x1d68]`, which the posture verbs write.
@@ -205,7 +205,16 @@ pub(super) fn control(
             })
         })
         .unwrap_or((false, false, 0));
-    let stand_state = speed_capsule.13.stand_state(stand_byte);
+    // The prediction is the active player's ([`posture`]): a possessed body reads its own byte.
+    let self_driven = speed_capsule
+        .11
+        .single()
+        .is_ok_and(|(.., embodied)| embodied);
+    let stand_state = if self_driven {
+        speed_capsule.13.stand_state(stand_byte)
+    } else {
+        stand_byte
+    };
     // The shared precondition `0x5144e0`, once per tick. Its far-sight conjunct,
     // `!(IsActivePlayer(mover) && [mover+0x1c70] & 1)`, reads the resolved subject (`0x5ee290`
     // latches only once resolved) and spares a possessed mover, which sets the same field.
@@ -496,12 +505,12 @@ pub(super) fn control(
         // The stand state and the sheath toggle, which interlock; returns the committed stand.
         let reads = posture::PlayerReads {
             control_lost: speed_capsule.10 .0,
-            precast: speed_capsule.11.single().unwrap_or(false),
         };
         let stand_now = posture::update(
             &mut player,
             &mut speed_capsule.13,
             &body,
+            &speed_capsule.11,
             binds,
             &net.0,
             &mut commands,

@@ -267,77 +267,150 @@ pub(crate) struct ActionEvents {
     bags: bool,
 }
 
-/// Computes and diff-pushes every occupied slot's state, and owes the reference's events to
-/// [`fire_action_events`].
-#[allow(clippy::type_complexity)] // a Bevy system's full input set
-pub(super) fn feed_action_state(
-    // The cooldowns, the selection with the relations and positions
-    // `IsActionInRange`'s pre-check reads, and the pet's bar (the gate and the history a macro
-    // bound to a pet spell reads), which the call host also reaches.
-    mut vm: crate::script_calls::VmWith<(
-        ResMut<'static, Cooldowns>,
-        crate::spell::cast_target::CastTargeting<'static, 'static>,
-        Option<Res<'static, crate::ui_pet::PetBar>>,
-        crate::target::RelationWorld<'static, 'static>,
-    )>,
-    actions: Res<PlayerActions>,
-    spells: Option<Res<Spells>>,
-    clock: Res<crate::ui_script::UiClock>,
-    // One tuple for Bevy's 16-param ceiling: macro bindings, spell mods, the range units, the
-    // control flag, the skill lines and the active player's creation.
+/// What the action slots' states are computed from, and the memory the feed and the selection's
+/// refresh share: the selection with the relations and positions `IsActionInRange`'s pre-check
+/// reads, the cooldowns, and the pet's bar (the gate and the history a macro bound to a pet spell
+/// reads). The feed ([`feed_action_state`]) runs it each frame, and a script call that moves the
+/// selection runs its usable refresh inside the call ([`ActionStates::usable_refresh`]), as
+/// `SetSelection` does (`0x493892`, `0x493a69`).
+#[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)] // every input the slot walk reads, as one param
+pub(crate) struct ActionStates<'w, 's> {
+    cooldowns: ResMut<'w, Cooldowns>,
+    targeting: crate::spell::cast_target::CastTargeting<'w, 's>,
+    pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
+    actions: Res<'w, PlayerActions>,
+    spells: Option<Res<'w, Spells>>,
+    // Macro bindings, spell mods, the range units, the control flag and the skill lines.
     cast_state: (
-        Res<crate::ui_macro::MacroBoundSpells>,
-        Res<crate::spell::SpellModifiers>,
+        Res<'w, crate::ui_macro::MacroBoundSpells>,
+        Res<'w, crate::spell::SpellModifiers>,
         // The caster's and the target's reach and motion, which the range compare reads.
-        crate::spell::RangeUnits,
+        crate::spell::RangeUnits<'w, 's>,
         // `[0xb4b3e4]`, which the usable walk reads.
-        Option<Res<crate::player::OwnControlLost>>,
+        Option<Res<'w, crate::player::OwnControlLost>>,
         // A profession opener's line (`0x6de040`), which the checked test reads, and the skill
         // lines the walk's cost finds its level through.
-        Option<Res<crate::ui_spellbook::SkillLines>>,
-        // The active player's creation, whose arrival (`0x5dea86`) empties the reactive list.
-        Query<(), Added<SelfPlayer>>,
+        Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     ),
-    self_q: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
-    // One param for the guid index and the item store, for the same ceiling.
-    objects: crate::net::Objects,
-    units: Query<(&ObjectStore, &Transform), Without<SelfPlayer>>,
-    // The item cache and the channel its misses query on, one param for the same ceiling.
-    (items, commands): (Res<Items>, Res<NetCommands>),
+    self_q: Query<'w, 's, (&'static ObjectStore, &'static Transform), With<SelfPlayer>>,
+    // The guid index and the item store.
+    objects: crate::net::Objects<'w, 's>,
+    units: Query<'w, 's, (&'static ObjectStore, &'static Transform), Without<SelfPlayer>>,
+    relations: crate::target::RelationWorld<'w, 's>,
+    // The item cache and the channel its misses query on.
+    items: Res<'w, Items>,
+    commands: Res<'w, NetCommands>,
     // `ItemSubClass.dbc`, whose flags the walk's ammo leg reads.
-    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
-    // The usable refresh's field-watch callers, the enter cascade, the item lane's
-    // `RaiseBagUpdate` calls, the events owed and the memory about the VM.
-    (mut edges, mut entries, item_lane, mut owed, mut memory): (
-        MessageReader<FieldChanged>,
-        MessageReader<crate::net::WorldEnterCascadeMessage>,
-        Option<Res<crate::item_lane::ItemLane>>,
-        ResMut<ActionEvents>,
-        Local<crate::ui_script::VmMemo<StateMemory>>,
-    ),
-    // The bar's usable cache, which lives for the session, not for a VM.
-    mut cache: Local<UsableCache>,
-    // The reactive list, which lives from one arrival to the next, not for a VM.
-    mut reactive: Local<super::reactive::ReactiveList>,
-) {
-    vm.turn(|script, (mut cooldowns, targeting, pet_bar, relations)| {
-        let Some(script) = script else {
-            return;
-        };
-        let (memory, new_vm) = memory.get_reset(script);
+    sub_classes: Option<Res<'w, crate::ui_items::ItemSubClasses>>,
+    memory: ResMut<'w, ActionStateMemory>,
+}
+
+/// What the action states remember between passes: what was pushed to the VM and the edge
+/// detectors, the bar's usable cache, which lives for the session, not for a VM, and the reactive
+/// list, which lives from one arrival to the next.
+#[derive(Resource, Default)]
+pub(crate) struct ActionStateMemory {
+    vm: crate::ui_script::VmMemo<StateMemory>,
+    /// The frame's (`Instant`, `GetTime`) pair the feed last read ([`crate::ui_script::UiClock`]):
+    /// every frame's pair maps a store `Instant` onto the same `GetTime`, so a refresh between
+    /// feeds derives the same cooldown starts.
+    clock: Option<(Instant, f64)>,
+    cache: UsableCache,
+    reactive: super::reactive::ReactiveList,
+}
+
+/// One pass over the slots: when it runs, and which of the refreshes it is.
+struct Pass {
+    now: Instant,
+    /// The (`Instant`, `GetTime`) pair cooldown starts are mapped through.
+    clock: (Instant, f64),
+    /// The cooldown-clock trace's once-a-second line is due.
+    trace_cd: bool,
+    /// The usable refresh `0x4b31c0` runs, which re-checks the reactive list.
+    refresh: bool,
+    /// The usable cache's refresh `0x4e5c00` runs.
+    refresh_cache: bool,
+    /// Our player's arrival writes every slot (`0x5deafc`).
+    arrived: bool,
+}
+
+/// What a usable refresh signals ([`ActionStates::usable_refresh`]), in the reference's order:
+/// the bar's `ACTIONBAR_UPDATE_USABLE` when a pair changed (`0x4e5c53`), each reactive spell that
+/// turned usable (`SPELL_ACTIVE`, `0x4b3226`), then `SPELL_UPDATE_USABLE` (`0x4b3246`).
+pub(crate) struct UsableSignals {
+    usable_changed: bool,
+    activated: Vec<String>,
+}
+
+impl UsableSignals {
+    /// Signal them on `script`, in place.
+    pub(crate) fn fire(self, script: &mut benilla_ui::script::UiScript) {
+        if self.usable_changed {
+            script.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
+        }
+        for name in self.activated {
+            crate::ui_unit::fire_combat_text(script, "SPELL_ACTIVE", Some(name), None);
+        }
+        script.fire_event("SPELL_UPDATE_USABLE", vec![]);
+    }
+}
+
+impl ActionStates<'_, '_> {
+    /// The usable refresh `0x4b31c0` a selection change runs inside `SetSelection`, after the
+    /// target is stored (`0x4936e2`, `0x4939d3`) and before `PLAYER_TARGET_CHANGED` (`0x493892`
+    /// ahead of `0x49389c`, `0x493a69` ahead of `0x493a73`): every slot's state recomputed against
+    /// the new selection and pushed, the bar's cache refreshed, the reactive list re-checked. The
+    /// feed hears the change as made, so it refreshes no second time for it.
+    pub(crate) fn usable_refresh(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+    ) -> UsableSignals {
+        let selection = self.targeting.selection.guid;
+        // Ahead of the feed's first pass on a new VM, that pass still meets the VM as new.
+        self.memory.vm.get_leaving_reset(script).selection = selection;
         let now = Instant::now();
-        // Every cooldown pushes its absolute start on the `GetTime` clock, derived from this one
-        // pair, so a running cooldown derives the same start every frame.
-        let (anchor, ui_now) = (clock.anchor, clock.ui_now);
+        let clock = self.memory.clock.unwrap_or((now, script.now()));
+        let pass = Pass {
+            now,
+            clock,
+            trace_cd: false,
+            refresh: true,
+            refresh_cache: true,
+            arrived: false,
+        };
+        let (usable_changed, activated) = self.pass(script, pass);
+        UsableSignals {
+            usable_changed,
+            activated,
+        }
+    }
+
+    /// The feed's frame: the cooldowns' upkeep, the refreshes this frame's callers owe, then the
+    /// pass, owing its events to [`fire_action_events`].
+    fn feed(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        clock: (Instant, f64),
+        edges: &mut MessageReader<FieldChanged>,
+        entered: bool,
+        bag_updates: u64,
+        arrived: bool,
+        owed: &mut ActionEvents,
+    ) {
+        let (memory, new_vm) = self.memory.vm.get_reset(script);
+        let cooldowns = &mut *self.cooldowns;
+        let (items, commands, spells) = (&*self.items, &*self.commands, &self.spells);
+        let now = Instant::now();
         cooldowns.prune(now);
         // The callback `0x6e2f70` that the bag getter's and the bag and inventory tooltips'
         // queries asked, each a lookup with it (`0x6e2f0d`); then every awaited record that
         // answered, whose flush is this frame's.
         for entry in script.take_cooldown_record_asks() {
-            let _ = items.template(entry, 0, Ask::Event(&commands));
+            let _ = items.template(entry, 0, Ask::Event(commands));
             cooldowns.await_item_record(entry);
         }
-        cooldowns.answer_awaited_records(&items, spells.as_deref().map(|s| &s.catalog), now);
+        cooldowns.answer_awaited_records(items, spells.as_deref().map(|s| &s.catalog), now);
         let gen_changed = memory.last_generation != Some(cooldowns.generation);
         memory.last_generation = Some(cooldowns.generation);
         // The cooldown-clock trace (`WOW_MOVE_TRACE` sink, tag "cd"): once per second.
@@ -348,15 +421,117 @@ pub(super) fn feed_action_state(
         if trace_cd {
             memory.last_cd_trace = Some(now);
         }
+        let control_lost = self.cast_state.3.as_ref().is_some_and(|c| c.0);
+        let selection = self.targeting.selection.guid;
+        let self_guid = self.targeting.context().self_guid;
 
-        let (bound, spell_mods, range_units, own_control, skill_lines, created) = &cast_state;
+        // The frame's callers of the usable refresh `0x4b31c0` and of `0x4f93d0`; a new VM meets
+        // the state as it stands and hears none.
+        let mut refresh = edges.read().fold(false, |hit, e| {
+            hit | refreshes_usable(e, self_guid, selection)
+        });
+        // The target's select and release (`0x493892`, `0x493a69`), where no script call made
+        // them, and `SetPlayerControl` (`0x4958fc`, `0x495910`), each on a change.
+        refresh |= selection != memory.selection || control_lost != memory.control_lost;
+        (memory.selection, memory.control_lost) = (selection, control_lost);
+        // The cooldown list's own (`0x6e2e85`, `0x6e3076`).
+        refresh |= cooldowns.usable_refreshes != memory.usable_refreshes;
+        memory.usable_refreshes = cooldowns.usable_refreshes;
+        let mut bags = cooldowns.bag_flushes != memory.bag_flushes;
+        memory.bag_flushes = cooldowns.bag_flushes;
+        if new_vm {
+            (refresh, bags) = (false, false);
+        }
+        // The usable cache's other refreshes (`0x4e5c00`): world entry (`0x4e4f90`, from the enter
+        // cascade at our player's arrival or a reload's), `EditMacro` (`0x4f132e`) and each
+        // `RaiseBagUpdate` a watcher's run calls (`0x4f9374`).
+        let macro_edits = script.macro_edits();
+        let refresh_cache = refresh
+            || entered
+            || new_vm
+            || macro_edits != memory.macro_edits
+            || bag_updates != memory.bag_updates;
+        (memory.macro_edits, memory.bag_updates) = (macro_edits, bag_updates);
+
+        // The reactive list: emptied at an arrival and filled from the book; the pass re-checks it
+        // inside each usable refresh after the bar (`0x4b31d7`-`0x4b323d`).
+        let list = &mut self.memory.reactive;
+        if arrived {
+            list.arrive();
+        }
+        if let Some(sp) = self.spells.as_deref() {
+            if arrived
+                || self.actions.is_changed()
+                || self.spells.as_ref().is_some_and(|s| s.is_changed())
+            {
+                list.sync(&self.actions.spells, &sp.catalog);
+            }
+        }
+
+        self.memory.clock = Some(clock);
+        let pass = Pass {
+            now,
+            clock,
+            trace_cd,
+            refresh,
+            refresh_cache,
+            arrived,
+        };
+        let (usable_changed, activated) = self.pass(script, pass);
+        owed.cooldowns |= gen_changed;
+        owed.usable_changed |= usable_changed;
+        owed.refresh |= refresh;
+        owed.activated.extend(activated);
+        owed.bags |= bags;
+    }
+
+    /// Compute every occupied slot's state and diff-push it, store the pairs in the bar's usable
+    /// cache, and with a usable refresh re-check the reactive list: whether the cache's refresh
+    /// found a pair changed, and the reactive spells that turned usable.
+    fn pass(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        pass: Pass,
+    ) -> (bool, Vec<String>) {
+        let Pass {
+            now,
+            clock: (anchor, ui_now),
+            trace_cd,
+            refresh,
+            refresh_cache,
+            arrived,
+        } = pass;
+        let Self {
+            cooldowns,
+            targeting,
+            pet_bar,
+            actions,
+            spells,
+            cast_state,
+            self_q,
+            objects,
+            units,
+            relations,
+            items,
+            commands,
+            sub_classes,
+            memory,
+        } = self;
+        let ActionStateMemory {
+            vm,
+            cache,
+            reactive,
+            ..
+        } = &mut **memory;
+        let memory = vm.get_leaving_reset(script);
+        let (bound, spell_mods, range_units, own_control, skill_lines) = &*cast_state;
         let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
         let sub_classes = sub_classes.as_deref().map(|s| &s.0);
         let me = self_q.iter().next();
         let control_lost = own_control.as_ref().is_some_and(|c| c.0);
-        // The bags, walked once per frame for every reagent and totem count below.
+        // The bags, walked once per pass for every reagent and totem count below.
         let stacks = me
-            .map(|(s, _)| stack_counts(&s.0, &objects))
+            .map(|(s, _)| stack_counts(&s.0, objects))
             .unwrap_or_default();
         let caster = range_units.caster();
         let selection = &targeting.selection;
@@ -373,39 +548,6 @@ pub(super) fn feed_action_state(
                 crate::ui_pet::pet_actions_usable(bar, cast_ctx.self_guid, me.map(|(s, _)| s), pet);
             (bar, pet.filter(|_| held))
         });
-
-        // The frame's callers of the usable refresh `0x4b31c0` and of `0x4f93d0`; a new VM meets
-        // the state as it stands and hears none.
-        let mut refresh = edges.read().fold(false, |hit, e| {
-            hit | refreshes_usable(e, cast_ctx.self_guid, selection.guid)
-        });
-        // The target's select and release (`0x493892`, `0x493a69`) and `SetPlayerControl`
-        // (`0x4958fc`, `0x495910`), each on a change.
-        refresh |= selection.guid != memory.selection || control_lost != memory.control_lost;
-        (memory.selection, memory.control_lost) = (selection.guid, control_lost);
-        // The cooldown list's own (`0x6e2e85`, `0x6e3076`).
-        refresh |= cooldowns.usable_refreshes != memory.usable_refreshes;
-        memory.usable_refreshes = cooldowns.usable_refreshes;
-        let mut bags = cooldowns.bag_flushes != memory.bag_flushes;
-        memory.bag_flushes = cooldowns.bag_flushes;
-        if new_vm {
-            (refresh, bags) = (false, false);
-        }
-        // The usable cache's other refreshes (`0x4e5c00`): world entry (`0x4e4f90`, from the enter
-        // cascade at our player's arrival or a reload's), `EditMacro` (`0x4f132e`) and each
-        // `RaiseBagUpdate` a watcher's run calls (`0x4f9374`).
-        let entered = entries.read().count() > 0;
-        // Our player's creation, whose arrival (`0x5dea50`) writes every slot (`0x5deafc`) and
-        // empties the reactive list (`0x5dea86`); a reload reaches neither.
-        let arrived = !created.is_empty();
-        let macro_edits = script.macro_edits();
-        let bag_updates = item_lane.map_or(0, |l| l.bag_raises());
-        let refresh_cache = refresh
-            || entered
-            || new_vm
-            || macro_edits != memory.macro_edits
-            || bag_updates != memory.bag_updates;
-        (memory.macro_edits, memory.bag_updates) = (macro_edits, bag_updates);
 
         let mut fresh: HashMap<u32, ActionState> = HashMap::new();
         for (&slot, button) in &actions.buttons {
@@ -477,7 +619,7 @@ pub(super) fn feed_action_state(
                             store,
                             target: selection.guid.zip(target.map(|(s, _)| s)),
                             rel: relations.get(),
-                            cooldowns: &cooldowns,
+                            cooldowns,
                             stacks: &stacks,
                             spell_mods,
                             control_lost,
@@ -485,7 +627,7 @@ pub(super) fn feed_action_state(
                             sub_classes,
                         };
                         let (u, oom) =
-                            usable::spell_usable(button.action, d, sp, &ctx, &objects, &items);
+                            usable::spell_usable(button.action, d, sp, &ctx, objects, items);
                         st.usable = u;
                         st.not_enough_mana = oom;
                     } else {
@@ -525,7 +667,7 @@ pub(super) fn feed_action_state(
                     // Only the `Copy` on-use spell, not a clone of the template per slot per frame.
                     // The getter's lookup passes a callback (`0x4e5b3f`) on the bar's events, which
                     // no event here marks: an entry is asked when it first shows.
-                    let template = items.template(button.action, 0, Ask::New(&commands));
+                    let template = items.template(button.action, 0, Ask::New(commands));
                     // A missing record is asked with the callback `0x6e2f70` by the slot's cooldown
                     // query and its usable test (`0x6e2efb`, `0x6e2fea`).
                     if template.is_none() && !items.template_answered_unknown(button.action) {
@@ -547,7 +689,7 @@ pub(super) fn feed_action_state(
                     st.equipped = me.is_some_and(|(s, _)| {
                         crate::ui_items::find_item(
                             &s.0,
-                            &objects,
+                            objects,
                             button.action,
                             crate::ui_items::ItemSearch {
                                 equipment_only: true,
@@ -564,7 +706,7 @@ pub(super) fn feed_action_state(
                             store,
                             target: selection.guid.zip(target.map(|(s, _)| s)),
                             rel: relations.get(),
-                            cooldowns: &cooldowns,
+                            cooldowns,
                             stacks: &stacks,
                             spell_mods,
                             control_lost,
@@ -577,8 +719,8 @@ pub(super) fn feed_action_state(
                             count > 0,
                             &ctx,
                             spells.as_deref(),
-                            &objects,
-                            &items,
+                            objects,
+                            items,
                         );
                         st.usable = u;
                         st.not_enough_mana = oom;
@@ -645,24 +787,14 @@ pub(super) fn feed_action_state(
         }
         memory.pushed = fresh;
 
-        // The reactive list: emptied at an arrival, filled from the book, and re-checked inside
-        // each usable refresh after the bar (`0x4b31d7`-`0x4b323d`), on the walk the bar takes.
-        let list = &mut *reactive;
-        if arrived {
-            list.arrive();
-        }
-        if let Some(sp) = spells.as_deref() {
-            if arrived || actions.is_changed() || spells.as_ref().is_some_and(|s| s.is_changed()) {
-                list.sync(&actions.spells, &sp.catalog);
-            }
-        }
+        let list = reactive;
         let activated = match (me, spells.as_deref()) {
             (Some((store, _)), Some(sp)) if refresh => {
                 let ctx = usable::UsableCtx {
                     store,
                     target: selection.guid.zip(target.map(|(s, _)| s)),
                     rel: relations.get(),
-                    cooldowns: &cooldowns,
+                    cooldowns,
                     stacks: &stacks,
                     spell_mods,
                     control_lost,
@@ -672,17 +804,52 @@ pub(super) fn feed_action_state(
                 list.refresh(|id| {
                     sp.catalog
                         .get(id)
-                        .is_some_and(|d| usable::spell_usable(id, d, sp, &ctx, &objects, &items).0)
+                        .is_some_and(|d| usable::spell_usable(id, d, sp, &ctx, objects, items).0)
                 })
             }
             _ => Vec::new(),
         };
 
-        owed.cooldowns |= gen_changed;
-        owed.usable_changed |= usable_changed;
-        owed.refresh |= refresh;
-        owed.activated.extend(activated);
-        owed.bags |= bags;
+        (usable_changed, activated)
+    }
+}
+
+/// Computes and diff-pushes every occupied slot's state ([`ActionStates`]), and owes the
+/// reference's events to [`fire_action_events`].
+pub(super) fn feed_action_state(
+    mut vm: crate::script_calls::VmWith<ActionStates<'static, 'static>>,
+    // The usable refresh's field-watch callers, the enter cascade, the item lane's
+    // `RaiseBagUpdate` calls and the events owed.
+    (mut edges, mut entries, item_lane, mut owed): (
+        MessageReader<FieldChanged>,
+        MessageReader<crate::net::WorldEnterCascadeMessage>,
+        Option<Res<crate::item_lane::ItemLane>>,
+        ResMut<ActionEvents>,
+    ),
+    // The active player's creation, whose arrival (`0x5dea50`) writes every slot (`0x5deafc`) and
+    // empties the reactive list (`0x5dea86`); a reload reaches neither.
+    created: Query<(), Added<SelfPlayer>>,
+    // Every cooldown pushes its absolute start on the `GetTime` clock, derived from this frame's
+    // pair, so a running cooldown derives the same start every frame.
+    clock: Res<crate::ui_script::UiClock>,
+) {
+    let clock = (clock.anchor, clock.ui_now);
+    let entered = entries.read().count() > 0;
+    let bag_updates = item_lane.map_or(0, |l| l.bag_raises());
+    let arrived = !created.is_empty();
+    vm.turn(|script, mut states| {
+        let Some(script) = script else {
+            return;
+        };
+        states.feed(
+            script,
+            clock,
+            &mut edges,
+            entered,
+            bag_updates,
+            arrived,
+            &mut owed,
+        );
     })
 }
 
