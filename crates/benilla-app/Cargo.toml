@@ -153,6 +153,15 @@ web-sys = { version = "0.3", features = [
     "AudioBuffer",
     "BaseAudioContext",
     "OfflineAudioContext",
+    # `sound::web_backend`'s chunk scheduler.
+    "AudioBufferSourceNode",
+    "AudioContext",
+    "AudioContextOptions",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioScheduledSourceNode",
+    "Event",
+    "EventTarget",
 ] }
 
 # Off macOS the device layer's last hop runs over cpal (`sound::output::cpal`). macOS goes direct:
