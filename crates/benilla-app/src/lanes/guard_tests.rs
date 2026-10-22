@@ -229,12 +229,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
          acting in its call, holds it in the host",
     ),
     (
-        Row::Queue,
-        "::ui_reputation::FactionFlagWrites",
-        "the flag bytes the reputation verbs write in their calls, which `feed_reputation` folds \
-         into the slots; the list's own copy changed in the call, so the fold fires nothing",
-    ),
-    (
         Row::HostHeld,
         "::ui_taxi::TaxiState",
         "the flight master's packets, which `feed_taxi` fires from; the taxi verbs, acting in \
@@ -301,7 +295,9 @@ const HOST_HELD_UNREAD: &[&str] = &[
     "::creature_anim::PlaySeq",
     "::items::Items",
     "::net::GuidIndex",
-    "::net::Reputations",
+    // Read, and quiet: the feeds that hold it fire nothing off it, as the reputation messages'
+    // `UPDATE_FACTION` and `UNIT_FACTION` go on the notice lane at their packets.
+    "::net::reputations::Reputations",
     "::net::SelfGuid",
     "::net::game_time::ServerTime",
     "::spell::cast_send::HeldForPick",
@@ -331,15 +327,11 @@ const HOST_HELD_UNREAD: &[&str] = &[
 ];
 
 /// The resources the handlers fill through a shared reference, which their declared access shows
-/// as a read: the error keys a refusal pushes, the tutorial banks a watcher fires and the flag
-/// bytes the reputation verbs write. The lanes
+/// as a read: the error keys a refusal pushes and the tutorial banks a watcher fires. The lanes
 /// and the host's two other sinks (the message sounds and the unit edits, which raise no event)
 /// are not queues here.
-const FILLED_THROUGH_A_READ: &[&str] = &[
-    "::ui_action::errors::UiErrorKeys",
-    "::tutorial::Tutorials",
-    "::ui_reputation::FactionFlagWrites",
-];
+const FILLED_THROUGH_A_READ: &[&str] =
+    &["::ui_action::errors::UiErrorKeys", "::tutorial::Tutorials"];
 
 /// Every other resource a handler reads and does not write: state, tables and caches it
 /// consults, none of them a queue a feed takes. A new one fails until it is placed here or in
@@ -367,6 +359,9 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     // The bag cache the open-container handler numbers its `BAG_OPEN`s from.
     "::BagCache",
     "::NetCommands",
+    // Read-only to the handlers that only judge relations (the combat log's, the cast result's
+    // and the loot response's): the reputation handlers write it, and so does every handler that
+    // lends the call host, whose reputation verbs write the slots.
     "::Reputations",
     "::SelfGuid",
     "::OwnControlLost",
