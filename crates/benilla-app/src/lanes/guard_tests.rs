@@ -234,22 +234,23 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     (
         Row::Edge,
         "::ui_party::feed::feed_party",
-        "the roster's diff",
-    ),
-    (
-        Row::Edge,
-        "::ui_cast::feed_cast_reports",
-        "the form's change",
-    ),
-    (
-        Row::Edge,
-        "::ui_unit::feed_units",
-        "the combo points' change",
+        "the ready check, the saved instances and the members' presence, found by comparing \
+         the group's state",
     ),
     (
         Row::Edge,
         "::ui_unit::feed_units",
         "the selection's change, `PLAYER_TARGET_CHANGED`",
+    ),
+    (
+        Row::Edge,
+        "::ui_action::state::fire_action_events",
+        "the usable refresh `0x4b31c0` (`ACTIONBAR_UPDATE_USABLE`, `SPELL_ACTIVE`, \
+         `SPELL_UPDATE_USABLE`), which the reference runs inside each caller's packet: the form \
+         and combo watchers (`0x5de011`, `0x5ddff0`), the unit-flags, health, power and \
+         aura-state watchers, the selection and the cooldowns. Here it is one pass a frame over \
+         the bar's 120 slots and the reactive list, diffed against the usable cache, so one \
+         caller's run cannot be cut out to fire at its own notice",
     ),
 ];
 
@@ -318,7 +319,6 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::MailOpen",
     "::Stationery",
     "::MerchantOpen",
-    "::GroupState",
     "::PetBar",
     "::QuestLog",
     "::UiClock",
@@ -334,6 +334,19 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::sound::message::MessageSounds",
     "::creature_anim::edits::UnitEdits",
 ];
+
+/// Every lane's queue, by type: what a handler fills there fires in the packets' order.
+fn lane_types() -> [TypeId; 6] {
+    [
+        TypeId::of::<crate::field_watch::NoticeLane>(),
+        TypeId::of::<crate::ui_chat::ChatLog>(),
+        TypeId::of::<crate::ui_cast::CastReports>(),
+        TypeId::of::<crate::ui_auction::HouseLane>(),
+        // The party lane: the group's signal log and the lane's place in it.
+        TypeId::of::<crate::ui_party::GroupState>(),
+        TypeId::of::<crate::ui_party::PartyLane>(),
+    ]
+}
 
 /// Whether `id` names a `Messages<T>` buffer, which a reader takes from through a read.
 fn is_messages(world: &World, id: ComponentId) -> bool {
@@ -416,14 +429,10 @@ fn every_resource_a_handler_reads_is_a_known_queue_or_read_only() {
     let vm = world
         .components()
         .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
-    let lanes = [
-        world
-            .components()
-            .get_resource_id(TypeId::of::<crate::ui_chat::ChatLog>()),
-        world
-            .components()
-            .get_resource_id(TypeId::of::<crate::field_watch::NoticeLane>()),
-    ];
+    let lanes: Vec<Option<ComponentId>> = lane_types()
+        .into_iter()
+        .map(|t| world.components().get_resource_id(t))
+        .collect();
     let mut reads = BTreeSet::new();
     for (_, access) in &handlers.accesses {
         let access = access.combined_access();
@@ -463,13 +472,22 @@ fn every_resource_a_handler_reads_is_a_known_queue_or_read_only() {
 }
 
 /// The drain runs once a frame after every feed and before the tick, gated as the feeds of the
-/// in-game interface are, and holds the chat and notice lanes.
+/// in-game interface are, and holds the lanes.
 #[test]
 fn the_drain_runs_after_the_feeds_and_before_the_tick() {
     let mut app = headless_client();
     let mut lanes = app.world().resource::<super::Lanes>().names();
     lanes.sort_unstable();
-    assert_eq!(lanes, ["chat", "field notices"]);
+    assert_eq!(
+        lanes,
+        [
+            "auction house",
+            "cast reports",
+            "chat",
+            "field notices",
+            "party"
+        ]
+    );
     let c = census(&mut app, Update, SyncPoints::Declared);
     if !type_names_available(&c) {
         eprintln!("skipped: this build carries no type names");
@@ -554,13 +572,10 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
                 .components()
                 .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
             let host = call_host_access(world);
-            let lanes: Vec<ComponentId> = [
-                TypeId::of::<crate::field_watch::NoticeLane>(),
-                TypeId::of::<crate::ui_chat::ChatLog>(),
-            ]
-            .into_iter()
-            .filter_map(|t| world.components().get_resource_id(t))
-            .collect();
+            let lanes: Vec<ComponentId> = lane_types()
+                .into_iter()
+                .filter_map(|t| world.components().get_resource_id(t))
+                .collect();
             let graph = schedule.graph();
             let in_feed = |node: NodeId| in_feed(graph, node);
             let mut taken = BTreeSet::new();
@@ -692,7 +707,8 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
     ),
     (
         "::ui_chat::channels::auto_join_zone_channels",
-        "world entry only arms the zone-channel walk, an engine turn that runs no Lua",
+        "world entry only arms the zone-channel walk, an engine turn that runs no Lua: its one \
+         push is a walk's refusal into `UiErrorKeys`, which the action feed shows",
     ),
     (
         "::ui_chat::channels::end_session_channels_on_disconnect",
@@ -704,13 +720,24 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
 const NOT_YET_PLACED: &[(&str, &str)] = &[
     (
+        "::swing_refusal::apply_swing_refusals",
+        "the server's swing stop `0x5ecac0`, `CancelNextSwingSpells` (`0x6e6f30`) and the \
+         tutorials 0xa and 0xb, which the reference runs inside its packet (`0x625ab8`, \
+         `0x5e7dd0`), off the swing refusals",
+    ),
+    (
+        "::target::scan::auto_acquire",
+        "the attacked and cast-at acquires' `SelectTarget`, which the reference runs inside its \
+         packet (`0x6259fe`, `0x6e799c`), off the swings and the spell starts",
+    ),
+    (
         "::ui_trade::drain_trade",
         "the trade records' `TRADE_UPDATE`, off the item notices after the tick",
     ),
     (
         "::ui_tradeskill::drain_trade_skill",
-        "the repeat craft's hook, which the reference runs inside the cast's go (`0x6e81d3`), \
-         off the cast events",
+        "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
+         `0x4fd7b0` (`0x6e81e7`), off the cast events",
     ),
 ];
 
@@ -730,13 +757,16 @@ fn every_lane_push_off_a_handler_queue_keeps_its_place() {
         let host = call_host_access(world);
         let id = |t: TypeId| world.components().get_resource_id(t);
         let vm = id(TypeId::of::<benilla_ui::script::UiScript>());
-        let lanes: Vec<ComponentId> = [
-            TypeId::of::<crate::field_watch::NoticeLane>(),
-            TypeId::of::<crate::ui_chat::ChatLog>(),
-        ]
-        .into_iter()
-        .filter_map(id)
-        .collect();
+        let lanes: Vec<ComponentId> = lane_types().into_iter().filter_map(id).collect();
+        // The chat lane is pushed through a shared reference, the others through a write.
+        let chat = id(TypeId::of::<crate::ui_chat::ChatLog>());
+        let pushes_onto = |access: &bevy::ecs::query::Access, lane: ComponentId| {
+            if Some(lane) == chat {
+                access.has_resource_read(lane)
+            } else {
+                access.has_resource_write(lane)
+            }
+        };
         let placed: Vec<ComponentId> = placed_queues().into_iter().filter_map(id).collect();
         let graph = schedule.graph();
         let mut pushes = BTreeSet::new();
@@ -753,7 +783,7 @@ fn every_lane_push_off_a_handler_queue_keeps_its_place() {
             // queues it reads: a plain resource it writes is its verbs' own state.
             if system.is_exclusive()
                 || (fires && in_feed(graph, bevy::ecs::schedule::NodeId::System(key)))
-                || !lanes.iter().any(|&l| access.has_resource_read(l))
+                || !lanes.iter().any(|&l| pushes_onto(access, l))
             {
                 continue;
             }

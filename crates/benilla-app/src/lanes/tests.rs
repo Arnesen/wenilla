@@ -438,3 +438,241 @@ fn each_answer_handler_queues_a_release_behind_a_line_that_reads_it() {
         assert_eq!(kinds.last(), Some(&"release"), "{kinds:?}");
     }
 }
+
+/// The active player's own watches over one values block of `delta` on a fresh descriptor, as the
+/// update handler runs them (`0x465330`).
+fn own_watches(delta: &[(u16, u32)]) -> Vec<FieldNotice> {
+    use benilla_protocol::messages::ObjectType;
+    use benilla_protocol::ObjectFields;
+    let mut me = ObjectFields::from_pairs(&[]).into_created(ObjectType::Player);
+    let delta = ObjectFields::from_pairs(delta);
+    let sent: Vec<u16> = delta.raw_fields().map(|(i, _)| i).collect();
+    let mut moved = Vec::new();
+    me.merge_diff(delta, |i, o, n| moved.push((i, o, n)));
+    let around = crate::field_watch::Around {
+        me: Some(ME),
+        creature_lookup: &|_| false,
+        others: &Vec::new,
+        pet_bar: 0,
+    };
+    let block = crate::field_watch::Notified::new(crate::field_watch::Sent::Fields(&sent), &moved);
+    crate::field_watch::placed_values(&around, ME, ObjectType::Player, &me, &block)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect()
+}
+
+/// `PLAYER_FIELD_BYTES`, whose byte 1 is the combo count.
+const PLAYER_FIELD_BYTES: u16 = 188 + 0x1028 / 4;
+/// `UNIT_FIELD_BYTES_1`, whose byte 2 is the form.
+const UNIT_FIELD_BYTES_1: u16 = 6 + 0x210 / 4;
+
+fn combo_lands(_: In<SessionEvent>, mut n: Notices) {
+    n.write_batch(own_watches(&[(PLAYER_FIELD_BYTES, 2 << 8)]));
+}
+
+fn form_changes(_: In<SessionEvent>, mut n: Notices) {
+    n.write_batch(own_watches(&[(UNIT_FIELD_BYTES_1, 1 << 16)]));
+}
+
+/// The combo count is a watcher on the active player (`0x5ddff0`, registered at `0x5dd9d0`), so
+/// `PLAYER_COMBO_POINTS` (`0x5ddffa`) fires inside its update packet, whole before a later
+/// packet's events and after an earlier one's.
+#[test]
+fn the_combo_watcher_signals_at_its_packet() {
+    let mut app = client(|app| {
+        app.net_handler(SessionEventKind::LoggedOut, combo_lands)
+            .net_handler(SessionEventKind::LoginQueued, enter);
+    });
+    assert_eq!(
+        frame(&mut app, vec![p1(), p2()]),
+        ["PLAYER_COMBO_POINTS", "PLAYER_ENTER_COMBAT"]
+    );
+    assert_eq!(
+        frame(&mut app, vec![p2(), p1()]),
+        ["PLAYER_ENTER_COMBAT", "PLAYER_COMBO_POINTS"]
+    );
+}
+
+/// The form byte is a watcher on the active player (`0x5de010`, registered at `0x5dda18`): the
+/// cast-change pair (`0x5de016` → `0x4b3250`), then the bonus bar's event (`0x5de01b` →
+/// `0x4e4fc0`, which signals on every change), inside its packet.
+#[test]
+fn the_form_watcher_signals_at_its_packet() {
+    let mut app = client(|app| {
+        app.net_handler(SessionEventKind::LoggedOut, form_changes)
+            .net_handler(SessionEventKind::LoginQueued, enter);
+    });
+    assert_eq!(
+        frame(&mut app, vec![p2(), p1()]),
+        [
+            "PLAYER_ENTER_COMBAT",
+            "ACTIONBAR_UPDATE_STATE",
+            "CURRENT_SPELL_CAST_CHANGED",
+            "UPDATE_BONUS_ACTIONBAR"
+        ]
+    );
+}
+
+fn cast_stops(_: In<SessionEvent>, mut reports: ResMut<crate::ui_cast::CastReports>) {
+    reports.bar(crate::ui_cast::CastBarEdge::Stop);
+}
+
+/// A client with the cast reports' lane too, and what their readying reads.
+fn cast_client(handlers: impl FnOnce(&mut App)) -> App {
+    let mut app = client(|app| {
+        app.add_plugins(crate::ui_cast::UiCastPlugin);
+        handlers(app);
+    });
+    app.world_mut()
+        .init_resource::<crate::ui_action::CastFailRedisplays>();
+    app
+}
+
+/// A cast's report fires inside its packet's handler (`SPELLCAST_STOP` from `SMSG_CAST_RESULT`,
+/// `0x6e741a`): whole before a later packet's events and after an earlier one's.
+#[test]
+fn a_cast_report_fires_at_its_packet() {
+    let mut app = cast_client(|app| {
+        app.net_handler(SessionEventKind::LoggedOut, cast_stops)
+            .net_handler(SessionEventKind::LoginQueued, enter);
+    });
+    assert_eq!(
+        frame(&mut app, vec![p1(), p2()]),
+        ["SPELLCAST_STOP", "PLAYER_ENTER_COMBAT"]
+    );
+    assert_eq!(
+        frame(&mut app, vec![p2(), p1()]),
+        ["PLAYER_ENTER_COMBAT", "SPELLCAST_STOP"]
+    );
+}
+
+/// `SMSG_AUCTION_COMMAND_RESULT` outbid in flight: its line shows inside the handler
+/// (`0x4cc728` → `0x496720`).
+fn outbid() -> SessionEvent {
+    SessionEvent::AuctionCommandResult {
+        auction_id: 7,
+        action: benilla_protocol::messages::auction_action::BID_PLACED,
+        error: benilla_protocol::messages::auction_error::HIGHER_BID,
+        tail: benilla_protocol::messages::AuctionCommandTail::HigherBid {
+            new_bidder_guid: 0x55,
+            new_bid: 200,
+            new_min_outbid: 10,
+        },
+    }
+}
+
+/// An auction handler's line fires inside it (`0x4cc728` → `0x496720`), so a packet ahead of it
+/// in the frame is heard first and one behind it after, not the reverse as when the handler
+/// signalled during the drain of the packets.
+#[test]
+fn an_auction_line_fires_at_its_packet() {
+    let mut app = client(|app| {
+        app.add_plugins(crate::ui_auction::UiAuctionPlugin)
+            .net_handler(SessionEventKind::LoggedOut, enter);
+    });
+    app.world_mut()
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .run(r#"ERR_AUCTION_HIGHER_BID = "You have been outbid.""#)
+        .unwrap();
+    assert_eq!(
+        frame(&mut app, vec![p1(), outbid()]),
+        ["PLAYER_ENTER_COMBAT", "UI_ERROR_MESSAGE"]
+    );
+}
+
+/// `SMSG_GROUP_LIST` as the wire carries it: one member under us as leader, with the loot tail a
+/// list with members carries (`0x5e6e12`).
+fn group_list() -> SessionEvent {
+    SessionEvent::GroupList {
+        group_type: 0,
+        own_flags: 0,
+        members: vec![benilla_protocol::messages::GroupMemberEntry {
+            name: "Friend".into(),
+            guid: FRIEND,
+            status: 1,
+            flags: 0,
+        }],
+        leader: ME,
+        loot: Some(benilla_protocol::messages::GroupLootInfo {
+            method: 3,
+            master: 0,
+            threshold: 2,
+        }),
+    }
+}
+
+/// The group list's handler, run whole at its packet: the members change after the seat loop
+/// (`0x5e6c66`), the leader store (`0x5e6c7e` → `0x4e82a9`), the line of a new group we lead
+/// (`0x5e6cc1`), the loot store's lines and its event on every list with members (`0x5e6e52` →
+/// `0x4e86f0`, `0x4e87fa`), then a party's board clear (`0x4ba5db`); all before a later packet's
+/// events and after an earlier one's.
+#[test]
+fn the_roster_events_fire_at_their_packet() {
+    let mut app = client(|app| {
+        app.add_plugins(crate::ui_party::UiPartyPlugin)
+            .net_handler(SessionEventKind::LoginQueued, enter);
+    });
+    app.world_mut().resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+    app.world_mut()
+        .init_resource::<crate::ui_quest::QuestGiver>();
+    app.world_mut()
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .run(
+            r#"
+            ERR_JOINED_GROUP_S = "%s joins the party."
+            ERR_SET_LOOT_GROUP = "Looting set to group loot."
+            ERR_SET_LOOT_THRESHOLD_S = "Loot threshold set to %s."
+            ITEM_QUALITY2_DESC = "Uncommon"
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        frame(&mut app, vec![p2(), group_list()]),
+        [
+            "PLAYER_ENTER_COMBAT",
+            "PARTY_MEMBERS_CHANGED",
+            "PARTY_LEADER_CHANGED",
+            "CHAT_MSG_SYSTEM:Friend joins the party.",
+            "CHAT_MSG_SYSTEM:Looting set to group loot.",
+            "CHAT_MSG_SYSTEM:Loot threshold set to Uncommon.",
+            "PARTY_LOOT_METHOD_CHANGED",
+            "RAID_TARGET_UPDATE"
+        ]
+    );
+    assert_eq!(
+        frame(&mut app, vec![group_list(), p2()]),
+        [
+            "PARTY_MEMBERS_CHANGED",
+            "PARTY_LEADER_CHANGED",
+            "PARTY_LOOT_METHOD_CHANGED",
+            "RAID_TARGET_UPDATE",
+            "PLAYER_ENTER_COMBAT"
+        ],
+        "the same list again: the loot store's event, whatever the tail says"
+    );
+}
+
+/// The session's end drops what the cast and house lanes hold, as the chat lane's end drops its
+/// lines: the Lua state they were readied for is replaced.
+#[test]
+fn the_session_end_drops_the_cast_and_house_lanes() {
+    let mut app = cast_client(|app| {
+        app.add_plugins(crate::ui_auction::UiAuctionPlugin);
+    });
+    app.add_plugins(bevy::state::app::StatesPlugin)
+        .insert_state(crate::client_state::ClientState::InWorld);
+    let world = app.world_mut();
+    world
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .run(r#"ERR_AUCTION_HIGHER_BID = "You have been outbid.""#)
+        .unwrap();
+    world
+        .resource_mut::<crate::ui_cast::CastReports>()
+        .bar(crate::ui_cast::CastBarEdge::Stop);
+    crate::net::handlers::dispatch(world, vec![outbid()]);
+    world.run_schedule(OnExit(crate::client_state::ClientState::InWorld));
+    assert!(world.resource::<crate::ui_cast::CastReports>().is_empty());
+    fire_frame(world);
+    assert!(heard(&mut app).is_empty(), "nothing left to fire");
+}

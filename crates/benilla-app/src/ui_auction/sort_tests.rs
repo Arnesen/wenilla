@@ -111,9 +111,12 @@ impl House {
             .insert_player(guid, name.into(), None);
     }
 
+    /// The packet, the frame's feeds, then the house lane's steps, as the lanes' drain follows the
+    /// feeds.
     fn dispatch(&mut self, event: SessionEvent) {
         crate::net::handlers::dispatch(self.app.world_mut(), vec![event]);
         self.app.update();
+        super::net::fire_house_lane(self.app.world_mut());
     }
 
     fn open(&mut self, auctioneer: u64) {
@@ -199,10 +202,11 @@ impl House {
             .unwrap()
     }
 
-    /// The packet through its handlers alone, with no frame after: what the handler signals
-    /// itself.
+    /// The packet through its handlers and the house lane alone, with no frame after: what the
+    /// handler signals itself.
     fn handle(&mut self, event: SessionEvent) {
         crate::net::handlers::dispatch(self.app.world_mut(), vec![event]);
+        super::net::fire_house_lane(self.app.world_mut());
     }
 
     /// From here on, each list update with its first row's bid as the update's handler reads it,
@@ -1043,10 +1047,63 @@ fn a_patch_in_its_pages_frame_signals_after_the_page() {
             outbid(),
         ],
     );
+    super::net::fire_house_lane(h.app.world_mut());
     assert_eq!(
         h.heard(),
         ["AUCTION_ITEM_LIST_UPDATE=0", "AUCTION_ITEM_LIST_UPDATE=900"]
     );
     h.app.update();
     assert!(h.heard().is_empty(), "the frame after signals nothing");
+}
+
+/// The item cache's answer as the item handler lands it: the record, then the lists' callbacks
+/// for the pages waiting on it (`0x4cc9bf`, `0x4cca10`).
+fn item_answers(
+    In(ev): In<SessionEvent>,
+    mut items: ResMut<Items>,
+    mut auction: ResMut<super::AuctionOpen>,
+    mut lane: ResMut<super::HouseLane>,
+) {
+    if let SessionEvent::ItemTemplate { entry, info } = ev {
+        items.insert_template(entry, info.map(|b| *b));
+        super::record_answered(&mut auction, &mut lane, &items, entry);
+    }
+}
+
+/// A page with an item the cache lacks runs no tail in its handler (`0x4cca10`); the item's
+/// answer later in the same frame runs it inside the record's callback (`0x4cc9e8`), so the
+/// update fires behind the page, on the page sorted, and once.
+#[test]
+fn a_page_whose_item_answers_later_in_its_frame_sorts_at_the_answer() {
+    use crate::net::handlers::NetHandlerApp;
+    let mut h = House::new();
+    h.app.net_handler(
+        benilla_protocol::SessionEventKind::ItemTemplate,
+        item_answers,
+    );
+    h.item(2, "Silk", 20, 1);
+    h.open(AUCTIONEER);
+    h.lua("SortAuctionItems('list', 'level')");
+    h.seen();
+    let mut cloth = crate::items::test_template("Cloth");
+    cloth.required_level = 10;
+    crate::net::handlers::dispatch(
+        h.app.world_mut(),
+        vec![
+            SessionEvent::AuctionListResult {
+                auctions: vec![entry(1, 1), entry(2, 2)],
+                total_count: 2,
+            },
+            SessionEvent::ItemTemplate {
+                entry: 1,
+                info: Some(Box::new(cloth)),
+            },
+        ],
+    );
+    h.app.update();
+    super::net::fire_house_lane(h.app.world_mut());
+    assert_eq!(h.seen(), ["AUCTION_ITEM_LIST_UPDATE=Silk,Cloth"]);
+    h.app.update();
+    super::net::fire_house_lane(h.app.world_mut());
+    assert!(h.seen().is_empty(), "once");
 }
