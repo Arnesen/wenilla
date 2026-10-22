@@ -47,6 +47,7 @@ pub(crate) mod recount;
 mod state;
 pub(crate) use state::ActionStates;
 pub(crate) mod toggle;
+mod unlearn;
 mod weapon_icon;
 
 /// Every feed that pushes cooldown triples runs `.before` this set: [`state::fire_action_events`]
@@ -87,6 +88,14 @@ pub(crate) struct PlayerActions {
     /// item tooltip's lock walk `0x5da5e0` scan it from the front, so its order picks between
     /// 6478 "Opening" and 22810 "Opening - No Text", which open the same locks.
     pub openers: Vec<u32>,
+    /// `SMSG_SUPERCEDED_SPELL`'s `(old, new)` pairs in arrival order, for the macro arm of
+    /// `0x4e5e60`: a macro on the bar whose cached spell is `old` gets `new` (`0x4e5ec4`). The
+    /// macro rebind drains it ([`crate::ui_macro`]).
+    pub superseded: Vec<(u32, u32)>,
+    /// The spells unlearned (`0x5e9fe0`), by `SMSG_REMOVED_SPELL` or a supersede's old rank, in
+    /// arrival order, whose bar slots the unlearn clears (`0x5ea253` into `0x4e5e20`), drained by
+    /// the bar's clear (`unlearn`).
+    pub unlearned: Vec<u32>,
     /// Set by every book or bar change, cleared once the feed re-resolves slot identity, which a
     /// landed item template ([`crate::items::Items::template_epoch`]) also triggers. Between
     /// resolves an item slot's count moves only by the item watchers' recount (`recount`).
@@ -377,6 +386,15 @@ impl Plugin for UiActionPlugin {
                     ranks::normalize_action_ranks
                         .in_set(UnitFeed)
                         .before(feed::feed_actions),
+                    // The unlearns' clears, after the macros' bound spells a macro slot resolves
+                    // through and after the rank pass, which stands in for the supersede's move
+                    // of the spell slots (`0x4e5e60`) that its unlearn (`0x5e6392`) follows; before
+                    // the identity feed that consumes their `dirty`.
+                    unlearn::clear_unlearned_slots
+                        .in_set(UnitFeed)
+                        .after(crate::ui_macro::MacroBindings)
+                        .after(ranks::normalize_action_ranks)
+                        .before(feed::feed_actions),
                     // Our player's arrival recount, after the server's unlocks.
                     recount::recount_item_actions
                         .in_set(UnitFeed)
@@ -389,13 +407,15 @@ impl Plugin for UiActionPlugin {
                         .before(crate::ui_aura::AuraEvents),
                     // A seat: the world-enter events' handlers read the slots' state, which the
                     // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
-                    // After the bag feed, a seat too: left to the VM pass, the pair links through
-                    // one more command barrier ([`crate::vm_pass`]).
+                    // After the macros' bound spells, which a macro slot resolves through. After the
+                    // bag feed, a seat too: left to the VM pass, the pair links through one more
+                    // command barrier ([`crate::vm_pass`]).
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .in_set(crate::ui_unit::WorldEnterSeats)
                         .after(crate::player::ControlRestore)
                         .after(crate::ui_items::feed::feed_containers)
+                        .after(crate::ui_macro::MacroBindings)
                         .after(feed::feed_actions),
                     // After the unit snapshots, which its handlers read (the target stored at
                     // `0x4936e2`, a watched field written before its watch runs), and ahead of the

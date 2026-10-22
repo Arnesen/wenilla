@@ -748,6 +748,11 @@ fn removed_spell(
     if actions.spells.remove(&spell_id) {
         actions.dirty = true;
     }
+    // `UnlearnSpell 0x5e9fe0` does nothing for a spell with no record (`0x5ea02a`); otherwise it
+    // clears the bar slots that stand for the spell (`0x5ea253`), which the bar's queue makes.
+    if spells.is_some_and(|s| s.catalog.get(spell_id).is_some()) {
+        actions.unlearned.push(spell_id);
+    }
     // `0x5ea24c`: every unlearn runs `0x4b2c50`.
     unlist_opener(spell_id, actions);
     announce_unlearn(spell_id, spells, errors);
@@ -780,6 +785,7 @@ fn superceded_spell(
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
     actions.spells.remove(&old_spell_id);
     actions.spells.insert(new_spell_id);
+    actions.superseded.push((old_spell_id, new_spell_id));
     actions.dirty = true;
     // `0x4b2f50` unlists the old rank and registers the new one at the tail; the player's own
     // unlearn of the old rank (`0x5e6392` → `0x5ea24c`) then runs the removal once more, and its
@@ -793,6 +799,12 @@ fn superceded_spell(
     announce_learn(new_spell_id, spells, errors);
     // The same flag flashes the tab of the new rank.
     tab_flash.0.push(new_spell_id);
+    // That unlearn (`UnlearnSpell(old, 1)`, `0x5e6392` into `0x5e9fe0`) then clears every bar slot
+    // still standing for the old rank (`0x5ea253`), an item's on-use spell included; a spell with
+    // no record unlearns nothing (`0x5ea02a`).
+    if spells.is_some_and(|s| s.catalog.get(old_spell_id).is_some()) {
+        actions.unlearned.push(old_spell_id);
+    }
 }
 
 /// The server's verdict on our cast (`SMSG_CAST_RESULT`, `HandleCastResult 0x6e7330`).
@@ -1846,6 +1858,12 @@ mod tests {
         let mut flash = LearnedInTab::default();
         superceded_spell(78, 284, &mut actions, Some(&spells), &errors, &mut flash);
 
+        assert_eq!(
+            actions.unlearned,
+            [78],
+            "the handler's `UnlearnSpell(old, 1)` clears what still stands for the old rank \
+             (`0x5e6392` into `0x5e9fe0`, `0x5ea253`)"
+        );
         assert_eq!(errors.len(), 1, "one line for a rank-up, not two");
         assert_eq!(
             flash.0,

@@ -94,6 +94,8 @@ mod tests {
             buttons: buttons.iter().map(|b| (b.slot, *b)).collect(),
             spells: spells.iter().copied().collect(),
             openers: Vec::new(),
+            superseded: Vec::new(),
+            unlearned: Vec::new(),
             dirty: true,
         })
         .insert_resource(SkillLines { catalog })
