@@ -69,13 +69,15 @@ Login screen, headless Chrome 152 on an RTX 4090 (WebGPU), `requestAnimationFram
 
 cpal 0.17's `webaudio` host — which `web_backend.rs` used — mixes on the main thread from `ended` events and keeps two 2048-frame buffers in flight: measured 28–45 ms of lead on an idle page. Any main-thread stall longer than that underruns, and cpal never resyncs its cursor, so the late buffers start "in the past" and overlap the next ones (garble until it catches up; after the first resume on the login screen it played 51 buffers on top of each other). The mix itself is cheap (~0.35 ms per 2048 frames on the login screen).
 
-`web_backend.rs` now schedules 1024-frame chunks itself: refilled from each chunk's `ended` (an audio event, so it keeps running in a background tab), an adaptive lead (80 ms floor; ×1.5 per underrun up to 350 ms; back down one chunk per 8 quiet seconds), a resync on underrun (one gap, never overlap), and pooled `AudioBuffer`s. Forced main-thread stalls on the login screen:
+`web_backend.rs` now schedules 1024-frame chunks itself: refilled from each chunk's `ended` (an audio event, so it keeps running in a background tab), an adaptive lead (80 ms floor; ×1.5 per underrun up to 350 ms, unless the stall was longer than 350 ms and no lead could have covered it; after 5 quiet seconds, back down one chunk a second), a resync on underrun (one gap, never overlap), and pooled `AudioBuffer`s. Forced main-thread stalls on the login screen:
 
 | Stall | cpal (before) | Scheduler (after) |
 |---|---|---|
 | 60 ms every 300 ms | 11 of 215 buffers late | 1 underrun, then none (lead 120 ms) |
 | 120 ms every 500 ms | 44 of 216 late | 1 underrun, then none |
 | 250 ms every 1 s | — | 2 underruns, then none (lead 350 ms) |
+
+Measured in-world afterwards (local realm, Stormwind gate, three world entries per build): the first shipped decay (one chunk per 8 quiet seconds) left the lead at 230+ ms a minute after world entry, because entry's streaming stalls had pushed it to the ceiling. Stalls longer than any lead could cover no longer grow it, and the lead now steps down every second once 5 s pass without an underrun: back at 80 ms 0–30 s after entry, with a similar number of underruns (4–9 vs 4–6). In steady play neither build had a late buffer on the test machine.
 
 The cost is latency while the page is janky: a sound starts up to the current lead after it was triggered (80 ms when steady). `?audiolead=<ms>` sets the floor; `window.__wenilla_audio` shows `{ underruns, lead_ms }`.
 
