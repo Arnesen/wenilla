@@ -96,6 +96,8 @@ pub(crate) use approach::{
     can_auto_interact, cancel_move_action_on_ui_shutdown, Approach, ApproachVerb, AutoMove,
     Refused, Subject, RANGE_STOP_FRACTION, TALK_STOP,
 };
+/// `SetStandState` run inside a script call.
+pub(crate) use posture::StandSetter;
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
@@ -104,9 +106,9 @@ use state::{
     WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 pub(crate) use state::{
-    OwnControlLost, Player, PlayerCapsule, CAPSULE_HEIGHT, CAPSULE_RADIUS, CREATURE_STEP_UP_HEIGHT,
-    DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT,
-    SETTLE_TIMEOUT, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
+    OwnControlLost, Player, PlayerCapsule, StandPending, CAPSULE_HEIGHT, CAPSULE_RADIUS,
+    CREATURE_STEP_UP_HEIGHT, DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY,
+    HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h`, also the wade ceiling, for the creature swim marker and the
 /// footstep splash, which have no `Player`.
@@ -153,10 +155,10 @@ pub(crate) const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
 pub(crate) const UNIT_FLAG_TAXI_FLIGHT: u32 = 0x0010_0000;
 
 /// A stand-state request for [`posture`]'s one setter, the client's `SetStandState` (`0x5ed430`:
-/// send `CMSG_STANDSTATECHANGE` and apply locally through `0x6127b0`). The posture emotes (`/sit`,
-/// `/sleep`, `/kneel`, `/stand`, `/lay`) send it, as `DoEmote`'s `EmoteSpecProc == 1` branch calls
-/// the setter the `X` key does; the server sets no posture for a state text emote
-/// (`ChatHandler.cpp:729-733`). States are `UnitStandStateType`: 0 stand, 1 sit, 3 sleep, 8 kneel.
+/// send `CMSG_STANDSTATECHANGE` and apply locally through `0x6127b0`), made where no call runs it
+/// at once: the attack's stand, the idle sit, the approach's stand. A script call runs the setter
+/// inside the call ([`StandSetter`]). States are `UnitStandStateType`: 0 stand, 1 sit, 3 sleep, 8
+/// kneel.
 #[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
 pub(crate) struct StandStateRequest {
     pub(crate) state: u8,
@@ -270,6 +272,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<camera_zoom::ZoomLimit>();
         app.init_resource::<camera::FollowConfig>();
         app.init_resource::<OwnControlLost>();
+        app.init_resource::<StandPending>();
         app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight resolves `PLAYER_FARSIGHT` to a pose before `control` seats the camera: a
         // separate system, as `control` holds our `Transform` mutably and cannot read another's.

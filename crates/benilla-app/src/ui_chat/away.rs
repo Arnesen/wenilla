@@ -117,7 +117,7 @@ pub(crate) fn auto_clear_line(
 }
 
 /// Fill the first `%s` of a GlobalString, which the reference `snprintf`s; `%%` is a percent.
-fn fill_one(template: &str, arg: &str) -> String {
+pub(super) fn fill_one(template: &str, arg: &str) -> String {
     let mut out = String::with_capacity(template.len() + arg.len());
     let mut chars = template.chars().peekable();
     let mut used = false;
@@ -145,6 +145,12 @@ fn fill_one(template: &str, arg: &str) -> String {
 /// Push one of the four lines into the chat log as `CHAT_MSG_SYSTEM`.
 pub(crate) fn push_system(chat: &ChatLog, line: String) {
     chat.push_event(ChatEvent::text_only(ChatEventKind::System, line));
+}
+
+/// Show one of the four lines inside the verb that prints it, as `0x49a870` does with type 0xa:
+/// its `CHAT_MSG_SYSTEM` fires before the call returns.
+pub(crate) fn show_system(chat: &ChatLog, script: &mut benilla_ui::script::UiScript, line: String) {
+    chat.show_now(script, &ChatEvent::text_only(ChatEventKind::System, line));
 }
 
 /// The last `PLAYER_FLAGS` the reconcile saw; `None` with no local player in the world.

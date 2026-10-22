@@ -6,16 +6,17 @@ use benilla_protocol::messages::{ChatMessage, CHAT_MSG_WHISPER};
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use super::{Broadcast, ChatEvent, ChatEventKind, ChatLog};
+use super::{Broadcast, ChatLog};
 use crate::net::{ClientCommand, NetCommands, NetHandlerApp, PlayedTimeAnswer, ServerSaidMessage};
 use crate::ui_action::{UiErrorKeys, UiErrorTexts};
 use crate::ui_social::SocialState;
 
-/// Register the chat window's handlers and its session-end listener.
+/// Register the chat window's handlers and its session-end listener, the channel list's among
+/// them.
 pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
+    super::roster::register(app);
     app.net_handler(K::Chat, on_chat)
-        .net_handler(K::ChannelList, on_channel_list)
         .net_handler(K::ChatPlayerNotFound, on_whisper_refusal)
         .net_handler(K::ChatWrongFaction, on_whisper_refusal)
         .net_handler(K::ZoneUnderAttack, on_broadcast)
@@ -40,15 +41,6 @@ fn on_chat(
 ) {
     if let SessionEvent::Chat(m) = ev {
         chat(m, &chat_log, &social, &commands, &mut server_said);
-    }
-}
-
-fn on_channel_list(In(ev): In<SessionEvent>, chat_log: Res<ChatLog>) {
-    if let SessionEvent::ChannelList {
-        channel, members, ..
-    } = ev
-    {
-        channel_list(channel, &members, &chat_log);
     }
 }
 
@@ -84,16 +76,13 @@ fn on_toast(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorTexts>) {
     }
 }
 
-/// Print the `/played` breakdown, and fill the mailbox `feed::played_time_bridge` fires as
-/// `TIME_PLAYED_MSG`.
-fn on_played_time(
-    In(ev): In<SessionEvent>,
-    mut answer: ResMut<PlayedTimeAnswer>,
-    chat_log: Res<ChatLog>,
-) {
+/// Fill the mailbox `feed::played_time_bridge` fires as `TIME_PLAYED_MSG`, the handler's one
+/// event (`0x4018df`): the reference prints nothing to chat itself (its lines go to the console,
+/// `0x401878`-`0x4018c8`), and the stock `ChatFrame_DisplayTimePlayed` prints the answer
+/// (`ChatFrame.lua:1279`).
+fn on_played_time(In(ev): In<SessionEvent>, mut answer: ResMut<PlayedTimeAnswer>) {
     if let SessionEvent::PlayedTime { total, level } = ev {
         answer.0 = Some((total, level));
-        played_time(total, level, &chat_log);
     }
 }
 
@@ -121,8 +110,13 @@ fn on_random_roll(In(ev): In<SessionEvent>, chat_log: Res<ChatLog>) {
 }
 
 /// Clear the chat log's session state when the session ends.
-fn on_session_end(In(_): In<SessionEvent>, chat_log: Res<ChatLog>) {
+fn on_session_end(
+    In(_): In<SessionEvent>,
+    chat_log: Res<ChatLog>,
+    mut rosters: ResMut<super::roster::ChannelRosters>,
+) {
     chat_log.clear_session();
+    rosters.clear();
 }
 
 /// A spoken line (`SMSG_MESSAGECHAT`). System lines (`0x0A`), the server's answers to GM
@@ -186,17 +180,6 @@ fn chat(
     chat_log.push_wire(m);
 }
 
-/// The `/chatlist` roster (`SMSG_CHANNEL_LIST`). Members arrive as guids and are not resolved,
-/// so the line gives their count where the reference lists their names (`0x49c690`).
-fn channel_list(channel: String, members: &[(u64, u8)], chat_log: &ChatLog) {
-    let mut ev = ChatEvent::text_only(
-        ChatEventKind::ChannelList,
-        format!("{} member(s)", members.len()),
-    );
-    ev.channel = channel;
-    chat_log.push_event(ev);
-}
-
 /// A whisper target is offline: message 241, `ERR_CHAT_PLAYER_NOT_FOUND_S`, with the server's
 /// name. The key travels, since there is no VM here; its row routes it to chat.
 fn chat_player_not_found(name: &str, errors: &crate::ui_action::UiErrorKeys) {
@@ -232,23 +215,6 @@ fn area_trigger_message(text: String, errors: &mut UiErrorTexts) {
 fn broadcast(b: Broadcast, chat_log: &ChatLog) {
     info!("net: world broadcast — {b:?}");
     chat_log.push_broadcast(b);
-}
-
-/// The `/played` answer as two system lines, in English, shaped like `TIME_PLAYED_TOTAL` and
-/// `TIME_PLAYED_LEVEL` over `TIME_DAYHOURMINUTESECOND` (`GlobalStrings.lua:4243-4247`).
-fn played_time(total: u32, level: u32, chat_log: &ChatLog) {
-    for (label, secs) in [
-        ("Total time played", total),
-        ("Time played this level", level),
-    ] {
-        let (d, rem) = (secs / 86_400, secs % 86_400);
-        let (h, rem) = (rem / 3_600, rem % 3_600);
-        let (m, sec) = (rem / 60, rem % 60);
-        chat_log.push_event(ChatEvent::text_only(
-            ChatEventKind::System,
-            format!("{label}: {d} days, {h} hours, {m} minutes, {sec} seconds"),
-        ));
-    }
 }
 
 #[cfg(test)]
@@ -301,6 +267,30 @@ mod tests {
             )
             .unwrap();
         world.resource::<ChatLog>().pending_len()
+    }
+
+    /// `SMSG_PLAYED_TIME` (`0x401850`) fills the mailbox `TIME_PLAYED_MSG` fires from (`0x4018df`)
+    /// and prints nothing to chat itself: its own lines go to the console (`0x401878`-`0x4018c8`),
+    /// and the stock `ChatFrame_DisplayTimePlayed` is the answer's one printer.
+    #[test]
+    fn the_played_time_answer_prints_no_chat_line_of_its_own() {
+        let mut world = World::new();
+        world.insert_resource(ChatLog::default());
+        world.init_resource::<PlayedTimeAnswer>();
+        world
+            .run_system_once_with(
+                on_played_time,
+                SessionEvent::PlayedTime {
+                    total: 360_000,
+                    level: 7_200,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            world.resource::<PlayedTimeAnswer>().0,
+            Some((360_000, 7_200))
+        );
+        assert_eq!(world.resource::<ChatLog>().pending_len(), 0);
     }
 
     /// `SMSG_TRANSFER_ABORTED` reaches chat: its reason is parked for the line the resolve pass

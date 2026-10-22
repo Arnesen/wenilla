@@ -340,6 +340,7 @@ const FILLED_THROUGH_A_READ: &[&str] =
 /// in system order, or a system that pushes onto a lane off it at its own place, passes every
 /// check here unseen.
 const READ_ONLY_TO_HANDLERS: &[&str] = &[
+    "::ui_chat::edit::ChannelState",
     "::AreaTableRes",
     "::DamageTextGates",
     "::AttackStopInFlight",
@@ -366,6 +367,7 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::SelfGuid",
     "::OwnControlLost",
     "::Player",
+    "::player::state::StandPending",
     "::BarUnitOutdoors",
     "::PlayerOutdoors",
     "::EmoteSounds",

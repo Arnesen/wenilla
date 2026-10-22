@@ -1,8 +1,8 @@
 //! The chat verbs the host applies inside their calls ([`ChatSender`]): `SendChatMessage`
 //! (`0x49f1e0`) past its binding's checks, from the group gates to the packet, the sends of
-//! `RandomRoll` (`0x48c832`), `UninviteByName` (`0x48a669`) and `SendAddonMessage` (`0x49faff`),
-//! and the channel verbs' slots and packets. No slash grammar runs here: an addon sending
-//! `"/dance"` says six characters.
+//! `RandomRoll` (`0x48c832`), `RequestTimePlayed` (`0x48a936`), `UninviteByName` (`0x48a669`) and
+//! `SendAddonMessage` (`0x49faff`), and the channel verbs' slots and packets. No slash grammar runs
+//! here: an addon sending `"/dance"` says six characters.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -30,6 +30,11 @@ pub(crate) struct ChatSender<'w, 's> {
     /// The channel slots the channel verbs read and the join's allocator writes; a world with no
     /// chat has none.
     channels: Option<ResMut<'w, super::super::edit::ChannelState>>,
+    /// The tutorial banks `AcknowledgeTutorial(0x16)` writes inside the call (`0x49f5fc`).
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
+    /// The profanity masker the drunk transform asks (`0x508891`), and its `profanityFilter` gate.
+    filter: Option<Res<'w, crate::text_filter::TextFilter>>,
+    switches: Option<Res<'w, crate::text_filter::TextFilterSwitches>>,
 }
 
 impl ChatSender<'_, '_> {
@@ -53,6 +58,11 @@ impl ChatSender<'_, '_> {
     /// `MSG_RANDOM_ROLL` (`0x48c832`), the binding having checked the range.
     pub(crate) fn random_roll(&self, min: u32, max: u32) {
         let _ = self.commands.0.send(ClientCommand::RandomRoll { min, max });
+    }
+
+    /// `RequestTimePlayed`'s empty `CMSG_PLAYED_TIME` (`0x48a936`).
+    pub(crate) fn request_time_played(&self) {
+        let _ = self.commands.0.send(ClientCommand::PlayedTime);
     }
 
     /// `UninviteByName`'s `CMSG_GROUP_UNINVITE` (`0x48a669`).
@@ -131,8 +141,9 @@ impl ChatSender<'_, '_> {
         if wire == ChatKind::Dnd {
             let strings = |key: &str| super::super::combat::global_string(script, key);
             let out = away::dnd_line(&send.text, self.player_flags() & 0x4 != 0, &strings);
+            // The echo, type 0xa through `0x49a870` (`0x49f588`), fires inside the call.
             if let Some(line) = out.line {
-                away::push_system(&self.chat_log, line);
+                away::show_system(&self.chat_log, script, line);
             }
             send.text = out.body;
         }
@@ -144,12 +155,23 @@ impl ChatSender<'_, '_> {
             return;
         }
         // `AcknowledgeTutorial(0x16)` (`0x49f5fc`), for every type that gets past the dead check,
-        // the living's say, yell and emote included.
-        script.queue_tutorial_acknowledge(crate::tutorial::id::CHATTING);
+        // the living's say, yell and emote included: its `CMSG_TUTORIAL_FLAG` goes out inside the
+        // call, ahead of the line's packet (`0x49f72a`).
+        if let Some(tutorials) = self.tutorials.as_deref() {
+            tutorials.acknowledge_now(crate::tutorial::id::CHATTING, &self.commands);
+            script.set_tutorial_bank(tutorials.acknowledged_bank());
+        }
         let mut text =
             benilla_ui::script::expand_target_tokens(&send.text, || self.target_name(script));
-        // A drunk player's text goes through `0x508680` here (`0x49f614`-`0x49f656`), which
-        // benilla does not build.
+        // A drunk player's text goes through `0x508680` (`0x49f614`-`0x49f656`), for every type
+        // past the AFK arm, and the escape scan and the packet take its output (`0x49f65b`).
+        let drunk = self
+            .player()
+            .and_then(|s| s.0.player_drunk_byte())
+            .unwrap_or(0);
+        if drunk != 0 {
+            text = self.slur(script, &text, drunk);
+        }
         if benilla_ui::script::validate_escapes(&mut text).is_err() {
             script.raise_in_call(benilla_ui::script::INVALID_ESCAPE);
             return;
@@ -166,13 +188,42 @@ impl ChatSender<'_, '_> {
         }
     }
 
+    /// `0x508680` over `text` for drunk byte `drunk` (`[[player+0xe68]+0x1d]`, `0x49f61a`): its
+    /// strength is the byte cut to 100 and scaled by 0.01 (`0x49f62c`-`0x49f64e`), its buffer 256
+    /// bytes (`0x49f651`). Deviation: a line of 256 bytes or more, which reaches here only through
+    /// `chat_send`'s deviation for `0x49f604`, is slurred whole instead of cut to that buffer, so
+    /// it reaches the server whole for the refusal that deviation leaves to it.
+    fn slur(&self, script: &UiScript, text: &str, drunk: u8) -> String {
+        let cap = if text.len() < 0x100 {
+            0x100
+        } else {
+            usize::MAX
+        };
+        let enabled = self.switches.as_deref().is_none_or(|s| s.profanity);
+        let slurred_speech =
+            super::super::combat::global_string(script, "SLURRED_SPEECH").unwrap_or_default();
+        super::drunk::slur(
+            text,
+            crate::player::drunk::fraction(drunk),
+            cap,
+            rand::random::<u32>,
+            |probe| {
+                self.filter
+                    .as_deref()
+                    .is_some_and(|f| f.mask(enabled, probe))
+            },
+            &slurred_speech,
+        )
+    }
+
     /// The AFK arm: `SetAFK` (`0x5eb740`) or the forced `ClearAFK(1)` (`0x5eb830`), each echoing
     /// and sending its own packet, language 0 (`0x5eb7ed`), not the argument's.
-    fn afk(&mut self, script: &UiScript, msg: &str) {
+    fn afk(&mut self, script: &mut UiScript, msg: &str) {
         let strings = |key: &str| super::super::combat::global_string(script, key);
         let out = away::afk_line(msg, self.afk_mirror(), &strings);
+        // `SetAFK`'s echo (`0x5eb7a9`) and the forced clear's (`0x5eb878`) fire inside the call.
         if let Some(line) = out.line {
-            away::push_system(&self.chat_log, line);
+            away::show_system(&self.chat_log, script, line);
         }
         if let (Some(v), Some(mirror)) = (out.mirror, self.mirror.as_mut()) {
             mirror.0 = v;
@@ -180,15 +231,16 @@ impl ChatSender<'_, '_> {
         self.send_afk(out.body);
     }
 
-    /// `ClearAFK(0)` (`0x49f3d6`): with the mirror set and `autoClearAFK` on, the line, the mirror
-    /// zeroed and the empty AFK packet, ahead of the message's own.
-    fn clear_afk(&mut self, script: &UiScript) {
+    /// `ClearAFK(0)` (`0x49f3d6`): with the mirror set and `autoClearAFK` on, the line (fired
+    /// inside the call, `0x5eb878`), the mirror zeroed and the empty AFK packet, ahead of the
+    /// message's own.
+    fn clear_afk(&mut self, script: &mut UiScript) {
         let strings = |key: &str| super::super::combat::global_string(script, key);
         let Some(line) = away::auto_clear_line(self.afk_mirror(), auto_clear_afk(script), &strings)
         else {
             return;
         };
-        away::push_system(&self.chat_log, line);
+        away::show_system(&self.chat_log, script, line);
         if let Some(mirror) = self.mirror.as_mut() {
             mirror.0 = 0;
         }
@@ -321,6 +373,7 @@ pub(crate) fn chat_world(script: UiScript) -> (World, crossbeam_channel::Receive
     world.init_resource::<crate::target::Selection>();
     world.init_resource::<crate::names::NameCache>();
     world.init_resource::<super::super::edit::ChannelState>();
+    world.init_resource::<crate::tutorial::Tutorials>();
     (world, rx)
 }
 
@@ -339,6 +392,7 @@ pub(crate) fn run_chat(world: &mut World, lua: &str) -> benilla_ui::mlua::Result
             }
             benilla_ui::script::ScriptCall::Channel(cmd) => sender.channel(script, cmd),
             benilla_ui::script::ScriptCall::Uninvite(name) => sender.uninvite(name),
+            benilla_ui::script::ScriptCall::RequestTimePlayed => sender.request_time_played(),
             benilla_ui::script::ScriptCall::AddonMessage(send) => sender.addon_message(send),
             other => panic!("not a chat call: {other:?}"),
         });

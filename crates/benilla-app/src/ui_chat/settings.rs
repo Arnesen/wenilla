@@ -483,9 +483,8 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
         // `Some` is the reference's "chat system ready" flag (`0x499a18`): the zone walk and the
         // guild-recruitment cascade wait for it.
         channels.zone_mask = Some(mask);
-        // The custom re-join list, seated here, then moved by a confirmed join, a leave and the
-        // free of a slot.
-        channels.custom = parsed.joined.clone();
+        // The header's list is the live slots' from here on, none until a re-join confirms.
+        channels.ended_custom = None;
         // The header's `CHANNELS` names, joined by the walk's third pass after the zone channels
         // (`0x49a5b4`), which the loader runs (`0x499a22`).
         channels.deferred_joins = parsed.joined.clone();
@@ -554,7 +553,7 @@ fn write(script: &UiScript, channels: &super::edit::ChannelState, path: &std::pa
     let body = render(
         &script.chat_window_looks(),
         &script.chat_colors(),
-        &channels.custom,
+        &channels.cache_channels(),
         zone_mask,
         script.guild_recruitment_mode() != 0,
     );
@@ -860,8 +859,12 @@ mod tests {
         );
     }
 
+    /// The header's `CHANNELS` is the slots' at write time (`0x499b90`-`0x499bb1`): a slot with a
+    /// number, in state 0 and with row id 0, so a zone channel, a join the server has not
+    /// confirmed and a freed slot are not written; and after the session's end, the slots as it
+    /// found them, until a slot is claimed again.
     #[test]
-    fn the_custom_list_moves_on_a_confirmed_join_and_a_leave() {
+    fn the_custom_list_is_the_confirmed_custom_slots() {
         let mut state = super::super::edit::ChannelState {
             channels: benilla_formats::ChatChannelsCatalog::from_rows(vec![
                 benilla_formats::ChatChannelRow {
@@ -873,18 +876,34 @@ mod tests {
             ]),
             ..Default::default()
         };
-        // The teardown writes the confirmed slots with id 0 (`0x499b90`-`0x499baa`).
         state.claim_slot("General - Elwynn Forest", 1);
         state.confirm_slot("General - Elwynn Forest");
-        assert!(state.custom.is_empty(), "a zone channel travels as its bit");
+        assert!(
+            state.cache_channels().is_empty(),
+            "a zone channel travels as its bit"
+        );
         state.claim_slot("MyChan", 0);
-        assert!(state.custom.is_empty(), "not yet confirmed");
+        assert!(state.cache_channels().is_empty(), "not yet confirmed");
         state.confirm_slot("MyChan");
         state.claim_slot("mychan", 0);
         state.confirm_slot("mychan");
-        assert_eq!(state.custom, vec!["MyChan".to_string()], "once, by name");
-        state.note_custom_channel_left("MYCHAN");
-        assert!(state.custom.is_empty(), "an explicit leave drops it");
+        state.claim_slot("Other", 0);
+        assert_eq!(state.cache_channels(), ["MyChan"], "once, by name");
+        state.end_session_slots();
+        state.end_session_slots();
+        assert_eq!(
+            state.cache_channels(),
+            ["MyChan"],
+            "the slots as the session's end found them"
+        );
+        state.claim_slot("MyChan", 0);
+        assert!(state.cache_channels().is_empty(), "live again, pending");
+        state.confirm_slot("MyChan");
+        state.free_slot("MyChan");
+        assert!(
+            state.cache_channels().is_empty(),
+            "a freed slot has no number"
+        );
     }
 
     /// The teardown write ignores the dirty flag, as the reference's does, so a `/leave` persists.
@@ -1138,15 +1157,40 @@ mod tests {
     }
 
     /// The disconnect clears the live roster a frame before `end_ui_session` flushes, so the
-    /// header's re-join list must come from the durable custom list; the same functions run here.
+    /// header's re-join list must come from the slots as the session's end found them; the same
+    /// functions run here.
     #[test]
     fn a_custom_channel_survives_a_logout() {
+        let on_disk = logout_after_rejoin("Channelprobe", true);
+        assert!(
+            on_disk.contains("\nCHANNELS\nMyChan\nEND\n\nZONECHANNELS"),
+            "the custom channel is still in the header's re-join list; file was:\n{on_disk}"
+        );
+    }
+
+    /// The writer lists confirmed slots only (`0x499b9f`): a custom channel read from the file
+    /// whose re-join the server has not confirmed when the session ends is not written back.
+    #[test]
+    fn a_custom_channel_whose_rejoin_is_pending_is_not_saved() {
+        let on_disk = logout_after_rejoin("Pendingprobe", false);
+        assert!(
+            !on_disk.contains("\nCHANNELS\nMyChan\n"),
+            "the pending re-join is dropped from the header; file was:\n{on_disk}"
+        );
+    }
+
+    /// Log in with `MyChan` in the file's header, re-join it, `confirm` it or not, log out, and
+    /// read the file the flush wrote.
+    fn logout_after_rejoin(character: &str, confirm: bool) -> String {
         use bevy::ecs::system::RunSystemOnce;
 
         let _l = crate::local_state::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = std::env::temp_dir().join(format!("benilla-chat-custom-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "benilla-chat-custom-{character}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("benilla-config")).expect("hermetic home");
         let _capture = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
@@ -1157,7 +1201,7 @@ mod tests {
                 .expect("utf-8 temp path"),
         );
 
-        let roster = probe_roster("Channelprobe");
+        let roster = probe_roster(character);
         let id = crate::ui_macro::identity(&roster).expect("a picked character");
         let path = crate::local_state::chat_character_path(&id.0, &id.1).expect("a cache path");
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("the character dir");
@@ -1189,8 +1233,8 @@ mod tests {
             ["MyChan"],
             "the header's names wait for the walk's third pass (`0x49a5b4`)"
         );
-        // The walk joins it, then the server confirms the re-join (`YOU_JOINED`) through the real
-        // feed arm.
+        // The walk joins it, then, with `confirm`, the server confirms the re-join (`YOU_JOINED`)
+        // through the real feed arm.
         world.resource_scope(
             |world, mut channels: Mut<super::super::edit::ChannelState>| {
                 let mut script = world.non_send_resource_mut::<UiScript>();
@@ -1211,7 +1255,9 @@ mod tests {
                 );
                 e.channel = "MyChan".into();
                 e.notice = "2".into(); // YOU_JOINED
-                super::super::feed::deliver(&mut script, &mut windows, &mut channels, &mut e);
+                if confirm {
+                    super::super::feed::deliver(&mut script, &mut windows, &mut channels, &mut e);
+                }
             },
         );
         assert_eq!(
@@ -1219,7 +1265,7 @@ mod tests {
                 .resource::<super::super::edit::ChannelState>()
                 .number_of("MyChan"),
             Some(1),
-            "precondition: the channel is joined and numbered"
+            "precondition: the channel's slot is claimed and numbered"
         );
 
         // `/logout`: the disconnect lands in `Update` first…
@@ -1234,12 +1280,8 @@ mod tests {
         crate::ui_script::end_ui_session(&mut world);
 
         let on_disk = std::fs::read_to_string(&path).expect("the flush wrote the file");
-        assert!(
-            on_disk.contains("\nCHANNELS\nMyChan\nEND\n\nZONECHANNELS"),
-            "the custom channel is still in the header's re-join list; file was:\n{on_disk}"
-        );
-
         drop(world);
         let _ = std::fs::remove_dir_all(&tmp);
+        on_disk
     }
 }

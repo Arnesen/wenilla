@@ -1,14 +1,17 @@
 //! The submitted-line side of the chat: [`drain_chat_input`] executes what [`parse`] resolved and
 //! the `ConsoleExec` lines the VM queues; [`send`] applies `SendChatMessage`, `RandomRoll`,
-//! `UninviteByName`, `SendAddonMessage` and the channel verbs inside their calls, and [`emote`]
-//! `DoEmote` (`0x5ef560`): the eligibility gate, the asleep gate, the stow, the posture, then
-//! `CMSG_TEXT_EMOTE`. Own sends are never echoed locally; the server echoes them.
+//! `RequestTimePlayed`, `UninviteByName`, `SendAddonMessage` and the channel verbs inside their
+//! calls, and [`emote`] `DoEmote` (`0x5ef560`): the eligibility gate, the asleep gate, the stow,
+//! the posture, then `CMSG_TEXT_EMOTE`. Own sends are never echoed locally; the server echoes
+//! them.
 
 use crate::query_cache::Ask;
 use bevy::prelude::*;
 
 /// The channel verbs' slot writes and packets.
 mod channel;
+/// The drunk transform a drunk player's line goes through.
+mod drunk;
 /// `DoEmote`, applied inside its call.
 mod emote;
 mod parse;
@@ -766,7 +769,7 @@ pub(super) fn drain_chat_input(
             }),
             LineWork::Emote { text_id, arg } => {
                 if let Some(host) = vm.parts().1.p1().as_mut() {
-                    host.emote(text_id, arg.as_deref());
+                    host.emote(text_id, arg);
                 }
             }
         }
