@@ -10,17 +10,13 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{RecruitmentPlan, RecruitmentRun, UiScript};
+use benilla_ui::script::RecruitmentPlan;
 
 use crate::area::AreaTableRes;
-use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{ObjectStore, SelfPlayer};
 
-use super::channels::{city_word, ZoneChannelWalk};
+use super::channels::{city_word, ZoneChannelWalk, AREA_FLAG_CAPITAL};
 use super::edit::ChannelState;
-
-/// vmangos `AREA_FLAG_CAPITAL`, the cascade's capital test (`0x49eb2e`); the walk tests `0x8`,
-/// which marks the same six rows in 1.12 data.
-const AREA_FLAG_CAPITAL: u32 = 0x100;
 
 /// The cascade's own state: whether a run is owed, and the guild id its watcher last saw.
 #[derive(Resource, Default)]
@@ -111,7 +107,10 @@ fn plan(
         .rows()
         .iter()
         .find(|r| r.is_guild_recruitment())
-        .and_then(|row| Some((row, row.joinable_name("", city_word(&areas.0)?))));
+        .and_then(|row| {
+            let city = city_word(&areas.0).filter(|w| !w.is_empty())?;
+            Some((row, row.joinable_name(city)))
+        });
     let Some((row, name)) = target else {
         return RecruitmentPlan::Unnamed;
     };
@@ -127,78 +126,41 @@ fn plan(
 
 /// The cascade, chained after the walk: the reference runs it at the walk's tail, on a fresh zone.
 /// The VM runs it on the plan pushed here, inside `SetGuildRecruitmentMode(1)` or for this
-/// system's retry and watcher; its joins and leaves come back for the slot table and the wire.
+/// system's retry and watcher; the call host applies its join or leave inside the run.
 pub(super) fn guild_recruitment_cascade(
-    script: Option<NonSendMut<UiScript>>,
+    mut vm: crate::script_calls::VmWith<Res<'static, ChannelState>>,
     mut state: ResMut<GuildRecruitmentCascade>,
-    mut channels: ResMut<ChannelState>,
     walk: Res<ZoneChannelWalk>,
     areas: Option<Res<AreaTableRes>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    commands: Res<NetCommands>,
 ) {
-    let Some(mut script) = script else { return };
-    apply_runs(&mut script, &mut channels, &commands);
-    // A `SetGuildRecruitmentMode(1)` whose cascade could not act leaves the run owed.
-    if script.take_guild_recruitment_cascade() {
-        state.request();
-    }
     // Only while the avatar is streamed: a despawned body has not "left the guild". With no
     // player object the verb's cascade returns owing nothing (`0x49eac3`).
-    let Some(guild_id) = self_q.iter().next().map(|s| s.0.player_guild_id()) else {
-        script.set_guild_recruitment_plan(RecruitmentPlan::NoPlayer);
-        return;
+    let guild_id = self_q.iter().next().map(|s| s.0.player_guild_id());
+    let plan = match guild_id {
+        Some(guild_id) => plan(guild_id, &vm.own(), &walk, areas.as_deref()),
+        None => RecruitmentPlan::NoPlayer,
     };
-    state.observe_guild_id(guild_id);
-    script.set_guild_recruitment_plan(plan(guild_id, &channels, &walk, areas.as_deref()));
-    if !state.pending {
-        return;
-    }
-    // STANDARD: nothing, not even the retry (`0x49ea96`).
-    if script.guild_recruitment_mode() == 1 && !script.run_guild_recruitment_cascade() {
-        return;
-    }
-    state.pending = false;
-    apply_runs(&mut script, &mut channels, &commands);
-}
-
-/// The app's halves of the cascade's runs: a join's slot (`0x49b980`, by name) and its send, which
-/// goes out always; a leave's packet and mask bit.
-fn apply_runs(script: &mut UiScript, channels: &mut ChannelState, commands: &NetCommands) {
-    for run in script.take_guild_recruitment_runs() {
-        match run {
-            RecruitmentRun::Leave(name) => {
-                info!("chat: guild recruitment cascade — guilded, leaving {name:?}");
-                cascade_leave(channels, commands, name);
-            }
-            RecruitmentRun::Join(name) => {
-                info!("chat: guild recruitment cascade — unguilded in a capital, joining {name:?}");
-                match channels.claim_slot(&name) {
-                    Some(n) => {
-                        debug!("chat: {name:?} registered as slot {n}");
-                        script.set_joined_channels(channels.names());
-                    }
-                    None => warn!(
-                        "chat: no free slot for {name:?} — all {} are taken",
-                        super::edit::MAX_CHANNELS
-                    ),
-                }
-                let _ = commands.0.send(ClientCommand::JoinChannel {
-                    name,
-                    password: String::new(),
-                });
-            }
+    vm.run(|script| {
+        let Some(script) = script else { return };
+        // A `SetGuildRecruitmentMode(1)` whose cascade could not act leaves the run owed.
+        if script.take_guild_recruitment_cascade() {
+            state.request();
         }
-    }
-}
-
-/// Leave by the full name (`0x49ee70`): the packet and the mask bit (`0x49f10a`/`0x49f11a`). No
-/// window loses its entry: the strip matches that name verbatim (`0x49f017`), which none holds.
-fn cascade_leave(channels: &mut ChannelState, commands: &NetCommands, name: String) {
-    let _ = commands
-        .0
-        .send(ClientCommand::LeaveChannel { name: name.clone() });
-    channels.note_zone_channel_left(&name);
+        script.set_guild_recruitment_plan(plan);
+        let Some(guild_id) = guild_id else {
+            return;
+        };
+        state.observe_guild_id(guild_id);
+        if !state.pending {
+            return;
+        }
+        // STANDARD: nothing, not even the retry (`0x49ea96`).
+        if script.guild_recruitment_mode() == 1 && !script.run_guild_recruitment_cascade() {
+            return;
+        }
+        state.pending = false;
+    })
 }
 
 #[cfg(test)]
@@ -224,8 +186,11 @@ mod tests {
         assert_eq!(cascade(true, 0, false), Some(Cascade::Deferred));
     }
 
+    /// The cascade's leave (`0x49eb17` → `0x49ee70`) clears the mask bit (`0x49f10a`), sends, and
+    /// strips no window: the strip matches the full name verbatim (`0x49f017`), which none holds.
     #[test]
     fn the_cascades_leave_keeps_the_windows_entry() {
+        use benilla_ui::script::UiScript;
         const GUILD_RECRUITMENT: u32 = 25;
         let mut script = UiScript::new().expect("a VM");
         assert!(script.register_chat_window_channel(0, "GuildRecruitment", GUILD_RECRUITMENT));
@@ -241,17 +206,22 @@ mod tests {
             zone_mask: Some(1 << (GUILD_RECRUITMENT - 1)),
             ..Default::default()
         };
-        channels.claim_slot("GuildRecruitment - City");
+        channels.claim_slot("GuildRecruitment - City", GUILD_RECRUITMENT);
         let (tx, rx) = crossbeam_channel::unbounded();
 
-        cascade_leave(
+        super::super::input::apply_channel_command(
+            benilla_ui::script::ChannelCommand::Leave {
+                name: "GuildRecruitment - City".into(),
+            },
             &mut channels,
-            &NetCommands(tx),
-            "GuildRecruitment - City".into(),
+            &mut script,
+            &crate::net::NetCommands(tx),
+            &super::super::ChatLog::default(),
+            &crate::ui_action::UiErrorKeys::default(),
         );
 
         assert!(
-            matches!(rx.try_recv(), Ok(ClientCommand::LeaveChannel { name }) if name == "GuildRecruitment - City"),
+            matches!(rx.try_recv(), Ok(crate::net::ClientCommand::LeaveChannel { name }) if name == "GuildRecruitment - City"),
             "the CMSG_LEAVE_CHANNEL goes out"
         );
         assert_eq!(channels.zone_mask, Some(0), "the mask bit clears");
@@ -259,6 +229,11 @@ mod tests {
             script.chat_window_looks()[0].channels,
             vec![("GuildRecruitment".to_string(), GUILD_RECRUITMENT)],
             "window 1 still carries the entry the join registered"
+        );
+        assert_eq!(
+            script.guild_recruitment_mode(),
+            1,
+            "the cascade passes no reset flag"
         );
     }
 

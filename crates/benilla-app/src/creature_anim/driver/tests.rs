@@ -29,6 +29,7 @@ fn clip(anim_id: u16, node: u32, looping: bool) -> AnimClip {
         anim_id,
         seq_index: 0,
         node: AnimationNodeIndex::new(node as usize),
+        blend_node: None,
         looping,
         duration: 1.0,
         move_speed: 0.0,
@@ -178,9 +179,9 @@ fn stationary_cast_hold_stows_an_engaged_casters_weapon() {
     let sheath = |app: &App| {
         app.world()
             .entity(unit)
-            .get::<AnimDriver>()
+            .get::<crate::creature_anim::CommittedSheath>()
             .unwrap()
-            .sheath_state()
+            .state()
     };
 
     app.update();
@@ -229,9 +230,9 @@ fn moving_cast_hold_keeps_its_stow_between_plays() {
     let sheath = |app: &App| {
         app.world()
             .entity(unit)
-            .get::<AnimDriver>()
+            .get::<crate::creature_anim::CommittedSheath>()
             .unwrap()
-            .sheath_state()
+            .state()
     };
 
     app.update();
@@ -284,6 +285,7 @@ fn spawn_fidgeter(app: &mut App) -> (Entity, Vec<AnimationNodeIndex>) {
         .add(graph);
     let seq = |id: u16, node, duration: f32, frequency: u16| AnimClip {
         node,
+        blend_node: None,
         duration,
         blend_time: 0.0,
         frequency,
@@ -424,9 +426,9 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
     let sheath = |app: &App| {
         app.world()
             .entity(unit)
-            .get::<AnimDriver>()
+            .get::<crate::creature_anim::CommittedSheath>()
             .unwrap()
-            .sheath_state()
+            .state()
     };
 
     app.update();
@@ -2032,9 +2034,9 @@ fn a_landed_swing_snaps_its_attacker_out_of_the_ranged_stance() {
     let sheath = |app: &App| {
         app.world()
             .entity(unit)
-            .get::<AnimDriver>()
+            .get::<crate::creature_anim::CommittedSheath>()
             .unwrap()
-            .sheath_state()
+            .state()
     };
     let swing = |app: &mut App| {
         app.world_mut().write_message(SwingMessage {
@@ -2119,7 +2121,8 @@ fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
         clips: vec![stand, family(90, 1, 2), family(89, 3, 4)],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
-        animation_lookup: Vec::new(),
+        // The toggle runs only on a model that authors both sheathe animations (`0x5eb580`).
+        animation_lookup: lookup(&[0, 90, 89]),
         global_bones: Vec::new(),
         first_seq: None,
         pose: Default::default(),
@@ -2202,6 +2205,203 @@ fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
         settled,
         "the ceremony must end with the pin dropped, leaving the committed state (saw {seen:?})"
     );
+}
+
+/// An AnimationLookup (`0x711960`'s table) that authors `ids`.
+fn lookup(ids: &[u16]) -> Vec<u16> {
+    let mut table = vec![0xffff; 256];
+    for (slot, &id) in ids.iter().enumerate() {
+        table[id as usize] = slot as u16;
+    }
+    table
+}
+
+/// The toggle's model tests at the setter: a model without Sheath (89, `0x5eb58b`) takes no
+/// toggle, nor a body firing a bow (AttackBow 46 armed, `0x5eb542`); a snap is no toggle and
+/// meets neither.
+#[test]
+fn the_toggle_draws_nothing_on_a_model_without_sheathe_animations_or_mid_shot() {
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    let mut app = app();
+    let spawn = |app: &mut App, authored: &[u16]| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let mut c = AnimationClip::default();
+                c.set_duration(10.0);
+                app.world_mut()
+                    .resource_mut::<Assets<AnimationClip>>()
+                    .add(c)
+            })
+            .collect();
+        let (graph, nodes) = AnimationGraph::from_clips(handles);
+        let graph = app
+            .world_mut()
+            .resource_mut::<Assets<AnimationGraph>>()
+            .add(graph);
+        let mut clips = vec![clip(0, 0, true), clip(46, 0, false)];
+        for (c, n) in clips.iter_mut().zip(nodes) {
+            c.node = n;
+            c.duration = 10.0;
+        }
+        app.world_mut()
+            .spawn((
+                ModelAnimations {
+                    graph: graph.clone(),
+                    clips,
+                    hand_close: [None, None],
+                    playable_animation_lookup: Vec::new(),
+                    animation_lookup: lookup(authored),
+                    global_bones: Vec::new(),
+                    first_seq: None,
+                    pose: Default::default(),
+                },
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimationGraphHandle(graph),
+                AnimDriver::default(),
+                Wielded {
+                    main: Some((2, 0x7)), // a one-handed sword
+                    main_sheath: 3,
+                    ..Default::default()
+                },
+            ))
+            .id()
+    };
+    let form = spawn(&mut app, &[0, 46, 90]);
+    let archer = spawn(&mut app, &[0, 46, 89, 90]);
+    let idle = spawn(&mut app, &[0, 46, 89, 90]);
+    app.update();
+    let sheath = |app: &App, unit| sheath_of(app, unit);
+    let press = |app: &mut App, entity, ceremony| {
+        app.world_mut().write_message(SheathRequest {
+            entity,
+            state: 1,
+            ceremony,
+        });
+        app.update();
+    };
+
+    press(&mut app, form, true);
+    assert_eq!(sheath(&app, form), Some(0), "a model without 89 refuses Z");
+    press(&mut app, form, false);
+    assert_eq!(sheath(&app, form), Some(1), "a snap draws all the same");
+
+    app.world_mut().write_message(EmoteAnim {
+        entity: archer,
+        anim_id: 46,
+        seq: 1,
+        via_player: true,
+    });
+    advance(&mut app, 50);
+    press(&mut app, archer, true);
+    assert_eq!(sheath(&app, archer), Some(0), "Z waits out the shot");
+    press(&mut app, idle, true);
+    assert_eq!(sheath(&app, idle), Some(1), "the same model standing draws");
+}
+
+/// The setter's class test (`0x611cff`-`0x611d44`): a Paladin player takes no ranged state, not
+/// from a request nor from its `UNIT_FIELD_BYTES_2` byte (`0x604c70` calls the setter), while a
+/// Warrior adopts it. Only the constructor's seed (`0x5fafa0`) takes the byte untested.
+#[test]
+fn a_relic_class_player_refuses_the_ranged_sheath_state() {
+    let mut app = app();
+    app.insert_resource(crate::chr_classes::ChrClassTable(
+        benilla_formats::ChrClasses::from_rows([
+            (1, "Warrior", "WARRIOR"),
+            (2, "Paladin", "PALADIN"),
+        ])
+        .with_relic_slot(2),
+    ));
+    // `OBJECT_FIELD_TYPE` (2) object | unit | player, `UNIT_FIELD_BYTES_0` (36) byte 1 the class,
+    // `UNIT_FIELD_BYTES_2` (164) byte 0 the sheath state.
+    let player = |class: u32, sheath: u32| {
+        crate::net::ObjectStore(ObjectFields::from_pairs(&[
+            (2, 0x19),
+            (36, class << 8),
+            (164, sheath),
+        ]))
+    };
+    let spawn = |app: &mut App, store| {
+        app.world_mut()
+            .spawn((
+                caster_model(),
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                store,
+            ))
+            .id()
+    };
+    let paladin = spawn(&mut app, player(2, 1));
+    let warrior = spawn(&mut app, player(1, 1));
+    let seeded = spawn(&mut app, player(2, 2));
+    app.update();
+    let sheath = |app: &App, unit| sheath_of(app, unit);
+    assert_eq!(sheath(&app, paladin), Some(1), "seeded drawn");
+    assert_eq!(
+        sheath(&app, seeded),
+        Some(2),
+        "the constructor's seed is untested"
+    );
+
+    for unit in [paladin, warrior] {
+        let class = if unit == paladin { 2 } else { 1 };
+        app.world_mut().entity_mut(unit).insert(player(class, 2));
+    }
+    app.update();
+    assert_eq!(sheath(&app, paladin), Some(1), "the adopted 2 is refused");
+    assert_eq!(sheath(&app, warrior), Some(2), "a Warrior adopts it");
+
+    app.world_mut().write_message(SheathRequest {
+        entity: paladin,
+        state: 2,
+        ceremony: false,
+    });
+    app.update();
+    assert_eq!(sheath(&app, paladin), Some(1), "a request for 2 is refused");
+}
+
+/// Only the constructor seeds the state from the byte (`0x5fafa0`): a driver rebuilt for a new
+/// model, as a display swap or a rig heal does, finds the unit's state seeded, so a Paladin whose
+/// adopted 2 was refused shows no ranged state after a morph.
+#[test]
+fn a_rebuilt_driver_keeps_the_units_committed_sheath_state() {
+    let mut app = app();
+    app.insert_resource(crate::chr_classes::ChrClassTable(
+        benilla_formats::ChrClasses::from_rows([(2, "Paladin", "PALADIN")]).with_relic_slot(2),
+    ));
+    // `OBJECT_FIELD_TYPE` (2), `UNIT_FIELD_BYTES_0` (36) byte 1 the class, `UNIT_FIELD_BYTES_2`
+    // (164) byte 0 the sheath state.
+    let paladin = |sheath: u32| {
+        crate::net::ObjectStore(ObjectFields::from_pairs(&[
+            (2, 0x19),
+            (36, 2 << 8),
+            (164, sheath),
+        ]))
+    };
+    let unit = app
+        .world_mut()
+        .spawn((
+            caster_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            paladin(1),
+        ))
+        .id();
+    app.update();
+    app.world_mut().entity_mut(unit).insert(paladin(2));
+    app.update();
+    assert_eq!(sheath_of(&app, unit), Some(1), "the adopted 2 is refused");
+    // The rebuild's teardown and the attach's fresh driver.
+    app.world_mut().entity_mut(unit).remove::<AnimDriver>();
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(AnimDriver::default());
+    app.update();
+    assert_eq!(sheath_of(&app, unit), Some(1), "no second seed");
 }
 
 /// A root that wipes the direction bits the frame a cast arrives: against the base's flags the edge
@@ -2512,6 +2712,15 @@ fn drv_of(app: &App, unit: Entity) -> &AnimDriver {
     app.world().entity(unit).get::<AnimDriver>().unwrap()
 }
 
+/// The unit's committed sheath state.
+fn sheath_of(app: &App, unit: Entity) -> Option<u8> {
+    app.world()
+        .entity(unit)
+        .get::<crate::creature_anim::CommittedSheath>()
+        .unwrap()
+        .state()
+}
+
 /// The mount arm (`0x607a00`'s tail, `0x607b44`) is an ordinary primary play of 91 `Mount` on
 /// bone 0, so it displaces the summon's full-body cast clip at once.
 #[test]
@@ -2742,9 +2951,10 @@ fn a_running_shooter_drops_the_nocked_arrow_and_keeps_its_ammo_cache() {
     );
 }
 
-/// The drawn idle enters on the local auto-repeat bit `0x200` alone (`0x5fd460`), never `0x400`.
+/// The drawn idle enters on the local auto-repeat bit `0x200` alone (`0x5fd460`), never the
+/// precast bit `0x400`.
 #[test]
-fn the_weapon_visual_hold_alone_never_puts_a_shooter_in_the_drawn_idle() {
+fn the_precast_bit_alone_never_puts_a_shooter_in_the_drawn_idle() {
     let spawn = |app: &mut App, auto_repeat: bool| {
         let mut e = app.world_mut().spawn((
             archer_model(),
@@ -2756,8 +2966,11 @@ fn the_weapon_visual_hold_alone_never_puts_a_shooter_in_the_drawn_idle() {
                 ranged: Some((2, 0x2)),
                 ..Default::default()
             },
-            // Set by any ranged spell's visual, and not cleared at volley end.
-            crate::creature_anim::RangedHold,
+            // A precast, bit set: the drawn idle never reads it.
+            crate::creature_anim::Precast {
+                spell_id: 75,
+                busy: true,
+            },
         ));
         if auto_repeat {
             e.insert(crate::creature_anim::AutoRepeatArmed);
@@ -3113,6 +3326,7 @@ fn spawn_vendor(app: &mut App) -> (Entity, Vec<AnimationNodeIndex>) {
         .add(graph);
     let seq = |id: u16, node, duration: f32, blend_time: f32| AnimClip {
         node,
+        blend_node: None,
         duration,
         blend_time,
         replay: (0, 0),
@@ -3527,6 +3741,7 @@ fn a_no_wound_creature_takes_no_flinch() {
         pet_family: 0,
         rank: 0,
         type_flags,
+        pet_spell_list: 0,
         civilian: false,
         racial_leader: false,
         display_id: 0,
@@ -3613,6 +3828,7 @@ fn the_no_wound_flag_takes_the_parry_but_not_the_dodge() {
         pet_family: 0,
         rank: 0,
         type_flags,
+        pet_spell_list: 0,
         civilian: false,
         racial_leader: false,
         display_id: 0,

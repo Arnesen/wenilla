@@ -34,7 +34,8 @@ pub use interior::{
 pub(crate) use interior::{surface_terrain_sample, WmoAreas, POSITION_PROBE_LIFT};
 use interior::{track_area_interior, track_current_interior, track_unit_interiors};
 pub use interior::{
-    CurrentAreaInterior, CurrentWmoInterior, PlayerWmoRoom, UnitWmoRoom, WmoInteriorKeys,
+    CurrentAreaInterior, CurrentWmoInterior, EntityOutdoors, PlayerWmoRoom, UnitWmoRoom,
+    WmoInteriorKeys,
 };
 use probe::TraceLog;
 pub use probe::WmoCullProbe;

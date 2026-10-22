@@ -9,7 +9,7 @@ use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
 use super::feed::{feed_actions, MISSING_ITEM_ICON};
-use super::{CastErrors, MountErrors, PetTameFailures, PlayerActions, UiErrorKeys, UiErrorTexts};
+use super::{MountErrors, PetTameFailures, PlayerActions, UiErrorKeys, UiErrorTexts};
 use crate::entities::ItemDisplays;
 use crate::items::{test_template, Items};
 use crate::net::{ClientCommand, NetCommands};
@@ -50,7 +50,6 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
     app.insert_resource(actions)
         .init_resource::<Items>()
         .init_resource::<crate::net::GuidIndex>()
-        .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()
@@ -374,7 +373,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         SLOT,
         ActionButton {
             slot: SLOT,
-            action: 1, // macro index 1
+            action: 1, // macro id 1
             kind: ACTION_KIND_MACRO,
         },
     );
@@ -382,7 +381,6 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     app.insert_resource(actions)
         .init_resource::<Items>()
         .init_resource::<crate::net::GuidIndex>()
-        .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()
@@ -392,16 +390,17 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         .init_resource::<crate::sound::MessageSounds>()
         .insert_resource(NetCommands(tx));
     let mut script = UiScript::new().unwrap();
-    script.set_macros(MacroState {
-        account: vec![MacroView {
+    script.set_macro_icons(vec!["Interface\\Icons\\Spell_Fire_FlameBolt".into()]);
+    script.set_macros(MacroState::from_scopes(
+        vec![MacroView {
             name: "Ambush".into(),
             texture: Some("Interface\\Icons\\Ability_Ambush".into()),
             // The bound spell is not what the icon shows.
             body: "/cast Ambush".into(),
-            local_only: false,
+            ..Default::default()
         }],
-        character: Vec::new(),
-    });
+        Vec::new(),
+    ));
     app.insert_non_send_resource(script);
     app.add_systems(Update, feed_actions);
 
@@ -420,7 +419,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
 
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
-        .run(r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#)
+        .run("EditMacro(1, nil, 1)")
         .unwrap();
     assert!(
         !app.world().resource::<PlayerActions>().dirty,
@@ -588,33 +587,48 @@ fn a_notice_under_the_loading_cover_fires_at_the_reveal() {
     assert!(app.world().resource::<UiErrorTexts>().0.is_empty());
 }
 
+/// The cast reports' feed ([`crate::ui_cast::feed_cast_reports`]) over a VM, with `reports`
+/// queued and `spells` as the catalog.
+fn report_feed(spells: crate::ui_action::Spells, reports: crate::ui_cast::CastReports) -> App {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>();
+    app.insert_resource(reports)
+        .insert_resource(spells)
+        .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<super::CastFailRedisplays>()
+        .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
+        .init_resource::<crate::spell::PendingCast>()
+        .init_resource::<crate::spell::QueuedMeleeSpell>()
+        .init_resource::<crate::spell::targeting::SpellTargeting>()
+        .init_resource::<crate::spell::ActiveChannel>()
+        .init_resource::<crate::spell::AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
+        .insert_resource(NetCommands(tx));
+    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.add_systems(Update, crate::ui_cast::signal_reports);
+    app
+}
+
 /// `HandleCastFailed 0x6e1a00` logs through `0x62c360`; `HandlePetCastFailed 0x6e8eb0` calls only
 /// the packet readers and `0x496720`, with no log line and no error sound. Both entries name the
 /// same spell, so only the caster differs.
 #[test]
 fn a_pets_refused_cast_writes_no_combat_log_line() {
-    use crate::ui_action::{CastFail, Caster, Spells};
+    use crate::ui_action::{CastFail, Spells};
     use benilla_formats::{SpellCatalog, SpellDisplay};
 
     const GROWL: u32 = 2649;
 
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let mut app = App::new();
-    let mut errors = CastErrors::default();
+    let mut reports = crate::ui_cast::CastReports::default();
     // 0x5f ROOTED has a string on both tables, so neither entry drops for want of one.
-    errors.0.push(CastFail {
-        spell_id: GROWL,
-        reason: 0x5F,
-        arg: None,
-        caster: Caster::Player,
-        redisplay: false,
-        input: benilla_ui::script::InputEvents::NONE,
-    });
-    errors.push_pet(GROWL, 0x5F);
-
-    app.insert_resource(PlayerActions::default())
-        .insert_resource(errors)
-        .insert_resource(Spells {
+    reports.refused(CastFail::server(GROWL, 0x5F, None));
+    reports.pet_refused(GROWL, 0x5F);
+    let mut app = report_feed(
+        Spells {
             catalog: SpellCatalog::from_displays(HashMap::from([(
                 GROWL,
                 SpellDisplay {
@@ -623,23 +637,18 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
                 },
             )])),
             ..Spells::empty_for_tests()
-        })
-        .init_resource::<Items>()
-        .init_resource::<crate::net::GuidIndex>()
-        .init_resource::<MountErrors>()
-        .init_resource::<PetTameFailures>()
-        .init_resource::<UiErrorKeys>()
-        .init_resource::<UiErrorTexts>()
-        .init_resource::<crate::ui_chat::ChatLog>()
-        .init_resource::<crate::sound::MessageSounds>()
-        .insert_resource(NetCommands(tx));
-    let script = UiScript::new().unwrap();
-    // Only what the log line needs; the red line's text has its own tests.
-    script
-        .run(r#"SPELL_FAILED_ROOTED = "You are unable to move";"#)
+        },
+        reports,
+    );
+    // Only what the log line needs, its template and its reason; the red line's text has its own
+    // tests.
+    app.world_mut()
+        .non_send_resource::<UiScript>()
+        .run(
+            r#"SPELLFAILCASTSELF = "You fail to cast %s: %s."
+               SPELL_FAILED_ROOTED = "You are unable to move";"#,
+        )
         .unwrap();
-    app.insert_non_send_resource(script);
-    app.add_systems(Update, feed_actions);
     app.update();
 
     assert_eq!(
@@ -649,6 +658,103 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
         1,
         "the player's failure logs and the pet's does not"
     );
+}
+
+/// `0x62c360` logs no refusal of a spell flagged `Attributes & 0x180` (`0x62c4bd`), though the
+/// red line still shows.
+#[test]
+fn a_refused_spell_flagged_not_to_log_writes_no_combat_log_line() {
+    use crate::ui_action::{CastFail, Spells};
+    use benilla_formats::{SpellCatalog, SpellDisplay};
+
+    let logged = |attributes| {
+        let mut reports = crate::ui_cast::CastReports::default();
+        reports.refused(CastFail::server(1, 0x5F, None));
+        let mut app = report_feed(
+            Spells {
+                catalog: SpellCatalog::from_displays(HashMap::from([(
+                    1,
+                    SpellDisplay {
+                        name: "Growl".into(),
+                        attributes,
+                        ..Default::default()
+                    },
+                )])),
+                ..Spells::empty_for_tests()
+            },
+            reports,
+        );
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .run(
+                r#"SPELLFAILCASTSELF = "You fail to cast %s: %s."
+                   SPELL_FAILED_ROOTED = "You are unable to move";"#,
+            )
+            .unwrap();
+        app.update();
+        app.world()
+            .resource::<crate::ui_chat::ChatLog>()
+            .pending_len()
+    };
+    assert_eq!(logged(0), 1);
+    assert_eq!(logged(0x100), 0, "SPELL_ATTR_DO_NOT_LOG");
+    assert_eq!(logged(0x80), 0, "SPELL_ATTR_DO_NOT_DISPLAY");
+}
+
+/// `DisplayError` formats the default errorId through `ERR_SPELL_FAILED_S` (`0x4967d7`); an empty
+/// one shows nothing (`0x4945b0` drops an empty text), and the log still writes the reason
+/// (`0x6e21e2`-`0x6e21fc` run whatever was shown).
+#[test]
+fn an_empty_default_format_shows_nothing_and_still_logs() {
+    use crate::ui_action::{CastFail, Spells};
+    use benilla_formats::{SpellCatalog, SpellDisplay};
+
+    let lines = |format: &str| {
+        let mut reports = crate::ui_cast::CastReports::default();
+        reports.refused(CastFail::server(1, 0x5F, None));
+        let mut app = report_feed(
+            Spells {
+                catalog: SpellCatalog::from_displays(HashMap::from([(
+                    1,
+                    SpellDisplay {
+                        name: "Growl".into(),
+                        ..Default::default()
+                    },
+                )])),
+                ..Spells::empty_for_tests()
+            },
+            reports,
+        );
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .run(&format!(
+                r#"SPELLFAILCASTSELF = "You fail to cast %s: %s."
+                SPELL_FAILED_ROOTED = "You are unable to move"
+                ERR_SPELL_FAILED_S = "{format}"
+                SEEN = {{}}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UI_ERROR_MESSAGE")
+                f:SetScript("OnEvent", function() table.insert(SEEN, arg1) end)"#
+            ))
+            .unwrap();
+        app.update();
+        let seen = app
+            .world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<Vec<String>>("return SEEN")
+            .unwrap();
+        let logged = app
+            .world()
+            .resource::<crate::ui_chat::ChatLog>()
+            .pending_len();
+        (seen, logged)
+    };
+    assert_eq!(lines("%s"), (vec!["You are unable to move".to_string()], 1));
+    assert_eq!(
+        lines("Failed: %s"),
+        (vec!["Failed: You are unable to move".to_string()], 1)
+    );
+    assert_eq!(lines(""), (vec![], 1));
 }
 
 /// `0x6e6a20` resolves `PETTAME_<reason>` first and passes the string to `DisplayError(0xee)`,
@@ -718,7 +824,11 @@ fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
 /// not.
 #[test]
 fn a_refusal_of_the_armed_craft_disarms_the_batch() {
-    let (mut app, _rx) = app_with_food_on_the_bar();
+    use crate::ui_action::CastFail;
+    let mut app = report_feed(
+        crate::ui_action::Spells::empty_for_tests(),
+        crate::ui_cast::CastReports::default(),
+    );
     {
         let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
         script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
@@ -751,13 +861,13 @@ fn a_refusal_of_the_armed_craft_disarms_the_batch() {
             .trade_skill_repeat()
     };
     app.world_mut()
-        .resource_mut::<CastErrors>()
-        .push_local(133, 0x0c);
+        .resource_mut::<crate::ui_cast::CastReports>()
+        .refused(CastFail::local(133, 0x0c));
     app.update();
     assert_eq!(repeat(&app), (2963, 3), "another spell's refusal");
     app.world_mut()
-        .resource_mut::<CastErrors>()
-        .push_local(2963, 0x0c);
+        .resource_mut::<crate::ui_cast::CastReports>()
+        .refused(CastFail::local(2963, 0x0c));
     app.update();
     assert_eq!(repeat(&app), (0, 3), "the armed craft's refusal disarms");
 }

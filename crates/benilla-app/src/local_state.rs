@@ -143,7 +143,7 @@ pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<Pa
 }
 
 /// `benilla-config/saved-variables.lua`: the flat channel our FrameXML saves through
-/// `RegisterForSave` (the `SavedVariables.lua` analog), written whole at logout, run at UI load.
+/// `RegisterForSave` (the `SavedVariables.lua` analog), written whole at logout, read at UI load.
 pub(crate) fn saved_variables_path() -> Option<PathBuf> {
     home().map(|h| h.join("saved-variables.lua"))
 }
@@ -252,9 +252,10 @@ pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<Path
     character_path(CharacterFile::Camera, realm, character)
 }
 
-/// `benilla-config/account`: the account name the login screen remembers
-/// (`GetSavedAccountName`/`SetSavedAccountName`; the reference's is `Config.wtf`'s `accountName`).
-pub(crate) fn saved_account_path() -> Option<PathBuf> {
+/// `benilla-config/account`, where earlier builds kept the account name the login screen
+/// remembers. It is now the `accountName` CVar in `config.toml`, as the reference's is in
+/// `Config.wtf`: [`crate::cvars`] reads this file once into it and deletes it after the save.
+pub(crate) fn legacy_account_path() -> Option<PathBuf> {
     home().map(|h| h.join("account"))
 }
 
@@ -704,7 +705,7 @@ mod tests {
         );
 
         assert_eq!(
-            saved_account_path(),
+            legacy_account_path(),
             Some(tmp.join("benilla-config/account"))
         );
         assert_eq!(shots_path(), Some(tmp.join("benilla-config/shots.txt")));
@@ -717,7 +718,7 @@ mod tests {
         let _c2 = EnvGuard::set("WOW_CAPTURE", "ui-options");
         assert_eq!(home(), None);
         assert_eq!(
-            saved_account_path(),
+            legacy_account_path(),
             None,
             "a capture reads no saved account"
         );

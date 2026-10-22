@@ -17,6 +17,11 @@ fn seed_level_strings(s: &mut UiScript) {
         PLAYER = "[PLAYER]"
         ELITE  = "[ELITE]"
         BOSS   = "[BOSS]"
+        PVP_ENABLED       = "[PVP]"
+        RESURRECTABLE     = "[RESURRECTABLE]"
+        UNIT_SKINNABLE    = "[SKINNABLE]"
+        PVP_RANK_CIVILIAN = "[CIVILIAN]"
+        PVP_RANK_LEADER   = "[LEADER]"
     "#,
     )
     .unwrap();
@@ -25,12 +30,14 @@ fn seed_level_strings(s: &mut UiScript) {
 fn wolf() -> UnitState {
     UnitState {
         exists: true,
+        has_object: true,
         guid: 0xF130_0000_4500_0001,
         name: Some("Timber Wolf".into()),
         health: 30,
         max_health: 50,
         level: 10,
         reaction: 2, // hostile
+        player_reaction: 2,
         creature_type_name: Some("Beast".into()),
         rank: 2, // rare-elite prints ELITE (the byte table)
         skinnable: true,
@@ -38,7 +45,7 @@ fn wolf() -> UnitState {
     }
 }
 
-/// A creature: gold name, subtitle, the CLASS_TYPE level line, red Skinnable.
+/// A creature: gold name, subtitle, the CLASS_TYPE level line, red `UNIT_SKINNABLE`.
 #[test]
 fn creature_line_law() {
     let mut s = script();
@@ -60,7 +67,7 @@ fn creature_line_law() {
         assert(TTTextLeft1:GetText() == "Timber Wolf")
         assert(TTTextLeft2:GetText() == "Alpha")
         assert(TTTextLeft3:GetText() == "[LEVEL_CLASS_TYPE 10 Beast [ELITE]]", "got " .. TTTextLeft3:GetText())
-        assert(TTTextLeft4:GetText() == "Skinnable")
+        assert(TTTextLeft4:GetText() == "[SKINNABLE]")
         -- A RECOGNISED token naming nothing answers nil...
         assert(tt:SetUnit("party4") == nil, "a recognised but absent unit answers nil")
         -- ...while an UNRECOGNISED one raises, because SetUnit resolves through the client's one
@@ -85,6 +92,7 @@ fn unqueried_wolf() -> UnitState {
         max_health: 50,
         level: 10,
         reaction: 2, // hostile
+        player_reaction: 2,
         skinnable: true,
         guid: 0xF130_0000_0000_0001,
         ..Default::default()
@@ -117,7 +125,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
         -- bare TOOLTIP_UNIT_LEVEL template because both the CLASS and TYPE slots are the record's.
         assert(TTTextLeft2:GetText() == "[LEVEL 10]", "got " .. TTTextLeft2:GetText())
         -- The descriptor's own lines are NOT the record's and show anyway.
-        assert(TTTextLeft3:GetText() == "Skinnable")
+        assert(TTTextLeft3:GetText() == "[SKINNABLE]")
     "#,
     )
     .unwrap();
@@ -135,7 +143,7 @@ fn a_pending_name_titles_unknownobject_and_the_answer_replaces_it() {
         assert(TTTextLeft1:GetText() == "Timber Wolf", "the answer replaced UNKNOWNOBJECT")
         assert(TTTextLeft2:GetText() == "Alpha")
         assert(TTTextLeft3:GetText() == "[LEVEL_CLASS_TYPE 10 Beast [ELITE]]", "got " .. TTTextLeft3:GetText())
-        assert(TTTextLeft4:GetText() == "Skinnable")
+        assert(TTTextLeft4:GetText() == "[SKINNABLE]")
     "#,
     )
     .unwrap();
@@ -268,6 +276,7 @@ fn the_tooltip_title_is_the_pvp_name() {
             name: Some("Defias Civilian".into()),
             level: 20,
             reaction: 2,
+            player_reaction: 2,
             pvp: true,
             civilian: true,
             ..Default::default()
@@ -282,9 +291,9 @@ fn the_tooltip_title_is_the_pvp_name() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The faction line sits between the level line and "PvP" (`0x529fe0`). Civilian needs the PvP
-/// bit, the flag, hostility and a grey level (`0x612550`); Leader only the PvP bit and the flag
-/// (`0x6125c0`).
+/// The faction line sits between the level line and `PVP_ENABLED` (`0x529fe0`).
+/// `PVP_RANK_CIVILIAN` needs the PvP bit, the flag, hostility and a grey level (`0x612550`);
+/// `PVP_RANK_LEADER` only the PvP bit and the flag (`0x6125c0`).
 #[test]
 fn faction_line_and_civilian_gate() {
     let mut s = script();
@@ -301,8 +310,11 @@ fn faction_line_and_civilian_gate() {
             guid: 0xF130_0000_0000_0101,
             exists: true,
             name: Some("Marshal McBride".into()),
+            has_object: true,
+            flags: 0x1000,
             level: 20,
             reaction: 6, // friendly
+            player_reaction: 6,
             creature_type_name: Some("Humanoid".into()),
             faction_name: Some("Stormwind".into()),
             pvp: true,
@@ -318,7 +330,7 @@ fn faction_line_and_civilian_gate() {
         tt:SetUnit("target")
         assert(TTTextLeft2:GetText() == "[LEVEL 20]", "friendly creature: no type word; got " .. TTTextLeft2:GetText())
         assert(TTTextLeft3:GetText() == "Stormwind", "faction line before PvP; got " .. TTTextLeft3:GetText())
-        assert(TTTextLeft4:GetText() == "PvP")
+        assert(TTTextLeft4:GetText() == "[PVP]")
         assert(TTTextLeft5 == nil or TTTextLeft5:GetText() == nil, "friendly civilian shows NO Civilian line")
     "#,
     )
@@ -329,9 +341,12 @@ fn faction_line_and_civilian_gate() {
         Some(UnitState {
             guid: 0xF130_0000_0000_0102,
             exists: true,
+            has_object: true,
+            flags: 0x1000,
             name: Some("Defias Civilian".into()),
             level: 20,
             reaction: 2, // hostile
+            player_reaction: 2,
             creature_type_name: Some("Humanoid".into()),
             pvp: true,
             civilian: true,
@@ -344,9 +359,9 @@ fn faction_line_and_civilian_gate() {
         TT:SetOwner(UF9, "ANCHOR_RIGHT")
         TT:SetUnit("target")
         assert(TTTextLeft2:GetText() == "[LEVEL_CLASS 20 Humanoid]", "got " .. TTTextLeft2:GetText())
-        assert(TTTextLeft3:GetText() == "PvP")
-        assert(TTTextLeft4:GetText() == "Civilian", "hostile+grey+pvp civilian warns; got " .. TTTextLeft4:GetText())
-        assert(TTTextLeft5:GetText() == "Leader")
+        assert(TTTextLeft3:GetText() == "[PVP]")
+        assert(TTTextLeft4:GetText() == "[CIVILIAN]", "hostile+grey+pvp civilian warns; got " .. TTTextLeft4:GetText())
+        assert(TTTextLeft5:GetText() == "[LEADER]")
     "#,
     )
     .unwrap();
@@ -356,9 +371,12 @@ fn faction_line_and_civilian_gate() {
         Some(UnitState {
             guid: 0xF130_0000_0000_0103,
             exists: true,
+            has_object: true,
+            flags: 0x1000,
             name: Some("Defias Civilian".into()),
             level: 25,
             reaction: 2,
+            player_reaction: 2,
             creature_type_name: Some("Humanoid".into()),
             pvp: true,
             civilian: true,
@@ -369,7 +387,7 @@ fn faction_line_and_civilian_gate() {
         r#"
         TT:SetOwner(UF9, "ANCHOR_RIGHT")
         TT:SetUnit("target")
-        assert(TTTextLeft3:GetText() == "PvP")
+        assert(TTTextLeft3:GetText() == "[PVP]")
         assert(TTTextLeft4 == nil or TTTextLeft4:GetText() == nil, "a non-grey civilian does not warn")
     "#,
     )
@@ -377,7 +395,9 @@ fn faction_line_and_civilian_gate() {
     assert!(s.take_errors().is_empty());
 }
 
-/// Players read "Race Class (Player)"; the dead read "Corpse"; a world boss reads "??".
+/// Players read "Race Class (Player)"; the dead read "Corpse"; a world boss reads "??", and so
+/// does any unit hostile to the player ten or more levels above it, a player too: the path from
+/// `0x52a338` to `0x52a366` tests no type.
 #[test]
 fn level_line_variants() {
     let mut s = script();
@@ -393,11 +413,13 @@ fn level_line_variants() {
             guid: 0xF130_0000_0000_0104,
             exists: true,
             name: Some("Bandit".into()),
+            has_object: true,
             level: 32,
             is_player: true,
             race: Some("Human".into()),
             class: Some("Rogue".into()),
             pvp: true,
+            flags: 0x1000,
             ..Default::default()
         }),
     );
@@ -408,7 +430,7 @@ fn level_line_variants() {
         tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetUnit("target")
         assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 32 Human Rogue [PLAYER]]", "got " .. TTTextLeft2:GetText())
-        assert(TTTextLeft3:GetText() == "PvP")
+        assert(TTTextLeft3:GetText() == "[PVP]")
     "#,
     )
     .unwrap();
@@ -422,6 +444,7 @@ fn level_line_variants() {
             level: 3,
             dead: true,
             reaction: 2,
+            player_reaction: 2,
             creature_type_name: Some("Beast".into()),
             ..Default::default()
         }),
@@ -443,6 +466,7 @@ fn level_line_variants() {
             name: Some("Kazzak".into()),
             level: 63,
             reaction: 2,
+            player_reaction: 2,
             creature_type_name: Some("Demon".into()),
             rank: 3,
             ..Default::default()
@@ -463,6 +487,7 @@ fn level_line_variants() {
         name: Some("Elder".into()),
         level: 70,
         reaction,
+        player_reaction: reaction,
         is_player,
         creature_type_name: (!is_player).then(|| "Beast".into()),
         race: is_player.then(|| "Orc".into()),
@@ -486,12 +511,22 @@ fn level_line_variants() {
     "#,
     )
     .unwrap();
-    // Players never read "??".
+    // A hostile player ten up reads "??" too, and `UnitLevel` -1.
     s.set_unit("target", Some(ten_up(2, true)));
     s.run(
         r#"
         TT:SetOwner(UF2, "ANCHOR_RIGHT"); TT:SetUnit("target")
-        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 70 Orc Shaman [PLAYER]]", "hostile player, got " .. TTTextLeft2:GetText())
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE ?? Orc Shaman [PLAYER]]", "hostile player, got " .. TTTextLeft2:GetText())
+        assert(UnitLevel("target") == -1, "UnitLevel's hostile leg has no player test either")
+    "#,
+    )
+    .unwrap();
+    // An unfriendly player ten up shows the level.
+    s.set_unit("target", Some(ten_up(3, true)));
+    s.run(
+        r#"
+        TT:SetOwner(UF2, "ANCHOR_RIGHT"); TT:SetUnit("target")
+        assert(TTTextLeft2:GetText() == "[LEVEL_CLASS_TYPE 70 Orc Shaman [PLAYER]]", "unfriendly player, got " .. TTTextLeft2:GetText())
     "#,
     )
     .unwrap();
@@ -525,6 +560,7 @@ fn a_players_level_line_ignores_the_snapshots_creature_type() {
         name: Some("Fenwick".into()),
         level: 40,
         reaction,
+        player_reaction: reaction,
         is_player: true,
         race: Some("Night Elf".into()),
         class: Some("Druid".into()),
@@ -576,6 +612,7 @@ fn a_type_ten_creature_has_no_word_in_the_level_line_but_unitcreaturetype_answer
         name: Some("Wisp".into()),
         level: 60,
         reaction,
+        player_reaction: reaction,
         creature_type: id,
         creature_type_name: Some(word.into()),
         ..Default::default()
@@ -602,6 +639,59 @@ fn a_type_ten_creature_has_no_word_in_the_level_line_but_unitcreaturetype_answer
         "#,
         )
         .unwrap_or_else(|e| panic!("reaction {reaction}: {e}"));
+    }
+    assert!(s.take_errors().is_empty());
+}
+
+/// The creature type shows by the player's reaction toward the unit, not the unit's toward the
+/// player (`0x6061e0(player, unit)`, `0x52a2d9`, under 4 internal): a not-at-war reputation
+/// faction such as the Cenarion Circle reads neutral toward the player while the player reads it
+/// friendly, so it shows no type, and neither does a guard turned hostile on a contested player,
+/// whom the player still reads friendly. No active player shows none (`0x52a2d0`).
+#[test]
+fn the_creature_type_reads_the_players_reaction_toward_the_unit() {
+    let mut s = script();
+    seed_level_strings(&mut s);
+    s.set_screen_size(800.0, 600.0);
+    s.set_player_req_state(PlayerReqState {
+        level: 60,
+        ..Default::default()
+    });
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "UF4"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+    "#,
+    )
+    .unwrap();
+    let druid = |reaction: u8, player_reaction: u8| UnitState {
+        guid: 0xF130_0000_0000_010A,
+        exists: true,
+        has_object: true,
+        name: Some("Cenarion Druid".into()),
+        level: 60,
+        reaction,
+        player_reaction,
+        creature_type: 7,
+        creature_type_name: Some("Humanoid".into()),
+        ..Default::default()
+    };
+    for (reaction, player_reaction, line) in [
+        (4, 5, "[LEVEL 60]"),
+        (2, 5, "[LEVEL 60]"),
+        (5, 4, "[LEVEL_CLASS 60 Humanoid]"),
+        (2, 3, "[LEVEL_CLASS 60 Humanoid]"),
+        (4, 0, "[LEVEL 60]"),
+    ] {
+        s.set_unit("target", Some(druid(reaction, player_reaction)));
+        s.run(&format!(
+            r#"
+            TT:SetOwner(UF4, "ANCHOR_RIGHT"); TT:SetUnit("target")
+            assert(TTTextLeft2:GetText() == "{line}", "got " .. TTTextLeft2:GetText())
+        "#
+        ))
+        .unwrap_or_else(|e| panic!("reaction {reaction}, player's {player_reaction}: {e}"));
     }
     assert!(s.take_errors().is_empty());
 }
@@ -634,6 +724,8 @@ fn world_hover_drive_and_health_watcher() {
         end)
         local bar = CreateFrame("StatusBar", "GameTooltipStatusBar", tt)
         bar:SetPoint("TOPLEFT", tt, "BOTTOMLEFT", 2, -1); bar:SetWidth(100); bar:SetHeight(8)
+        BarFires = {}
+        bar:SetScript("OnValueChanged", function() table.insert(BarFires, arg1) end)
     "#,
     )
     .unwrap();
@@ -650,10 +742,11 @@ fn world_hover_drive_and_health_watcher() {
         assert(GameTooltipTextLeft1:GetText() == "Timber Wolf")
         local _, mx = GameTooltipStatusBar:GetMinMaxValues()
         assert(mx == 50 and GameTooltipStatusBar:GetValue() == 30, "bar seeded from the snapshot")
+        assert(table.getn(BarFires) == 1 and BarFires[1] == 30, "a fresh bar: the value fires")
     "#,
     )
     .unwrap();
-    // The auto-size needs the line measures before the plate has a rect.
+    // With no font engine the sizer waits on the line measures before the plate has a rect.
     let answers: Vec<(u32, f32, f32, u64)> = s
         .fontstrings_needing_measure()
         .iter()
@@ -662,7 +755,8 @@ fn world_hover_drive_and_health_watcher() {
     s.set_measured_text_unwrapped(&answers);
     s.resolve();
     s.run(
-        r#"assert(GameTooltip:GetRight() == 787 and GameTooltip:GetBottom() == 70,
+        r#"assert(math.abs(GameTooltip:GetRight() - 787) < 1e-3
+                  and math.abs(GameTooltip:GetBottom() - 70) < 1e-3,
                   "plate at the default corner, got " .. tostring(GameTooltip:GetRight()) .. "," .. tostring(GameTooltip:GetBottom()))"#,
     )
     .unwrap();
@@ -672,6 +766,18 @@ fn world_hover_drive_and_health_watcher() {
     s.set_unit("mouseover", Some(hurt));
     s.run(
         r#"assert(GameTooltipStatusBar:GetValue() == 12, "the health watcher tracked the push")"#,
+    )
+    .unwrap();
+    // The watcher (`0x529560`) sets the range, re-firing the held 30, then the moved value; an
+    // unchanged push runs no watcher, and a maximum alone is not the watched field.
+    let mut same = wolf();
+    same.health = 12;
+    s.set_unit("mouseover", Some(same.clone()));
+    same.max_health = 60;
+    s.set_unit("mouseover", Some(same));
+    s.run(
+        r#"assert(table.getn(BarFires) == 3 and BarFires[2] == 30 and BarFires[3] == 12,
+                  "fired " .. table.getn(BarFires))"#,
     )
     .unwrap();
     // Hover lost: the fade arms and `"mouseover"` names nobody (`0x492890` zeroes the pair), yet
@@ -747,7 +853,7 @@ fn minimap_blip_tooltip_shows_follows_and_hides() {
     s.run(
         r#"
         assert(GameTooltipTextLeft1:GetText() == "Stormwind", "content survives a move")
-        assert(GameTooltip:GetBottom() == 300, "the plate follows the cursor")
+        assert(math.abs(GameTooltip:GetBottom() - 300) < 1e-3, "the plate follows the cursor")
         "#,
     )
     .unwrap();
@@ -1006,5 +1112,58 @@ fn a_unit_with_guid_zero_is_no_unit() {
         "#,
     )
     .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// A unit with a maximum of 0 seeds the bar's range as `(0, 0)` (`0x52a0eb`, no floor), whose fill
+/// is 0 (`0x783394`): after the bar's update (`0x7833c0`) its texture is cut to nothing across.
+#[test]
+fn a_unit_with_no_maximum_health_draws_an_empty_tooltip_bar() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_unit("target", Some(wolf()));
+    s.run(
+        r#"
+        EmptyHost = CreateFrame("Frame", "EmptyHost")
+        EmptyTip = CreateFrame("GameTooltip", "EmptyTip", nil, "TestTooltipTemplate")
+        local bar = CreateFrame("StatusBar", "EmptyTipStatusBar", EmptyTip)
+        bar:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 10, 10)
+        bar:SetWidth(100); bar:SetHeight(8)
+        bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+        EmptyTip:SetOwner(EmptyHost, "ANCHOR_RIGHT")
+        assert(EmptyTip:SetUnit("target") == 1)
+    "#,
+    )
+    .unwrap();
+    let fill = |s: &UiScript| -> Option<([f32; 4], f32)> {
+        s.extract().iter().find_map(|q| match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                tex_coords,
+                ..
+            } if p.contains("UI-StatusBar") => Some((
+                tex_coords.map_or([0.0, 1.0, 0.0, 1.0], |tc| tc.edges()),
+                (q.rect.expect("bar rect resolved").width() * 100.0).round() / 100.0,
+            )),
+            _ => None,
+        })
+    };
+    s.tick(0.0);
+    assert_eq!(fill(&s), Some(([0.0, 0.6, 0.0, 1.0], 60.0)), "30 of 50");
+    let mut spent = wolf();
+    spent.guid += 1;
+    spent.health = 0;
+    spent.max_health = 0;
+    s.set_unit("target", Some(spent));
+    s.run(
+        r#"
+        assert(EmptyTip:SetUnit("target") == 1)
+        local mn, mx = EmptyTipStatusBar:GetMinMaxValues()
+        assert(mn == 0 and mx == 0, "the raw maximum: " .. mn .. "," .. mx)
+    "#,
+    )
+    .unwrap();
+    s.tick(0.0);
+    assert_eq!(fill(&s), Some(([0.0, 0.0, 0.0, 1.0], 0.0)), "empty across");
     assert!(s.take_errors().is_empty());
 }

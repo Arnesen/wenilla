@@ -1,11 +1,13 @@
 //! The requirement validator `0x6094f0`: the press-time gates `TryCast 0x6e4b60` runs between
 //! the target bind and the commit, plus the range compare `IsTargetInRange 0x6e47b0` that
 //! `CanTargetUnit 0x6e4440` runs before it. Pure predicates answering the reference's reason codes,
-//! called by [`super::cast_send`]'s ladder in its order. Only `TryCast` reaches `0x6094f0`, never
-//! the greying walk `0x6e3d60`.
+//! called by [`super::cast_send`]'s ladder in its order: the cooldown and power rungs there, the
+//! rest through [`caster_refusal`]. Only `TryCast` reaches `0x6094f0`, never the greying walk
+//! `0x6e3d60`.
 
 use super::SpellModifiers;
-use benilla_formats::{RangeUnit, SpellDisplay, SpellRange};
+use benilla_formats::{CcExemption, RangeUnit, SpellDisplay, SpellRange};
+use benilla_protocol::ObjectFields;
 
 /// The range refusals `CanTargetUnit 0x6e4440` emits: "Out of range." and "Target too close".
 pub(super) const ERR_OUT_OF_RANGE: u8 = 0x59;
@@ -57,22 +59,22 @@ const PREVENTION_PACIFY: u32 = 2;
 /// | 5 | FLEEING | bit 23 | `0x1e` |
 /// | 6 | CONFUSED | bit 22 | `0x16` |
 ///
-/// A dead caster skips all six (`0x60980d`). Only `TryCast` calls this, so stun, silence and
-/// pacify refuse on the press without greying a button; the greying walk's own copy of these
-/// helpers (fear, confuse, charm) is not built. SILENCED reads `test ah,0x20`, invisible to a
-/// dword-immediate scan.
+/// [`caster_refusal`] runs it for a living caster only (`0x60980d`). Only `TryCast` calls this, so
+/// stun, silence and pacify refuse on the press without greying a button; the greying walk's own
+/// copy of these helpers (fear, confuse, charm) is not built. SILENCED reads `test ah,0x20`,
+/// invisible to a dword-immediate scan.
 ///
 /// Each arm first scans the caster's `UNIT_FIELD_AURA[0..47]` for auras of its own types (charm
 /// `{6, 177, 2}`, stun `{12}`, silence `{27, 12, 60}`, pacify `{25, 12, 60}`, fear `{7}`, confuse
-/// `{5}`) and asks [`benilla_formats::grants_immunity`] of each: a hit lifts the refusal; a named
-/// blocking mechanic turns the reason into `0x8d`.
+/// `{5}`), `scan` answering for one type ([`benilla_formats::cc_exemption`], `0x6e9ca0`) and
+/// [`cc_exemption_over`] joining them: an exemption lifts the refusal; a named blocking mechanic
+/// turns the reason into `0x8d`.
 pub(crate) fn cast_cc_refusal(
     unit_flags: u32,
-    health: Option<u32>,
     charmed_by_other: bool,
     spell: Option<&SpellDisplay>,
-    exempt: &mut impl FnMut(&[u32]) -> benilla_formats::CcExemption,
-) -> Option<(u8, Option<u32>)> {
+    scan: &mut dyn FnMut(u32) -> CcExemption,
+) -> Option<Refusal> {
     use crate::player::UNIT_FLAG_STUNNED;
     /// `UNIT_FIELD_FLAGS` bits 13, 17, 22 and 23 (vmangos `UnitDefines.h`).
     const UNIT_FLAG_SILENCED: u32 = 0x0000_2000;
@@ -80,23 +82,22 @@ pub(crate) fn cast_cc_refusal(
     const UNIT_FLAG_CONFUSED: u32 = 0x0040_0000;
     const UNIT_FLAG_FLEEING: u32 = 0x0080_0000;
 
-    // A dead caster skips the leg (`0x60980d`); an earlier rung refuses a corpse.
-    if health == Some(0) {
-        return None;
-    }
     let prevention = spell.map_or(0, |d| d.prevention_type);
     // An exempt scan skips the arm; otherwise `0x8d` when it named a mechanic, else the arm's own
     // reason.
-    let mut arm = |aura_types: &[u32], own_reason: u8| -> Option<(u8, Option<u32>)> {
-        let scan = exempt(aura_types);
-        if scan.exempt {
+    let mut arm = |aura_types: &[u32], own_reason: u8| -> Option<Refusal> {
+        let over = cc_exemption_over(aura_types, scan);
+        if over.exempt {
             return None;
         }
-        Some(if scan.mechanic != 0 {
+        Some(if over.mechanic != 0 {
             // The mechanic is the message's `%s`, the one local refusal with an argument word.
-            (REASON_PREVENTED_BY_MECHANIC, Some(scan.mechanic))
+            Refusal {
+                reason: REASON_PREVENTED_BY_MECHANIC,
+                arg: Some(over.mechanic),
+            }
         } else {
-            (own_reason, None)
+            Refusal::of(own_reason)
         })
     };
 
@@ -133,18 +134,52 @@ pub(crate) fn cast_cc_refusal(
     None
 }
 
+/// The wrappers over the scan `0x6e9ca0` (`0x6e9c80`, `0x6e9e60`, `0x6e9ec0`, `0x6e9f20`,
+/// `0x6e9f40`, `0x6e9f60`): one scan per aura type in order, exempt as soon as any scan exempts
+/// (`0x6e9e84`, `0x6e9e95`, `0x6e9ea6`). The mechanic word is cleared once at entry (`0x6e9e72`)
+/// and each refusing scan writes its nonzero mechanic over it (`0x6e9d4c`, `0x6e9d5f`), so the
+/// last one names the refusal.
+pub(crate) fn cc_exemption_over(
+    aura_types: &[u32],
+    scan: &mut dyn FnMut(u32) -> CcExemption,
+) -> CcExemption {
+    let mut mechanic = 0;
+    for &aura_type in aura_types {
+        let one = scan(aura_type);
+        if one.exempt {
+            return CcExemption {
+                exempt: true,
+                mechanic,
+            };
+        }
+        if one.mechanic != 0 {
+            mechanic = one.mechanic;
+        }
+    }
+    CcExemption {
+        exempt: false,
+        mechanic,
+    }
+}
+
 /// `SPELL_FAILED_PREVENTED_BY_MECHANIC`, "Can't do that while %s" with the blocking aura's
 /// `SpellMechanic.dbc` name.
 const REASON_PREVENTED_BY_MECHANIC: u8 = 0x8d;
 
-/// The mounted refusal, `0x6094f0`'s mounted block (`0x609c6c`): a live
-/// `UNIT_FIELD_MOUNTDISPLAYID` refuses with `0x39` "You are mounted" unless Attributes bit 24
-/// (`0x01000000`, vmangos `SPELL_ATTR_ALLOW_WHILE_MOUNTED`, tested at `0x609c6f`) is set. A spell
-/// with no record has no exemption. The mount-required gate (`0x53`, `0x609c05`) is not built, as
-/// no 1.12 player spell needs it; it reads `0x40` in `AuraInterruptFlags` and, at `0x609c3a`, in
-/// `ChannelInterruptFlags`.
+/// The mounted refusal, `0x6094f0`'s mounted block (`0x609c6c`): a
+/// `UNIT_FIELD_MOUNTDISPLAYID` above 0 (`0x609c84 jle`) refuses with `0x39` "You are mounted"
+/// unless Attributes bit 24 (`0x01000000`, vmangos `SPELL_ATTR_ALLOW_WHILE_MOUNTED`, tested at
+/// `0x609c6f`) is set. A spell with no record has no exemption.
 pub(crate) fn cast_mounted_refusal(mounted: bool, spell: Option<&SpellDisplay>) -> bool {
     mounted && spell.is_none_or(|d| d.attributes & 0x0100_0000 == 0)
+}
+
+/// Whether a spell's aura or channel carries an interrupt bit, as the validator's stance and water
+/// rungs read it: arm A in `AuraInterruptFlags` (`+0x58`) always, arm B in
+/// `ChannelInterruptFlags` (`+0x5c`) only for a channeled spell ([`ATTR_EX_CHANNELED`]).
+fn interrupt_flag_requires(d: &SpellDisplay, bit: u32) -> bool {
+    d.aura_interrupt_flags & bit != 0
+        || (d.attributes_ex & ATTR_EX_CHANNELED != 0 && d.channel_interrupt_flags & bit != 0)
 }
 
 /// The interrupt-flag water pair: `0x80` cancels an aura on entering water, `0x100` on leaving it
@@ -180,15 +215,10 @@ pub(super) const ERR_ONLY_UNDERWATER: u8 = 0x58;
 pub(super) fn cast_water_refusal(move_flags_word: u32, spell: Option<&SpellDisplay>) -> Option<u8> {
     let d = spell?;
     let swimming = move_flags_word & crate::creature_anim::move_flags::SWIMMING != 0;
-    // Arm A always; arm B only for a channeled spell.
-    let requires = |bit: u32| {
-        d.aura_interrupt_flags & bit != 0
-            || (d.attributes_ex & ATTR_EX_CHANNELED != 0 && d.channel_interrupt_flags & bit != 0)
-    };
-    if !swimming && requires(INTERRUPT_ABOVE_WATER) {
+    if !swimming && interrupt_flag_requires(d, INTERRUPT_ABOVE_WATER) {
         return Some(ERR_ONLY_UNDERWATER);
     }
-    if swimming && requires(INTERRUPT_UNDER_WATER) {
+    if swimming && interrupt_flag_requires(d, INTERRUPT_UNDER_WATER) {
         return Some(ERR_ONLY_ABOVEWATER);
     }
     None
@@ -227,6 +257,224 @@ pub(super) fn cast_moving_refusal(
         && (cast_time_ms != 0
             || d.aura_interrupt_flags & AURA_INTERRUPT_MOVING_TURNING != 0
             || d.channel_interrupt_flags & AURA_INTERRUPT_MOVING_TURNING != 0)
+}
+
+/// One refusal of the validator: the reason `ReportCastFailure 0x6e1a00` is passed, and the
+/// argument word it pushes first, which only the crowd-control rename carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub(crate) reason: u8,
+    pub(crate) arg: Option<u32>,
+}
+
+impl Refusal {
+    const fn of(reason: u8) -> Self {
+        Self { reason, arg: None }
+    }
+}
+
+/// The caster as the validator's rungs past its power test read it: the active player, or the
+/// pet bar's unit the attempt passes (`0x6e4f3b`).
+pub(crate) struct CasterState<'a> {
+    /// Its descriptor.
+    pub(crate) fields: &'a ObjectFields,
+    /// The active player's guid (`0x60994d` asks `0x468550`), which the charm arm compares the
+    /// caster's charmer with (`0x60995e`).
+    pub(crate) guid: Option<u64>,
+    /// `GetStandState`, the caster's vtable slot 41 (`0x609cad`): the active player's local state
+    /// (`0x5ed570`), a unit's descriptor byte (`0x60be50`).
+    pub(crate) stand_state: u8,
+    /// The sheathe state `[unit+0xd40]`: 0 away, 1 melee, 2 ranged (`0x609ba9`).
+    pub(crate) sheathe_state: u8,
+    /// The mover's flags `[[unit+0x118]+0x40]`, which the water and moving rungs read.
+    pub(crate) move_flags: u32,
+    /// `IsDaytime 0x60a050` on the game clock.
+    pub(crate) daytime: bool,
+    /// `0x612cc0`: the entity outdoors test `0x6706f0` on the caster's world node.
+    pub(crate) outdoors: bool,
+}
+
+/// What the rungs read beyond the record and the caster: the cast time the moving rung asks
+/// `0x6e3340` for, whether the caster's form counts as a stance (`0x612480`), and the player's
+/// standing with a faction (`GetFactionStanding 0x4d6370`).
+pub(crate) struct SpellInputs<'a> {
+    pub(crate) cast_time_ms: u32,
+    pub(crate) form_is_stance: bool,
+    pub(crate) standing: &'a dyn Fn(u32) -> i32,
+}
+
+/// `AURA_INTERRUPT_DISMOUNT_CANCELS` and `AURA_INTERRUPT_SHEATHING_CANCELS` (vmangos
+/// `SpellDefines.h:545`, `:548`): an aura that ends on a dismount needs a mount, one that ends on
+/// sheathing a drawn weapon.
+const INTERRUPT_DISMOUNT: u32 = 0x40;
+const INTERRUPT_SHEATHING: u32 = 0x200;
+
+/// The `Attributes` bits the rungs read (vmangos `SpellDefines.h:804-820`).
+const ATTR_DAYTIME_ONLY: u32 = 0x0000_1000;
+const ATTR_NIGHT_ONLY: u32 = 0x0000_2000;
+const ATTR_ONLY_INDOORS: u32 = 0x0000_4000;
+const ATTR_ONLY_OUTDOORS: u32 = 0x0000_8000;
+const ATTR_ONLY_STEALTHED: u32 = 0x0002_0000;
+const ATTR_ALLOW_WHILE_SITTING: u32 = 0x0800_0000;
+const ATTR_NOT_IN_COMBAT_ONLY_PEACEFUL: u32 = 0x1000_0000;
+/// `SPELL_ATTR_EX_DISMISS_PET_FIRST` (vmangos `SpellDefines.h:832`): a summon or charm a held pet
+/// does not refuse (`0x60972c`).
+const ATTR_EX_DISMISS_PET_FIRST: u32 = 0x1;
+
+/// The summoning effects the loop tests (`0x6096f6`-`0x609706`): `SPELL_EFFECT_SUMMON` 28,
+/// `_TAMECREATURE` 55 and `_SUMMON_PET` 56 (vmangos `SpellDefines.h:239`, `:266`, `:267`), and the
+/// aura types `SPELL_AURA_MOD_CHARM` 6 and `_MOD_POSSESS` 2 (`SpellAuraDefines.h:64`, `:47`), the
+/// aura column read whatever the effect (`0x609708`-`0x609713`).
+const SUMMON_EFFECTS: [u32; 3] = [28, 55, 56];
+const CHARM_AURAS: [u32; 2] = [6, 2];
+/// `TARGET_PET`, the implicit target the pet test matches in either column (`0x60973e`).
+const TARGET_PET: u32 = 5;
+
+/// The rungs of `0x6094f0` after its cooldown and power tests, in its order, the first that fails
+/// answering. `scan` is the crowd-control scan `0x6e9ca0` for one aura type. A spell with no record
+/// takes no rung that needs one of its bits to apply.
+///
+/// | rung | reason | test |
+/// |---|---|---|
+/// | each effect (`0x6096c3`-`0x6097fc`) | `4`/`5` | a summon or charm with `UNIT_FIELD_CHARM`, else `_SUMMON`, held, unless [`ATTR_EX_DISMISS_PET_FIRST`] |
+/// | | `0x4c` | an effect aimed at the pet with neither held |
+/// | living caster (`0x60980d`) | `0x61` | a player logging out, `PLAYER_FIELD_BYTES` bit `0x4` (`0x60982b`) |
+/// | | crowd control | [`cast_cc_refusal`] |
+/// | `0x609ba1` | `0x41` | [`INTERRUPT_SHEATHING`] with the weapon away, `[unit+0xd40] == 0` |
+/// | `0x609c05` | `0x53` | [`INTERRUPT_DISMOUNT`] with `UNIT_FIELD_MOUNTDISPLAYID` at 0 or below |
+/// | `0x609c6c` | `0x39` | [`cast_mounted_refusal`] |
+/// | `0x609ca2` | `0x3e` | not standing (`0x609cad`), unless [`ATTR_ALLOW_WHILE_SITTING`] |
+/// | `0x609cd3` | `0x51` | [`ATTR_DAYTIME_ONLY`] at night (`IsDaytime 0x60a050`) |
+/// | `0x609d03` | `0x54` | [`ATTR_NIGHT_ONLY`] by day |
+/// | `0x609d33` | `0x58`/`0x50` | [`cast_water_refusal`] |
+/// | `0x609de3` | `0x2e` | [`cast_moving_refusal`] |
+/// | `0x609e50` | the form's | [`SpellDisplay::form_refusal`] |
+/// | `0x609e76` | `0x57` | [`ATTR_ONLY_STEALTHED`] without `UNIT_FIELD_BYTES_1` byte 3 bit `0x2` |
+/// | `0x609eae` | `0` | [`ATTR_NOT_IN_COMBAT_ONLY_PEACEFUL`] in combat |
+/// | `0x609ee4` | `0x12` | `CasterAuraState` n without `UNIT_FIELD_AURASTATE` bit n - 1 |
+/// | `0x609f1f` | `0x8f` | `MinFactionId` standing below `MinReputation`'s floor (`0x80928c`) |
+/// | `0x609f59` | `0x52` | [`ATTR_ONLY_INDOORS`] outdoors (`0x612cc0`) |
+/// | | `0x4b`/`0x55` | [`ATTR_ONLY_OUTDOORS`] indoors: `0x4b` when an effect applies the mount aura |
+///
+/// Not built: the learn rungs, which show a line of their own through `0x496720` (`0x6098a2`,
+/// `0x609920`) or ask a pet's knowledge (`0x609904`); and the tame rung `0x17` (`0x609fd7`), which
+/// shows its pet tame failure through `0x6e6a20` first.
+pub(crate) fn caster_refusal(
+    spell: Option<&SpellDisplay>,
+    caster: &CasterState,
+    inputs: &SpellInputs,
+    scan: &mut dyn FnMut(u32) -> CcExemption,
+) -> Option<Refusal> {
+    let fields = caster.fields;
+    if let Some(d) = spell {
+        for i in 0..3 {
+            let summons = SUMMON_EFFECTS.contains(&d.effects[i])
+                || CHARM_AURAS.contains(&d.effect_apply_aura[i]);
+            if summons
+                && fields.unit_pet_guid().is_some()
+                && d.attributes_ex & ATTR_EX_DISMISS_PET_FIRST == 0
+            {
+                // 4 "You already control a charmed creature" while charming, else 5 (`0x6098ce`).
+                return Some(Refusal::of(if fields.unit_charm().is_some() {
+                    4
+                } else {
+                    5
+                }));
+            }
+            let at_pet = d.effect_implicit_target_a[i] == TARGET_PET
+                || d.effect_implicit_target_b[i] == TARGET_PET;
+            if at_pet && fields.unit_pet_guid().is_none() {
+                return Some(Refusal::of(0x4c));
+            }
+        }
+    }
+    // A caster with health 0 or below skips the control block (`0x60980d jle`); no health field
+    // yet is not death.
+    let alive = fields.unit_health().is_none_or(|h| h as i32 > 0);
+    if alive {
+        if fields.player_logging_out() {
+            return Some(Refusal::of(0x61));
+        }
+        // The charm arm refuses only when someone else holds the charm (`0x60995e`).
+        let charmed_by_other = fields
+            .unit_charmed_by()
+            .is_some_and(|charmer| Some(charmer) != caster.guid);
+        if let Some(r) = cast_cc_refusal(fields.unit_flags(), charmed_by_other, spell, scan) {
+            return Some(r);
+        }
+    }
+    let attributes = spell.map_or(0, |d| d.attributes);
+    let mount_display = fields.unit_mount_display_id() as i32;
+    if let Some(d) = spell {
+        if interrupt_flag_requires(d, INTERRUPT_SHEATHING) && caster.sheathe_state == 0 {
+            return Some(Refusal::of(0x41));
+        }
+        // `0x609c18 jg`: a signed display id.
+        if interrupt_flag_requires(d, INTERRUPT_DISMOUNT) && mount_display <= 0 {
+            return Some(Refusal::of(0x53));
+        }
+    }
+    if cast_mounted_refusal(mount_display > 0, spell) {
+        return Some(Refusal::of(0x39));
+    }
+    if attributes & ATTR_ALLOW_WHILE_SITTING == 0 && caster.stand_state != 0 {
+        return Some(Refusal::of(0x3e));
+    }
+    if attributes & ATTR_DAYTIME_ONLY != 0 && !caster.daytime {
+        return Some(Refusal::of(0x51));
+    }
+    if attributes & ATTR_NIGHT_ONLY != 0 && caster.daytime {
+        return Some(Refusal::of(0x54));
+    }
+    if let Some(reason) = cast_water_refusal(caster.move_flags, spell) {
+        return Some(Refusal::of(reason));
+    }
+    if cast_moving_refusal(caster.move_flags, inputs.cast_time_ms, spell) {
+        return Some(Refusal::of(0x2e));
+    }
+    let d = spell?;
+    if let Some(refusal) = d.form_refusal(fields.unit_shapeshift_form(), inputs.form_is_stance) {
+        return Some(Refusal::of(refusal.reason()));
+    }
+    if attributes & ATTR_ONLY_STEALTHED != 0 && !fields.unit_is_stealthed() {
+        return Some(Refusal::of(0x57));
+    }
+    if attributes & ATTR_NOT_IN_COMBAT_ONLY_PEACEFUL != 0
+        && fields.unit_flags() & crate::player::UNIT_FLAG_IN_COMBAT != 0
+    {
+        // `SPELL_FAILED_AFFECTING_COMBAT`, reason 0 (`0x609ed0 xor dl,dl`).
+        return Some(Refusal::of(0));
+    }
+    // `shl edx,cl` (`0x609ef9`) takes the count mod 32.
+    if d.caster_aura_state != 0
+        && fields.unit_aura_state() & 1u32.wrapping_shl(d.caster_aura_state - 1) == 0
+    {
+        return Some(Refusal::of(0x12));
+    }
+    if d.min_faction_id != 0 {
+        // A signed compare against the rank's floor (`0x609f3b jge`); Spell.dbc ranks run 0 to 7.
+        let floor = crate::ui_reputation::RANK_BOUNDS
+            .get(d.min_reputation as usize)
+            .copied()
+            .unwrap_or(i32::MAX);
+        if (inputs.standing)(d.min_faction_id) < floor {
+            return Some(Refusal::of(0x8f));
+        }
+    }
+    // One question for either bit (`0x609f5c`, `0x609f63`).
+    if attributes & (ATTR_ONLY_INDOORS | ATTR_ONLY_OUTDOORS) != 0 {
+        if caster.outdoors {
+            if attributes & ATTR_ONLY_INDOORS != 0 {
+                return Some(Refusal::of(0x52));
+            }
+        } else if attributes & ATTR_ONLY_OUTDOORS != 0 {
+            // `SPELL_FAILED_NO_MOUNTS_ALLOWED` for an effect applying `SPELL_AURA_MOUNTED` (6 and
+            // 78 in the same effect, `0x609fa1`, `0x609fa6`), else `ONLY_OUTDOORS`.
+            let mounts = (0..3).any(|i| d.effects[i] == 6 && d.effect_apply_aura[i] == 78);
+            return Some(Refusal::of(if mounts { 0x4b } else { 0x55 }));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -554,248 +802,5 @@ mod tests {
 }
 
 #[cfg(test)]
-mod cc_refusal_tests {
-    use super::*;
-
-    const STUNNED: u32 = 0x0004_0000;
-    const SILENCED: u32 = 0x0000_2000;
-    const PACIFIED: u32 = 0x0002_0000;
-    const CONFUSED: u32 = 0x0040_0000;
-    const FLEEING: u32 = 0x0080_0000;
-
-    fn spell(prevention_type: u32) -> SpellDisplay {
-        SpellDisplay {
-            prevention_type,
-            ..Default::default()
-        }
-    }
-
-    /// A scan that finds no aura: every arm answers its own reason.
-    fn no_auras() -> impl FnMut(&[u32]) -> benilla_formats::CcExemption {
-        |_: &[u32]| benilla_formats::CcExemption::default()
-    }
-
-    /// The reason alone, dropping the mechanic.
-    fn reason_of(v: Option<(u8, Option<u32>)>) -> Option<u8> {
-        v.map(|(r, _)| r)
-    }
-
-    /// A live caster, nobody else at the reins, no auras.
-    fn cc(flags: u32, d: &SpellDisplay) -> Option<u8> {
-        cast_cc_refusal(flags, Some(100), false, Some(d), &mut no_auras()).map(|(r, _)| r)
-    }
-
-    /// Stun, fear, charm and confuse refuse every spell; silence and pacify only the rows whose
-    /// `PreventionType` names them.
-    #[test]
-    fn crowd_control_refuses_by_prevention_type_except_the_unconditional_arms() {
-        // Fireball's shape (silence), Heroic Strike's (pacify), auto-attack's (neither).
-        let cast = spell(1);
-        let melee = spell(2);
-        let neither = spell(0);
-
-        // The arms with no per-spell gate refuse every row.
-        for (flags, reason) in [(STUNNED, 0x64), (FLEEING, 0x1e), (CONFUSED, 0x16)] {
-            for d in [&cast, &melee, &neither] {
-                assert_eq!(cc(flags, d), Some(reason), "flags {flags:#x}");
-            }
-        }
-        // Charm: somebody else holds the reins.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                0,
-                Some(100),
-                true,
-                Some(&neither),
-                &mut no_auras()
-            )),
-            Some(0x14)
-        );
-
-        assert_eq!(cc(SILENCED, &cast), Some(0x60));
-        assert_eq!(cc(SILENCED, &melee), None);
-        assert_eq!(cc(SILENCED, &neither), None);
-
-        assert_eq!(cc(PACIFIED, &melee), Some(0x5a));
-        assert_eq!(cc(PACIFIED, &cast), None);
-
-        // No record claims no prevention.
-        assert_eq!(cc(0, &cast), None);
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                SILENCED,
-                Some(100),
-                false,
-                None,
-                &mut no_auras()
-            )),
-            None
-        );
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                Some(100),
-                false,
-                None,
-                &mut no_auras()
-            )),
-            Some(0x64),
-            "the stun needs no record"
-        );
-    }
-
-    /// The reference's order, first match wins.
-    #[test]
-    fn the_arms_are_tried_in_the_references_order() {
-        let cast = spell(1);
-        // Charm (1) beats a stun.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED | SILENCED,
-                Some(100),
-                true,
-                Some(&cast),
-                &mut no_auras()
-            )),
-            Some(0x14)
-        );
-        // Stun (2) beats everything below it.
-        assert_eq!(
-            cc(STUNNED | SILENCED | PACIFIED | FLEEING | CONFUSED, &cast),
-            Some(0x64)
-        );
-        // Silence (3) beats fear (5) and confuse (6).
-        assert_eq!(cc(SILENCED | FLEEING | CONFUSED, &cast), Some(0x60));
-        // Out of silence's reach, fear takes it before confuse.
-        assert_eq!(cc(SILENCED | FLEEING | CONFUSED, &spell(0)), Some(0x1e));
-    }
-
-    /// The exemption's three outcomes at an arm.
-    #[test]
-    fn the_exemption_skips_an_arm_or_renames_its_refusal() {
-        let cast = spell(1);
-        let scan = |exempt: bool, mechanic: u32| {
-            move |_: &[u32]| benilla_formats::CcExemption { exempt, mechanic }
-        };
-
-        // No aura of the arm's type: its own reason.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                Some(100),
-                false,
-                Some(&cast),
-                &mut scan(false, 0)
-            )),
-            Some(0x64)
-        );
-        // A blocking aura the cast does not counter: renamed to `0x8d`.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                Some(100),
-                false,
-                Some(&cast),
-                &mut scan(false, 12)
-            )),
-            Some(0x8d)
-        );
-        // The cast grants immunity (Ice Block while stunned): the arm is skipped.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                Some(100),
-                false,
-                Some(&cast),
-                &mut scan(true, 0)
-            )),
-            None
-        );
-        // Skipping the stun arm still leaves silence below it.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED | SILENCED,
-                Some(100),
-                false,
-                Some(&cast),
-                &mut |types: &[u32]| {
-                    // Exempt from the stun arm `{12}` only.
-                    benilla_formats::CcExemption {
-                        exempt: types == [12],
-                        mechanic: 0,
-                    }
-                }
-            )),
-            Some(0x60)
-        );
-    }
-
-    /// Only the renamed refusal carries the mechanic.
-    #[test]
-    fn the_renamed_refusal_carries_the_mechanic_and_the_others_carry_nothing() {
-        let cast = spell(1);
-        let scan = |exempt: bool, mechanic: u32| {
-            move |_: &[u32]| benilla_formats::CcExemption { exempt, mechanic }
-        };
-
-        assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(false, 12)),
-            Some((0x8d, Some(12)))
-        );
-        assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(false, 0)),
-            Some((0x64, None))
-        );
-        assert_eq!(
-            cast_cc_refusal(STUNNED, Some(100), false, Some(&cast), &mut scan(true, 0)),
-            None
-        );
-    }
-
-    /// A dead caster skips all six arms (`0x60980d`'s `jle` on `UNIT_FIELD_HEALTH`).
-    #[test]
-    fn a_dead_caster_takes_no_crowd_control_refusal() {
-        let cast = spell(1);
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                Some(0),
-                false,
-                Some(&cast),
-                &mut no_auras()
-            )),
-            None
-        );
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                0,
-                Some(0),
-                true,
-                Some(&cast),
-                &mut no_auras()
-            )),
-            None
-        );
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                Some(1),
-                false,
-                Some(&cast),
-                &mut no_auras()
-            )),
-            Some(0x64)
-        );
-        // No health field yet is not death.
-        assert_eq!(
-            reason_of(cast_cc_refusal(
-                STUNNED,
-                None,
-                false,
-                Some(&cast),
-                &mut no_auras()
-            )),
-            Some(0x64)
-        );
-    }
-}
+#[path = "validator_tests.rs"]
+mod caster_tests;

@@ -18,14 +18,14 @@ use bevy::prelude::*;
 use benilla_assets::coords::bevy_to_wow;
 use benilla_assets::MapCatalogRes;
 use benilla_protocol::messages::{BattlefieldPosition, BattlefieldPositions as PositionsPacket};
-use benilla_ui::script::{BattlefieldFlagView, BattlefieldPositionView, UiScript};
+use benilla_ui::script::{BattlefieldFlagView, BattlefieldPositionView};
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, EnteredWorldMessage, GuidIndex, NetCommands, NetEntity, SelfGuid};
 use crate::query_cache::Ask;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 use crate::ui_world_map::{project_on_displayed, WorldMapUiData};
 
 /// `RequestBattlefieldPositions` (`0x4aa5c0`) sends at most once per 5000 ms (stamp
@@ -90,7 +90,7 @@ fn flag_token(faction: Option<&str>) -> Option<&'static str> {
 }
 
 fn feed_battlefield_positions(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut state: ResMut<BattlefieldPositions>,
     queue: Res<BattlefieldQueue>,
     data: Option<Res<WorldMapUiData>>,
@@ -104,109 +104,113 @@ fn feed_battlefield_positions(
     // The last empty push: with no list the engine is told on change, with one every frame.
     mut last_empty: Local<crate::ui_script::VmMemo<Option<(bool, u32)>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let active = queue.active_map();
-    // `GetBattlefieldMapIconScale`: the active slot's `Map.dbc` row, map 0's with no slot.
-    let icon_scale = maps
-        .as_deref()
-        .and_then(|m| m.0.battleground(active.unwrap_or(0)))
-        .map_or(1.0, |b| b.minimap_icon_scale);
-    let BattlefieldPositions {
-        packet,
-        pending_names,
-        ..
-    } = &mut *state;
-    // The getter's calls are its name lookups with the callback `0x4ac190` (`0x4ac118`): the map's
-    // `OnUpdate` makes them every frame it shows (`WorldMapFrame.lua:408`,
-    // `Blizzard_BattlefieldMinimap.lua:290`), so a row read nameless is asked, a refused name
-    // again once per answer. The push itself only reads.
-    let looked_up = script.take_battlefield_position_lookups();
-    let (Some(map), Some(packet)) = (active, packet.as_ref()) else {
-        let key = Some((false, icon_scale.to_bits()));
-        let last = last_empty.get(&script);
-        if *last != key {
-            *last = key;
-            script.set_battlefield_positions(Vec::new(), None, icon_scale);
-        }
-        return;
-    };
-    *last_empty.get(&script) = Some((true, icon_scale.to_bits()));
-
-    let selection = script.world_map_selection();
-    let project = |x: f32, y: f32| {
-        data.as_deref()
-            .and_then(|d| project_on_displayed(d, selection, map, x, y))
-            .unwrap_or((0.0, 0.0))
-    };
-    let mut name_landed = false;
-    let mut players = Vec::with_capacity(packet.players.len());
-    for p in &packet.players {
-        if me.0 == Some(p.guid) || group.members.iter().any(|m| m.guid == p.guid) {
-            continue;
-        }
-        let ask = if looked_up.contains(&players.len()) {
-            Ask::Event(&commands)
-        } else {
-            Ask::Read
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
         };
-        let (x, y) = live_or_packet(p, &guids, &unit_pos);
-        let name = names.resolve_player(p.guid, ask).map(str::to_string);
-        match name {
-            None => {
-                if !pending_names.contains(&p.guid) {
-                    pending_names.push(p.guid);
+        let active = queue.active_map();
+        // `GetBattlefieldMapIconScale`: the active slot's `Map.dbc` row, map 0's with no slot.
+        let icon_scale = maps
+            .as_deref()
+            .and_then(|m| m.0.battleground(active.unwrap_or(0)))
+            .map_or(1.0, |b| b.minimap_icon_scale);
+        let BattlefieldPositions {
+            packet,
+            pending_names,
+            ..
+        } = &mut *state;
+        // The getter's calls are its name lookups with the callback `0x4ac190` (`0x4ac118`): the
+        // map's `OnUpdate` makes them every frame it shows (`WorldMapFrame.lua:408`,
+        // `Blizzard_BattlefieldMinimap.lua:290`), so a row read nameless is asked, a refused name
+        // again once per answer. The push itself only reads.
+        let looked_up = script.take_battlefield_position_lookups();
+        let (Some(map), Some(packet)) = (active, packet.as_ref()) else {
+            let key = Some((false, icon_scale.to_bits()));
+            let last = last_empty.get(script);
+            if *last != key {
+                *last = key;
+                script.set_battlefield_positions(Vec::new(), None, icon_scale);
+            }
+            return;
+        };
+        *last_empty.get(script) = Some((true, icon_scale.to_bits()));
+
+        let selection = script.world_map_selection();
+        let project = |x: f32, y: f32| {
+            data.as_deref()
+                .and_then(|d| project_on_displayed(d, selection, map, x, y))
+                .unwrap_or((0.0, 0.0))
+        };
+        let mut name_landed = false;
+        let mut players = Vec::with_capacity(packet.players.len());
+        for p in &packet.players {
+            if me.0 == Some(p.guid) || group.members.iter().any(|m| m.guid == p.guid) {
+                continue;
+            }
+            let ask = if looked_up.contains(&players.len()) {
+                Ask::Event(&commands)
+            } else {
+                Ask::Read
+            };
+            let (x, y) = live_or_packet(p, &guids, &unit_pos);
+            let name = names.resolve_player(p.guid, ask).map(str::to_string);
+            match name {
+                None => {
+                    if !pending_names.contains(&p.guid) {
+                        pending_names.push(p.guid);
+                    }
+                }
+                Some(_) => {
+                    if let Some(i) = pending_names.iter().position(|g| *g == p.guid) {
+                        pending_names.swap_remove(i);
+                        name_landed = true;
+                    }
                 }
             }
-            Some(_) => {
-                if let Some(i) = pending_names.iter().position(|g| *g == p.guid) {
-                    pending_names.swap_remove(i);
-                    name_landed = true;
-                }
-            }
+            players.push(BattlefieldPositionView {
+                uv: project(x, y),
+                name,
+            });
         }
-        players.push(BattlefieldPositionView {
-            uv: project(x, y),
-            name,
+        let flag = packet.carrier.as_ref().map(|c| {
+            let (x, y) = live_or_packet(c, &guids, &unit_pos);
+            let faction = script
+                .eval::<Option<String>>(r#"return (UnitFactionGroup("player"))"#)
+                .ok()
+                .flatten();
+            BattlefieldFlagView {
+                uv: project(x, y),
+                token: flag_token(faction.as_deref()).map(str::to_string),
+            }
         });
-    }
-    let flag = packet.carrier.as_ref().map(|c| {
-        let (x, y) = live_or_packet(c, &guids, &unit_pos);
-        let faction = script
-            .eval::<Option<String>>(r#"return (UnitFactionGroup("player"))"#)
-            .ok()
-            .flatten();
-        BattlefieldFlagView {
-            uv: project(x, y),
-            token: flag_token(faction.as_deref()).map(str::to_string),
+        script.set_battlefield_positions(players, flag, icon_scale);
+        if name_landed {
+            script.fire_event("WORLD_MAP_NAME_UPDATE", Vec::new());
         }
-    });
-    script.set_battlefield_positions(players, flag, icon_scale);
-    if name_landed {
-        script.fire_event("WORLD_MAP_NAME_UPDATE", Vec::new());
-    }
+    })
 }
 
 fn drain_battlefield_positions(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut state: ResMut<BattlefieldPositions>,
     queue: Res<BattlefieldQueue>,
     commands: Res<NetCommands>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    if script.take_battlefield_position_requests() == 0 {
-        return;
-    }
-    if queue.active_map().is_none() {
-        state.clear();
-        return;
-    }
-    if state.request_due(Instant::now()) {
-        let _ = commands.0.send(ClientCommand::RequestBattlefieldPositions);
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        if script.take_battlefield_position_requests() == 0 {
+            return;
+        }
+        if queue.active_map().is_none() {
+            state.clear();
+            return;
+        }
+        if state.request_due(Instant::now()) {
+            let _ = commands.0.send(ClientCommand::RequestBattlefieldPositions);
+        }
+    })
 }
 
 fn reset_on_world_enter(
@@ -249,7 +253,7 @@ impl Plugin for BattlefieldPositionsPlugin {
             (
                 reset_on_world_enter.before(feed_battlefield_positions),
                 feed_battlefield_positions.in_set(UiFeed),
-                drain_battlefield_positions.after(UiInput),
+                drain_battlefield_positions.in_set(crate::ui_script::UiDrain),
             ),
         );
     }
@@ -258,6 +262,7 @@ impl Plugin for BattlefieldPositionsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::script::UiScript;
 
     /// The getter's calls are the name lookups (`0x4ac118`, callback `0x4ac190`), which the map's
     /// `OnUpdate` makes every frame: the packet and the frames without a call ask nothing, a call

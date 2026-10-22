@@ -1,60 +1,185 @@
 //! The interface events of the field watches and the packet handlers that signal unit events
-//! ([`crate::field_watch`]): each notice the packets wrote this frame fires its callback's
-//! signals, in wire order, after every snapshot those events' handlers read is pushed
-//! ([`FieldEventPushes`]) and the unit tokens are seated ([`crate::ui_aura::AuraEvents`]).
+//! ([`crate::field_watch`]): the notice lane, whose notices fire their callbacks' signals in the
+//! packets' order among the other lanes ([`crate::lanes`]), after every snapshot those events'
+//! handlers read is pushed ([`FieldEventPushes`]) and the unit tokens are seated
+//! ([`crate::ui_aura::AuraEvents`]), as the reference's notify pass follows a block's write passes
+//! (`0x465277` after `0x46520e`, `0x465222`).
 
-use bevy::ecs::message::MessageCursor;
 use bevy::prelude::*;
 
 use benilla_ui::script::{ScriptValue, UiScript};
 
-use crate::field_watch::FieldNotice;
+use crate::field_watch::{FieldNotice, NoticeLane};
+use crate::lanes::Until;
 
 /// The feeds that push what a field event's handlers read: the unit tokens' snapshots with the XP
-/// and rest values (`feed_units`), the group's and the pet's tokens, the pet's stats, the combat
-/// stats of the player and of the pet, the honor block and the watched faction. The firing runs
-/// after all of them, as the reference writes a whole block before its notify pass.
+/// and rest values (`feed_units`), the group's and the pet's tokens, the pet's stats, the player's
+/// combat stats and inventory, the inspected unit's slots, the honor block and the watched
+/// faction. The lanes' drain runs after all of them, as the reference writes a whole block before
+/// its notify pass.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct FieldEventPushes;
 
-/// The read position in the notices, one for both of their readers: the firing while the in-game
-/// interface is up and the drop while it is not, so each notice is taken exactly once, the frame
-/// it is written.
-#[derive(Resource, Default)]
-pub(crate) struct FieldNoticeCursor(MessageCursor<FieldNotice>);
-
-/// Fire this frame's field notices in the order the packets wrote them. Under the unit feed's
-/// gate, so only while the in-game interface is up; [`drop_field_notices`] takes them otherwise.
-pub(crate) fn fire_field_notices(
-    script: Option<NonSendMut<UiScript>>,
-    notices: Res<Messages<FieldNotice>>,
-    mut cursor: ResMut<FieldNoticeCursor>,
-    mut sink: crate::ui_action::MessageSink,
+/// What a field notice's firing reads.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct NoticeFiring<'w, 's> {
+    sink: crate::ui_action::MessageSink<'w>,
+    // The drunk watcher names the player it runs on (`0x609210`).
+    names: Res<'w, crate::names::NameCache>,
     // The quest log's watcher reads the slots.
-    me: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
-) {
-    let fresh: Vec<FieldNotice> = cursor.0.read(&notices).copied().collect();
-    // No VM, nobody to hear them: they are dropped, as below.
-    let Some(mut script) = script else {
-        return;
-    };
-    for notice in fresh {
+    me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
+    // The form table the bonus bar's offset reads (`0x4e4fc0`).
+    spells: Option<Res<'w, crate::ui_action::Spells>>,
+}
+
+impl NoticeFiring<'_, '_> {
+    /// One notice's signals.
+    fn fire(&mut self, script: &mut UiScript, notice: FieldNotice) {
         if notice == FieldNotice::QuestLog {
-            if let Some(store) = me.iter().next() {
+            if let Some(store) = self.me.iter().next() {
                 script.quest_log_changed(crate::ui_quest_log::slot_views(&store.0));
             }
-            continue;
+            return;
         }
-        fire(&mut script, &mut sink, notice);
+        if let FieldNotice::Tutorial { id } = notice {
+            // `0x4b5390` with no delay, inside the watcher's run.
+            let published = self.tutorials.as_ref().and_then(|t| t.lock().fire_now(id));
+            if let Some(published) = published {
+                crate::tutorial::fire_published(script, &self.sink.sounds, published);
+            }
+            return;
+        }
+        if let FieldNotice::Drunk { guid, old, new } = notice {
+            drunk(script, &mut self.sink, &self.names, guid, old, new);
+            return;
+        }
+        if notice == FieldNotice::Shapeshift {
+            // `0x5de016` → `0x4b3250`: `0x4e5bf0`'s event, then its own (`0x4b325a`).
+            script.fire_event("ACTIONBAR_UPDATE_STATE", vec![]);
+            script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
+            // `0x5de01b` → `0x4e4fc0`: the offset stored, then the event, on every form change.
+            let offset =
+                crate::ui_action::bonus_bar_offset(self.me.iter().next(), self.spells.as_deref());
+            script.set_bonus_bar_offset(offset);
+            script.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+            return;
+        }
+        fire(script, &mut self.sink, notice);
     }
 }
 
-/// The field notices' second reader and its position: [`drop_field_notices`] under the exact
-/// complement of the unit feed's gate, so a notice is fired or dropped the frame it is written,
-/// never left to age in the buffer.
-pub(super) fn add_notice_drop(app: &mut App) {
-    app.add_message::<FieldNotice>()
-        .init_resource::<FieldNoticeCursor>()
+/// The notice lane's head ([`crate::lanes`]).
+fn peek(world: &World) -> Option<crate::lanes::Stamp> {
+    world.get_resource::<NoticeLane>()?.peek()
+}
+
+/// The notices `until` admits, in stamp order, each one's signals with the host lent; the lane's
+/// firing stops after a notice whose firing stamped anything, so the drain takes what it pushed
+/// next. With no VM there is nobody to hear them, and they are dropped, as below.
+fn fire_lane(
+    hosted_vm: &mut crate::script_calls::HostedVm,
+    lane: &mut NoticeLane,
+    firing: &mut NoticeFiring,
+    until: Until,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            lane.clear();
+            return;
+        };
+        while let Some((stamp, notice)) = lane.pop(until) {
+            let ((), moved) = crate::lanes::firing(stamp, || firing.fire(script, notice));
+            if moved {
+                break;
+            }
+        }
+    })
+}
+
+/// The notice lane's `fire_until`.
+fn fire_notices(
+    In(until): In<Until>,
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut lane: ResMut<NoticeLane>,
+    mut firing: NoticeFiring,
+) {
+    fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+}
+
+/// Every notice waiting, fired alone, for a test that drives the notices without the chat lane.
+#[cfg(test)]
+pub(crate) fn fire_field_notices(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut lane: ResMut<NoticeLane>,
+    mut firing: NoticeFiring,
+) {
+    let until = Until::all();
+    while lane.peek().is_some_and(|s| until.admits(s)) {
+        fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+    }
+}
+
+/// `0x5e2a90`'s run on the player `guid` whose drunk byte moved from `old` to `new`. On the active
+/// player, `UNIT_LEVEL` for `"target"` when it can attack its target (`0x5e2afb`-`0x5e2b38`), as
+/// `UnitLevel` lowers such a unit's level by the player's drunkenness (`0x518096`). Then each
+/// message as a system chat line (`0x49a870`, type 0xa, `0x5e2c5d`): `DRUNK_MESSAGE_SELF%d` for
+/// the active player (`0x5e2bf8`), else `DRUNK_MESSAGE_OTHER%d` filled with the player's name
+/// (`0x5e2c09`, `0x609210`), the text the key names or empty (`0x703bf0`). The active player's
+/// name-plate refresh and camera field-of-view bias (`0x605550`, `0x511250`) are not built.
+fn drunk(
+    script: &mut UiScript,
+    sink: &mut crate::ui_action::MessageSink,
+    names: &crate::names::NameCache,
+    guid: u64,
+    old: u8,
+    new: u8,
+) {
+    let me = script.is_active_player(guid);
+    if me && script.player_can_attack_target() {
+        script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str("target".to_string())]);
+    }
+    let name = (!me).then(|| {
+        names
+            .resolve_player(guid, crate::query_cache::Ask::Read)
+            .map_or_else(|| script.unknown_object_text(), str::to_string)
+    });
+    let lines: Vec<_> = drunk_messages(old, new)
+        .into_iter()
+        .map(|k| {
+            let key = if me {
+                format!("DRUNK_MESSAGE_SELF{k}")
+            } else {
+                format!("DRUNK_MESSAGE_OTHER{k}")
+            };
+            let template = script
+                .lua()
+                .globals()
+                .get::<String>(key)
+                .unwrap_or_default();
+            let args: Vec<benilla_ui::strings::Arg<'_>> = name
+                .as_deref()
+                .map(benilla_ui::strings::Arg::S)
+                .into_iter()
+                .collect();
+            crate::ui_action::Shown::unkeyed(
+                benilla_ui::messages::MsgKind::Chat,
+                benilla_ui::strings::fill(&template, &args),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Each to the line function inside the watcher's run (`0x5e2c68` → `0x49a870`).
+    for line in lines {
+        crate::ui_action::show_now(script, sink, "ui_unit", line);
+    }
+}
+
+/// The notice lane and its drop: [`drop_field_notices`] under the exact complement of the
+/// drain's gate, so a notice is fired or dropped the frame it is written, never left to age.
+pub(super) fn add_notice_lane(app: &mut App) {
+    use crate::lanes::LaneApp;
+    app.init_resource::<NoticeLane>()
+        .add_lane("field notices", peek, fire_notices, None)
         .add_systems(
             Update,
             drop_field_notices
@@ -68,11 +193,8 @@ pub(super) fn add_notice_drop(app: &mut App) {
 /// to hear them, and the one that comes up later must not hear changes from before it. The
 /// reference's interface exists before the world it watches, so it has no such window; the
 /// snapshots the VM reads are pushed whole when it comes up, as they are at a `/reload`.
-pub(super) fn drop_field_notices(
-    notices: Res<Messages<FieldNotice>>,
-    mut cursor: ResMut<FieldNoticeCursor>,
-) {
-    cursor.0.clear(&notices);
+pub(super) fn drop_field_notices(mut lane: ResMut<NoticeLane>) {
+    lane.clear();
 }
 
 /// One callback's signals.
@@ -89,9 +211,12 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
         FieldNotice::RestState { old, new } => {
             // `0x5de4e0`: the signal, then the line for the new state.
             script.fire_event("UPDATE_EXHAUSTION", vec![]);
+            // Through `DisplayError` (`0x5de52c`), whose chat row shows it at once (`0x496842`).
             let line = super::rest_state_message(old, new)
                 .and_then(|key| crate::ui_action::keyed_line(script, key));
-            crate::ui_action::show_messages(script, sink, "ui_unit", line);
+            if let Some(line) = line {
+                crate::ui_action::show_now(script, sink, "ui_unit", line);
+            }
         }
         FieldNotice::CombatSkill => {
             // `0x5ed990`, in its order (`0x5ed99f`, `0x5ed9b3`, `0x5ed9c7`).
@@ -114,8 +239,14 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                 script.fire_event(global, vec![]);
             }
         }
-        // Fired by [`fire_field_notices`], which holds the slots.
-        FieldNotice::QuestLog => {}
+        // `0x5ddffa`.
+        FieldNotice::ComboPoints => script.fire_event("PLAYER_COMBO_POINTS", vec![]),
+        // Fired by [`NoticeFiring::fire`], which holds the slots, the banks, the names and the
+        // form table.
+        FieldNotice::QuestLog
+        | FieldNotice::Tutorial { .. }
+        | FieldNotice::Drunk { .. }
+        | FieldNotice::Shapeshift => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -132,9 +263,41 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                         crate::ui_action::Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, t)
                     }),
             ];
-            crate::ui_action::show_messages(script, sink, "ui_unit", lines.into_iter().flatten());
+            for line in lines.into_iter().flatten() {
+                crate::ui_action::show_now(script, sink, "ui_unit", line);
+            }
         }
     }
+}
+
+/// The drunk thresholds, the floats at `0x80af68`.
+const DRUNK_THRESHOLDS: [f32; 3] = [0.01, 0.5, 0.9];
+
+/// The numbers of the drunk messages a move of the byte from `old` to `new` prints, in order, over
+/// the drunk fractions of the two bytes (`0x5e2acc`-`0x5e2aeb`, `0x5e2b5e`-`0x5e2b7c`). Threshold
+/// k, from the lowest (`0x5e2b6f`), is crossed rising when `old < t <= new` (`0x5e2b8b`,
+/// `0x5e2b9b`) and falling when `new < t <= old` (`0x5e2bab`, `0x5e2bbf`); a rise prints k + 2 and
+/// skips threshold k + 1 (`0x5e2bd0`-`0x5e2bdc`), a fall prints k + 1.
+fn drunk_messages(old: u8, new: u8) -> Vec<u8> {
+    let (old, new) = (
+        crate::player::drunk::fraction(old),
+        crate::player::drunk::fraction(new),
+    );
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < DRUNK_THRESHOLDS.len() {
+        let t = DRUNK_THRESHOLDS[k];
+        let rising = old < t && new >= t;
+        let falling = old >= t && new < t;
+        if rising || falling {
+            if new > old {
+                k += 1;
+            }
+            out.push(k as u8 + 1);
+        }
+        k += 1;
+    }
+    out
 }
 
 /// A unit notice's signals into a bare VM, for the stock-file tests that drive the frames off the
@@ -163,7 +326,7 @@ fn signal_unit(script: &mut UiScript, guid: u64, id: u16) {
     }
 }
 
-/// `0x5de4b0`: the event its registration names, `arg1 = "player"`.
+/// A [`FieldNotice::Player`]: the event its id names, `arg1 = "player"`.
 fn fire_player(script: &mut UiScript, id: u16) {
     let Some(event) = player_event(id) else {
         return;
@@ -208,6 +371,7 @@ fn unit_event(id: u16) -> Option<&'static str> {
         159..=161 => "UNIT_ATTACK_POWER",
         162..=164 => "UNIT_RANGED_ATTACK_POWER",
         183 => "UNIT_NAME_UPDATE",
+        186 => "UNIT_INVENTORY_CHANGED",
         187 => "UNIT_CLASSIFICATION_CHANGED",
         345 => "PLAYER_GUILD_UPDATE",
         407 => "PLAYER_FLAGS_CHANGED",
@@ -226,6 +390,7 @@ fn global_event(id: u16) -> Option<&'static str> {
         id::PET_ATTACK_STOP => "PET_ATTACK_STOP",
         id::PLAYER_GUILD_UPDATE => "PLAYER_GUILD_UPDATE",
         id::TABARD_CANSAVE_CHANGED => "TABARD_CANSAVE_CHANGED",
+        id::PLAYER_UNGHOST => "PLAYER_UNGHOST",
         id::PLAYER_UPDATE_RESTING => "PLAYER_UPDATE_RESTING",
         id::PET_UI_UPDATE => "PET_UI_UPDATE",
         id::PLAYTIME_CHANGED => "PLAYTIME_CHANGED",
@@ -233,10 +398,12 @@ fn global_event(id: u16) -> Option<&'static str> {
     })
 }
 
-/// The event-table name of an id `0x5dd8a0` registers `0x5de4b0` with.
+/// The event-table name of an id `0x5dd8a0` registers `0x5de4b0` with, or another callback
+/// signals with `"player"` ([`FieldNotice::Player`]).
 fn player_event(id: u16) -> Option<&'static str> {
     Some(match id {
         149 => "UNIT_RESISTANCES",
+        186 => "UNIT_INVENTORY_CHANGED",
         189 => "PLAYER_XP_UPDATE",
         201 => "PLAYER_DAMAGE_DONE_MODS",
         372 => "UPDATE_FACTION",
@@ -291,7 +458,7 @@ mod tests {
                 );
             }
         }
-        for id in [149, 189, 201, 372, 406, 523, 524] {
+        for id in [149, 186, 189, 201, 372, 406, 523, 524] {
             assert_eq!(
                 player_event(id),
                 table.get(&id).map(String::as_str),
@@ -316,10 +483,10 @@ mod tests {
     /// A world whose VM records every event the notices fire, with `guids` seated.
     fn world(guids: benilla_ui::script::UnitGuids) -> App {
         let mut app = App::new();
-        app.add_message::<FieldNotice>()
-            .init_resource::<FieldNoticeCursor>()
+        app.init_resource::<crate::field_watch::NoticeLane>()
             .init_resource::<crate::ui_chat::ChatLog>()
-            .init_resource::<crate::sound::MessageSounds>();
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::names::NameCache>();
         let mut script = UiScript::new().unwrap();
         script
             .run(
@@ -340,7 +507,7 @@ mod tests {
 
     fn fired(app: &mut App, notices: &[FieldNotice]) -> Vec<String> {
         app.world_mut()
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .write_batch(notices.iter().copied());
         app.world_mut().run_system_once(fire_field_notices).unwrap();
         let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
@@ -358,6 +525,32 @@ mod tests {
             mouseover: MOB,
             ..Default::default()
         }
+    }
+
+    /// `UNIT_INVENTORY_CHANGED` from its three kinds of producer: the visible-item bridge
+    /// (`0x51bd70`) and the record set-up (`0x5d85fe`) for each token of the player, the
+    /// ammunition and slot paths for `"player"` alone (`0x4c7110`, `0x4c72e0`, `0x4c8509`).
+    #[test]
+    fn the_inventory_event_reaches_each_token_or_the_player() {
+        let mut app = world(seated());
+        let id = crate::field_watch::id::UNIT_INVENTORY_CHANGED;
+        assert_eq!(
+            fired(
+                &mut app,
+                &[
+                    FieldNotice::Unit { guid: ME, id },
+                    FieldNotice::Signal { guid: ME, id },
+                    FieldNotice::Player { id }
+                ]
+            ),
+            [
+                "UNIT_INVENTORY_CHANGED player",
+                "UNIT_INVENTORY_CHANGED target",
+                "UNIT_INVENTORY_CHANGED player",
+                "UNIT_INVENTORY_CHANGED target",
+                "UNIT_INVENTORY_CHANGED player"
+            ]
+        );
     }
 
     /// The bridge fires once per token naming the unit, in the fan-out's order; a unit with no
@@ -422,7 +615,9 @@ mod tests {
     }
 
     /// A global notice fires its event bare, once, whatever unit raised it; the PvP preference
-    /// shows its toast for the new state, then its verbose sentence as a chat line.
+    /// shows its toast for the new state, then its verbose sentence as a chat line, whose
+    /// `CHAT_MSG_SYSTEM` fires inside the watcher's run, its line function called directly
+    /// (`0x5eeb5d` → `0x49a870`).
     #[test]
     fn a_global_notice_fires_bare_and_the_pvp_preference_speaks() {
         let mut app = world(seated());
@@ -446,20 +641,165 @@ mod tests {
                     FieldNotice::Global { id: 335 },
                     FieldNotice::PvpPreference { on: false },
                     FieldNotice::Global { id: 300 },
+                    FieldNotice::Global { id: 401 },
                 ]
             ),
             [
                 "PLAYER_REGEN_DISABLED nil",
                 "UI_INFO_MESSAGE on",
+                "CHAT_MSG_SYSTEM on, verbose",
                 "PET_ATTACK_STOP nil",
                 "UI_INFO_MESSAGE off",
+                "CHAT_MSG_SYSTEM off, verbose",
+                "PLAYER_UNGHOST nil",
             ]
+        );
+        assert!(
+            app.world()
+                .resource::<crate::ui_chat::ChatLog>()
+                .pending_lines()
+                .is_empty(),
+            "the lines fired in the watcher's run, not from the chat lane"
+        );
+    }
+
+    /// `0x5e2a90`'s thresholds, the floats 0.01, 0.5 and 0.9 at `0x80af68` against
+    /// `min(byte, 100) · 0.01` as a single (`0x5e2acc`-`0x5e2aeb`, `0x5e2b5e`-`0x5e2b7c`): a rise
+    /// across threshold k prints message k + 2 and skips threshold k + 1 (`0x5e2bd5`-`0x5e2bdc`), a
+    /// fall prints k + 1, in threshold order.
+    #[test]
+    fn the_drunk_messages_follow_the_thresholds_crossed() {
+        for (old, new, want) in [
+            (0, 1, &[2][..]),
+            (1, 0, &[1]),
+            (0, 49, &[2]),
+            (0, 50, &[2]),
+            (49, 50, &[3]),
+            (50, 49, &[2]),
+            (89, 90, &[4]),
+            (90, 89, &[3]),
+            (0, 95, &[2, 4]),
+            (95, 0, &[1, 2, 3]),
+            (30, 95, &[3]),
+            (60, 60, &[]),
+            (100, 255, &[]),
+        ] {
+            assert_eq!(drunk_messages(old, new), want, "{old} -> {new}");
+        }
+    }
+
+    /// The drunk watcher's run (`0x5e2a90`): on the active player, `UNIT_LEVEL` for `"target"` when
+    /// the player can attack its target (`0x5e2afb`-`0x5e2b38`); then, on any player, each message
+    /// as a system chat line (`0x49a870`, type 0xa): `DRUNK_MESSAGE_SELF%d` for the active player
+    /// (`0x5e2bf8`), else `DRUNK_MESSAGE_OTHER%d` filled with the player's name (`0x5e2c09`,
+    /// `0x609210`).
+    #[test]
+    fn the_drunk_watcher_signals_the_target_and_speaks() {
+        const OTHER: u64 = 0x08;
+        struct Attackable;
+        impl benilla_ui::script::UnitRelations for Attackable {
+            fn holds(&self, guid: u64) -> bool {
+                guid == MOB || guid == ME
+            }
+            fn reaction(&self, _: u64, _: u64) -> Option<u8> {
+                None
+            }
+            fn can_attack(&self, a: u64, b: u64) -> Option<bool> {
+                Some(a == ME && b == MOB)
+            }
+            fn can_assist(&self, _: u64, _: u64) -> Option<bool> {
+                None
+            }
+            fn can_cooperate(&self, _: u64, _: u64) -> Option<bool> {
+                None
+            }
+            fn is_pvp(&self, _: u64) -> Option<bool> {
+                None
+            }
+        }
+        let mut app = world(benilla_ui::script::UnitGuids {
+            target: MOB,
+            ..seated()
+        });
+        app.world_mut()
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(OTHER, "Bob".into(), None);
+        {
+            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            script.set_unit_relations(Some(std::rc::Rc::new(Attackable)));
+            script
+                .run(
+                    r#"
+                    for k = 1, 4 do
+                        setglobal("DRUNK_MESSAGE_SELF" .. k, "self " .. k)
+                        setglobal("DRUNK_MESSAGE_OTHER" .. k, "%s other " .. k)
+                    end
+                "#,
+                )
+                .unwrap();
+        }
+        let drunk = |guid, old, new| FieldNotice::Drunk { guid, old, new };
+        assert_eq!(
+            fired(&mut app, &[drunk(ME, 0, 95)]),
+            [
+                "UNIT_LEVEL target",
+                "CHAT_MSG_SYSTEM self 2",
+                "CHAT_MSG_SYSTEM self 4"
+            ]
+        );
+        // Another player: no signal, its name in the line.
+        assert_eq!(
+            fired(&mut app, &[drunk(OTHER, 95, 0)]),
+            [
+                "CHAT_MSG_SYSTEM Bob other 1",
+                "CHAT_MSG_SYSTEM Bob other 2",
+                "CHAT_MSG_SYSTEM Bob other 3"
+            ]
+        );
+        // A target the player cannot attack: the lines alone.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .set_unit_guids(&seated());
+        assert_eq!(
+            fired(&mut app, &[drunk(ME, 60, 40)]),
+            ["CHAT_MSG_SYSTEM self 2"]
+        );
+        assert!(
+            app.world()
+                .resource::<crate::ui_chat::ChatLog>()
+                .pending_lines()
+                .is_empty(),
+            "each line fired in the watcher's run (`0x5e2c68`)"
+        );
+    }
+
+    /// A watcher's tutorial fires inside its run (`0x4b5390` with delay 0): the `TutorialPopup` cue
+    /// and `TUTORIAL_TRIGGER` with the number plus one, ahead of the next notice's event, once per
+    /// fire-once bit.
+    #[test]
+    fn a_watchers_tutorial_fires_in_its_place_once() {
+        let mut app = world(seated());
+        app.init_resource::<crate::tutorial::Tutorials>();
+        app.world_mut()
+            .resource::<crate::tutorial::Tutorials>()
+            .lock()
+            .apply_flags(&[0u8; 8]);
+        assert_eq!(
+            fired(
+                &mut app,
+                &[
+                    FieldNotice::Tutorial { id: 0x1d },
+                    FieldNotice::Global { id: 405 },
+                    FieldNotice::Tutorial { id: 0x1d },
+                ]
+            ),
+            ["TUTORIAL_TRIGGER 30", "PLAYER_UPDATE_RESTING nil"]
         );
         assert_eq!(
             app.world()
-                .resource::<crate::ui_chat::ChatLog>()
-                .pending_lines(),
-            ["on, verbose", "off, verbose"]
+                .resource::<crate::sound::MessageSounds>()
+                .queued_cues(),
+            ["TutorialPopup"]
         );
     }
 
@@ -468,7 +808,7 @@ mod tests {
     fn a_dropped_notice_never_fires_later() {
         let mut app = world(seated());
         app.world_mut()
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .write(FieldNotice::Player { id: 523 });
         app.world_mut().run_system_once(drop_field_notices).unwrap();
         assert_eq!(
@@ -477,33 +817,38 @@ mod tests {
         );
     }
 
-    /// The drop's own registration: while no in-game interface is up it takes each notice the
-    /// frame it is written; once one is up it leaves them to the firing.
+    /// The lane's registration: while no in-game interface is up the drop takes each notice the
+    /// frame it is written, unheard; once one is up the lanes' drain fires it.
     #[test]
     fn the_drop_runs_exactly_while_no_interface_is_up() {
-        let mut app = App::new();
-        add_notice_drop(&mut app);
-        let unread = |app: &mut App, notice: FieldNotice| -> usize {
+        let mut app = world(seated());
+        add_notice_lane(&mut app);
+        let heard = |app: &mut App, notice: FieldNotice| -> Vec<String> {
             app.world_mut()
-                .resource_mut::<Messages<FieldNotice>>()
+                .resource_mut::<crate::field_watch::NoticeLane>()
                 .write(notice);
             app.update();
-            app.world_mut()
-                .resource_scope(|world, cursor: Mut<FieldNoticeCursor>| {
-                    cursor.0.len(world.resource::<Messages<FieldNotice>>())
-                })
+            assert_eq!(
+                app.world()
+                    .resource::<crate::field_watch::NoticeLane>()
+                    .iter()
+                    .count(),
+                0,
+                "fired or dropped the frame it is written"
+            );
+            seen(app)
         };
         // No state yet: the login screen's side of the gate.
-        assert_eq!(unread(&mut app, FieldNotice::Player { id: 189 }), 0);
+        assert!(heard(&mut app, FieldNotice::Player { id: 189 }).is_empty());
         app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         assert_eq!(
-            unread(&mut app, FieldNotice::Player { id: 189 }),
-            1,
-            "the interface is up: the firing's to take"
+            heard(&mut app, FieldNotice::Player { id: 189 }),
+            ["PLAYER_XP_UPDATE player"],
+            "the interface is up: the drain fires it"
         );
         // An entry load pending is the interface not up yet.
         app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
-        assert_eq!(unread(&mut app, FieldNotice::Player { id: 406 }), 0);
+        assert!(heard(&mut app, FieldNotice::Player { id: 406 }).is_empty());
     }
 
     /// A self player seated in a world that runs `feed_units` and the honor feed, its VM
@@ -512,8 +857,7 @@ mod tests {
         use crate::net::{Guid, NetCommands, ObjectStore, SelfPlayer};
         let mut app = App::new();
         app.add_message::<crate::net::FieldChanged>()
-            .add_message::<FieldNotice>()
-            .init_resource::<FieldNoticeCursor>()
+            .init_resource::<crate::field_watch::NoticeLane>()
             .init_resource::<crate::target::Selection>()
             .init_resource::<super::super::UnitFeedState>()
             .init_resource::<crate::names::NameCache>()
@@ -556,6 +900,194 @@ mod tests {
         out
     }
 
+    /// `PLAYER_TARGET_CHANGED` re-shows the inspect window on the new target
+    /// (`Blizzard_InspectUI.lua:29-31`), whose doll reads its slots inside the call
+    /// (`InspectPaperDollFrame.lua:57-79`): the aura feed seats the new target's guid, the inspect
+    /// feed pushes its slots, then the event fires. Both edges are declared, not left to
+    /// registration order.
+    #[test]
+    fn a_new_targets_slots_are_pushed_before_its_target_event() {
+        use crate::game_plugins::schedule_tests::{census, headless_client, SyncPoints};
+
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !c.systems.values().any(|s| s.name.contains("benilla_app::")) {
+            eprintln!("skipped: this build carries no type names");
+            return;
+        }
+        let one = |suffix: &str| {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        // The aura feed is private to its module, so its side is read by name off the graph.
+        let (aura, inspect, fire) = (
+            one("::ui_aura::feed_auras"),
+            one("::ui_inspect::feed_inspect"),
+            one("::ui_unit::fire_unit_events"),
+        );
+        assert_eq!(
+            [
+                c.dependencies.contains(&(aura, inspect)),
+                c.dependencies.contains(&(inspect, fire)),
+            ],
+            [true; 2],
+            "aura seat, inspect push"
+        );
+    }
+
+    /// A target held for the first time answers inside its own `PLAYER_TARGET_CHANGED`, whose
+    /// inspect handler re-shows the window (`Blizzard_InspectUI.lua:29-31`): `CanInspect` reads
+    /// the new target's object (`0x48a1b0` → `0x4944a0`) and so do the slot getters (`0x4c8328`),
+    /// so its reach and its slots are in the VM before the event. The frame runs its feeds in the
+    /// order the client schedules them.
+    #[test]
+    fn a_new_targets_reach_and_slots_answer_inside_its_target_event() {
+        use crate::game_plugins::schedule_tests::headless_client;
+        use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+        use crate::target::relations::fixture::{factions, HUMAN};
+        use crate::target::Selection;
+        use crate::test_support::runs_before;
+        use benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR;
+        use benilla_protocol::messages::ObjectFields;
+        const OTHER: u64 = 0x1002;
+        const HELM: u32 = 7366;
+        /// `OBJECT_FIELD_TYPE` and `UNIT_FIELD_FACTIONTEMPLATE`.
+        const OBJECT_TYPE: u16 = 2;
+        const TEMPLATE: u16 = 35;
+
+        let mut client = headless_client();
+        let inspect_first = runs_before(
+            &mut client,
+            crate::ui_inspect::feed_inspect,
+            super::super::fire_unit_events,
+        );
+        let reach_first = runs_before(
+            &mut client,
+            super::super::feed_unit_reach,
+            super::super::fire_unit_events,
+        );
+        drop(client);
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(crate::client_state::ClientState::InWorld)
+            .init_resource::<Selection>()
+            .init_resource::<crate::ui_pet::PetBar>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<super::super::UnitFeedState>()
+            .init_resource::<crate::ui_inspect::InspectTarget>()
+            .init_resource::<crate::ui_inspect::InspectFeedState>()
+            .init_resource::<crate::items::Items>()
+            .insert_resource(crate::net::SelfGuid(Some(ME)))
+            .insert_resource(factions())
+            .insert_resource(NetCommands(tx))
+            .add_plugins(crate::ui_aura::UiAuraPlugin);
+        app.world_mut()
+            .resource_mut::<crate::items::Items>()
+            .insert_template(HELM, Some(crate::items::test_template("Helm")));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_TARGET_CHANGED")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, tostring(CanInspect("target")) .. " "
+                        .. tostring(GetInventoryItemLink("target", 1)))
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+
+        // We at the origin; a Human 3 yards off wearing the helm, whom no token names yet.
+        let mut spawn = |guid: u64, pairs: &[(u16, u32)], yards: f32| {
+            let e = app
+                .world_mut()
+                .spawn((
+                    Guid(guid),
+                    ObjectStore(ObjectFields::from_pairs(pairs)),
+                    Transform::from_xyz(yards, 0.0, 0.0),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+            e
+        };
+        let me = spawn(ME, &[(OBJECT_TYPE, 0x19), (TEMPLATE, HUMAN)], 0.0);
+        let other = spawn(
+            OTHER,
+            &[
+                (OBJECT_TYPE, 0x19),
+                (TEMPLATE, HUMAN),
+                (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 2, HELM),
+            ],
+            3.0,
+        );
+        app.world_mut().entity_mut(me).insert(SelfPlayer);
+
+        // One frame of the feeds after the aura feed's seat, in the client's order.
+        let feeds = |app: &mut App, target_changed: bool| {
+            app.update();
+            if target_changed {
+                app.world_mut().resource_scope(
+                    |world, mut feed: Mut<super::super::UnitFeedState>| {
+                        let script = world.non_send_resource::<UiScript>();
+                        feed.vm.get(script).pending.target_changed = true;
+                    },
+                );
+            }
+            let world = app.world_mut();
+            if inspect_first {
+                world
+                    .run_system_once(crate::ui_inspect::feed_inspect)
+                    .unwrap();
+            }
+            if reach_first {
+                world
+                    .run_system_once(super::super::feed_unit_reach)
+                    .unwrap();
+            }
+            world
+                .run_system_once(super::super::fire_unit_events)
+                .unwrap();
+            if !inspect_first {
+                world
+                    .run_system_once(crate::ui_inspect::feed_inspect)
+                    .unwrap();
+            }
+            if !reach_first {
+                world
+                    .run_system_once(super::super::feed_unit_reach)
+                    .unwrap();
+            }
+        };
+        feeds(&mut app, false);
+        app.insert_resource(Selection {
+            target: Some(other),
+            guid: Some(OTHER),
+            ..Default::default()
+        });
+        feeds(&mut app, true);
+
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        s.resolve();
+        let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+        assert!(
+            matches!(seen.as_slice(), [one] if one.starts_with("1 ") && one.contains("[Helm]")),
+            "{seen:?}"
+        );
+    }
+
     /// A values block with new XP: `PLAYER_XP_UPDATE`'s handler reads the new `UnitXP`, because
     /// the schedule runs every push the field events' handlers read ahead of the firing.
     #[test]
@@ -566,47 +1098,48 @@ mod tests {
             crate::test_support::runs_before(
                 &mut headless,
                 super::super::feed_units,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_char::feed_char,
-                fire_field_notices,
-            ),
-            crate::test_support::runs_before(
-                &mut headless,
-                crate::ui_pet_doll::feed_pet_doll,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_honor::feed_honor,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_reputation::feed_reputation,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_party::feed_party,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_pet::feed_pet_unit,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_pet_stats::feed_pet_stats,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
+            ),
+            // The inspected unit's slots, which the bridge's `UNIT_INVENTORY_CHANGED` repaints.
+            crate::test_support::runs_before(
+                &mut headless,
+                crate::ui_inspect::feed_inspect,
+                crate::lanes::fire_in_order,
             ),
         ];
         assert_eq!(
             ahead, [true; 8],
-            "feed_units, char, pet doll, honor, reputation, party, pet, pet stats"
+            "feed_units, char, honor, reputation, party, pet, pet stats, inspect"
         );
 
         // In that order: the block lands, the push, the firing.
@@ -644,16 +1177,53 @@ mod tests {
             ME,
             benilla_protocol::messages::ObjectType::Player,
             &fields,
-            &edges,
+            &crate::field_watch::Notified::new(crate::field_watch::Sent::Fields(&[XP]), &edges),
         );
         app.world_mut()
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .write_batch(notices);
         app.world_mut()
             .run_system_once(super::super::feed_units)
             .unwrap();
         app.world_mut().run_system_once(fire_field_notices).unwrap();
         assert_eq!(seen(&mut app), ["PLAYER_XP_UPDATE 30"]);
+    }
+
+    /// The active player's arrival runs its ghost state (`0x5dea50` → `0x5deb2a` → `0x5de9c0`)
+    /// ahead of the world-enter cascade (`0x5deb60`): alive, it signals `PLAYER_UNGHOST`
+    /// (`0x5dea2a`) before `PLAYER_ENTERING_WORLD`; as a ghost its leg is the Death tutorial and no
+    /// event. A `/reload`'s cascade (`0x490168`) runs no arrival, so its fresh VM hears
+    /// `PLAYER_ENTERING_WORLD` alone.
+    #[test]
+    fn an_alive_arrival_signals_player_unghost_ahead_of_the_cascade() {
+        let spy = r#"SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_UNGHOST")
+            f:RegisterEvent("PLAYER_ENTERING_WORLD")
+            f:SetScript("OnEvent", function() table.insert(SEEN, event) end)"#;
+        const PLAYER_FLAGS: u16 = 190;
+        for (flags, heard) in [
+            (0, &["PLAYER_UNGHOST", "PLAYER_ENTERING_WORLD"][..]),
+            (0x10, &["PLAYER_ENTERING_WORLD"][..]),
+        ] {
+            let (mut app, _) = feed_world(&[(PLAYER_FLAGS, flags)], spy);
+            app.add_systems(Update, super::super::feed_units);
+            app.update();
+            assert_eq!(seen(&mut app), heard, "flags {flags:#x}: the arrival");
+            let mut reloaded = UiScript::new().unwrap();
+            reloaded.run(spy).unwrap();
+            reloaded.set_unit_guids(&benilla_ui::script::UnitGuids {
+                player: ME,
+                ..Default::default()
+            });
+            app.insert_non_send_resource(reloaded);
+            app.update();
+            assert_eq!(
+                seen(&mut app),
+                ["PLAYER_ENTERING_WORLD"],
+                "flags {flags:#x}: the reload"
+            );
+        }
     }
 
     /// `PLAYER_ENTERING_WORLD`'s handler reads the honor block, since the schedule pushes it ahead
@@ -686,5 +1256,90 @@ mod tests {
             .run_system_once(super::super::feed_units)
             .unwrap();
         assert_eq!(seen(&mut app), ["PLAYER_ENTERING_WORLD 3"]);
+    }
+
+    /// The login in the server's order: the faction list lands before the player's create (vmangos
+    /// `SendInitialPacketsBeforeAddToMap`, `Player.cpp:19256`), so the list's first push and the
+    /// world-enter cascade share the create's frame. The cascade's rebuild signals
+    /// `UPDATE_FACTION` after `PLAYER_ENTERING_WORLD` (`0x4909d3`), the player seated, so
+    /// `ReputationWatchBar_Update` reads the level and a 60 trades the XP bar for the max-level art
+    /// (`ReputationFrame.lua:236-239`), a 59 keeps it (`:241-243`). Skips without client data.
+    #[test]
+    fn the_world_enter_rebuild_sets_the_xp_bar_by_the_seated_level() {
+        benilla_formats::wow_data_or_skip!();
+        const WATCHED: u16 = 1261;
+        const XP: u16 = 716;
+        let mut headless = crate::game_plugins::schedule_tests::headless_client();
+        assert!(crate::test_support::runs_before(
+            &mut headless,
+            crate::ui_reputation::feed_reputation,
+            super::super::feed_units
+        ));
+
+        for (level, xp_bar) in [(60, false), (59, true)] {
+            let (mut app, _) = feed_world(
+                &[
+                    (benilla_protocol::field::FIELD_UNIT_LEVEL, level),
+                    (WATCHED, u32::MAX),
+                    // `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`: a 60 on vmangos reads 0 / 217400.
+                    (XP, 0),
+                    (XP + 1, 217_400),
+                    // `PLAYER_BYTES_2` byte 3, rest state 2, normal: `ExhaustionTick_Update`
+                    // compares `GetRestState()` at `PLAYER_ENTERING_WORLD`.
+                    (194, 2 << 24),
+                ],
+                "",
+            );
+            app.insert_resource(crate::target::Factions::from_catalog(
+                benilla_formats::FactionCatalog::from_rows(Default::default(), Default::default()),
+            ));
+            {
+                let s = app.world().non_send_resource::<UiScript>();
+                for file in [
+                    r"Interface\FrameXML\GlobalStrings.lua",
+                    r"Interface\FrameXML\Fonts.xml",
+                    // `TEXT` (`BasicControls.xml:24`), which the popups' file reads.
+                    r"Interface\FrameXML\BasicControls.xml",
+                    r"Interface\FrameXML\UIParent.xml",
+                    r"Interface\FrameXML\MoneyFrame.lua",
+                    r"Interface\FrameXML\MoneyFrame.xml",
+                    r"Interface\FrameXML\GameTooltip.xml",
+                    r"Interface\FrameXML\UIPanelTemplates.lua",
+                    r"Interface\FrameXML\UIPanelTemplates.xml",
+                    r"Interface\FrameXML\OptionsFrameTemplates.xml",
+                    // `UIParent`'s `PLAYER_UNGHOST` arm, which an alive arrival signals ahead of
+                    // the cascade, hides the resurrect popups (`UIParent.lua:251-257`).
+                    r"Interface\FrameXML\StaticPopup.xml",
+                    r"Interface\FrameXML\TextStatusBar.lua",
+                    r"Interface\FrameXML\TextStatusBar.xml",
+                    r"Interface\FrameXML\MainMenuBar.xml",
+                    r"Interface\FrameXML\Cooldown.xml",
+                    r"Interface\FrameXML\ActionButtonTemplate.xml",
+                    r"Interface\FrameXML\ActionBarFrame.xml",
+                    r"Interface\FrameXML\ReputationFrame.xml",
+                    r"Interface\FrameXML\BonusActionBarFrame.xml",
+                ] {
+                    crate::ui_script::test_ui::load_ui(s, file);
+                }
+            }
+            app.world_mut()
+                .run_system_once(crate::ui_reputation::feed_reputation)
+                .unwrap();
+            app.world_mut()
+                .run_system_once(super::super::feed_units)
+                .unwrap();
+            let s = app.world().non_send_resource::<UiScript>();
+            let shown = |frame: &str| {
+                s.eval::<bool>(&format!("return {frame}:IsShown() ~= nil"))
+                    .unwrap()
+            };
+            assert_eq!(shown("MainMenuExpBar"), xp_bar, "level {level}: the XP bar");
+            assert_eq!(
+                shown("MainMenuBarMaxLevelBar"),
+                !xp_bar,
+                "level {level}: the max-level art"
+            );
+            assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+        }
     }
 }

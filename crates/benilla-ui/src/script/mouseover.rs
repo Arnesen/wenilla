@@ -41,9 +41,17 @@ fn leave_class(model: &Model, h: FrameHandle) -> LeaveClass {
 /// a motion leave and 1 for a removal, only clears the drag arm (`0x76b725`); `OnLeave` runs
 /// through the plain runner (`0x76b753` → `0x702690`), which sets no arg global.
 pub(super) fn leave(lua: &Lua, h: FrameHandle, script: Option<u32>) {
+    // An enabled Button's leave refreshes its label after the base leave and its `OnLeave`
+    // (`0x7794f4` → `0x76b6f0`, then `0x779502`).
+    let refresh = |lua: &Lua| {
+        if script.is_some() {
+            super::button::refresh_label(&mut model(lua), h);
+        }
+    };
     // A hyperlink button's leave is its text frame's `OnHyperlinkLeave` (`0x7a34e0`), in place of
     // the Button's.
     if super::hyperlink::hover(lua, h, false) {
+        refresh(lua);
         return;
     }
     let class = leave_class(&model(lua), h);
@@ -61,6 +69,7 @@ pub(super) fn leave(lua: &Lua, h: FrameHandle, script: Option<u32>) {
             model(lua).record_lua_error(&e);
         }
     }
+    refresh(lua);
     // `0x483b1d` runs the base leave first; then, only while the WorldFrame's own last publish is
     // not empty (`0x483b30`), the empty one (`0x483b46`).
     if let LeaveClass::World = class {
@@ -132,6 +141,17 @@ impl UiScript {
     /// `"mouseover"` and builds its plate. Returns whether it changed.
     pub fn publish_world_mouseover(&mut self, guid: Option<u64>) -> bool {
         publish(&self.lua, guid)
+    }
+
+    /// Seat a published unit in the token resolver, held with its `UNIT_FIELD_TARGET`: the
+    /// publisher writes the pair (`0x492890`) before it signals (`0x4929b3`), so `"mouseover"`
+    /// names the unit inside its `UPDATE_MOUSEOVER_UNIT`. The app's next token push carries it on.
+    pub fn seat_world_mouseover_unit(&mut self, guid: u64, target: u64) {
+        let mut model = self.model_mut();
+        if model.world_mouseover == Some(guid) {
+            model.unit_guids.mouseover = guid;
+            model.unit_guids.held.insert(guid, target);
+        }
     }
 
     /// Whether the walk probes the Minimap with the cursor on it: it holds the hover, which a hit

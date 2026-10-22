@@ -13,15 +13,17 @@ use crate::ui_quest::QuestGiver;
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::ecs::system::SystemParam;
 
+use super::{clock_tick, ServerTime};
 use super::{
     AddonInfoMessage, CharActionResultMessage, CharListMessage, CharacterLoginFailedMessage,
     CinematicTriggeredMessage, ClientControlMessage, DisconnectedMessage, DroppedOpcodes,
-    EnteredWorldMessage, GameTime, GuidIndex, HomeBind, KnockBackMessage, LoggedOutMessage,
+    EnteredWorldMessage, GuidIndex, HomeBind, KnockBackMessage, LoggedOutMessage,
     LoginFailedMessage, LoginQueuedMessage, LoginStageMessage, NetCommands, NetHandlerApp,
     NetStatus, ObjectStore, PendingTransfer, Proficiencies, RealmListMessage, Reputations,
-    RosterFailedMessage, SelfGuid, ServerTime, ServerWallClock, TeleportMessage, WorldAuthMessage,
+    RosterFailedMessage, SelfGuid, ServerWallClock, TeleportMessage, WorldAuthMessage,
     WorldportMessage,
 };
+use benilla_world::frame_pace::FrameStep;
 
 /// Registers the session handlers.
 pub(super) fn register(app: &mut App) {
@@ -48,6 +50,9 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::TransferPending, on_transfer)
         .net_handler(K::TransferAborted, on_transfer)
         .net_handler(K::TimeSpeed, on_clock)
+        .net_handler(K::GameSpeedSet, on_clock)
+        .net_handler(K::GameTimeUpdate, on_clock)
+        .net_handler(K::GameTimeSet, on_clock)
         .net_handler(K::ServerUnixTime, on_clock)
         .net_handler(K::Reputations, on_reputations)
         .net_handler(K::ReputationDelta, on_reputation_delta)
@@ -217,10 +222,17 @@ fn on_logged_out(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
 }
 
 /// The bridge's half of the session end; each window's own listener runs after it.
-fn on_disconnected(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
+fn on_disconnected(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    mut b: Bridge,
+    mut released: ResMut<super::objects::Released>,
+) {
     if let SessionEvent::Disconnected { reason, end } = ev {
         // The same teardown as `on_logged_out`'s.
         b.reputations.clear_forced();
+        // Leaving the world frees the released objects with the live ones (`0x467700`).
+        released.clear();
         disconnected(
             reason,
             end,
@@ -272,6 +284,8 @@ fn on_worldport(
     mut e: Edges,
     mut b: Bridge,
     mut group: ResMut<crate::ui_party::GroupState>,
+    script: Option<NonSend<benilla_ui::script::UiScript>>,
+    mut released: ResMut<super::objects::Released>,
 ) {
     if let SessionEvent::Worldport {
         map_id,
@@ -281,7 +295,14 @@ fn on_worldport(
     } = ev
     {
         // Every streamed roster member is about to be purged; the reference deactivates each.
-        crate::ui_party::net::roster_deactivated(&mut group, &b.index, &b.stores, &b.names, &b.net);
+        crate::ui_party::net::roster_deactivated(
+            &mut group,
+            &b.index,
+            &b.stores,
+            &b.names,
+            script.as_deref(),
+            &b.net,
+        );
         worldport(
             map_id,
             position,
@@ -293,6 +314,8 @@ fn on_worldport(
             &b.transports,
             &mut e.worldports,
         );
+        // Loading a new world frees the released objects with the live ones (`0x467700`).
+        released.clear();
     }
 }
 
@@ -307,14 +330,19 @@ fn on_transfer(In(ev): In<SessionEvent>, mut e: Edges) {
     }
 }
 
-fn on_clock(In(ev): In<SessionEvent>, mut b: Bridge) {
+/// The game clock's four messages (`SMSG_LOGIN_SETTIMESPEED`, `SMSG_GAMESPEED_SET`,
+/// `SMSG_GAMETIME_UPDATE`, `SMSG_GAMETIME_SET`) and the server's wall clock.
+fn on_clock(In(ev): In<SessionEvent>, mut b: Bridge, step: Res<FrameStep>) {
     match ev {
-        SessionEvent::TimeSpeed {
-            hours,
-            minutes,
-            day_serial,
-            timescale,
-        } => time_speed(hours, minutes, day_serial, timescale, &mut b.server_time),
+        SessionEvent::TimeSpeed { .. }
+        | SessionEvent::GameSpeedSet { .. }
+        | SessionEvent::GameTimeUpdate { .. }
+        | SessionEvent::GameTimeSet { .. } => {
+            let lines = b.server_time.0.on_message(&ev, clock_tick(&step));
+            for line in lines.into_iter().flatten() {
+                info!("console: {line}");
+            }
+        }
         SessionEvent::ServerUnixTime { unix_time } => {
             server_unix_time(unix_time, &mut b.wall_clock)
         }
@@ -326,7 +354,7 @@ fn on_reputations(
     In(ev): In<SessionEvent>,
     mut b: Bridge,
     factions: Option<Res<crate::target::ring::Factions>>,
-    mut chat: ResMut<crate::ui_chat::ChatLog>,
+    chat: Res<crate::ui_chat::ChatLog>,
 ) {
     match ev {
         SessionEvent::Reputations { standings } => reputations(standings, &mut b.reputations),
@@ -343,7 +371,7 @@ fn on_reputations(
                     me.race,
                     me.class,
                 );
-                crate::ui_reputation::queue_standing_lines(line, f.catalog(), me.female, &mut chat);
+                crate::ui_reputation::queue_standing_lines(line, f.catalog(), me.female, &chat);
             }
             reputation_visible(list_id, &mut b.reputations)
         }
@@ -379,7 +407,7 @@ fn on_reputation_delta(
     In(ev): In<SessionEvent>,
     mut b: Bridge,
     factions: Option<Res<crate::target::ring::Factions>>,
-    mut chat_log: ResMut<crate::ui_chat::ChatLog>,
+    chat_log: Res<crate::ui_chat::ChatLog>,
     mut quest: ResMut<QuestGiver>,
     quest_log: Option<ResMut<crate::ui_quest_log::QuestLog>>,
 ) {
@@ -388,7 +416,7 @@ fn on_reputation_delta(
             &standings,
             &b.reputations,
             factions.as_deref(),
-            &mut chat_log,
+            &chat_log,
         );
         if let (Some(f), Some(me)) = (factions.as_deref(), self_facts(&b)) {
             let moved = crate::ui_reputation::rank_moved(
@@ -408,12 +436,7 @@ fn on_reputation_delta(
                 me.race,
                 me.class,
             );
-            crate::ui_reputation::queue_standing_lines(
-                lines,
-                f.catalog(),
-                me.female,
-                &mut chat_log,
-            );
+            crate::ui_reputation::queue_standing_lines(lines, f.catalog(), me.female, &chat_log);
         }
         reputation_delta(standings, &mut b.reputations, &mut quest);
     }
@@ -666,7 +689,8 @@ fn transfer_pending(map_id: u32, transport_entry: Option<u32>, pending: &mut Pen
     });
 }
 
-/// `SMSG_TRANSFER_ABORTED`: clears the latch.
+/// `SMSG_TRANSFER_ABORTED`: clears the latch, which ends the screen the transfer raised as
+/// `0x401a11` does (`0x407e80`); the reason's line is `ui_chat`'s.
 fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
     warn!("net: transfer aborted (reason {reason})");
     pending.0 = None;
@@ -713,20 +737,6 @@ fn worldport(
         needs_ack,
         transport_entry,
     });
-}
-
-/// `SMSG_LOGIN_SETTIMESPEED`: the game clock that drives day/night lighting.
-fn time_speed(
-    hours: u8,
-    minutes: u8,
-    day_serial: u32,
-    timescale: f32,
-    server_time: &mut ServerTime,
-) {
-    if server_time.0.is_none() {
-        info!("net: server game-time {hours:02}:{minutes:02} (drives lighting)");
-    }
-    server_time.0 = Some(GameTime::new(hours, minutes, day_serial, timescale));
 }
 
 /// `SMSG_QUERY_TIME_RESPONSE`: the server wall clock that absolute descriptor stamps (the
@@ -831,6 +841,8 @@ fn packet_dropped(opcode: u16, unparseable: bool, dropped: &mut DroppedOpcodes) 
     }
 }
 
+#[cfg(test)]
+mod clock_tests;
 #[cfg(test)]
 mod reputation_tests;
 

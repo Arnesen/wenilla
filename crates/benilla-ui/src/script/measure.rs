@@ -30,6 +30,15 @@ pub trait TextMeasure {
         let _ = req;
         None
     }
+
+    /// The tooltip sizer's split (`0x530837`-`0x5308c4`): `req`'s text cut at the row starts of its
+    /// wrap width (`0x772b60` → `0x5c2430`), at most `max_pieces` of them, each piece running to
+    /// the next start and the last to the text's end (`0x53088e`), measured unwrapped
+    /// (`0x772ae0`); the widest, in frame-local units. `None`, the default, has no split to give.
+    fn piece_width(&mut self, req: &MeasureRequest, max_pieces: usize) -> Option<f32> {
+        let _ = (req, max_pieces);
+        None
+    }
 }
 
 /// The installed [`TextMeasure`], shared by a state and its forks ([`super::UiScript::fork`]): a
@@ -47,6 +56,10 @@ impl TextMeasure for SharedMeasurer {
         req: &super::EditBoxAdvanceRequest,
     ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
         self.0.borrow_mut().editbox_advances(req)
+    }
+
+    fn piece_width(&mut self, req: &MeasureRequest, max_pieces: usize) -> Option<f32> {
+        self.0.borrow_mut().piece_width(req, max_pieces)
     }
 }
 
@@ -100,9 +113,12 @@ impl super::UiScript {
     /// it whenever the window size or `uiScale` changes: glyph advances snap to whole physical
     /// pixels.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasure>) {
-        self.model_mut().measurer = Some(SharedMeasurer(std::rc::Rc::new(
-            std::cell::RefCell::new(measurer),
-        )));
+        let mut model = self.model_mut();
+        model.measurer = Some(SharedMeasurer(std::rc::Rc::new(std::cell::RefCell::new(
+            measurer,
+        ))));
+        // A new engine answers under a new raster: no measure of the old one stands.
+        model.tooltip_measures.clear();
     }
 
     /// Whether a [`TextMeasure`] is installed; the host then skips its batch measure pass.

@@ -1,7 +1,8 @@
 //! The unit events that release the interaction latch (`0x4931c0`), off the field edges the apply
 //! pass emits, as the reference's mirror handlers see them.
 //!
-//! A unit whose health falls to 0 runs `CGUnit_C::OnDied` (`0x605860`, from the health watcher
+//! A unit whose health falls from above 0 to 0 or below, compared signed
+//! ([`FieldChanged::unit_died`]), runs `CGUnit_C::OnDied` (`0x605860`, from the health watcher
 //! `0x6046f0` at `0x6047a3`). For a player it calls `0x5e99b0` first, which for the active player
 //! releases the latch with the goodbye (`0x5e9a51`, `dl = 0`); then, for any unit, it releases the
 //! latch if it names the dying unit, without a goodbye (`0x605950`, `dl = 1`). A change of the
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use benilla_formats::ShapeshiftForm;
-use benilla_protocol::field::{FIELD_UNIT_BYTES_1, FIELD_UNIT_HEALTH};
+use benilla_protocol::field::FIELD_UNIT_BYTES_1;
 use benilla_protocol::messages::ObjectType;
 
 use super::latch::{release_cell, release_latch};
@@ -27,10 +28,11 @@ fn form_of(bytes_1: u32) -> u8 {
     (bytes_1 >> 16) as u8
 }
 
-/// Whether taking `form` closes the open window (`0x5de010`): a form other than none whose row is
-/// not a stance (`0x60e9f0`) and lacks the interact flag (`0x5de072`). A form with no row reads
-/// nothing here, where the reference faults.
-pub(super) fn form_releases(forms: &HashMap<u32, ShapeshiftForm>, form: u8) -> bool {
+/// Whether `form` bars the player from NPCs: a form other than none whose row is not a stance
+/// (`IsShapeShifted`, `0x60e9f0`) and lacks the interact flag (`0x5f017f`, `0x5de072`).
+/// `InteractWithNpc` (`0x5f0130`) refuses a talk with it, and taking it closes the open window
+/// (`0x5de010`). A form with no row reads nothing here, where the reference faults.
+pub(crate) fn form_bars_interaction(forms: &HashMap<u32, ShapeshiftForm>, form: u8) -> bool {
     form != 0
         && forms
             .get(&u32::from(form))
@@ -48,7 +50,7 @@ pub(super) fn release_on_field_edges(
 ) {
     let me = me.single().ok();
     for e in edges.read() {
-        if e.unit_field(FIELD_UNIT_HEALTH) && e.old > 0 && e.new == 0 {
+        if e.unit_died() {
             // `0x605860` → `0x5e99b0` for the active player, then its own guid for any unit.
             if e.kind == ObjectType::Player && Some(e.entity) == me {
                 commands.queue(|world: &mut World| release_latch(world, true));
@@ -60,7 +62,7 @@ pub(super) fn release_on_field_edges(
             && form_of(e.old) != form_of(e.new)
             && spells
                 .as_ref()
-                .is_some_and(|s| form_releases(&s.forms, form_of(e.new)))
+                .is_some_and(|s| form_bars_interaction(&s.forms, form_of(e.new)))
         {
             commands.queue(|world: &mut World| release_latch(world, true));
         }

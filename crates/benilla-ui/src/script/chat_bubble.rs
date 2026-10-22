@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::layout::{Anchor, Anchors, Point};
+use crate::layout::{Anchor, Anchors, Len, Point};
 use crate::order::DrawLayer;
 use crate::widget::{FrameHandle, FrameKind, RegionHandle, RegionKind};
 
@@ -65,8 +65,8 @@ pub struct BubbleState {
     /// The own-shown bit: a line is shown when it spawns and while it fades, hidden when an
     /// out-of-range fade ends (`0x4b0d9f`), shown again on the way back (`0x4b0ea0`).
     pub shown: bool,
-    /// The fade's frame alpha (`0x4b0d4f`, `0x4b0dc3`).
-    pub alpha: f32,
+    /// The fade's frame alpha byte, the one `0x4b0d4f` and `0x4b0dc3` hand the alpha walk.
+    pub alpha: u8,
     /// The projected speaker point the text's BOTTOM sits on, from the `WorldFrame`'s
     /// BOTTOMLEFT (`0x4b157a`).
     pub seat: (f32, f32),
@@ -290,8 +290,8 @@ fn create(
             bg_file: Some(BG_TEXTURE.to_string()),
             edge_file: Some(EDGE_TEXTURE.to_string()),
             tile: true,
-            tile_size: g.border,
-            edge_size: g.border,
+            tile_size: Len::Script(g.border),
+            edge_size: Len::Script(g.border),
             insets: uniform(g.border),
             ..Backdrop::default()
         }),
@@ -308,9 +308,9 @@ fn create(
         .expect("live bubble");
     // The `NAMEPLATE_FONT` global's font with no flags (`0x4b0b2b`-`0x4b0b42`): no outline, no
     // shadow.
+    // The engine's own load (`0x7714f0`) clears no inherit bit.
     let data = model.region_data.entry(text).or_default();
     data.font_path = font;
-    data.font_explicit.face = true;
     model.touch_layout_frame(frame);
     model.touch_layout_region(tail);
     model.touch_layout_region(text);
@@ -328,10 +328,10 @@ fn create(
 
 fn uniform(v: f32) -> Insets {
     Insets {
-        left: v,
-        right: v,
-        top: v,
-        bottom: v,
+        left: Len::Script(v),
+        right: Len::Script(v),
+        top: Len::Script(v),
+        bottom: Len::Script(v),
     }
 }
 
@@ -340,13 +340,19 @@ fn uniform(v: f32) -> Insets {
 fn lay_out(model: &mut Model, i: usize, g: BubbleGeometry) {
     let b = &model.chat_bubbles.bubbles[i];
     let (frame, tail, text) = (b.frame, b.tail, b.text);
-    backdrop::set_metrics(model, frame, g.border, g.border, uniform(g.border));
+    backdrop::set_metrics(
+        model,
+        frame,
+        Len::Script(g.border),
+        Len::Script(g.border),
+        uniform(g.border),
+    );
     let frame_id = model.frame_id(frame);
     let text_id = model.region_id(text);
 
     // A border-unit square, its TOPRIGHT on the frame's BOTTOM lifted a quarter unit.
     let tail_data = model.region_data.entry(tail).or_default();
-    tail_data.size = Some((g.border, g.border));
+    tail_data.size = Some((Len::Script(g.border), Len::Script(g.border)));
     tail_data.anchors = Anchors::from([Anchor::new(
         Point::TopRight,
         frame_id,
@@ -355,7 +361,7 @@ fn lay_out(model: &mut Model, i: usize, g: BubbleGeometry) {
         g.border / 4.0,
     )]);
 
-    model.region_data.entry(text).or_default().font_height = Some(g.text_height);
+    model.region_data.entry(text).or_default().font_height = Some(Len::Script(g.text_height));
     model.touch_measure(text);
 
     // The frame hugs the text: TOPLEFT and BOTTOMRIGHT on the text's, out by the margin.
@@ -400,7 +406,7 @@ fn set_line(
     let line = model.localized_text(state.text.clone());
     let data = model.region_data.entry(text).or_default();
     data.text = Some(line);
-    data.set_vertex_color(Some([c[0], c[1], c[2], 1.0]));
+    data.set_vertex_color(Some(crate::color::Rgba8::from_f32([c[0], c[1], c[2], 1.0])));
     // koKR left-justifies the text (`0x4b16e7` compares the locale with 1): the word's horizontal
     // bits set to LEFT and the same bits of its inherit mask cleared, as `SetJustifyH` does
     // (`0x4b1704`-`0x4b1717`, `0x79e776`-`0x79e788`), before the width is measured (`0x4b175d`).
@@ -408,7 +414,7 @@ fn set_line(
     if model.locale == KO_KR {
         let data = model.region_data.entry(text).or_default();
         data.justify.set_h(super::types::JustifyH::Left);
-        data.font_explicit.justify_h = true;
+        data.justify_mask.0 &= !crate::justify::H_MASK;
     }
     fit_width(model, i, g);
     if !was_shown {
@@ -434,7 +440,7 @@ fn fit_width(model: &mut Model, i: usize, g: BubbleGeometry) {
         natural.max(floor)
     };
     if let Some(d) = model.region_data.get_mut(&text) {
-        d.size = Some((width, 0.0));
+        d.size = Some((Len::Script(width), Len::Script(0.0)));
     }
     model.touch_measure(text);
     // `SetWidth`, which invalidates (`0x7683d0`).
@@ -479,7 +485,7 @@ fn drive(
     let width = model
         .region_data
         .get(&text)
-        .and_then(|d| d.size)
+        .and_then(|d| d.size_script(model.layout_units()))
         .map_or(0.0, |s| s.0)
         + 2.0 * g.margin;
     let snap = |v: f32| {

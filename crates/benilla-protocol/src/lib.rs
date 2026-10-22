@@ -10,19 +10,19 @@ pub mod wire;
 pub mod world;
 pub use auth::{AuthReject, LogonReply};
 pub use events::{
-    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, RosterCause,
-    SessionEnd, SessionEvent, SessionEventKind,
+    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, NotifyBlock, Poll,
+    RosterCause, SessionEnd, SessionEvent, SessionEventKind,
 };
 pub use messages::field;
 pub use messages::{
     AttackSwingError, CharCreateReq, CharEnumItem, Character, CorpseLook, CreateSpline, ItemInfo,
     JumpInfo, MonsterMoveFacing, MoveMode, MoverState, ObjectFields, OwnerFallback, RelayVerb,
-    ServerPacket, SpeedKind, SplineMode, TransportPose, CHARACTER_FLAG_GHOST,
+    ServerPacket, SpeedKind, SplineMode, TransportPose, WowTime, CHARACTER_FLAG_GHOST,
     CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
 };
 pub use world::{
-    observe_sends, SendObserver, Unparsed, WorldAuthReject, WorldConnectEvent, WorldReader,
-    WorldSession, WorldWriter, WORLD_PORT,
+    observe_sends, LinkTraffic, SendObserver, Unparsed, WorldAuthReject, WorldConnectEvent,
+    WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -74,6 +74,9 @@ impl std::fmt::Display for DialFailure {
 
 impl std::error::Error for DialFailure {}
 
+/// The port a realm's world address dials when it names none (`0x2382`, `0x53785a`).
+const WORLD_DEFAULT_PORT: u16 = 9090;
+
 /// Resolves, then dials the first IPv4 address ([`first_ipv4`]).
 ///
 /// wenilla: `async` over [`Conn`], since a page's dial is a WebSocket that opens on the event
@@ -102,28 +105,165 @@ async fn dial(host: &str, port: u16) -> Result<Conn> {
         };
         (target.ip().to_string(), target.port())
     };
-    Conn::connect(&host, port).await.map_err(|e| {
+    connect(&host, port, &address).await
+}
+
+/// Open a connection to `host:port`; a refusal is a [`DialFailure`] naming `address`.
+async fn connect(host: &str, port: u16, address: &str) -> Result<Conn> {
+    Conn::connect(host, port).await.map_err(|e| {
         anyhow::Error::new(DialFailure {
-            address,
+            address: address.to_string(),
             unresolved: false,
         })
         .context(format!("connecting: {e}"))
     })
 }
 
-/// The address 1.12.1 dials: IPv4 alone, the first the resolver gives (`WowConnection::ConnectToHost`
-/// `0x5b6e40`: `inet_addr`, else `gethostbyname`'s first entry). `localhost` resolves to `::1`
-/// first, which a realmd bound to IPv4 refuses only after about 2 s on Windows.
+/// The address the world dial takes: IPv4 alone, the first the resolver gives
+/// (`WowConnection::ConnectToHost` `0x5b6e40`: `inet_addr`, else `gethostbyname`'s first entry).
+/// `localhost` resolves to `::1` first, which a server bound to IPv4 refuses only after about 2 s
+/// on Windows.
 #[cfg(not(target_arch = "wasm32"))]
 fn first_ipv4(addrs: &[SocketAddr]) -> Option<SocketAddr> {
     addrs.iter().copied().find(SocketAddr::is_ipv4)
+}
+
+/// Dial a realm's world server at its realm-list address ([`world_host_port`]).
+pub(crate) async fn dial_world(address: &str) -> Result<Conn> {
+    let (host, port) = world_host_port(address);
+    dial(host, port).await
+}
+
+/// A realm's world address as `NetClient::Connect` (`0x537820`) splits it: the host up to the
+/// first `:` (`SStrChr2` `0x64a3f0`, `0x53786c`) and the low 16 bits (`0x5b6e94`) of `_atoi` of
+/// the rest (`0x53787a`), or the whole text and [`WORLD_DEFAULT_PORT`] with no `:`.
+fn world_host_port(address: &str) -> (&str, u16) {
+    match address.split_once(':') {
+        Some((host, port)) => (host, atoi(port) as u16),
+        None => (address, WORLD_DEFAULT_PORT),
+    }
+}
+
+/// `_atoi` (`0x41449c` → `_atol` `0x414411`): C-locale spaces skipped, one `-` or `+`, then the
+/// decimal digits in wrapping 32-bit arithmetic up to the first other byte; 0 with none.
+fn atoi(text: &str) -> i32 {
+    let mut bytes = text
+        .bytes()
+        .skip_while(|b| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .peekable();
+    let negative = match bytes.peek() {
+        Some(b'-') => {
+            bytes.next();
+            true
+        }
+        Some(b'+') => {
+            bytes.next();
+            false
+        }
+        _ => false,
+    };
+    let value = bytes.take_while(u8::is_ascii_digit).fold(0i32, |n, d| {
+        n.wrapping_mul(10).wrapping_add(i32::from(d - b'0'))
+    });
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
+}
+
+/// The hosts of a realmlist the logon resolves, in order: the text cut at each `;` (`SStrChr2` at
+/// `0x43b8f6`) up to the first empty piece, which ends the list (`0x43b941`), each split by
+/// [`host_port`] with the request's port 3724 (`0xe8c`, `0x5bc400`) when it names none. The
+/// reference branches on a piece's first byte (`0x43b947`, `0x43b94f`, `'0'..'9'`): a digit-led
+/// piece splits a `:port` (`0x43f3d0`: `SStrChr`, `SStrToInt`, then `inet_addr` unchecked, so a
+/// failed parse stores 255.255.255.255), while a name goes to `gethostbyname` whole, `:port`
+/// included (`0x43ba0e`), every address it returns taking 3724 (`0x43ba86`); a name's port here
+/// is the deviation below.
+fn logon_pieces(realmlist: &str) -> Vec<(&str, u16)> {
+    realmlist
+        .split(';')
+        .take_while(|piece| !piece.is_empty())
+        // Deviation: a named piece takes a `:port` here, where the reference hands a name to
+        // `gethostbyname` whole (`0x43ba0e`) and only a dotted piece takes a port (`0x43f3d0`),
+        // because a server on a non-default logon port behind a host name is everyday use.
+        .map(|piece| host_port(piece, AUTH_PORT))
+        .collect()
+}
+
+/// `ConnectToRandomAddress` (`0x5bc2b0`): entry `draw mod count` (`0x5bc392`) of the list, or none
+/// of an empty one, which the reference reports as a failed dial (`0x5bc3cb`).
+#[cfg(not(target_arch = "wasm32"))]
+fn pick(addrs: &[SocketAddr], draw: u32) -> Option<SocketAddr> {
+    let count = u32::try_from(addrs.len()).ok().filter(|&n| n > 0)?;
+    Some(addrs[(draw % count) as usize])
+}
+
+/// The address a logon dials, and the realmlist's hosts for a failure to name. The list is every
+/// IPv4 address of each piece in order, at the piece's port ([`logon_pieces`]): one for a dotted
+/// address, every `AF_INET` address `gethostbyname` gives for a name (`0x43ba07`-`0x43baf6`), none
+/// for a name that resolves to none (`0x43ba18`). One is drawn at random ([`pick`]), as
+/// `ClientLink::Connect` (`0x5bc3e0`) hands the list to `ConnectToRandomAddress`.
+///
+/// wenilla: the target comes back as `(host, port)` text for [`Conn::connect`].
+#[cfg(not(target_arch = "wasm32"))]
+fn logon_target(realmlist: &str) -> Result<((String, u16), String)> {
+    use std::net::ToSocketAddrs;
+    let pieces = logon_pieces(realmlist);
+    let address = pieces
+        .iter()
+        .map(|(host, port)| format!("{host}:{port}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let mut addrs = Vec::new();
+    let mut unresolved = Vec::new();
+    for &(host, port) in &pieces {
+        match (host, port).to_socket_addrs() {
+            Ok(found) => addrs.extend(found.filter(SocketAddr::is_ipv4)),
+            Err(e) => unresolved.push(format!("resolving {host}: {e}")),
+        }
+    }
+    match pick(&addrs, rand::random()) {
+        Some(target) => Ok(((target.ip().to_string(), target.port()), address)),
+        None => {
+            let failure = anyhow::Error::new(DialFailure {
+                address,
+                unresolved: true,
+            });
+            Err(if unresolved.is_empty() {
+                failure
+            } else {
+                failure.context(unresolved.join("; "))
+            })
+        }
+    }
+}
+
+/// The page's [`logon_target`]: it resolves nothing (the host proxies the dial), so the draw is
+/// among the realmlist's pieces rather than their addresses.
+#[cfg(target_arch = "wasm32")]
+fn logon_target(realmlist: &str) -> Result<((String, u16), String)> {
+    let pieces = logon_pieces(realmlist);
+    let address = pieces
+        .iter()
+        .map(|(host, port)| format!("{host}:{port}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    if pieces.is_empty() {
+        return Err(anyhow::Error::new(DialFailure {
+            address,
+            unresolved: true,
+        }));
+    }
+    let (host, port) = pieces[rand::random::<u32>() as usize % pieces.len()];
+    Ok(((host.to_string(), port), address))
 }
 
 /// A realm from realmd's realm list, with every field the wire carries.
 #[derive(Debug, Clone)]
 pub struct RealmInfo {
     pub name: String,
-    /// `host:port` of the world server, as the client would connect to it.
+    /// The world server's `host[:port]`, as the client connects to it ([`WorldSession::connect`]).
     pub address: String,
     /// The population, sentinels already rewritten as the reference parser does
     /// ([`auth::MAGIC_POPULATIONS`]); the list shows a band against all realms' mean and deviation.
@@ -206,24 +346,25 @@ impl Logon {
 /// The full SRP6 logon against a vanilla `realmd`, then the realm list — the blocking twin of
 /// [`logon_async`], for the CLIs/probes and the native net thread.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn logon(host: &str, username: &str, password: &str, locale: u32) -> Result<Logon> {
-    futures_lite::future::block_on(logon_async(host, username, password, locale))
+pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Result<Logon> {
+    futures_lite::future::block_on(logon_async(realmlist, username, password, locale))
 }
 
-/// The full SRP6 logon against a vanilla `realmd`, then the realm list. `locale` is the client's
-/// locale tag the challenge carries ([`auth::write_logon_challenge`]).
+/// The full SRP6 logon against a vanilla `realmd`, then the realm list. `realmlist` is one or more
+/// `host[:port]` separated by `;`, the server dialled one of their addresses (`logon_target`).
+/// `locale` is the client's locale tag the challenge carries ([`auth::write_logon_challenge`]).
 pub async fn logon_async(
-    host: &str,
+    realmlist: &str,
     username: &str,
     password: &str,
     locale: u32,
 ) -> Result<Logon> {
-    let (host, port) = host_port(host, AUTH_PORT);
-
     let username_n =
         NormalizedString::new(username).map_err(|e| anyhow!("invalid username: {e}"))?;
     let password_n =
         NormalizedString::new(password).map_err(|e| anyhow!("invalid password: {e}"))?;
+    // One draw per login, as the reference dials once: the redials below go to the same address.
+    let (target, address) = logon_target(realmlist)?;
 
     // The account name goes uppercased, as SRP6 hashes it. About one `B` in 137 serializes
     // differently in the client and mangos (a right password gets 0x04), so redial for a fresh
@@ -231,7 +372,7 @@ pub async fn logon_async(
     let (mut stream, reply, server_public_key) = {
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
-            let mut stream = dial(host, port).await?;
+            let mut stream = connect(&target.0, target.1, &address).await?;
             auth::write_logon_challenge(
                 &mut stream,
                 &username.to_uppercase(),
@@ -338,7 +479,7 @@ mod host_port_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod dial_tests {
-    use super::first_ipv4;
+    use super::{first_ipv4, logon_pieces, pick, world_host_port, AUTH_PORT};
     use std::net::SocketAddr;
 
     fn addrs(list: &[&str]) -> Vec<SocketAddr> {
@@ -356,5 +497,65 @@ mod dial_tests {
         let got = first_ipv4(&addrs(&["[2001:db8::2]:1", "10.0.0.2:1", "10.0.0.1:1"]));
         assert_eq!(got, Some("10.0.0.2:1".parse().unwrap()));
         assert_eq!(first_ipv4(&addrs(&["[2001:db8::1]:1"])), None);
+    }
+
+    /// `NetClient::Connect` (`0x537820`): the port is 9090 (`0x2382`, `0x53785a`) unless the text
+    /// has a `:`, where the host is cut at the first one (`SStrChr2` `0x64a3f0`, `0x53786c`) and
+    /// the port is `_atoi` of the rest (`0x53787a`).
+    #[test]
+    fn a_world_address_without_a_port_dials_9090() {
+        assert_eq!(
+            world_host_port("realm.example.org"),
+            ("realm.example.org", 9090)
+        );
+        assert_eq!(world_host_port("10.0.0.1"), ("10.0.0.1", 9090));
+        assert_eq!(world_host_port("10.0.0.1:8085"), ("10.0.0.1", 8085));
+    }
+
+    /// The cut is at the first `:`, and `_atol` (`0x414411`) skips C-locale spaces, takes one
+    /// sign and reads digits up to the first other character, 0 with none; the dial keeps the
+    /// low 16 bits (`0x5b6e94`).
+    #[test]
+    fn a_world_port_is_atoi_of_the_text_after_the_first_colon() {
+        assert_eq!(world_host_port("a:8085:9"), ("a", 8085));
+        assert_eq!(world_host_port("a: 8085x"), ("a", 8085));
+        assert_eq!(world_host_port("a:+8085"), ("a", 8085));
+        assert_eq!(world_host_port("a:"), ("a", 0));
+        assert_eq!(world_host_port("a:port"), ("a", 0));
+        assert_eq!(world_host_port("a:-1"), ("a", 0xffff));
+        assert_eq!(world_host_port("a:73621"), ("a", 8085));
+        assert_eq!(world_host_port(":8085"), ("", 8085));
+    }
+
+    /// The logon resolver splits the text at each `;` (`0x43b8f6`) and resolves the pieces in
+    /// order (`0x43b890`); the first empty piece ends the list (`0x43b941`).
+    #[test]
+    fn a_realmlist_is_split_at_each_semicolon_until_an_empty_piece() {
+        assert_eq!(
+            logon_pieces("logon.example.org"),
+            [("logon.example.org", AUTH_PORT)]
+        );
+        assert_eq!(
+            logon_pieces("10.0.0.1;10.0.0.2:3725;b.example.org"),
+            [
+                ("10.0.0.1", AUTH_PORT),
+                ("10.0.0.2", 3725),
+                ("b.example.org", AUTH_PORT)
+            ]
+        );
+        assert_eq!(logon_pieces("a;b;"), [("a", AUTH_PORT), ("b", AUTH_PORT)]);
+        assert_eq!(logon_pieces("a;;b"), [("a", AUTH_PORT)]);
+        assert!(logon_pieces(";a").is_empty());
+    }
+
+    /// `ConnectToRandomAddress` (`0x5bc2b0`) dials entry `draw mod count` (`0x5bc392`) of every
+    /// address the pieces resolved to.
+    #[test]
+    fn the_logon_dials_the_entry_its_draw_picks() {
+        let list = addrs(&["10.0.0.1:3724", "10.0.0.2:3724", "10.0.0.3:3724"]);
+        assert_eq!(pick(&list, 0), Some(list[0]));
+        assert_eq!(pick(&list, 5), Some(list[2]));
+        assert_eq!(pick(&list, u32::MAX), Some(list[0]));
+        assert_eq!(pick(&[], 1), None);
     }
 }

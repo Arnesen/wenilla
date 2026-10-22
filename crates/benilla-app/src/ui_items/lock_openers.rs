@@ -2,42 +2,44 @@
 //! pushed whole once, and what the active player opens locks with, pushed on change. The walk and
 //! the colour are the engine's ([`benilla_ui::script::check_lock`]).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
 use benilla_formats::{LockCatalog, SpellCatalog};
-use benilla_ui::script::{LockOpener, LockOpeners, LockSlotView, UiScript};
+use benilla_ui::script::{LockOpener, LockOpeners, LockSlotView};
 
 use crate::ui_script::gate;
 
 /// Pushes every `Lock.dbc` row and `LockType.dbc` name once per VM. Both load together; without
 /// `LockType.dbc` every lock kind reads `UNKNOWN`, as a missing row does.
 pub(super) fn feed_lock_rows(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     locks: Option<Res<crate::go_templates::Locks>>,
     lock_types: Option<Res<crate::go_templates::LockTypes>>,
     mut pushed: Local<crate::ui_script::VmMemo<bool>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    if *pushed.get(&script) {
-        return;
-    }
-    let Some(locks) = locks else {
-        return;
-    };
-    let rows = row_views(&locks.0);
-    script.set_lock_rows(rows);
-    script.set_lock_type_names(
-        lock_types
-            .iter()
-            .flat_map(|t| t.0.names())
-            .map(|(id, name)| (id, name.to_string()))
-            .collect(),
-    );
-    *pushed.get(&script) = true;
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        if *pushed.get(script) {
+            return;
+        }
+        let Some(locks) = locks else {
+            return;
+        };
+        let rows = row_views(&locks.0);
+        script.set_lock_rows(rows);
+        script.set_lock_type_names(
+            lock_types
+                .iter()
+                .flat_map(|t| t.0.names())
+                .map(|(id, name)| (id, name.to_string()))
+                .collect(),
+        );
+        *pushed.get(script) = true;
+    })
 }
 
 /// Every row as the reference holds it, all eight slots in order: the walk skips a type 0 slot,
@@ -59,16 +61,16 @@ fn row_views(catalog: &LockCatalog) -> HashMap<u32, Vec<LockSlotView>> {
         .collect()
 }
 
-/// What the player opens a lock with: each known spell with an open-lock effect, in the scan order
-/// of the known-spell list, with the skill it provides now (`0x6e3760`), and the item entries
-/// carried (`0x622270`, mode 0). `skill` is the player's skill in a spell's own line.
+/// What the player opens a lock with: each spell of the opener list `0xb700b0`, in the order the
+/// walk scans it (`0x5da644`-`0x5da712`), with the skill it provides now (`0x6e3760`), and the
+/// item entries carried (`0x622270`, mode 0). `skill` is the player's skill in a spell's own line.
 fn lock_openers(
-    known: &BTreeSet<u32>,
+    openers: &[u32],
     spells: Option<&SpellCatalog>,
     skill: &dyn Fn(u32) -> u32,
     held: HashSet<u32>,
 ) -> LockOpeners {
-    let opening = known.iter().filter_map(|&id| {
+    let opening = openers.iter().filter_map(|&id| {
         let spell = spells?.get(id)?;
         Some(LockOpener {
             lock_type: spell.open_lock_type()?,
@@ -84,58 +86,60 @@ fn lock_openers(
 /// Pushes [`LockOpeners`] when it changes. No player streamed pushes nothing, which the walk reads
 /// as every lock open, as the reference's null player does.
 pub(super) fn feed_lock_openers(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut inv: crate::items::Inventory,
     actions: Res<crate::ui_action::PlayerActions>,
     spells: Option<Res<crate::ui_action::Spells>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     mut last: Local<crate::ui_script::VmMemo<Option<LockOpeners>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let (last, vm_reset) = last.get_reset(&script);
-    // The state is a function of these inputs alone: the carried items (the object index and the
-    // descriptor slots that point at them), the book, the spell catalog, and the skills the
-    // opening spells' values scale by (the descriptor).
-    let objects_moved = inv.changes.moved();
-    let self_changed = !inv.self_changed.is_empty();
-    let actions_changed = actions.is_changed();
-    let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
-    gate::trace(
-        "feed_lock_openers",
-        &[
-            ("vm_reset", vm_reset),
-            ("objects", objects_moved),
-            ("self", self_changed),
-            ("actions", actions_changed),
-            ("spells", spells_changed),
-        ],
-    );
-    let gate = gate::Gate::new(
-        vm_reset || objects_moved || self_changed || actions_changed || spells_changed,
-    );
-    if gate.skip() {
-        return;
-    }
-    let Some(store) = inv.self_store.iter().next() else {
-        return;
-    };
-    let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
-    let held = crate::ui_items::stack_counts(&store.0, &inv.objects)
-        .into_keys()
-        .collect();
-    let state = lock_openers(
-        &actions.spells,
-        spells.as_deref().map(|s| &s.catalog),
-        &|id| crate::spell::spell_skill_value(Some(store), skill_catalog, id),
-        held,
-    );
-    if last.as_ref() != Some(&state) {
-        gate.audit("feed_lock_openers", "the lock openers");
-        *last = Some(state.clone());
-        script.set_lock_openers(state);
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let (last, vm_reset) = last.get_reset(script);
+        // The state is a function of these inputs alone: the carried items (the object index and
+        // the descriptor slots that point at them), the book, the spell catalog, and the skills the
+        // opening spells' values scale by (the descriptor).
+        let objects_moved = inv.changes.moved();
+        let self_changed = !inv.self_changed.is_empty();
+        let actions_changed = actions.is_changed();
+        let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+        gate::trace(
+            "feed_lock_openers",
+            &[
+                ("vm_reset", vm_reset),
+                ("objects", objects_moved),
+                ("self", self_changed),
+                ("actions", actions_changed),
+                ("spells", spells_changed),
+            ],
+        );
+        let gate = gate::Gate::new(
+            vm_reset || objects_moved || self_changed || actions_changed || spells_changed,
+        );
+        if gate.skip() {
+            return;
+        }
+        let Some(store) = inv.self_store.iter().next() else {
+            return;
+        };
+        let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
+        let held = crate::ui_items::stack_counts(&store.0, &inv.objects)
+            .into_keys()
+            .collect();
+        let state = lock_openers(
+            &actions.openers,
+            spells.as_deref().map(|s| &s.catalog),
+            &|id| crate::spell::spell_skill_value(Some(store), skill_catalog, id),
+            held,
+        );
+        if last.as_ref() != Some(&state) {
+            gate.audit("feed_lock_openers", "the lock openers");
+            *last = Some(state.clone());
+            script.set_lock_openers(state);
+        }
+    })
 }
 
 #[cfg(test)]
@@ -155,14 +159,23 @@ mod tests {
         }
     }
 
+    /// The walk reads the opener list from the front (`0x5da644`-`0x5da712`), so the openers go
+    /// in its order, not by spell id.
     #[test]
-    fn the_openers_are_the_known_open_lock_spells_with_their_current_points() {
+    fn the_openers_are_the_listed_open_lock_spells_in_order_with_their_current_points() {
+        let herbs = SpellDisplay {
+            open_lock: Some(OpenLock {
+                effect: 0,
+                lock_type: 2,
+            }),
+            ..pick_lock()
+        };
         let catalog = SpellCatalog::from_displays(HashMap::from([
             (1804, pick_lock()),
             (133, SpellDisplay::default()),
-            (6477, pick_lock()),
+            (6477, herbs),
         ]));
-        let known = BTreeSet::from([133, 1804, 6477, 9999]);
+        let known = [6477, 133, 1804, 9999];
         let at =
             |skill: u32| lock_openers(&known, Some(&catalog), &|_| skill, HashSet::from([5060]));
         let openers = at(150);
@@ -170,7 +183,7 @@ mod tests {
             openers.spells,
             [
                 LockOpener {
-                    lock_type: 1,
+                    lock_type: 2,
                     points: 150
                 },
                 LockOpener {
@@ -178,7 +191,7 @@ mod tests {
                     points: 150
                 }
             ],
-            "ascending spell id, Fireball and the unknown id left out"
+            "in list order, Fireball and the unknown id left out"
         );
         assert_eq!(openers.held, HashSet::from([5060]));
         // The value follows the skill, so a skill-up changes the state and re-pushes it.

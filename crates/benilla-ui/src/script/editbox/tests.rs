@@ -971,7 +971,8 @@ fn text_insets_shrink_the_text_region_rect() {
     let (l, r_, t, b) = s
         .eval::<(f32, f32, f32, f32)>("return E:GetTextInsets()")
         .unwrap();
-    assert_eq!((l, r_, t, b), (15.0, 13.0, 2.0, 3.0));
+    let law = |v: f32| crate::test_support::law43(v) as f32;
+    assert_eq!((l, r_, t, b), (law(15.0), law(13.0), law(2.0), law(3.0)));
 }
 
 // SetTextColor tints the box's text region, as `ChatEdit_UpdateHeader` colours the typed text.
@@ -1003,7 +1004,10 @@ fn set_text_color_tints_the_text_region() {
             _ => None,
         })
         .expect("the edit box text renders");
-    assert_eq!(color, Some([1.0, 0.5, 0.25, 1.0]));
+    assert_eq!(
+        color,
+        Some(crate::color::quant::drawn([1.0, 0.5, 0.25, 1.0]))
+    );
 }
 
 // ── the host text-UI seam: advances, caret/selection geometry, mouse, clipboard ─────────────
@@ -1777,5 +1781,47 @@ fn the_caret_flush_fires_on_cursor_changed_with_the_references_four_args() {
         s.eval::<i64>("return table.getn(fires)").unwrap() > before,
         "moving the caret one char fires the flush"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The four read-backs answer 1 or nil off the flags word, one value each: a new box is autoFocus
+/// (the ctor stores 1, `0x779a2e`) and nothing else; a bare setter enables, nil disables; XML sets
+/// them through the same setters.
+#[test]
+fn the_mode_read_backs_answer_one_or_nil() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    let probe = |expr: &str| -> (usize, String) {
+        let n = s.arity(expr).unwrap();
+        let t: String = s.eval(&format!("return type(({expr}))")).unwrap();
+        (n, t)
+    };
+    assert_eq!(probe("E:IsAutoFocus()"), (1, "number".into()));
+    assert_eq!(s.eval::<i64>("return E:IsAutoFocus()").unwrap(), 1);
+    for m in ["IsMultiLine", "IsNumeric", "IsPassword"] {
+        assert_eq!(
+            probe(&format!("E:{m}()")),
+            (1, "nil".into()),
+            "{m} on a new box"
+        );
+    }
+
+    s.run("E:SetNumeric(); E:SetAutoFocus(nil); E:SetMultiLine(1); E:SetPassword(true)")
+        .unwrap();
+    assert_eq!(probe("E:IsNumeric()"), (1, "number".into()));
+    assert_eq!(probe("E:IsAutoFocus()"), (1, "nil".into()));
+    assert_eq!(probe("E:IsMultiLine()"), (1, "number".into()));
+    assert_eq!(probe("E:IsPassword()"), (1, "number".into()));
+    s.run("E:SetNumeric(nil)").unwrap();
+    assert_eq!(probe("E:IsNumeric()"), (1, "nil".into()));
+
+    let doc = crate::framexml::parse(
+        r#"<Ui><EditBox name="Pw" password="true" autoFocus="false"/></Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert_eq!(s.eval::<i64>("return Pw:IsPassword()").unwrap(), 1);
+    assert_eq!(probe("Pw:IsAutoFocus()"), (1, "nil".into()));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

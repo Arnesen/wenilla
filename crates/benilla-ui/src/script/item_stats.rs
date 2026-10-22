@@ -5,10 +5,11 @@
 //! turns into `CMSG_ITEM_QUERY`, the reference's uncached-item early-out. The app resolves every
 //! DBC string, as the engine reads no DBCs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi;
 use super::Model;
 
 /// An item template's tooltip view: the `SMSG_ITEM_QUERY_SINGLE_RESPONSE` fields the tooltip reads,
@@ -73,21 +74,23 @@ pub struct ItemTemplateView {
     pub required_skill_name: Option<String>,
     pub required_spell: u32,
     pub required_spell_name: Option<String>,
-    /// No tooltip line in 1.12; only the usable gate (`0x5ea930`) reads it.
+    /// The required spell and every later rank of it: knowing any meets the requirement
+    /// (`0x60c740`, `0x60c8d0` at `0x52d618`, `0x5eaa42`). Empty reads as the spell alone.
+    pub required_spell_ranks: Vec<u32>,
+    /// The required honor rank (`+0x4c`): an `ITEM_REQ_SKILL` line naming the rank (`0x52d694`)
+    /// and a leg of the usable gate (`0x5ea930`).
     pub required_honor_rank: u32,
-    /// Usable gate only; nonzero always fails, as the `PVP_MEDALS` bits it tests are never set.
+    /// The required medal (`+0x50`), `PVP_MEDAL<n>`: an `ITEM_REQ_SKILL` line (`0x52d6ff`) and a
+    /// leg of the usable gate, both testing bit `n - 1` of `PLAYER_FIELD_PVP_MEDALS`.
     pub required_city_rank: u32,
     /// "Requires <Faction> - <Standing>", app-resolved; the raw faction and rank drive its red.
     pub required_rep_line: Option<String>,
     pub required_rep_faction: u32,
     pub required_rep_rank: u32,
-    /// Green trigger-spell lines `(trigger, spell id, text)` in wire order: 0 and 5 "Use:",
-    /// 1 "Equip:", 2 "Chance on hit:", 6 a taught spell (no line, only the "Already known" red).
-    pub spell_triggers: Vec<(u32, u32, String)>,
+    /// The spell blocks' lines in block order, each block whose spell has a non-empty
+    /// description (`0x52d992`..`0x52dd4d`).
+    pub spell_lines: Vec<ItemSpellLine>,
     pub lock_id: u32,
-    /// "N Charge(s)" for the first spell slot past the builder's gate (`0x52db51`: 0 and -1
-    /// print nothing, else the absolute value); 0 prints no line.
-    pub charges: i32,
     pub description: String,
     pub page_text: u32,
     /// Copper: the merchant money row, or `ITEM_UNSELLABLE` when 0 in a sell context.
@@ -99,6 +102,75 @@ pub struct ItemTemplateView {
     /// `RandomProperty` (template `+0x1b8`): the item can roll a suffix, so a template tooltip
     /// prints `<Random enchantment>` (`0x52cc33`).
     pub random_property: u32,
+    /// Block 0's template charges, unfiltered (`+0x144`): below -1 the merchant price scales by
+    /// the item's charges over them (`0x52e432`).
+    pub spell_charges_0: i32,
+    /// The record's area (`+0x1c8`) by its `AreaTable.dbc` name, app-resolved; `None` for an id
+    /// of 0 or below, one with no row, or an empty name (`0x52bac9`..`0x52bb01`).
+    pub area_name: Option<String>,
+    /// The record's map (`+0x1cc`) by its `Map.dbc` name, as [`Self::area_name`]
+    /// (`0x52bb06`..`0x52bb3e`).
+    pub map_name: Option<String>,
+    /// The record's area and map ids as they stand, 0 for none: either nonzero refuses the
+    /// auction sell slot (`0x5da500`, `0x5da570`).
+    pub area: u32,
+    pub map: u32,
+    /// What the first spell slot (`+0x11c`, any trigger) teaches when that spell's first effect is
+    /// 36, learn spell (`0x52d500`..`0x52d532`): the "Already known" line's subject.
+    pub teaches: Option<TaughtSpell>,
+}
+
+impl ItemTemplateView {
+    /// Whether the player knows the required spell or a later rank of it, `knows` asking of each
+    /// (`0x60c740`, then `0x60c8d0` along the chain, at `0x52d614` and `0x5eaa42`).
+    pub(crate) fn knows_required_spell(&self, knows: impl Fn(u32) -> bool) -> bool {
+        match self.required_spell_ranks.as_slice() {
+            [] => knows(self.required_spell),
+            ranks => ranks.iter().any(|&id| knows(id)),
+        }
+    }
+}
+
+/// One spell block's tooltip lines (`0x52d992`..`0x52dd4d`), app-resolved from the template and
+/// `Spell.dbc`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemSpellLine {
+    /// The block's ordinal, 0..=4: which of an item object's charges its line reads
+    /// (`0x52d9f4`).
+    pub block: u8,
+    /// `ItemSpelltriggerType`: 0 "Use:", 1 "Equip:", 2 "Chance on hit:", any other the text
+    /// alone (`0x52da37`..`0x52da61`).
+    pub trigger: u32,
+    pub spell_id: u32,
+    /// The spell's `$`-expanded description, never empty (`0x52da29`).
+    pub text: String,
+    /// The block's template charges (`+0x144`): 0 reads as -1 (`0x52da06`), and -1 prints no
+    /// charges line (`0x52db51`).
+    pub charges: i32,
+    /// The block's spell teaches a spell that creates an item: its line goes white, and the
+    /// product's tooltip and the reagents follow (`0x52daf5`..`0x52dd38`).
+    pub recipe: Option<ItemRecipe>,
+}
+
+/// A recipe's product and reagents, from the taught spell (`0x52dba7`, `0x52dbee`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemRecipe {
+    /// The created item, the taught spell's EffectItemType[0] (`+0x19c`).
+    pub product: u32,
+    /// The taught spell's reagents with an id above 0, `(item, count)` in slot order (`+0xa8`,
+    /// `+0xc8`).
+    pub reagents: Vec<(u32, i32)>,
+}
+
+/// A learn spell's subject, app-resolved from `Spell.dbc` and `SkillLineAbility.dbc`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaughtSpell {
+    /// The taught spell, the first effect's trigger spell (`+0x1b4`), then each higher rank in its
+    /// chain: knowing any is "known" (`0x60c740`, `0x60c8d0`).
+    pub ranks: Vec<u32>,
+    /// The first effect targets the pet (implicit target A or B 5, `0x52d538`..`0x52d547`): the
+    /// pet's book is asked, not the player's (`0x52d56d`).
+    pub pet: bool,
 }
 
 /// The player state the tooltip's red lines and the usable gate compare against.
@@ -121,6 +193,12 @@ pub struct PlayerReqState {
     pub can_dual_wield: bool,
     /// The highest lifetime honor rank (`PLAYER_FIELD_BYTES` byte 3).
     pub honor_rank: u8,
+    /// `PLAYER_FIELD_PVP_MEDALS` (player block `+0x1034`): medal `n` is bit `n - 1`.
+    pub pvp_medals: u32,
+    /// The learned skinning spell's (`[0xb700e4]`) `SKINNING` effect points, `0x6e3760` at the
+    /// player's skill (`0x529f4e`), which the unit tooltip's skinnable line colours by; `None`
+    /// without the spell, or at 0 or below (`0x529f58`).
+    pub skinning: Option<i32>,
 }
 
 /// The icon an item-texture getter answers while the item's template is unknown or its display
@@ -153,11 +231,10 @@ pub(super) fn item_refusal_by_id(model: &super::Model, item_id: u32) -> Option<&
     if item_id == 0 {
         return None;
     }
-    model.item_templates.get(&item_id).and_then(|v| {
-        item_refusal(v, &model.player_req, |id| {
-            model.spellbook.slots.iter().any(|s| s.spell_id == id)
-        })
-    })
+    model
+        .item_templates
+        .get(&item_id)
+        .and_then(|v| item_refusal(v, &model.player_req, |id| model.known_spells.contains(&id)))
 }
 
 /// The client's item-usable predicate `0x5ea930`, whose answer the merchant getters push as
@@ -173,9 +250,10 @@ pub fn item_usable(
 /// `0x5ea930`'s refusal, as the key of the error line its caller shows (`0x5d8e0e`, `0x5d926d`),
 /// its legs in the reference's order: the proficiency leg is `ERR_PROFICIENCY_NEEDED` (`0x7`,
 /// `0x5ea9b3`), every other failure `ERR_CANT_USE_ITEM` (`0x9c`, `0x5eaace`). Proficiency tests the
-/// item's own subclass bit, with no alternate walk. A nonzero city rank always fails: it tests
-/// `PLAYER_FIELD_PVP_MEDALS`, which is never written. Reputation compares ranks, equivalent to the
-/// reference's standing threshold (`0x4d6370`, table `0x80928c`); an unknown faction is rank 0. An
+/// item's own subclass bit, with no alternate walk. A required medal tests its bit of
+/// `PLAYER_FIELD_PVP_MEDALS` (`0x5eaa89`..`0x5eaaa0`). Reputation compares ranks, equivalent to
+/// the reference's standing threshold (`0x4d6370`, table `0x80928c`); an unknown faction is rank
+/// 0. The required spell is met by the spell or a later rank, `knows_spell` asked of each. An
 /// unpushed state (level 0) declines to judge, answering usable.
 pub fn item_refusal(
     v: &ItemTemplateView,
@@ -210,13 +288,13 @@ pub fn item_refusal(
             }
         }
     }
-    if v.required_spell != 0 && !knows_spell(v.required_spell) {
+    if v.required_spell != 0 && !v.knows_required_spell(knows_spell) {
         return CANT_USE;
     }
     if v.required_honor_rank != 0 && u32::from(req.honor_rank) < v.required_honor_rank {
         return CANT_USE;
     }
-    if v.required_city_rank != 0 {
+    if v.required_city_rank != 0 && req.pvp_medals & medal_bit(v.required_city_rank) == 0 {
         return CANT_USE;
     }
     if v.required_rep_faction != 0 {
@@ -230,6 +308,12 @@ pub fn item_refusal(
         }
     }
     None
+}
+
+/// Medal `n`'s bit of `PLAYER_FIELD_PVP_MEDALS`: `1 << (n - 1)` by `shl`, whose count is taken
+/// mod 32 (`0x52d70a`..`0x52d712`, `0x5eaa9e`).
+pub(in crate::script) fn medal_bit(medal: u32) -> u32 {
+    1u32.wrapping_shl(medal.wrapping_sub(1))
 }
 
 /// An item set's tooltip block (`0x854b1c`), app-resolved from `ItemSet.dbc`: member names from
@@ -309,6 +393,18 @@ impl super::UiScript {
         rows: std::collections::HashMap<u32, super::RandomPropertyView>,
     ) {
         self.model_mut().random_properties = rows;
+    }
+
+    /// Pushes the `SpellItemEnchantment` names once, at load, keyed by id: a chat link carries a
+    /// bare enchant id, and a clicked tooltip cannot repaint on a late answer.
+    pub fn set_enchant_names(&mut self, names: HashMap<u32, String>) {
+        self.model_mut().enchant_names = names;
+    }
+
+    /// Pushes every spell the player knows (`SMSG_INITIAL_SPELLS` and its updates), the set the
+    /// known-recipe line asks (`0x60c740`'s bits at `0xb710fc`), passives and recipes included.
+    pub fn set_known_spells(&mut self, spells: HashSet<u32>) {
+        self.model_mut().known_spells = spells;
     }
 
     /// Pushes the player state the red lines compare against.
@@ -413,7 +509,7 @@ fn parse_item_arg(v: &Value) -> mlua::Result<(i64, u32, u32, u32)> {
     let mut fields = rest
         .splitn(4, ':')
         .map(crate::script::binding_abi::s_str_to_int);
-    let id = fields.next().unwrap_or(0);
+    let id = i64::from(fields.next().unwrap_or(0));
     let mut next = || u32::try_from(fields.next().unwrap_or(0)).unwrap_or(0);
     Ok((id, next(), next(), next()))
 }
@@ -424,7 +520,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `ITEM_QUALITY_COLORS[-1]` is white, the colour of an uncached loot row (`0x4c2435`).
     lua.globals().set(
         "GetItemQualityColor",
-        lua.create_function(|lua, quality: i64| {
+        lua.create_function(|lua, quality: Value| {
+            // `is-number` else `Usage: GetItemQualityColor(index)` (`0x842d00`, `0x48dfc5`).
+            let quality = i64::from(binding_abi::number_arg(
+                lua,
+                quality,
+                "Usage: GetItemQualityColor(index)",
+            )?);
             // A 32-bit int (`__ftol`), compared unsigned.
             let i = match quality as i32 as u32 {
                 q if q >= 7 => 1,

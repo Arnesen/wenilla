@@ -5,16 +5,17 @@ use std::io::Cursor;
 
 use benilla_bytes::{chunks, ByteExt};
 
-/// A terrain vertex normal: three signed bytes, named `x, z, y` in disk order.
+/// A terrain vertex normal: three signed bytes in WoW's X, Y, Z, the order of the file
+/// (`CMapChunk::LoadNormals`, `0x6aff10`).
 #[derive(Debug, Clone, Copy)]
 pub struct VertexNormal {
     pub x: i8,
-    pub z: i8,
     pub y: i8,
+    pub z: i8,
 }
 
 impl VertexNormal {
-    /// `[x, y, z] / 127`, which is disk bytes `[b0, b2, b1]`; the terrain mesher swaps them back.
+    /// `[x, y, z] / 127`, the bytes in file order (`0x810c08` is the 1/127).
     pub fn to_normalized(&self) -> [f32; 3] {
         [
             f32::from(self.x) / 127.0,
@@ -436,8 +437,8 @@ fn read_mcnk(data: &[u8]) -> Result<McnkChunk> {
         for i in 0..145.min(sub.len() / 3) {
             normals.push(VertexNormal {
                 x: sub.u8_at(i * 3).ok_or(Error::Truncated("MCNR"))? as i8,
-                z: sub.u8_at(i * 3 + 1).ok_or(Error::Truncated("MCNR"))? as i8,
-                y: sub.u8_at(i * 3 + 2).ok_or(Error::Truncated("MCNR"))? as i8,
+                y: sub.u8_at(i * 3 + 1).ok_or(Error::Truncated("MCNR"))? as i8,
+                z: sub.u8_at(i * 3 + 2).ok_or(Error::Truncated("MCNR"))? as i8,
             });
         }
         chunk.normals = Some(McnrChunk { normals });
@@ -655,6 +656,35 @@ mod tests {
         let b = chunk(b"KNCM", &data);
         let ParsedAdt::Root(root) = parse(&b).expect("parses");
         assert!(root.mcnk_chunks[0].liquids.is_empty());
+    }
+
+    /// `CMapChunk::LoadNormals` (`0x6aff10`) stores each MCNR triple's three signed bytes as the
+    /// vector's components in file order, each times 1/127 (`0x810c08`): the bytes are X, Y, Z.
+    #[test]
+    fn mcnr_normals_are_x_y_z_in_file_order() {
+        let triple = |i: usize| [i as u8, (200 + i) as u8, 127];
+        let mcnr: Vec<u8> = (0..145).flat_map(triple).collect();
+        let mut data = vec![0u8; 128];
+        // The MCNR offset counts from the MCNK's magic, so the 8-byte chunk header is in it.
+        data[0x18..0x1c].copy_from_slice(&(8u32 + 128).to_le_bytes());
+        data.extend(chunk(b"RNCM", &mcnr));
+        let b = chunk(b"KNCM", &data);
+        let ParsedAdt::Root(root) = parse(&b).expect("parses");
+
+        let normals = &root.mcnk_chunks[0].normals.as_ref().expect("MCNR").normals;
+        assert_eq!(normals.len(), 145);
+        for (i, n) in normals.iter().enumerate() {
+            let [x, y, z] = triple(i).map(|b| b as i8);
+            assert_eq!((n.x, n.y, n.z), (x, y, z), "normal {i}");
+            assert_eq!(
+                n.to_normalized(),
+                [x, y, z].map(|c| f32::from(c) / 127.0),
+                "normal {i}"
+            );
+        }
+        // Flat ground: the bytes 0, 0, 127 are straight up in WoW's Z.
+        let up = VertexNormal { x: 0, y: 0, z: 127 };
+        assert_eq!(up.to_normalized(), [0.0, 0.0, 1.0]);
     }
 
     /// Each block keeps its own cell flags, so the river and the ocean tell apart by nibble.

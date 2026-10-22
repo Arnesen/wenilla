@@ -38,7 +38,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
     // The justify quartet, on both classes ([`super::install_justify`]).
-    super::install_justify(lua, &m, "MessageFrame")?;
+    super::install_justify(lua, &m)?;
 
     // AddMessage(text [, r, g, b [, a]]) (`0x795590`). An unusable text is a silent no-op
     // ([`super::message_text`]). r, g and b count only as a trio, else white, and a bad colour
@@ -81,21 +81,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| with_mf(lua, &this, MessageFrameState::clear))?,
     )?;
 
-    // SetInsertMode (`0x794ed0`) compares against "BOTTOM" (`0x871404`), so anything else is
-    // TOP; the ctor default is BOTTOM.
+    // SetInsertMode (`0x794ed0`): a `lua_isstring` value (`0x794f5c`), a number as its text,
+    // compared whole and without case, untrimmed (`SStrCmpI`), with "TOP" (`0x8713e0`) then
+    // "BOTTOM" (`0x871404`). Anything else raises `Usage: %s:SetInsertMode("TOP" or "BOTTOM")`
+    // (`0x87ba50`) naming the frame, the mode left alone. The ctor default is BOTTOM.
     m.set(
         "SetInsertMode",
         lua.create_function(|lua, (this, mode): (Table, Value)| {
-            let mode = match &mode {
-                Value::String(s) => {
-                    if s.to_str()?.trim().eq_ignore_ascii_case("BOTTOM") {
-                        InsertMode::Bottom
-                    } else {
-                        InsertMode::Top
-                    }
+            with_mf(lua, &this, |_| ())?;
+            let mode = match crate::script::binding_abi::optional_string(lua, &mode) {
+                Some(m) if m.eq_ignore_ascii_case("TOP") => InsertMode::Top,
+                Some(m) if m.eq_ignore_ascii_case("BOTTOM") => InsertMode::Bottom,
+                _ => {
+                    return Err(crate::script::binding_abi::usage(
+                        lua,
+                        &this,
+                        r#"SetInsertMode("TOP" or "BOTTOM")"#,
+                    ))
                 }
-                // A non-string fails the compare too.
-                _ => InsertMode::Top,
             };
             with_mf(lua, &this, |mf| mf.insert_mode = mode)
         })?,
@@ -128,10 +131,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // A `lua_isnumber` miss raises `Usage: %s:SetTimeVisible(seconds)` and `...SetFadeDuration(seconds)`
+    // (`0x87b918`, `0x87b93c`; `0x79530c`, `0x7954bc`); the number is stored as it is, no clamp
+    // (`0x785c65`, `0x785cc5`), and every line whose own time is not 0 takes it (`0x785c3d`).
     m.set(
         "SetTimeVisible",
-        lua.create_function(|lua, (this, s): (Table, f32)| {
-            with_mf(lua, &this, |mf| mf.time_visible = s.max(0.0))
+        lua.create_function(|lua, (this, s): (Table, Value)| {
+            let s = crate::script::binding_abi::method_number(
+                lua,
+                &this,
+                s,
+                "SetTimeVisible(seconds)",
+            )? as f32;
+            with_mf(lua, &this, |mf| mf.set_time_visible(s))
         })?,
     )?;
     m.set(
@@ -140,8 +152,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "SetFadeDuration",
-        lua.create_function(|lua, (this, s): (Table, f32)| {
-            with_mf(lua, &this, |mf| mf.fade_duration = s.max(0.0))
+        lua.create_function(|lua, (this, s): (Table, Value)| {
+            let s = crate::script::binding_abi::method_number(
+                lua,
+                &this,
+                s,
+                "SetFadeDuration(seconds)",
+            )? as f32;
+            with_mf(lua, &this, |mf| mf.set_fade_duration(s))
         })?,
     )?;
     m.set(

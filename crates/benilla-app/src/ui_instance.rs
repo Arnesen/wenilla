@@ -9,12 +9,11 @@
 //! would never offer the reset after a 5-man.
 
 use benilla_protocol::messages::{InstanceResetFailure, RaidInstanceMessage, RaidInstanceWarning};
-use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 /// `CanShowResetInstances()`'s window, 25 hours: `cmp eax, 0x15f90` at `0x495ce6` against
 /// `time(0)` minus when we left, unsigned, so the boundary is inclusive.
@@ -386,51 +385,56 @@ fn track_instance_state(
 /// Show every queued line as `CHAT_MSG_SYSTEM`, then publish `IsInInstance` and
 /// `CanShowResetInstances` every frame, as both move with the map and the clock (the setters diff).
 fn feed_instance(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut state: ResMut<InstanceState>,
-    mut chat: ResMut<ChatLog>,
+    chat: Res<ChatLog>,
     maps: Option<Res<benilla_assets::MapCatalogRes>>,
     current_map: Option<Res<benilla_world::world_map::CurrentMap>>,
     time: Res<Time<Real>>,
 ) {
-    let Some(mut script) = script else {
-        // No VM (an engine-only run): drop the queue rather than let it grow; a real session seats
-        // the VM before any of these packets can arrive.
-        let dropped = state.take_lines().len();
-        if dropped > 0 {
-            debug!("ui_instance: no VM — dropped {dropped} lockout line(s)");
-        }
-        return;
-    };
-    let here = current_map.as_ref().map(|m| m.0);
-    let now = time.elapsed().as_secs();
-
-    for line in state.take_lines() {
-        let name = line.map.map(|m| map_name(m, maps.as_deref()));
-        let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-        match lockout_text(&line, name.as_deref(), &get) {
-            Some(text) => {
-                debug!("ui_instance: {} -> {text:?}", line.token);
-                chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            // No VM (an engine-only run): drop the queue rather than let it grow; a real session
+            // seats the VM before any of these packets can arrive.
+            let dropped = state.take_lines().len();
+            if dropped > 0 {
+                debug!("ui_instance: no VM — dropped {dropped} lockout line(s)");
             }
-            // A missing or empty key: silence.
-            None => debug!("ui_instance: {} resolves to nothing — no line", line.token),
-        }
-    }
+            return;
+        };
+        let here = current_map.as_ref().map(|m| m.0);
+        let now = time.elapsed().as_secs();
 
-    script.set_instance_type(here.and_then(|m| maps.as_ref().and_then(|c| c.0.instance_type(m))));
-    let party_dungeon = |m: u32| maps.as_ref().is_some_and(|c| c.0.is_party_dungeon(m));
-    script.set_can_reset_instances(state.can_reset(here, &party_dungeon, now));
+        for line in state.take_lines() {
+            let name = line.map.map(|m| map_name(m, maps.as_deref()));
+            let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+            match lockout_text(&line, name.as_deref(), &get) {
+                Some(text) => {
+                    debug!("ui_instance: {} -> {text:?}", line.token);
+                    chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+                }
+                // A missing or empty key: silence.
+                None => debug!("ui_instance: {} resolves to nothing — no line", line.token),
+            }
+        }
+
+        script
+            .set_instance_type(here.and_then(|m| maps.as_ref().and_then(|c| c.0.instance_type(m))));
+        let party_dungeon = |m: u32| maps.as_ref().is_some_and(|c| c.0.is_party_dungeon(m));
+        script.set_can_reset_instances(state.can_reset(here, &party_dungeon, now));
+    })
 }
 
 /// Turn the `ResetInstances()` calls the dialog made into `CMSG_RESET_INSTANCES` sends.
-fn drain_instance(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for _ in 0..script.take_reset_instance_asks() {
-        let _ = commands.0.send(ClientCommand::ResetInstances);
-    }
+fn drain_instance(mut hosted_vm: crate::script_calls::HostedVm, commands: Res<NetCommands>) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for _ in 0..script.take_reset_instance_asks() {
+            let _ = commands.0.send(ClientCommand::ResetInstances);
+        }
+    })
 }
 
 /// Drop the witness at logout, as the next login may be another character. The three globals stay,
@@ -457,7 +461,7 @@ impl Plugin for UiInstancePlugin {
                 clear_witness_on_logout.before(track_instance_state),
                 track_instance_state.before(feed_instance),
                 feed_instance.in_set(UiFeed),
-                drain_instance.after(UiInput),
+                drain_instance.in_set(crate::ui_script::UiDrain),
             ),
         );
     }

@@ -45,7 +45,7 @@ fn node_anchors(
         .unwrap_or_default()
 }
 
-/// A frame's `effective_alpha` and `effective_scale`, worn by the quads it emits itself.
+/// A frame's alpha and `effective_scale`, worn by the quads it emits itself.
 #[derive(Clone, Copy)]
 pub(super) struct FramePaint {
     pub(super) alpha: f32,
@@ -86,8 +86,8 @@ impl InputFingerprint {
             self.feed(u64::from(a.point.id()));
             self.feed(u64::from(a.relative_to));
             self.feed(u64::from(a.relative_point.id()));
-            self.f32(a.x_off);
-            self.f32(a.y_off);
+            self.feed(a.x_off.bits());
+            self.feed(a.y_off.bits());
             n += 1;
         }
         self.feed(n);
@@ -96,8 +96,8 @@ impl InputFingerprint {
     #[inline]
     fn input(&mut self, i: &LayoutInput) {
         self.anchors(&i.anchors);
-        self.f32(i.width);
-        self.f32(i.height);
+        self.feed(i.width.bits());
+        self.feed(i.height.bits());
         self.f32(i.scale);
         self.feed(u64::from(i.clamp));
         self.f32(i.extent_x);
@@ -169,12 +169,12 @@ pub(super) fn region_node_hash(data: &RegionData, owner: Option<u32>) -> u64 {
     node.feed(owner.map_or(u64::MAX, u64::from));
     match data.size {
         Some((w, h)) => {
-            node.f32(w);
-            node.f32(h);
+            node.feed(w.bits());
+            node.feed(h.bits());
         }
         None => node.feed(u64::MAX),
     }
-    let unsized_axis = data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0);
+    let unsized_axis = data.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero());
     match effective_measure(data).filter(|_| unsized_axis) {
         Some(m) => {
             node.f32(m.w);
@@ -214,6 +214,43 @@ const SOLID_TEXTURE_TEXELS: f32 = 8.0;
 /// The floor under a FontString's derived span: `CSimpleFontString::GetWidth` (`0x772930`, height
 /// `0x772a60`) returns at least one FrameXML unit, not one line, so empty text reads back 1, not 0.
 pub(super) const FONTSTRING_MIN_SPAN: f32 = 1.0;
+
+/// A font string's size slot (`0x772930`, height `0x772a60`) in layout units: its stored size, or
+/// when that is 0 its text's extent (`0x772890`), raised to `S(1)`, at 53 bits, when not above it or
+/// a NaN (`0x772971`, `0x77297a`), so a single anchor always fixes the opposite edge.
+pub(in crate::script) fn fontstring_slot(
+    units: layout::LayoutUnits,
+    authored: layout::Len,
+    measure: Option<f32>,
+) -> f64 {
+    let stored = authored.layout(units);
+    let candidate = if stored == 0.0 {
+        measure.map_or(0.0, |m| f64::from(units.store(m)))
+    } else {
+        f64::from(stored)
+    };
+    let floor = units.store_wide(FONTSTRING_MIN_SPAN);
+    if floor >= candidate || candidate.is_nan() {
+        floor
+    } else {
+        candidate
+    }
+}
+
+/// A texture's size slot (`0x770720`, height `0x770790`) in layout units: its stored size `stored`,
+/// or when that is 0 and it has art, the art's texel extent through the setter steps, returned at
+/// 53 bits (`0x77074e`); 0 with no art.
+pub(in crate::script) fn texture_slot(
+    units: layout::LayoutUnits,
+    stored: f32,
+    content: Option<f32>,
+) -> f64 {
+    if stored == 0.0 {
+        content.map_or(0.0, |t| units.store_wide(t))
+    } else {
+        f64::from(stored)
+    }
+}
 
 /// Marks a [`LayoutScope::node_of`] index as one into `regions` rather than `plan`.
 const REGION_TAG: u32 = 0x8000_0000;
@@ -663,26 +700,26 @@ fn first_rect_diff(
     regions: &HashMap<RegionHandle, Rect>,
 ) -> Option<u32> {
     let mut ids: Vec<u32> = Vec::new();
-    for (h, r) in &model.resolved {
+    for (h, r) in &model.frame_rects {
         if frames.get(h) != Some(r) {
             ids.extend(model.frame_to_id.get(h));
         }
     }
-    for h in frames.keys().filter(|h| !model.resolved.contains_key(h)) {
+    for h in frames.keys().filter(|h| !model.frame_rects.contains_key(h)) {
         ids.extend(model.frame_to_id.get(h));
     }
-    for (h, r) in &model.region_resolved {
+    for (h, r) in &model.region_rects {
         if regions.get(h) != Some(r) {
             ids.extend(model.region_to_id.get(h));
         }
     }
     for h in regions
         .keys()
-        .filter(|h| !model.region_resolved.contains_key(h))
+        .filter(|h| !model.region_rects.contains_key(h))
     {
         ids.extend(model.region_to_id.get(h));
     }
-    let differs = frames != &model.resolved || regions != &model.region_resolved;
+    let differs = frames != &model.frame_rects || regions != &model.region_rects;
     ids.into_iter().min().or(differs.then_some(u32::MAX))
 }
 
@@ -738,7 +775,7 @@ pub(super) fn layout_verify_enabled() -> bool {
 struct PreambleProf {
     on: bool,
     last: Option<std::time::Instant>,
-    /// The GameTooltip auto-size pre-pass (`layout_tooltips`).
+    /// The GameTooltip cursor pre-pass (`anchor_cursor_tooltips`).
     tooltip: u128,
     /// `OnSizeChanged`'s "before" snapshot.
     watched: u128,
@@ -810,9 +847,12 @@ impl PreambleProf {
 }
 
 /// `OnSizeChanged`'s "after": queue `(id, width, height)` for each watched frame whose size moved
-/// by the `ApplyRect 0x76b580` test ([`crate::layout::size_changed`] at [`Model::size_eps`]), so a
-/// pure move never fires. A frame with no rect at entry compares against the zero rect
-/// `CSimpleFrame`'s ctor leaves; one that loses its rect had no `ApplyRect` and fires nothing.
+/// by the `ApplyRect 0x76b580` test ([`crate::layout::size_changed`] at [`layout::SIZE_EPS`] on the
+/// layout rects), so a pure move never fires. The size is the layout rect's own, `right − left` and
+/// `top − bottom` rounded to f32 (`0x76b623`–`0x76b63e`), with no getter steps and no scale
+/// divide, which slot `+0x48` (`0x76b660`) pushes as doubles under `"%f%f"` (`0x878830`). A frame
+/// with no rect at entry compares against the zero rect `CSimpleFrame`'s ctor leaves; one that
+/// loses its rect had no `ApplyRect` and fires nothing.
 fn queue_size_changes(
     watched: &[(FrameHandle, Option<Rect>)],
     resolved: &HashMap<FrameHandle, Rect>,
@@ -839,11 +879,14 @@ impl UiScript {
     /// [`UiScript::resolve`]'s body on a bare `Model`, so a Lua binding can force a fresh resolve,
     /// as a scroll frame's range recompute must reflect a same-tick `SetHeight`.
     pub(super) fn resolve_layout(model: &mut Model) {
+        // A tooltip sized before its lines were measured, in a VM with no font engine.
+        super::tooltip::size_owed(model);
         let solves = model.layout_solves;
         Self::resolve_layout_inner(model);
         // A solve may have resized a frame: its backdrop re-runs its texcoords (`0x76b580`).
         if model.layout_solves != solves {
             super::backdrop::after_resolve(model);
+            super::messageframe::after_resolve(model);
         }
         if !model.layout_verify_recheck {
             return;
@@ -862,8 +905,8 @@ impl UiScript {
     /// by step, not reset at each; the meters keep the incremental pass's values.
     pub(super) fn scratch_divergence(model: &mut Model) -> Option<String> {
         let cached = std::mem::take(&mut model.layout_scope);
-        let before = (model.resolved.clone(), model.region_resolved.clone());
-        let kept_before = model.region_kept.clone();
+        let before = (model.frame_rects.clone(), model.region_rects.clone());
+        let kept_before = model.region_kept_rects.clone();
         let meters = (
             model.layout_solves,
             model.layout_rounds,
@@ -912,7 +955,7 @@ impl UiScript {
                  First rect to differ: {}, incremental {:?}, fresh {:?}. Graph: {}",
                 report(id),
                 rect(&before.0, &before.1),
-                rect(&model.resolved, &model.region_resolved),
+                rect(&model.frame_rects, &model.region_rects),
                 graph.as_deref().unwrap_or("same as fresh"),
             ));
         }
@@ -923,11 +966,11 @@ impl UiScript {
                 graph.as_deref().unwrap_or("same as fresh"),
             ));
         }
-        if kept_before != model.region_kept {
+        if kept_before != model.region_kept_rects {
             return Some(format!(
                 "an INCREMENTAL layout pass kept failed textures' quads {kept_before:?}, a full \
                  derivation {:?}. Graph: {}",
-                model.region_kept,
+                model.region_kept_rects,
                 graph.as_deref().unwrap_or("same as fresh"),
             ));
         }
@@ -943,8 +986,8 @@ impl UiScript {
     fn resolve_layout_inner(model: &mut Model) {
         // Text that emptied or filled since the last resolve: named now where its node's hash
         // moved, ahead of the epoch's read, as if named at the write.
-        if !model.text_flips.is_empty() {
-            for rh in std::mem::take(&mut model.text_flips) {
+        if !model.content_writes.is_empty() {
+            for rh in std::mem::take(&mut model.content_writes) {
                 model.touch_layout_content(rh);
             }
         }
@@ -960,8 +1003,8 @@ impl UiScript {
         // Every call past tier 1 counts, verify's re-walks included: the walk is the cost.
         model.layout_gate_walks = model.layout_gate_walks.wrapping_add(1);
         let mut pre = PreambleProf::new(layout_prof_enabled());
-        // The GameTooltip pre-pass writes tooltip sizes and offsets from cached measures.
-        super::tooltip::layout_tooltips(model);
+        // The GameTooltip pre-pass places each cursor-anchored plate.
+        super::tooltip::anchor_cursor_tooltips(model);
         pre.tooltip = pre.lap();
         // The invalidations since the last resolve, the pre-pass's included, each answered by this
         // one, as the reference drains its whole queue (`0x768ed0`).
@@ -973,10 +1016,12 @@ impl UiScript {
         let watched: Vec<(FrameHandle, Option<Rect>)> = model
             .on_size_changed_frames
             .iter()
-            .map(|&h| (h, model.resolved.get(&h).copied()))
+            .map(|&h| (h, model.frame_rects.get(&h).copied()))
             .collect();
-        let size_eps = model.size_eps();
-        let resolve_eps = model.resolve_eps();
+        // Both thresholds in the layout units the rects are in (`0x8029d4`, `0x80c5c8`).
+        let size_eps = layout::SIZE_EPS;
+        let resolve_eps = layout::RESOLVE_EPS;
+        let space = model.layout_space();
         pre.watched = pre.lap();
         // The graph's own clears of a resolved bit (a moved effective scale) are writes made now.
         let forced_mark = model.layout_force.len();
@@ -993,14 +1038,13 @@ impl UiScript {
         let Model {
             arena,
             layout_inputs,
-            resolved,
+            frame_rects: resolved,
             region_data,
-            region_resolved,
-            region_kept,
+            region_rects: region_resolved,
+            region_kept_rects: region_kept,
             frame_to_id,
             id_to_frame,
             id_to_region,
-            screen,
             warnings,
             diagnostics,
             solver,
@@ -1026,6 +1070,8 @@ impl UiScript {
             ..
         } = model;
         let mut full_scope = false;
+        // The screen root in layout units, `K1` by `K2` at the interface's root (`0x764284`).
+        let screen = &space.root();
         // The nodes this resolve stores without the keep test; a write that cleared the resolved
         // bit of no node (an unanchored region's measure) leaves nothing to store.
         let mut forced = std::mem::take(layout_force);
@@ -1400,7 +1446,7 @@ impl UiScript {
                 let Some(input) = layout_inputs.get(&h) else {
                     continue;
                 };
-                solver.set_frame(id, input);
+                solver.set_frame(id, &input.stored(&space));
                 let cached = (!scope.has(id, MARK_FORCED)).then_some(raw).flatten();
                 solver.set_entry(id, cached, scope.has(id, MARK_INVALID));
                 let (d, held) = deferral(scope, arena, layout_hold, id);
@@ -1476,46 +1522,31 @@ impl UiScript {
                 }
                 // The owner supplies the region's scale and nothing else: no fallback edges.
                 let scale = arena.frame(owner).map(|f| f.effective_scale).unwrap_or(1.0);
-                // An axis authored 0, width or height, takes the host-measured extent: the
-                // reference sizes a zero width to the unwrapped line.
-                let measured = effective_measure(data);
-                let mut height = data.size.map_or(0.0, |s| s.1);
-                let mut width = data.size.map_or(0.0, |s| s.0);
-                if let Some(m) = &measured {
-                    if height == 0.0 {
-                        height = m.h;
-                    }
-                    if width == 0.0 {
-                        width = m.w;
-                    }
-                }
-                // Then the floor: `CSimpleFontString::GetWidth 0x772930` (height `0x772a60`)
-                // returns at least one unit on both legs, past the `jp 0x772957` that skips the
-                // measure, so a FontString's span is never 0 and a single anchor resolves it.
-                if is_fontstring {
-                    width = width.max(FONTSTRING_MIN_SPAN);
-                    height = height.max(FONTSTRING_MIN_SPAN);
-                }
-                // A texture's unset axis takes its texel extent (`content_span`): the reference's
-                // size getter is virtual for both region classes. It must apply before the
-                // resolve, as `combine_edge` reads a zero span as no size and leaves an edge unset.
-                // The getter runs in the resolve (`0x767579`, `0x7675e9`), loading the art first if
-                // it must (`0x44b3b0`), so only a resolve that reaches the node reads it.
-                if !is_fontstring && (width == 0.0 || height == 0.0) {
-                    if let Some((cw, ch)) = content_span(data, texture_size_probe.as_ref()) {
-                        if width == 0.0 {
-                            width = cw;
-                        }
-                        if height == 0.0 {
-                            height = ch;
-                        }
-                    }
-                }
-                scratch.anchors = data.anchors;
-                scratch.width = width;
-                scratch.height = height;
+                // The size slots the resolver calls (`0x767579`, `0x7675e9`), each class its own,
+                // in layout units. A texture reads its art only for an axis stored 0, loading it
+                // first if it must (`0x44b3b0`), so only a resolve that reaches the node reads it.
+                let units = space.units();
+                let zero = layout::Len::Script(0.0);
+                let (aw, ah) = data.size.unwrap_or((zero, zero));
+                let size = if is_fontstring {
+                    let measured = effective_measure(data);
+                    (
+                        fontstring_slot(units, aw, measured.map(|m| m.w)),
+                        fontstring_slot(units, ah, measured.map(|m| m.h)),
+                    )
+                } else {
+                    let (sw, sh) = (aw.layout(units), ah.layout(units));
+                    let content = (sw == 0.0 || sh == 0.0)
+                        .then(|| content_span(data, texture_size_probe.as_ref()))
+                        .flatten();
+                    (
+                        texture_slot(units, sw, content.map(|c| c.0)),
+                        texture_slot(units, sh, content.map(|c| c.1)),
+                    )
+                };
+                scratch.anchors = data.anchors.stored(units);
                 scratch.scale = scale;
-                let (edges, reads) = layout::resolve_rect_edges_reads(&scratch, |id| {
+                let (edges, reads) = layout::resolve_rect_edges_reads_sized(&scratch, size, |id| {
                     // The screen root is a frame-pass external only: a region anchor to id 0 finds
                     // no rect here, though the solver holds one.
                     (id != SCREEN).then(|| solver.rect(id)).flatten()
@@ -1704,17 +1735,17 @@ impl UiScript {
     /// the tier-2 fingerprint. Runs only when the ledger cannot vouch for the cache.
     fn derive_layout_graph(model: &mut Model, pre: &mut PreambleProf) -> InputFingerprint {
         model.layout_derives = model.layout_derives.wrapping_add(1);
+        let space = model.layout_space();
         let Model {
             arena,
             layout_inputs,
             region_data,
-            region_resolved,
-            region_kept,
+            region_rects: region_resolved,
+            region_kept_rects: region_kept,
             frame_to_id,
             id_to_region,
             region_to_id,
             next_id,
-            screen,
             layout_scope: scope,
             layout_force,
             ..
@@ -1742,12 +1773,8 @@ impl UiScript {
             }
             input.scale = scale;
             // Clamp-to-screen is a frame property (geometry flags `0x10`), so every placement path
-            // clamps alike, against the live window size.
+            // clamps alike, against the root's layout extent ([`LayoutInput::stored`]).
             input.clamp = clamp;
-            if clamp {
-                input.extent_x = screen.right;
-                input.extent_y = screen.top;
-            }
         }
         pre.ids = pre.lap();
 
@@ -1774,7 +1801,12 @@ impl UiScript {
         scope.begin_full(*next_id as usize + region_data.len() + 1);
         pre.begin = pre.lap();
         let mut fp = InputFingerprint::default();
-        fp.rect(*screen);
+        // The root and the cells, which every stored size and offset is read under.
+        fp.rect(space.root());
+        let units = space.units();
+        fp.f32(units.k1());
+        fp.f32(units.k2());
+        fp.f32(units.store(1.0));
         for &(h, id) in &ids {
             let Some(input) = layout_inputs.get(&h) else {
                 continue;
@@ -1873,13 +1905,12 @@ impl UiScript {
             arena,
             layout_inputs,
             region_data,
-            region_resolved,
-            region_kept,
+            region_rects: region_resolved,
+            region_kept_rects: region_kept,
             frame_to_id,
             id_to_frame,
             id_to_region,
             next_id,
-            screen,
             layout_scope: scope,
             layout_force,
             layout_hold,
@@ -1924,10 +1955,6 @@ impl UiScript {
                 }
                 input.scale = scale;
                 input.clamp = clamp;
-                if clamp {
-                    input.extent_x = screen.right;
-                    input.extent_y = screen.top;
-                }
                 targets.clear();
                 targets.extend(input.anchors.iter().map(|a| a.relative_to));
                 let hash = frame_node_hash(input);
@@ -2083,15 +2110,27 @@ pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option
         super::measure::store_measured(model, rh, id, zero);
         return None;
     }
+    let wrap_width = model.region_data.get(&rh)?.wrap_width(model.layout_units());
+    measure_request_at(model, rh, wrap_width, key, scale)
+}
+
+/// The [`MeasureRequest`] for `rh`'s text laid out in `wrap_width` (`None`, unwrapped) under
+/// `key`, whatever measure it holds; `None` for no text.
+pub(super) fn measure_request_at(
+    model: &mut Model,
+    rh: RegionHandle,
+    wrap_width: Option<f32>,
+    key: u64,
+    scale: f32,
+) -> Option<MeasureRequest> {
     let d = model.region_data.get(&rh)?;
     let text = d.text.clone().filter(|t| !t.is_empty())?;
-    let wrap_width = d.size.map(|s| s.0).filter(|w| *w > 0.0);
     let font = d.font_path.clone();
-    let height = d.font_height;
-    let text_height = d.text_height;
+    let height = d.font_height_script(model.layout_units());
+    let text_height = d.text_height(model.layout_units());
     let outline = d.outline;
     let spacing = d.line_gap();
-    let shadow_x = d.shadow_x();
+    let shadow_x = d.shadow_x(model.layout_units());
     let max_lines = d.max_lines;
     let non_space_wrap = model.non_space_wrap_of(rh);
     let id = model.region_id(rh);
@@ -2130,7 +2169,7 @@ fn stale_measure_key(model: &Model, rh: RegionHandle) -> Option<(u64, f32)> {
         return None;
     }
     // The metric reads in `region.rs` check the stored measure against this same key.
-    let key = d.measure_key(scale);
+    let key = d.measure_key(scale, model.layout_units());
     if d.measured.map(|m| m.key) == Some(key) {
         return None;
     }

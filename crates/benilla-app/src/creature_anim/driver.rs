@@ -22,11 +22,14 @@ use super::select::{
     self, current_special, defense_anim, is_swing_id, route_mounted, route_oneshot,
     swing_anim_main, swing_anim_off, unify, Mode, OneShotRoute, DEATH, DEFAULT_WALK_SPEED, STAND,
 };
-use super::sheath::{advance_sheath_ceremony, start_sheath_ceremony};
+use super::sheath::{
+    advance_sheath_ceremony, model_refuses_toggle, setter_refuses, start_sheath_ceremony,
+};
 use super::{
     find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, BaseAnimRecompute, CastHold,
-    DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, SheathRequest,
-    SheathSwapMessage, StateKitPins, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
+    CommittedSheath, DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay,
+    OverlayFade, SheathRequest, SheathSwapMessage, StateKitPins, SwingImpact, SwingMessage,
+    SwingSlowdown, Wielded, WoundAnim,
 };
 
 mod grip;
@@ -268,6 +271,8 @@ pub(super) fn drive_animations(
             Option<&crate::aura_visual::AuraNodes>,
             // The live state kits whose anim takes a stationary unit's plays (`0x5fde80`).
             Option<&StateKitPins>,
+            // The unit's `[+0xd40]`, which outlives this driver.
+            &mut CommittedSheath,
         ),
     )>,
     // A mount child's movement view is its host's, fetched through `MountBody.host`.
@@ -313,13 +318,17 @@ pub(super) fn drive_animations(
         // The open NPC session's unit (`[0xb4e2d0]`): its state emote is passed over when the
         // row's `EmoteFlags` carry `0x2000` (`0x5fd7e2`-`0x5fd7fd`).
         Option<Res<crate::ui_session::InteractNpc>>,
+        // `ChrClasses.dbc`, for the setter's class test on the ranged state.
+        Option<Res<crate::chr_classes::ChrClassTable>>,
     ),
     // The variation roll's LCG, the reference's single CRT `_rand` stream shared by every play.
     mut rng: ResMut<benilla_assets::AnimRng>,
     // The last anim trace line per traced unit; the trace writes only on change.
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
-    let (emote_sounds, loot_kneel, time, names, mut recomputes, riders, interact) = aux;
+    let (emote_sounds, loot_kneel, time, names, mut recomputes, riders, interact, class_table) =
+        aux;
+    let classes = class_table.as_deref().map(|t| &t.0);
     let dt = time.delta_secs();
     // This frame's one-shot plays per unit, replayed in the reference's call order (`PlaySeq`
     // stamps): a later call overwrites an earlier, and the combat fast path keys on what is playing
@@ -405,9 +414,19 @@ pub(super) fn drive_animations(
     for r in recomputes.read() {
         pending_recompute.insert(r.entity, r.anim_id);
     }
-    // Sheath requests by unit; the last SetSheatheState call wins.
+    // Sheath requests by unit; the last SetSheatheState call wins. The manual toggle's request
+    // meets the toggle's model tests first, on the animation armed now (`0x5fdb50`): one they
+    // refuse is no call, and an earlier request this frame stands.
     let mut pending_sheath: bevy::ecs::entity::EntityHashMap<SheathRequest> = default();
     for r in sheath_requests.read() {
+        let refused = r.ceremony
+            && units
+                .get(r.entity)
+                .is_ok_and(|u| model_refuses_toggle(u.1, armed_id(u.4, u.2, u.3, u.1)));
+        if refused {
+            debug!("sheath: unit {} toggle refused by its model", r.entity);
+            continue;
+        }
         pending_sheath.insert(r.entity, *r);
     }
     // `None` until `AnimationData.dbc` loads; every lookup then resolves to itself.
@@ -441,6 +460,7 @@ pub(super) fn drive_animations(
             move_modes,
             aura_nodes,
             state_pins,
+            mut committed,
         ),
     ) in &mut units
     {
@@ -701,25 +721,37 @@ pub(super) fn drive_animations(
         // ── Sheath state: the committed cache (`[+0xd40]`), not the descriptor byte, adopting the
         // byte whenever it changes (`0x604c70`). Every SetSheatheState (`0x611cf0`) snaps except
         // the manual toggle's ceremony, which carries the draw/stow sound.
-        let sheath_frame_start = drv.sheath_cur;
-        let sheath_byte = store.and_then(|s| s.0.unit_sheath_state()).unwrap_or(0);
-        if drv.sheath_cur.is_none() || drv.sheath_byte != Some(sheath_byte) {
-            drv.sheath_cur = Some(sheath_byte);
-            drv.sheath_byte = Some(sheath_byte);
+        let sheath_frame_start = committed.cur;
+        let fields = store.map(|s| &s.0);
+        let sheath_byte = fields.and_then(|f| f.unit_sheath_state()).unwrap_or(0);
+        // The constructor seeds the state from the byte untested (`0x5fafa0`), once per unit: a
+        // driver rebuilt for a new model finds it seeded. A later change goes through the setter
+        // (`0x604c70`: `0x611cf0(byte, 1, 0)`), whose class test can refuse it.
+        if committed.cur.is_none() {
+            committed.cur = Some(sheath_byte);
+            committed.byte = Some(sheath_byte);
+        } else if committed.byte != Some(sheath_byte) {
+            committed.byte = Some(sheath_byte);
+            if !setter_refuses(sheath_byte, fields, classes) {
+                committed.cur = Some(sheath_byte);
+            }
         }
         // The setter: a no-op when unchanged (`newState == CUR`), else commit, volunteer
         // `CMSG_SETSHEATHED` for the local player, and for the manual toggle play the ceremony,
         // per-arm masked overlays (`0x60b770`) by each item's stow family (hip 90, back 89).
         if let Some(req) = pending_sheath.get(&entity) {
-            let cur = drv.sheath_cur.unwrap_or(0);
+            let cur = committed.cur.unwrap_or(0);
             // Deviation: a mounted draw is refused at the setter, because our rider track never
             // replays the reference's per-play force-stow (`0x5fdf80`); the result is the same.
-            if req.state != cur && !(mounted && req.state != 0) {
+            if req.state != cur
+                && !(mounted && req.state != 0)
+                && !setter_refuses(req.state, fields, classes)
+            {
                 debug!(
                     "sheath: unit {entity} {cur} -> {} (request, ceremony {})",
                     req.state, req.ceremony
                 );
-                drv.sheath_cur = Some(req.state);
+                committed.cur = Some(req.state);
                 if is_self {
                     let _ = net.0.send(ClientCommand::SetSheathed {
                         state: u32::from(req.state),
@@ -742,7 +774,7 @@ pub(super) fn drive_animations(
         }
         // Ceremony upkeep: each arm's weapon moves at its clip's `$SHL`/`$SHR` event, and a
         // finished stow runs phase 2, the on-finish draw (`0x5fc920` at `0x5fca8c`/`0x5fcaa1`).
-        let sheath_now = drv.sheath_cur.unwrap_or(0);
+        let sheath_now = committed.cur.unwrap_or(0);
         advance_sheath_ceremony(
             &mut commands,
             entity,
@@ -1172,6 +1204,7 @@ pub(super) fn drive_animations(
                 store,
                 emote_sounds: emote_sounds.as_deref(),
                 interacting: interacting || drv.interact_hold,
+                sheath: committed.cur,
                 walk,
                 model_scale,
                 traced,
@@ -1339,13 +1372,14 @@ pub(super) fn drive_animations(
         // so a model lacking the clip still stows by the requested row.
         // It runs on plays only, this frame's one-shot first: re-running it on a silent frame
         // would undo a masked stow against the base gait. A mounted unit still drawn (the byte
-        // adopt bypasses the setter) forces once, as our rider track never plays.
+        // adopt skips the request's mounted refusal) forces once, as our rider track never plays.
+        // Each force is a setter call (`0x611cf0`), so its class test applies.
         if played_oneshot.is_some()
             || hold_played.is_some()
             || base_played
-            || (mounted && drv.sheath_cur.unwrap_or(0) != 0)
+            || (mounted && committed.cur.unwrap_or(0) != 0)
         {
-            let cur = drv.sheath_cur.unwrap_or(0);
+            let cur = committed.cur.unwrap_or(0);
             let anim = played_oneshot
                 .or(hold_played)
                 .or_else(|| drv.active_anim())
@@ -1364,12 +1398,12 @@ pub(super) fn drive_animations(
                 } else {
                     forced
                 };
-                if forced != cur {
+                if forced != cur && !setter_refuses(forced, fields, classes) {
                     debug!(
                         "sheath: unit {entity} {cur} -> {forced} (anim {anim} flags {flags:#x}, \
                          engaged {engaged})"
                     );
-                    drv.sheath_cur = Some(forced);
+                    committed.cur = Some(forced);
                     if is_self {
                         let _ = net.0.send(ClientCommand::SetSheathed {
                             state: u32::from(forced),
@@ -1380,7 +1414,7 @@ pub(super) fn drive_animations(
         }
         // Leaving sheath state 2 by any path un-nocks and drops the ammo (`0x60fc72`, gated
         // `[+0xd40] != 2`) until the next `SMSG_SPELL_START`.
-        if sheath_frame_start == Some(2) && drv.sheath_cur != Some(2) {
+        if sheath_frame_start == Some(2) && committed.cur != Some(2) {
             commands
                 .entity(entity)
                 .remove::<(super::NockedAmmo, super::NockLatch)>();

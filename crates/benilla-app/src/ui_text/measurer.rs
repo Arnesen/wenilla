@@ -20,7 +20,29 @@ pub(crate) fn measure_request(
     r: &MeasureRequest,
 ) -> (f32, f32, f32) {
     let rs = seam * r.scale;
-    let spec = || super::FontSpec {
+    let spec = request_spec(r, rs);
+    let wrap = r.wrap_width.map(|w| w * rs);
+    // `GetStringWidth` answers the unwrapped width (the extent measure `0x5c6940`), its line seeded
+    // with the shadow's x offset at the seam alone: `0x772890` leaves `[fs+0x108]` unscaled.
+    let natural = super::string_width(e, &r.text, spec, r.shadow_x * seam);
+    // Unwrapped, the laid-out width is that same measure (`[fs+0xfc]`).
+    let (w, h) = match wrap {
+        Some(w) => {
+            // `0x7729b0` measures the string `0x771ec0` returns: with `maxLines` the text is cut
+            // to that many lines first, and a FontString with no height takes its own from it.
+            let cut = (r.max_lines > 0)
+                .then(|| super::ellipsize_text(e, &r.text, w, 0.0, spec))
+                .flatten();
+            super::measure_text(e, cut.as_deref().unwrap_or(&r.text), wrap, spec)
+        }
+        None => (natural, super::unwrapped_height(e, &r.text, spec)),
+    };
+    (w / rs, h / rs, natural / rs)
+}
+
+/// `r`'s font at the drawn raster size `rs`, the seam times the owner's scale.
+fn request_spec(r: &MeasureRequest, rs: f32) -> super::FontSpec<'_> {
+    super::FontSpec {
         path: r.font.as_deref(),
         // The render pass's drawn px: `GetStringWidth` and `GetStringHeight` report the drawn
         // size (`0x772890`).
@@ -35,24 +57,35 @@ pub(crate) fn measure_request(
         alpha_gradient: None, // alpha never changes metrics
         non_space_wrap: r.non_space_wrap,
         max_lines: r.max_lines,
-    };
-    let wrap = r.wrap_width.map(|w| w * rs);
-    // `GetStringWidth` answers the unwrapped width (the extent measure `0x5c6940`), its line seeded
-    // with the shadow's x offset at the seam alone: `0x772890` leaves `[fs+0x108]` unscaled.
-    let natural = super::string_width(e, &r.text, spec(), r.shadow_x * seam);
-    // Unwrapped, the laid-out width is that same measure (`[fs+0xfc]`).
-    let (w, h) = match wrap {
-        Some(w) => {
-            // `0x7729b0` measures the string `0x771ec0` returns: with `maxLines` the text is cut
-            // to that many lines first, and a FontString with no height takes its own from it.
-            let cut = (r.max_lines > 0)
-                .then(|| super::ellipsize_text(e, &r.text, w, 0.0, spec()))
-                .flatten();
-            super::measure_text(e, cut.as_deref().unwrap_or(&r.text), wrap, spec())
+    }
+}
+
+/// The widest of the first `max_pieces` pieces of `r`'s text split at its wrap width, laid out at
+/// the size [`measure_request`] measures at. A piece runs from its row's start (`0x5c2430`) to the
+/// next one's, the last to the text's end (`0x530884`-`0x5308a8`), so it keeps the whitespace the
+/// wrap skipped (`0x5c24fe`); it is measured with `GetStringWidth`'s kernel and seed (`0x772ae0`).
+pub(crate) fn piece_width(
+    e: &mut TextEngine,
+    seam: f32,
+    r: &MeasureRequest,
+    max_pieces: usize,
+) -> f32 {
+    let rs = seam * r.scale;
+    let spec = request_spec(r, rs);
+    let wrap = r.wrap_width.map_or(0.0, |w| w * rs);
+    let mut starts = super::line_rows(e, &r.text, wrap, spec).0;
+    starts.truncate(max_pieces);
+    // Kept only when wider, from 0 (`0x53086d`, `0x5308ad`).
+    let mut widest = 0.0f32;
+    for (i, &at) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(r.text.len());
+        let piece = r.text.get(at..end).unwrap_or("");
+        let w = super::string_width(e, piece, spec, r.shadow_x * seam);
+        if w > widest {
+            widest = w;
         }
-        None => (natural, super::unwrapped_height(e, &r.text, spec())),
-    };
-    (w / rs, h / rs, natural / rs)
+    }
+    widest / rs
 }
 
 /// Answer one EditBox advance table as `(cumulative widths, row starts, row pitch)` in screen UI
@@ -123,6 +156,14 @@ impl TextMeasure for AtlasMeasurer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Some(editbox_advances(&mut e, self.seam, req))
+    }
+
+    fn piece_width(&mut self, req: &MeasureRequest, max_pieces: usize) -> Option<f32> {
+        let mut e = self
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(piece_width(&mut e, self.seam, req, max_pieces))
     }
 }
 
@@ -270,6 +311,126 @@ mod tests {
         );
     }
 
+    /// A tooltip split's piece runs from its row's start to the next (`0x530884`-`0x5308a8`): it
+    /// keeps the space its wrap skipped, a space being a glyph to the extent kernel (`0x5c6940`),
+    /// and a piece crossing a LF is as wide as its widest line, the LF no glyph.
+    #[test]
+    fn a_split_piece_keeps_its_space_and_ends_its_line_at_a_lf() {
+        benilla_formats::wow_data_or_skip!();
+        let mut e = super::super::engine::test_engine(1.0).expect("the client faces open");
+        let req = |text: &str, wrap: Option<f32>| benilla_ui::script::MeasureRequest {
+            id: 0,
+            font: Some("Fonts\\FRIZQT__.TTF".into()),
+            height: Some(12.0),
+            text_height: None,
+            wrap_width: wrap,
+            outline: benilla_ui::script::Outline::None,
+            spacing: 0.0,
+            shadow_x: 0.0,
+            non_space_wrap: false,
+            max_lines: 0,
+            scale: 1.0,
+            text: text.into(),
+            key: 0,
+        };
+        let natural = |e: &mut super::TextEngine, text: &str| {
+            super::measure_request(e, 1.0, &req(text, None)).2
+        };
+        let (word, spaced) = (natural(&mut e, "abcd"), natural(&mut e, "abcd "));
+        assert!(spaced > word, "a space is a glyph: {spaced} against {word}");
+        // Wide enough for "abcd" and not for "abcd ef": rows "abcd", "ef" and, past the LF, "gh".
+        let wrap = Some(word + 1.0);
+        let text = "abcd ef\ngh";
+        let r = req(text, wrap);
+        let rows = super::super::line_rows(&mut e, text, word + 1.0, super::request_spec(&r, 1.0));
+        assert_eq!(rows.0, [0, 5, 8]);
+        let got = super::piece_width(&mut e, 1.0, &req(text, wrap), 20);
+        assert_eq!(got, spaced, "the first piece, its space and all");
+        // One piece: the whole text, as wide as its widest line.
+        let got = super::piece_width(&mut e, 1.0, &req(text, wrap), 1);
+        assert_eq!(got, natural(&mut e, "abcd ef"));
+        // The first piece crosses the LF: "abcd\n" is as wide as "abcd".
+        let got = super::piece_width(&mut e, 1.0, &req("abcd\nef", wrap), 20);
+        assert_eq!(got, word);
+    }
+
+    /// The stock GameTooltip's second line (`GameTooltipTemplate.xml:35`, `GameTooltipText`)
+    /// wrapped past 20 rows at 230.4: the split stops at 20 pieces (`0x53083f`), the 20th running
+    /// to the text's end unwrapped (`0x53088e`), so the plate is that tail's `GetStringWidth` and
+    /// the pads.
+    #[test]
+    fn a_stock_tooltip_line_past_20_rows_sizes_to_its_20th_piece() {
+        benilla_formats::wow_data_or_skip!();
+        let engine = super::super::engine::test_engine(1.0).expect("the client faces open");
+        let mut s = UiScript::new().unwrap();
+        for file in [
+            r"Interface\FrameXML\GlobalStrings.lua",
+            r"Interface\FrameXML\Fonts.xml",
+            r"Interface\FrameXML\BasicControls.xml",
+            r"Interface\FrameXML\LocaleProperties.lua",
+            r"Interface\FrameXML\UIParent.xml",
+            r"Interface\FrameXML\MoneyFrame.lua",
+            r"Interface\FrameXML\MoneyFrame.xml",
+            r"Interface\FrameXML\GameTooltip.xml",
+        ] {
+            crate::ui_script::load_ui_for_test(&s, file);
+        }
+        s.set_screen_size(1024.0, 768.0);
+        s.set_text_measurer(Box::new(AtlasMeasurer::new(
+            Arc::new(Mutex::new(engine)),
+            1.0,
+        )));
+        s.resolve();
+        // How many words of "word" a 230.4-wide row of the line's font holds.
+        let per_row: usize = s
+            .eval(
+                r#"
+                P = CreateFrame("Frame", nil, UIParent):CreateFontString(nil, "ARTWORK", "GameTooltipText")
+                P:SetWidth(230.4)
+                P:SetText("word")
+                local one = P:GetHeight()
+                local n = 1
+                while P:GetHeight() == one do
+                    n = n + 1
+                    P:SetText(string.rep("word ", n - 1) .. "word")
+                end
+                return n - 1
+            "#,
+            )
+            .unwrap();
+        assert!(per_row > 2, "{per_row} words a row");
+        let words = |n: usize| vec!["word"; n].join(" ");
+        let plate = |rows: usize| -> f32 {
+            s.eval(&format!(
+                r#"GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+                GameTooltip:AddLine("x") GameTooltip:AddLine("{}", 1, 1, 1, 1) GameTooltip:Show()
+                return GameTooltip:GetWidth()"#,
+                words(per_row * rows)
+            ))
+            .unwrap()
+        };
+        let natural = |n: usize| -> f32 {
+            s.eval(&format!(
+                r#"P:SetText("{}") return P:GetStringWidth()"#,
+                words(n)
+            ))
+            .unwrap()
+        };
+        use benilla_ui::widget::TOOLTIP_PLATE_PAD;
+        let pads = 2.0 * TOOLTIP_PLATE_PAD;
+        let (nineteen, twenty) = (plate(19), plate(20));
+        assert_eq!(twenty, nineteen, "20 rows: the 20th piece is the last row");
+        // A piece before the last keeps the space its row's wrap skipped (`0x530884`).
+        let row = pads + natural(per_row);
+        assert!(twenty > row, "{twenty} against the row alone, {row}");
+        let tail = pads + natural(2 * per_row);
+        let got = plate(21);
+        assert!(
+            (got - tail).abs() < 1e-3,
+            "21 rows: the plate is {got}, the last two rows unwrapped {tail}"
+        );
+    }
+
     /// `GetStringWidth` (`0x79e510` → `0x772890`) answers the measure kernel's width divided by the
     /// drawn scale, as it stands, fractions and all: no `ceil` and no added pixel. A frame sized
     /// from it, as `MoneyFrame.lua:202-208` sizes each coin (`SetWidth(GetTextWidth() + 13)`), gets
@@ -328,7 +489,7 @@ mod tests {
                 s.resolve();
                 let w = s.eval::<f32>("return FS:GetStringWidth()").unwrap();
                 let want = law(12.0 * seam, text) / seam;
-                assert_eq!(w, want, "seam {seam}, {text:?}: GetStringWidth");
+                benilla_ui::assert_near!(w, want, "seam {seam}, {text:?}: GetStringWidth");
                 let framed = s.eval::<f32>("return F:GetWidth()").unwrap();
                 assert!(
                     (framed - (want + 13.0)).abs() < 1e-4,
@@ -346,7 +507,7 @@ mod tests {
                 let w = s.eval::<f32>("return FS:GetStringWidth()").unwrap();
                 let pad = if pad > 0.0 { (dx * seam).round() } else { 0.0 };
                 let want = (law(12.0 * seam, "1234") + pad) / seam;
-                assert_eq!(w, want, "seam {seam}, shadow x {dx}");
+                benilla_ui::assert_near!(w, want, "seam {seam}, shadow x {dx}");
             }
 
             // At scale 2 the glyphs measure twice the size, but the shadow keeps its pixel.
@@ -355,7 +516,7 @@ mod tests {
             s.resolve();
             let w = s.eval::<f32>("return FS:GetStringWidth()").unwrap();
             let want = (law(24.0 * seam, "1234") + seam.round()) / (2.0 * seam);
-            assert_eq!(w, want, "seam {seam}, scale 2");
+            benilla_ui::assert_near!(w, want, "seam {seam}, scale 2");
         }
     }
 }

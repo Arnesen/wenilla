@@ -7,8 +7,9 @@
 //! usability predicate first (`0x4bc9d0`): on an unusable pet the drop writes nothing and refills
 //! nothing, and the pickup holds its action with the slot left as it was.
 
-use mlua::Lua;
+use mlua::{Lua, Value};
 
+use crate::script::binding_abi;
 use crate::script::pet::StoredPetAction;
 use crate::script::tick::verb;
 use crate::script::{Model, PetActionView};
@@ -284,7 +285,9 @@ fn resolve_token_icon(lua: &Lua, payload: &mut CursorPetAction) {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "PickupPetAction",
-        lua.create_function(|lua, slot: u32| {
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: PickupPetAction(index)` (`0x84793c`, `0x4be196`).
+            let slot = binding_abi::index_arg32(lua, slot, "Usage: PickupPetAction(index)")?;
             pickup_pet_action(lua, slot);
             Ok(())
         })?,
@@ -679,7 +682,7 @@ mod tests {
     fn a_pickup_clears_twice_then_shows_the_pet_grid() {
         let mut s = bar_script();
         s.set_cursor_for_test(CursorPayload::Macro(crate::script::cursor::CursorMacro {
-            index: 1,
+            id: 1,
             texture: None,
         }));
         crate::script::cursor::install_kind_probe(&s);

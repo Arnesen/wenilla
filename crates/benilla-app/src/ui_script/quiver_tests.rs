@@ -73,6 +73,9 @@ fn load_addon_files(script: &UiScript, root: &Path, name: &str) -> Vec<String> {
 /// group, as every real session has.
 fn seat_a_hunter(root: &Path) -> UiScript {
     let mut s = UiScript::new().expect("VM");
+    // No engine behind it: the calls its Lua makes (Quiver's `SendAddonMessage` at login) are
+    // kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.register_cvars(crate::cvars::registered_pairs());
     s.set_realm_name("Harness");
@@ -140,6 +143,7 @@ fn seat_a_hunter(root: &Path) -> UiScript {
         "player",
         Some(benilla_ui::script::UnitState {
             exists: true,
+            has_object: true,
             name: Some("Probefour".into()),
             level: 60,
             ..Default::default()
@@ -332,6 +336,7 @@ fn seat_a_buff(s: &mut UiScript, spell_id: u32, name: &str, icon: &str) {
         name: Some(name.into()),
         icon: Some(icon.into()),
         count: 0,
+        level: 0,
         debuff_type: None,
         duration: 0.0,
         expiration_time: 0.0,
@@ -339,6 +344,7 @@ fn seat_a_buff(s: &mut UiScript, spell_id: u32, name: &str, icon: &str) {
         cancelable: true,
         until_cancelled: true,
         channeled: false,
+        raid_listed: false,
     }]);
     s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
 }
@@ -446,7 +452,7 @@ fn spending_an_arrow_starts_quivers_reload_through_the_real_item_feed() {
         Some(HashMap::from([(
             0i64,
             ContainerState {
-                name: Some("Backpack".into()),
+                name: None,
                 num_slots: 16,
                 slots: HashMap::from([(
                     1u32,

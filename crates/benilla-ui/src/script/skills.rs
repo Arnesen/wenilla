@@ -21,7 +21,6 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
 use super::Model;
-use crate::script::binding_abi::Idx;
 
 /// One known skill line off the player's `PLAYER_SKILL_INFO` block, resolved by the app.
 #[derive(Clone, Debug, PartialEq)]
@@ -310,7 +309,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // stock `SkillFrame.lua:211`'s early return.
     g.set(
         "GetSkillLineInfo",
-        lua.create_function(|lua, Idx(index): Idx| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetSkillLineInfo(index)` (`0x849eb4`, `0x4d3629`).
+            let index = binding_abi::index_arg(lua, index, "Usage: GetSkillLineInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(n) = index.checked_sub(1) else {
                 return out_of_range_tuple(lua);
@@ -368,7 +369,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // Collapse/ExpandSkillHeader(id): by the header's visible index, 0 for every group.
     g.set(
         "CollapseSkillHeader",
-        lua.create_function(|lua, id: usize| {
+        lua.create_function(|lua, id: Value| {
+            // `is-number` else `Usage: CollapseSkillHeader(index)` (`0x849ef0`, `0x4d3b81`).
+            let id = binding_abi::index_arg(lua, id, "Usage: CollapseSkillHeader(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             set_collapsed(&mut model, id, true);
             Ok(())
@@ -376,7 +379,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "ExpandSkillHeader",
-        lua.create_function(|lua, id: usize| {
+        lua.create_function(|lua, id: Value| {
+            // `is-number` else `Usage: ExpandSkillHeader(index)` (`0x849f14`, `0x4d3be1`).
+            let id = binding_abi::index_arg(lua, id, "Usage: ExpandSkillHeader(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             set_collapsed(&mut model, id, false);
             Ok(())
@@ -387,7 +392,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `GetSelectedSkill` (`0x4d4090`) always answers one number, 0 included.
     g.set(
         "SetSelectedSkill",
-        lua.create_function(|lua, index: u32| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: SetSelectedSkill(index)` (`0x849f88`, `0x4d4031`).
+            let index = binding_abi::index_arg32(lua, index, "Usage: SetSelectedSkill(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             set_selected(&mut model, index);
             Ok(())
@@ -402,7 +409,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetAdjustedSkillPoints() → 0 here; the reference answers `PLAYER_CHARACTER_POINTS2` less the
-    // cost of the points `AddSkillUp` has chosen (`0x4d3cb0`), 0 each (module doc). The stock pane reads it only under its
+    // cost of the points `AddSkillUp` has chosen (`0x4d3cb0`), 0 each (module doc). The stock pane
+    // reads it only under its
     // `stepCost` and `rankCost` branches, which 1.12 data never opens.
     g.set(
         "GetAdjustedSkillPoints",
@@ -413,7 +421,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // locally: the reference waits for the skill-field update (vmangos `SetSkill(id,0,0)`).
     g.set(
         "AbandonSkill",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: AbandonSkill(index)` (`0x849ed4`, `0x4d3ac7`).
+            let index = binding_abi::index_arg(lua, index, "Usage: AbandonSkill(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if let Some(id) = entry_at(&model, index).map(|e| e.skill_id) {
                 model.skill_abandons.push(id);

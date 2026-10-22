@@ -1,12 +1,36 @@
 //! Drives the stock `MailFrame.xml` off the player's chain with a synthetic inbox and the app's
-//! own `MAIL_SHOW`/`MAIL_INBOX_UPDATE` events, and asserts what it paints and queues.
+//! own `MAIL_SHOW`/`MAIL_INBOX_UPDATE` events, and asserts what it paints and the calls it makes,
+//! which a VM with no host keeps.
 
 mod common;
 
 use benilla_ui::script::{
-    EditAction, EditBoxAdvanceRequest, EditUnit, MailInboxRow, MailInvoice, MailState,
-    MeasureRequest, TextMeasure, UiScript,
+    EditAction, EditBoxAdvanceRequest, EditUnit, MailCall, MailInboxRow, MailInvoice, MailRowVerb,
+    MailState, MeasureRequest, TextMeasure, UiScript,
 };
+
+/// A VM with no call host, keeping the mail verbs' calls for [`kept_calls`].
+fn vm() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    s
+}
+
+/// The mail calls kept since the last take, in call order.
+fn kept_calls(s: &mut UiScript) -> Vec<MailCall> {
+    s.take_mail_calls()
+}
+
+/// The row verbs among the kept calls.
+fn row_verbs(s: &mut UiScript) -> Vec<MailRowVerb> {
+    kept_calls(s)
+        .into_iter()
+        .filter_map(|call| match call {
+            MailCall::Row { verb, .. } => Some(verb),
+            _ => None,
+        })
+        .collect()
+}
 
 /// The mail window's load prefix, in the app's order.
 const FILES: &[&str] = &[
@@ -43,6 +67,9 @@ fn load_ui(script: &UiScript) {
 /// One inbox row with the fields the window paints.
 fn row(sender: &str, subject: &str, was_read: bool, item_id: u32, cod: u32) -> MailInboxRow {
     MailInboxRow {
+        mail_id: 7,
+        item_text_id: 1,
+        stationery: 41,
         package_icon: (item_id != 0).then(|| "Interface\\Icons\\INV_Misc_Bag_08".to_string()),
         stationery_icon: Some("Interface\\Icons\\INV_Misc_Note_01".to_string()),
         sender: Some(sender.to_string()),
@@ -57,16 +84,16 @@ fn row(sender: &str, subject: &str, was_read: bool, item_id: u32, cod: u32) -> M
         can_reply: true,
         is_gm: false,
         body: Some("body".into()),
-        stationery_texture: "STATIONERYTEST".into(),
+        stationery_texture: Some("STATIONERYTEST".into()),
         is_invoice: false,
         invoice: None,
-        has_body: true,
         item_id,
         item_name: (item_id != 0).then(|| "Linen Cloth".to_string()),
         item_texture: (item_id != 0).then(|| "Interface\\Icons\\INV_Fabric_Linen_01".to_string()),
         item_quality: (item_id != 0).then_some(1),
-        can_delete: false,
         item_random_property_id: 0,
+        item_charges: 0,
+        item_durability: (0, 0),
         cod_payment: false,
         message_type: 0,
         mail_template_id: 0,
@@ -90,7 +117,7 @@ fn one_linen_backpack() -> benilla_ui::script::ContainerState {
         },
     );
     benilla_ui::script::ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }
@@ -110,7 +137,7 @@ fn small_inbox() -> MailState {
 #[test]
 fn mail_frame_loads_and_key_regions_exist() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let s = UiScript::new().unwrap();
+    let s = vm();
     load_ui(&s);
     // The window, both tabs' bodies, a row, the open-letter toplevel, and the send-tab widgets.
     for name in [
@@ -138,7 +165,7 @@ fn mail_frame_loads_and_key_regions_exist() {
 #[test]
 fn mail_show_opens_and_inbox_populates() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
 
@@ -150,7 +177,11 @@ fn mail_show_opens_and_inbox_populates() {
         "the window opens on MAIL_SHOW"
     );
     // MAIL_SHOW's CheckInbox() queued the inbox-refresh intent.
-    assert!(s.take_mail_check_inbox(), "MAIL_SHOW fires CheckInbox");
+    assert_eq!(
+        kept_calls(&mut s),
+        [MailCall::CheckInbox],
+        "MAIL_SHOW fires CheckInbox"
+    );
 
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     assert_eq!(s.eval::<i64>("return GetInboxNumItems()").unwrap(), 2);
@@ -177,7 +208,7 @@ fn mail_show_opens_and_inbox_populates() {
 #[test]
 fn paging_math_enables_next_only_when_overflowing() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     // 9 mails → 2 pages of 7.
     let mut inbox = Vec::new();
@@ -210,7 +241,7 @@ fn paging_math_enables_next_only_when_overflowing() {
 #[test]
 fn cod_tag_shows_on_a_cod_mail() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(MailState {
         inbox: vec![
@@ -240,14 +271,14 @@ fn cod_tag_shows_on_a_cod_mail() {
 #[test]
 fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
     s.fire_event("MAIL_SHOW", vec![]);
     // The list answer to `MAIL_SHOW`'s `CheckInbox` lifts the request lock (`0x4ad5d0`).
     s.mail_request_resolved();
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
-    let _ = s.take_mail_opens();
+    let _ = kept_calls(&mut s);
 
     // A programmatic click toggles the check button on, then fires OnClick (this = the button).
     s.run("MailItem1Button:Click()").unwrap();
@@ -255,12 +286,17 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
         s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap(),
         "the open-letter frame shows"
     );
-    // The sender/subject/body painted; GetInboxText queued the open (mark-read + body ask).
+    // The sender/subject/body painted; GetInboxText made its call (mark-read + body ask).
     assert_eq!(
         s.eval::<String>("return OpenMailSender:GetText()").unwrap(),
         "Thrall"
     );
-    assert!(s.take_mail_opens().contains(&1), "opening queued the row");
+    assert!(
+        kept_calls(&mut s)
+            .iter()
+            .any(|c| matches!(c, MailCall::Open { index: 1, .. })),
+        "opening called for the row"
+    );
     assert!(s.take_errors().is_empty());
 }
 
@@ -270,14 +306,14 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
 #[test]
 fn a_letter_and_the_centre_occupant_evict_each_other() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
     s.fire_event("MAIL_SHOW", vec![]);
     // The list answer to `MAIL_SHOW`'s `CheckInbox` lifts the request lock (`0x4ad5d0`).
     s.mail_request_resolved();
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
-    let _ = s.take_mail_opens();
+    let _ = kept_calls(&mut s);
 
     // Mailbox left, character sheet pushed to centre beside it.
     s.run(
@@ -328,7 +364,7 @@ fn a_letter_and_the_centre_occupant_evict_each_other() {
 #[test]
 fn reply_switches_to_send_tab_prefilled() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
     s.fire_event("MAIL_SHOW", vec![]);
@@ -358,7 +394,7 @@ fn reply_switches_to_send_tab_prefilled() {
 #[test]
 fn closing_a_plain_letter_does_not_delete_it() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(MailState {
         inbox: vec![row("One", "test", false, 0, 0)],
@@ -368,14 +404,16 @@ fn closing_a_plain_letter_does_not_delete_it() {
     // The list answer to `MAIL_SHOW`'s `CheckInbox` lifts the request lock (`0x4ad5d0`).
     s.mail_request_resolved();
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
-    let _ = s.take_mail_opens();
-    let _ = s.take_mail_deletes();
+    let _ = kept_calls(&mut s);
 
     s.run("MailItem1Button:Click()").unwrap();
     assert!(s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap());
     s.run("OpenMailCancelButton:Click()").unwrap();
     assert!(s.take_errors().is_empty(), "no Lua errors on close");
-    let deletes = s.take_mail_deletes();
+    let deletes: Vec<_> = row_verbs(&mut s)
+        .into_iter()
+        .filter(|&v| v == MailRowVerb::Delete)
+        .collect();
     assert!(
         deletes.is_empty(),
         "closing a plain read letter must NOT delete it, got deletes: {deletes:?}"
@@ -388,7 +426,7 @@ fn closing_a_plain_letter_does_not_delete_it() {
 #[test]
 fn closing_a_taken_husk_deletes_it() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     let mut husk = row("One", "test", false, 0, 0);
     husk.text_created = true;
@@ -400,15 +438,14 @@ fn closing_a_taken_husk_deletes_it() {
     // The list answer to `MAIL_SHOW`'s `CheckInbox` lifts the request lock (`0x4ad5d0`).
     s.mail_request_resolved();
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
-    let _ = s.take_mail_opens();
-    let _ = s.take_mail_deletes();
+    let _ = kept_calls(&mut s);
 
     s.run("MailItem1Button:Click()").unwrap();
     s.run("OpenMailCancelButton:Click()").unwrap();
     assert!(s.take_errors().is_empty(), "no Lua errors on close");
     assert_eq!(
-        s.take_mail_deletes(),
-        vec![1],
+        row_verbs(&mut s),
+        [MailRowVerb::Delete],
         "the husk purges on close (reference OnHide, MailFrame.lua l.256-272)"
     );
 }
@@ -418,7 +455,7 @@ fn closing_a_taken_husk_deletes_it() {
 #[test]
 fn expiry_text_pluralizes_days() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     let mut one_day = row("Two", "b", false, 0, 0);
     one_day.days_left = 1.7;
@@ -448,7 +485,7 @@ fn expiry_text_pluralizes_days() {
 #[test]
 fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     let mut mail = row("One", "asd", false, 0, 0);
     mail.money = 10000;
@@ -477,9 +514,9 @@ fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
     );
     s.run("OpenMailLetterButton:Click()").unwrap();
     assert_eq!(
-        s.take_mail_take_texts(),
-        vec![1],
-        "the click queues the permanent-copy intent"
+        row_verbs(&mut s),
+        [MailRowVerb::TakeText],
+        "the click calls for the permanent copy"
     );
     assert!(s.take_errors().is_empty());
 }
@@ -488,7 +525,7 @@ fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
 #[test]
 fn letter_button_hides_once_copied() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     let mut mail = row("One", "asd", false, 0, 0);
     mail.money = 10000;
@@ -516,7 +553,7 @@ fn letter_button_hides_once_copied() {
 #[test]
 fn money_button_hover_shows_the_amount_tooltip() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     let mut mail = row("One", "asd", false, 0, 0);
     mail.money = 10000;
@@ -549,7 +586,7 @@ fn money_button_hover_shows_the_amount_tooltip() {
 #[test]
 fn inbox_page_label_stays_empty_like_the_reference() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
     s.fire_event("MAIL_SHOW", vec![]);
@@ -570,7 +607,7 @@ fn inbox_page_label_stays_empty_like_the_reference() {
 #[test]
 fn a_runtime_shown_pane_renders_its_own_layers() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let s = UiScript::new().unwrap();
+    let s = vm();
     load_ui(&s);
     s.eval::<()>("MailFrame:Show() SendMailFrame:Show()")
         .unwrap();
@@ -601,12 +638,14 @@ fn an_auction_invoice_renders_as_a_receipt() {
         .unwrap();
     }
     fn open_with(invoice: MailInvoice) -> UiScript {
-        let mut s = UiScript::new().unwrap();
+        let mut s = vm();
         load_ui(&s);
         strings(&s);
         let mut inbox = small_inbox();
         inbox.inbox[0].is_invoice = true;
         inbox.inbox[0].invoice = Some(invoice);
+        // An auction mail's text is no letter body (`0x4af1cf`), as the feed resolves it.
+        (inbox.inbox[0].message_type, inbox.inbox[0].body) = (2, None);
         s.set_mail(Some(inbox));
         s.fire_event("MAIL_SHOW", vec![]);
         // The list answer to `MAIL_SHOW`'s `CheckInbox` lifts the request lock (`0x4ad5d0`).
@@ -708,7 +747,7 @@ fn an_auction_invoice_renders_as_a_receipt() {
 #[test]
 fn a_plain_letter_keeps_its_body_and_shows_no_receipt() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_mail(Some(small_inbox()));
     s.fire_event("MAIL_SHOW", vec![]);
@@ -734,7 +773,7 @@ fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
     let _data = benilla_formats::wow_data_or_skip!();
     use benilla_ui::script::QuadContent;
 
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     load_ui(&s);
     s.set_screen_size(1024.0, 768.0);
     s.set_mail(Some(small_inbox()));
@@ -783,7 +822,7 @@ fn the_open_letters_ring_icon_is_masked_but_the_inboxs_is_not() {
 #[test]
 fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     s.set_screen_size(1024.0, 768.0);
     load_ui(&s);
     s.fire_event("MAIL_SHOW", vec![]);
@@ -840,7 +879,7 @@ fn every_send_tab_box_takes_a_keystroke_not_just_the_one_with_an_onchar() {
 #[test]
 fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
     let _data = benilla_formats::wow_data_or_skip!();
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     s.set_screen_size(1024.0, 768.0);
     load_ui(&s);
     s.set_container(0, Some(one_linen_backpack()));
@@ -902,7 +941,7 @@ impl TextMeasure for Mono {
 
 /// The send tab, open, its boxes measured by [`Mono`].
 fn send_tab() -> UiScript {
-    let mut s = UiScript::new().unwrap();
+    let mut s = vm();
     s.set_screen_size(1024.0, 768.0);
     s.set_text_measurer(Box::new(Mono));
     load_ui(&s);

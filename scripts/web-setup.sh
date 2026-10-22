@@ -51,6 +51,7 @@ else
     Linux-aarch64) bplat=aarch64-linux ;;
     Darwin-arm64)  bplat=arm64-macos ;;
     Darwin-x86_64) bplat=x86_64-macos ;;
+    MINGW*-x86_64|MSYS*-x86_64) bplat=x86_64-windows ;;
     *) bplat="" ;;
   esac
   if [ -n "${bplat}" ]; then

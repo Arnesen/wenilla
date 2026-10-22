@@ -77,6 +77,7 @@ fn on_inventory_failure(
     In(ev): In<SessionEvent>,
     mut equip_errors: ResMut<EquipErrors>,
     mut latch: ResMut<LootLatch>,
+    ticks: bevy::ecs::system::SystemChangeTick,
 ) {
     if let SessionEvent::InventoryFailure {
         reason,
@@ -91,6 +92,7 @@ fn on_inventory_failure(
             required_level,
             items: [item_guid, item2_guid],
             bag_slot,
+            at: ticks.this_run(),
         };
         inventory_failure(failure, &mut equip_errors, &mut latch);
     }
@@ -103,6 +105,8 @@ struct Failure {
     /// The two item guids the packet names.
     items: [u64; 2],
     bag_slot: u8,
+    /// The handler call's change tick ([`EquipError::at`]).
+    at: bevy::ecs::change_detection::Tick,
 }
 
 /// A refused inventory operation (reason 0 never arrives: `benilla_protocol::events` drops it):
@@ -115,6 +119,7 @@ fn inventory_failure(failure: Failure, equip_errors: &mut EquipErrors, latch: &m
         required_level,
         items: [item_guid, item2_guid],
         bag_slot,
+        at,
     } = failure;
     debug!(
         "net: inventory failure {reason:#04x} (items {item_guid:#x} {item2_guid:#x}, bag slot \
@@ -126,6 +131,7 @@ fn inventory_failure(failure: Failure, equip_errors: &mut EquipErrors, latch: &m
         required_level,
         bag_slot,
         unlocks: [item_guid, item2_guid],
+        at,
     });
     // A failure whose first item guid is the looted item (a lockbox) ends the loot (`0x5e3a84`).
     if item_guid != 0 {
@@ -147,6 +153,7 @@ mod tests {
             required_level: None,
             items: [first, 0],
             bag_slot: 0,
+            at: Default::default(),
         };
 
         // An unrelated item's failure must not end the session.
@@ -202,6 +209,126 @@ mod tests {
         assert!(!s.item_locked(A) && !s.item_locked(B));
     }
 
+    /// One frame's refusal (through its handler) and a key landing in the backpack (a later
+    /// packet's write), the key first when `key_first`, over bags pushed empty; then what
+    /// `HasKey()` read at the refusal's `UI_ERROR_MESSAGE`, and after the frame.
+    fn refusal_and_key(key_first: bool) -> (String, bool) {
+        use crate::items::Items;
+        use bevy::ecs::system::RunSystemOnce;
+        const REASON: u8 = 0x16;
+        const KEY: u32 = 5396;
+        let mut app = App::new();
+        app.init_resource::<Items>()
+            .init_resource::<crate::spell::Cooldowns>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<EquipErrors>()
+            .init_resource::<LootLatch>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<BagOpens>()
+            .init_resource::<super::super::feed::BagUpdates>()
+            .init_resource::<crate::names::NameCache>()
+            .init_resource::<crate::ui_petition::PetitionState>()
+            .insert_resource(crate::ui_script::UiClock {
+                anchor: std::time::Instant::now(),
+                ui_now: 1000.0,
+            })
+            .add_systems(Update, super::super::feed::feed_containers);
+        app.world_mut().resource_mut::<Items>().insert_template(
+            KEY,
+            Some(benilla_protocol::messages::ItemInfo {
+                bag_family: super::super::BAG_FAMILY_KEYS,
+                ..crate::items::test_template("Key")
+            }),
+        );
+        app.world_mut().spawn((
+            SelfPlayer,
+            ObjectStore(ObjectFields::from_pairs(&[(2, 0x19)])),
+        ));
+        let script = benilla_ui::script::UiScript::new().unwrap();
+        let line = super::super::equip_error::equip_error_key(REASON);
+        script
+            .run(&format!(
+                "{line} = 'Refused.' SEEN = '' local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UI_ERROR_MESSAGE') \
+                 f:SetScript('OnEvent', function() SEEN = SEEN .. (HasKey() and 1 or 0) end)"
+            ))
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app.update();
+        let refusal = |world: &mut World| {
+            world
+                .run_system_once_with(
+                    super::on_inventory_failure,
+                    SessionEvent::InventoryFailure {
+                        reason: REASON,
+                        required_level: None,
+                        item_guid: 0,
+                        item2_guid: 0,
+                        bag_slot: 0xff,
+                    },
+                )
+                .unwrap();
+        };
+        // The key in backpack slot 1 (`PLAYER_FIELD_PACK_SLOT_1`, 532).
+        let key = |world: &mut World| {
+            world
+                .run_system_once(
+                    |mut commands: Commands,
+                     mut index: ResMut<crate::net::GuidIndex>,
+                     mut me: Query<&mut ObjectStore, With<SelfPlayer>>| {
+                        let guid = u64::from(benilla_protocol::guid::HIGH_ITEM) << 48 | 0xA1;
+                        let item = commands
+                            .spawn(ObjectStore(ObjectFields::from_pairs(&[
+                                (2, 0x3),
+                                (3, KEY),
+                                (14, 1),
+                            ])))
+                            .id();
+                        index.0.insert(guid, item);
+                        *me.single_mut().unwrap() = ObjectStore(ObjectFields::from_pairs(&[
+                            (2, 0x19),
+                            (532, guid as u32),
+                            (533, (guid >> 32) as u32),
+                        ]));
+                    },
+                )
+                .unwrap();
+        };
+        if key_first {
+            key(app.world_mut());
+            refusal(app.world_mut());
+        } else {
+            refusal(app.world_mut());
+            key(app.world_mut());
+        }
+        app.update();
+        let s = app
+            .world()
+            .non_send_resource::<benilla_ui::script::UiScript>();
+        (
+            s.eval::<String>("return SEEN").unwrap(),
+            s.eval::<bool>("return HasKey() == 1").unwrap(),
+        )
+    }
+
+    /// The failure's handler shows its line and unlocks its items (`0x496720`, `0x5e3ac0`,
+    /// `0x5e3ad3`) inside its dispatch, so its handlers read the bags as the packets before it
+    /// left them: a key that lands after it is not there yet, and one that landed before it is.
+    #[test]
+    fn an_inventory_failures_handlers_read_the_bags_the_packets_before_it_left() {
+        assert_eq!(
+            refusal_and_key(false),
+            ("0".into(), true),
+            "the key came after"
+        );
+        assert_eq!(
+            refusal_and_key(true),
+            ("1".into(), true),
+            "the key came first"
+        );
+    }
+
     /// A refusal that lands while no VM is up keeps its line for the next one but drops its
     /// unlocks, which would otherwise fire into that VM's locks.
     #[test]
@@ -217,6 +344,7 @@ mod tests {
                 required_level: None,
                 bag_slot: 0xff,
                 unlocks: [A, 0],
+                at: Default::default(),
             });
         app.world_mut()
             .run_system_once(super::super::feed::feed_containers)
@@ -247,6 +375,7 @@ mod tests {
                 required_level: None,
                 bag_slot: 0xff,
                 unlocks: [0x4000_0000_0000_0008, 0],
+                at: Default::default(),
             });
 
         crate::net::handlers::dispatch(

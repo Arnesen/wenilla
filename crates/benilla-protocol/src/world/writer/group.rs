@@ -33,7 +33,8 @@ impl WorldWriter {
         )
     }
 
-    /// Kick a group member by guid (`CMSG_GROUP_UNINVITE_GUID`), the raid frame's kick.
+    /// Kick a group member by guid (`CMSG_GROUP_UNINVITE_GUID`): what `0x5e9510` sends for a
+    /// player whose object the client does not hold (`0x5e953e`); a held one is kicked by name.
     pub fn group_uninvite_guid(&mut self, guid: u64) -> Result<()> {
         self.send(
             opcode::CMSG_GROUP_UNINVITE_GUID,
@@ -130,11 +131,11 @@ impl WorldWriter {
         self.send(opcode::MSG_RAID_READY_CHECK, &messages::ready_check_start())
     }
 
-    /// Answer a raid ready check (`MSG_RAID_READY_CHECK`).
-    pub fn ready_check_answer(&mut self, ready: bool) -> Result<()> {
+    /// Answer a raid ready check (`MSG_RAID_READY_CHECK`) with its status byte.
+    pub fn ready_check_answer(&mut self, status: u8) -> Result<()> {
         self.send(
             opcode::MSG_RAID_READY_CHECK,
-            &messages::ready_check_answer(ready),
+            &messages::ready_check_answer(status),
         )
     }
 

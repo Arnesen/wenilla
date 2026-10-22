@@ -14,8 +14,10 @@ mod channel;
 mod chat;
 mod client;
 mod combat_log;
+mod console_commands;
 mod death;
 mod duel;
+mod game_time;
 mod gameobject;
 mod gm_ticket;
 mod gossip;
@@ -96,7 +98,7 @@ pub use client::{
     auth_session, channel_announcements, channel_ban, channel_invite, channel_kick, channel_list,
     channel_moderate, channel_moderator, channel_mute, channel_owner, channel_password,
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
-    char_rename, creature_query, force_speed_ack, full_guid, join_channel, knock_back_ack,
+    char_rename, creature_query, emote, force_speed_ack, full_guid, join_channel, knock_back_ack,
     leave_channel, messagechat, messagechat_channel, messagechat_kind, messagechat_whisper,
     move_flag_ack, move_spline_done, move_time_skipped, movement, pet_name_query, ping,
     played_time, query_time, random_roll, teleport_ack, text_emote,
@@ -106,6 +108,7 @@ pub use combat_log::{
     PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog,
     SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
+pub use console_commands::{raw_position, teleport_to_unit, whois, world_teleport};
 pub use death::{
     area_spirit_healer, reclaim_corpse, resurrect_response, spirit_healer_activate,
     AreaSpiritHealerTime, CorpseLocation, ResurrectRequestBody,
@@ -114,6 +117,7 @@ pub use duel::{
     duel_accepted, duel_cancelled, read_duel_complete, read_duel_countdown, read_duel_requested,
     read_duel_winner, DuelRequested, DuelWinner,
 };
+pub use game_time::WowTime;
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
 pub use gm_ticket::{
     gm_ticket_create, gm_ticket_updatetext, GmTicket, GMTICKET_QUEUE_ENABLED,
@@ -178,11 +182,11 @@ pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use page_text::page_text_query;
 pub use parse::{parse_server, parse_server_with_tail};
 pub use pet::{
-    pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,
-    pet_stop_attack, pet_tame_failure_key, pet_unlearn, PetActionEntry, PetMode, PetSpellCooldown,
-    PetSpells, PetUnlearnConfirm, PET_ACTION_SLOTS, PET_ACT_COMMAND, PET_ACT_DISABLED,
-    PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION, PET_AUTOCAST_ALLOWED, PET_AUTOCAST_ON,
-    PET_COMMAND_ATTACK, PET_COMMAND_DISMISS, PET_COMMAND_FOLLOW, PET_COMMAND_STAY,
+    pet_abandon, pet_action, pet_cancel_aura, pet_cast_spell, pet_rename, pet_set_action,
+    pet_spell_autocast, pet_stop_attack, pet_tame_failure_key, pet_unlearn, PetActionEntry,
+    PetMode, PetSpellCooldown, PetSpells, PetUnlearnConfirm, PET_ACTION_SLOTS, PET_ACT_COMMAND,
+    PET_ACT_DISABLED, PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION, PET_AUTOCAST_ALLOWED,
+    PET_AUTOCAST_ON, PET_COMMAND_ATTACK, PET_COMMAND_DISMISS, PET_COMMAND_FOLLOW, PET_COMMAND_STAY,
     PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE, PET_REACT_DEFENSIVE, PET_REACT_PASSIVE,
     PET_STATE_BAR_DISABLED, PET_TALK_ATTACK, PET_TALK_ORDER, PET_TYPE_SPELL_FIRST,
     PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
@@ -223,13 +227,13 @@ pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
     looking_for_group_query, read_friend_list, read_friend_status, read_ignore_list, read_who,
     set_looking_for_group, who, FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry,
-    WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
+    WhoRequest, WhoResults,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
     cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_corpse,
-    cast_spell_gameobject, cast_spell_item, CastOutcome, CorpseTarget, SpellCastTargets,
-    SpellChainTargets, SpellGo, SpellStart,
+    cast_spell_gameobject, cast_spell_item, cast_spell_trade_item, CastOutcome, CorpseTarget,
+    SpellCastTargets, SpellChainTargets, SpellGo, SpellGoMiss, SpellStart,
 };
 pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,

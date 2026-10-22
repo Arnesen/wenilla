@@ -160,11 +160,11 @@ fn stale_advances(
     };
     let d = model.region_data.get(&rh);
     let font = d.and_then(|d| d.font_path.clone());
-    let height = d.and_then(|d| d.font_height);
+    let height = d.and_then(|d| d.font_height_script(model.layout_units()));
     let outline = d.map(|d| d.outline).unwrap_or_default();
     // A multi-line box steps its rows by the font height plus the gap (`0x77d133`-`0x77d161`).
     let spacing = d.map_or(0.0, super::super::RegionData::line_gap);
-    let shadow_x = d.map_or(0.0, |d| d.shadow_x());
+    let shadow_x = d.map_or(0.0, |d| d.shadow_x(model.layout_units()));
     // The host measures at the drawn raster size, so the advances land on the drawn glyphs.
     let scale = model
         .arena
@@ -175,9 +175,8 @@ fn stale_advances(
     let wrap_width = multi_line
         .then(|| {
             model
-                .region_resolved
-                .get(&rh)
-                .or_else(|| model.resolved.get(&h))
+                .region_rect(rh)
+                .or_else(|| model.frame_rect(h))
                 .map(|r| r.right - r.left)
         })
         .flatten()

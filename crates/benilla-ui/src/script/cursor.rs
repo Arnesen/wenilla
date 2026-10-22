@@ -5,9 +5,9 @@
 //! ([`set_cursor`] from a Lua verb, one segment each, so the clear's `CURSOR_UPDATE` reads the
 //! emptied cursor before the set), and every verb that drops a payload clears through [`clear`].
 
-use mlua::Lua;
+use mlua::{Lua, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::tick::verb;
 use super::{Model, ScriptValue};
 
@@ -19,7 +19,7 @@ pub(crate) mod equip;
 pub(crate) mod money;
 pub(super) mod pet;
 
-pub(crate) use bar::place_action;
+pub(crate) use bar::{clear_macro_slots, place_action};
 pub(crate) use drag::{
     abandon_drag, maybe_start_drag, press_drag, take_drag, DragGesture, DragRelease,
 };
@@ -83,9 +83,10 @@ impl CursorPayload {
                 texture: None,
                 count: 0,
                 consumable: false,
+                state: None,
             }),
             CursorPayload::Macro(_) => CursorPayload::Macro(CursorMacro {
-                index: 0,
+                id: 0,
                 texture: None,
             }),
             CursorPayload::PetAction(_) => CursorPayload::PetAction(CursorPetAction {
@@ -228,6 +229,10 @@ pub struct CursorAction {
     /// so the slot's `ACTIONBAR_SLOT_CHANGED` handler reads them before the app's re-feed.
     pub count: u32,
     pub consumable: bool,
+    /// The source slot's per-frame state, which a place writes back with the slot for the same
+    /// handler: the reference answers `IsEquippedAction` and kin for the slot's action at call
+    /// time (`0x4e74e0`), so the moved item's green border goes with it.
+    pub(crate) state: Option<super::action::StoredActionState>,
 }
 
 /// A pet-bar payload, mode 4, from `PickupPetAction` or the pet spellbook: the packed action word
@@ -251,8 +256,8 @@ pub struct CursorPetAction {
 /// `PlaceAction` accepts (`0x4e62e0`). It has no source slot, so a refused place leaves it held.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CursorMacro {
-    /// The 1-based macro index: 1..=18 account, 19..=36 character.
-    pub index: u32,
+    /// The macro's id (`[0xb4e2fc]`), not its position: the table re-sorts under a held macro.
+    pub id: u32,
     pub texture: Option<String>,
 }
 
@@ -287,6 +292,102 @@ impl Clear {
     };
 }
 
+/// The cursor state a write changes: the payload, the grid a setter showed, an armed gift wrap and
+/// the displayed cursor its arm took.
+#[derive(Clone, Debug)]
+pub(crate) struct CursorState {
+    payload: Option<CursorPayload>,
+    grid: bool,
+    wrap: Option<super::container::PendingWrap>,
+    ui_cursor: Option<super::container::UiCursorMode>,
+    ui_cursor_dirty: bool,
+}
+
+impl Model {
+    fn cursor_state(&self) -> CursorState {
+        CursorState {
+            payload: self.cursor.clone(),
+            grid: self.cursor_grid,
+            wrap: self.pending_wrap,
+            ui_cursor: self.ui_cursor,
+            ui_cursor_dirty: self.ui_cursor_dirty,
+        }
+    }
+
+    /// Put the cursor back as `state` held it.
+    pub(crate) fn restore_cursor_state(&mut self, state: &CursorState) {
+        self.cursor = state.payload.clone();
+        self.cursor_grid = state.grid;
+        self.pending_wrap = state.wrap;
+        self.ui_cursor = state.ui_cursor;
+        self.ui_cursor_dirty = state.ui_cursor_dirty;
+    }
+}
+
+/// A cursor write as the operation it is: `ClearCursor` (`0x495190`) with its flags, or a setter's
+/// put. A clear acts on what the cursor holds when it runs.
+#[derive(Clone, Debug)]
+pub(crate) enum CursorOp {
+    Clear(Clear),
+    Put(CursorPayload),
+}
+
+/// One cursor write as made: the operation, the cursor state it found, and what it raised. Made
+/// while something waits for the host, the take puts that state back ([`CursorWrite::rewind`])
+/// and the operation runs again in its place, against the cursor as it is then, as the
+/// reference's runs after what came ahead of it: never its recorded result.
+#[derive(Clone, Debug)]
+pub(crate) struct CursorWrite {
+    pub(crate) op: CursorOp,
+    before: CursorState,
+    pub(crate) raised: Vec<super::tick::Raised>,
+}
+
+impl CursorWrite {
+    /// Undo it: its lock writes, last first, then the cursor state it found.
+    pub(crate) fn rewind(&self, model: &mut Model) {
+        super::tick::rewind(model, &self.raised);
+        model.restore_cursor_state(&self.before);
+    }
+}
+
+/// Make cursor write `op`, recorded whole ([`CursorWrite`]): inside a verb segment as one record,
+/// which its fan-out shows and its replay for the host makes again ([`super::tick::fan_out`]);
+/// outside one while something waits for the host, captured and queued behind it, its events
+/// raised when it is made again. With nothing waiting outside a segment it is just made.
+pub(crate) fn write(model: &mut Model, op: CursorOp) {
+    let before = model.cursor_state();
+    let start = model.verb_events.as_ref().map(Vec::len);
+    let queued = start.is_none() && !model.script_calls.is_empty();
+    if queued {
+        model.verb_events = Some(Vec::new());
+    }
+    match op.clone() {
+        CursorOp::Clear(how) => clear_now(model, how),
+        CursorOp::Put(payload) => put_now(model, payload),
+    }
+    let Some(segment) = model.verb_events.as_mut() else {
+        return;
+    };
+    let raised = segment.split_off(start.unwrap_or(0));
+    let write = Box::new(CursorWrite { op, before, raised });
+    if queued {
+        model.verb_events = None;
+        model.push_waiting(super::calls::Waiting::Cursor {
+            write,
+            shown: false,
+        });
+    } else {
+        segment.push(super::tick::Raised::CursorWrite(write));
+    }
+}
+
+/// `ClearCursor(unlock, signal)` (`0x495190`), the one way a payload leaves the cursor, made as a
+/// recorded write ([`write`]).
+pub(crate) fn clear(model: &mut Model, how: Clear) {
+    write(model, CursorOp::Clear(how));
+}
+
 /// `ClearCursor(unlock, signal)` (`0x495190`), the one way a payload leaves the cursor. An armed
 /// gift wrap is cancelled first (`0x495197`). Then the payload's arm: an item's unlock signals
 /// `ITEM_LOCK_CHANGED` when `unlock` (`0x4951d9`, `0x495455`), coins `PLAYER_MONEY` when `signal`
@@ -296,7 +397,7 @@ impl Clear {
 /// wrap's and the item's unlock see the whole payload, the item reading unlocked, while the coins'
 /// `PLAYER_MONEY` and the grid hide come after the arm zeroed the data
 /// ([`CursorPayload::emptied`]). `CURSOR_UPDATE` alone reads the emptied cursor (`0x4952cc`).
-pub(crate) fn clear(model: &mut Model, how: Clear) {
+fn clear_now(model: &mut Model, how: Clear) {
     let held = model.cursor.take();
     model.view_cursor(held.clone());
     // `0x5edf10`: the wrapping paper unlocks (`0x5ededd`) and the cursor mode returns to the base.
@@ -339,8 +440,14 @@ pub(crate) fn clear_cursor(model: &mut Model) {
 /// bar item, mode 7 (`0x49513a`), and fires `CURSOR_UPDATE` (`0x49515e`). The spell (`0x494dd1`)
 /// and macro (`0x494fd7`) setters end on the action bar's grid, the pet-action setter on the pet
 /// bar's (`0x494f28`), the money setter on `PLAYER_MONEY` (`0x494d0a`) and the stable grab on
-/// nothing (`0x4950c5`), so no `CURSOR_UPDATE` follows theirs.
+/// nothing (`0x4950c5`), so no `CURSOR_UPDATE` follows theirs. Made as a recorded write
+/// ([`write`]).
 pub(crate) fn put(model: &mut Model, payload: CursorPayload) {
+    write(model, CursorOp::Put(payload));
+}
+
+/// [`put`]'s set and tail.
+fn put_now(model: &mut Model, payload: CursorPayload) {
     /// What a setter fires past its set.
     enum Tail {
         /// `SetCursorItem` and the row grab: the action bar's grid if asked, then `CURSOR_UPDATE`.
@@ -551,17 +658,22 @@ pub(crate) fn world_drop_click(model: &mut Model) -> bool {
 /// clears with `ClearCursor(1,1)` (`0x4fa078`), whatever is held, stops spell targeting
 /// (`0x4fa07d`, `0x6e4900`), then picks up ([`pick_up_item`], `0x4fa0aa`), so its handlers see
 /// two clears and the set. Returns whether anything was picked up.
-pub(crate) fn split_container_item(lua: &Lua, bag: i64, slot: u32, count: i64) -> bool {
+pub(crate) fn split_container_item(
+    lua: &Lua,
+    bag: i64,
+    slot: u32,
+    count: i64,
+) -> mlua::Result<bool> {
     let item = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         let Some(s) = model.containers.get(&bag).and_then(|c| c.slots.get(&slot)) else {
-            return false;
+            return Ok(false);
         };
         if s.item_id == 0 || item_locked(&model, s.guid) {
-            return false;
+            return Ok(false);
         }
         if count < 1 || count > i64::from(s.count) {
-            return false;
+            return Ok(false);
         }
         let n = count as u32;
         let whole = n == s.count;
@@ -580,15 +692,16 @@ pub(crate) fn split_container_item(lua: &Lua, bag: i64, slot: u32, count: i64) -
             equip_slots: s.equip_slots.clone(),
         }
     };
-    verb(lua, |model| {
+    let targeting = verb(lua, |model| {
         clear_cursor(model);
-        // `StopTargeting` ends an armed spell's targeting, as `SpellStopTargeting` does.
-        if model.spell_targeting {
-            model.queue_call(super::ScriptCall::SpellStopTargeting);
-        }
+        model.spell_targeting
     });
+    // `StopTargeting` ends an armed spell's targeting, as `SpellStopTargeting` does.
+    if targeting {
+        super::calls::submit(lua, super::ScriptCall::SpellStopTargeting)?;
+    }
     pick_up_item(lua, item);
-    true
+    Ok(true)
 }
 
 /// `DeleteCursorItem()` (`0x4897b0`), the delete popup's accept: a held item queues its
@@ -651,7 +764,7 @@ impl super::UiScript {
         if guid == 0 {
             return;
         }
-        self.model_mut().item_locks.insert(guid);
+        self.model_mut().set_item_lock(guid, true);
         self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
     }
 
@@ -661,7 +774,7 @@ impl super::UiScript {
         if guid == 0 {
             return;
         }
-        self.model_mut().item_locks.remove(&guid);
+        self.model_mut().set_item_lock(guid, false);
         self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
     }
 
@@ -682,7 +795,7 @@ impl super::UiScript {
             };
             let freed: Vec<u64> = guids.iter().copied().filter(|&g| !attached(g)).collect();
             for guid in freed {
-                model.item_locks.remove(&guid);
+                model.set_item_lock(guid, false);
             }
         }
         self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
@@ -697,7 +810,9 @@ impl super::UiScript {
     /// them; a lock it strands lasts until the item's seat or stack moves, which this does not
     /// copy.
     pub fn unlock_all_items(&mut self) {
-        self.model_mut().item_locks.clear();
+        for guid in self.item_locks() {
+            self.model_mut().set_item_lock(guid, false);
+        }
         self.fire_event("ITEM_LOCK_CHANGED", Vec::new());
     }
 
@@ -713,7 +828,7 @@ impl super::UiScript {
     /// with that guid starts unlocked, as the item constructor zeroes the bit (`0x5d821f`,
     /// `0x5d823e`).
     pub fn forget_item_lock(&mut self, guid: u64) {
-        self.model_mut().item_locks.remove(&guid);
+        self.model_mut().set_item_lock(guid, false);
     }
 
     /// Seat a fresh VM's locks before anything runs on it, with no event.
@@ -798,6 +913,19 @@ impl super::UiScript {
         clear_cursor(&mut self.model_mut());
     }
 
+    /// The world click router's object leg (`0x492ce0`): `ClearCursor(1, 1)` only while a preview
+    /// payload is held, `[0xb4b41c]` set, which is a vendor row (mode 5) or an item action lifted
+    /// off the bar (mode 7); any other payload stays held.
+    pub fn clear_preview_payload(&mut self) {
+        let preview = matches!(
+            self.model_ref().cursor,
+            Some(CursorPayload::Merchant(_) | CursorPayload::Action(_))
+        );
+        if preview {
+            clear_cursor(&mut self.model_mut());
+        }
+    }
+
     /// Test-only: set the payload directly, bypassing the Lua bindings.
     #[cfg(test)]
     pub(crate) fn set_cursor_for_test(&mut self, payload: CursorPayload) {
@@ -810,8 +938,9 @@ impl super::UiScript {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 impl super::UiScript {
     /// Arm or disarm the targeting cursor's item half (`TargetingWantsItem`, `0x6e6330`): while
-    /// armed, a bag or paper-doll click queues its `(bag, slot)` as a pick instead of picking up,
-    /// as the reference's two pickups do (`0x4f9b30` at `0x4f9c54`, `0x4c7300` at `0x4c76df`).
+    /// armed, a bag or paper-doll click hands its `(bag, slot)` to the host as a pick instead of
+    /// picking up, as the reference's two pickups do (`0x4f9b30` at `0x4f9c54`, `0x4c7300` at
+    /// `0x4c76df`).
     pub fn set_item_pick_armed(&mut self, armed: bool) {
         self.model_mut().item_pick_armed = armed;
     }
@@ -822,20 +951,10 @@ impl super::UiScript {
     pub fn set_spell_targetable_units(&mut self, guids: impl IntoIterator<Item = u64>) {
         self.model_mut().spell_targetable_units = guids.into_iter().collect();
     }
-
-    /// Drain the picks since the last call; a paper-doll pick reports as [`EQUIPMENT_BAG`] and
-    /// its 1-based inventory slot.
-    pub fn take_item_picks(&mut self) -> Vec<ItemPick> {
-        std::mem::take(&mut self.model_mut().item_picks)
-    }
-
-    /// Drain the enchant-confirm answers since the last call; both answer the pick the app parked.
-    pub fn take_enchant_confirms(&mut self) -> Vec<EnchantAnswer> {
-        std::mem::take(&mut self.model_mut().enchant_confirms)
-    }
 }
 
-/// A bag or paper-doll click made while targeting wants an item (`0x4f9c54`, `0x4c76df`).
+/// A bag or paper-doll click made while targeting wants an item (`0x4f9c54`, `0x4c76df`); a
+/// paper-doll pick is [`EQUIPMENT_BAG`] and its 1-based inventory slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemPick {
     pub bag: i64,
@@ -872,7 +991,7 @@ pub enum EnchantConfirm {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // `BindEnchant()`, `ReplaceEnchant()`: queue an intent for the app; nothing is sent from here.
+    // `BindEnchant()`, `ReplaceEnchant()`: the host answers the parked pick inside the verb.
     for (name, answer) in [
         ("BindEnchant", EnchantConfirm::Bind),
         ("ReplaceEnchant", EnchantConfirm::Replace),
@@ -881,12 +1000,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, ()| {
                 let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.enchant_confirms.push(EnchantAnswer {
-                    confirm: answer,
-                    may_cast,
-                });
-                Ok(())
+                super::calls::submit(
+                    lua,
+                    super::ScriptCall::EnchantConfirm(EnchantAnswer {
+                        confirm: answer,
+                        may_cast,
+                    }),
+                )
             })?,
         )?;
     }
@@ -918,8 +1038,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "SplitContainerItem",
-        lua.create_function(|lua, (bag, slot, count): (i64, u32, i64)| {
-            split_container_item(lua, bag, slot, count);
+        lua.create_function(|lua, (bag, slot, count): (Value, Value, Value)| {
+            // `is-number` on args 1, 2 and 3 else `Usage: SplitContainerItem(index, slot, amount)`
+            // (`0x84d910`, `0x4fa0bf`).
+            let bag = i64::from(binding_abi::number_arg(
+                lua,
+                bag,
+                "Usage: SplitContainerItem(index, slot, amount)",
+            )?);
+            let slot = binding_abi::index_arg32(
+                lua,
+                slot,
+                "Usage: SplitContainerItem(index, slot, amount)",
+            )?;
+            let count = i64::from(binding_abi::number_arg(
+                lua,
+                count,
+                "Usage: SplitContainerItem(index, slot, amount)",
+            )?);
+            split_container_item(lua, bag, slot, count)?;
             Ok(())
         })?,
     )?;
@@ -979,7 +1116,7 @@ pub(crate) fn two_item_bag() -> super::container::ContainerState {
         ..Default::default()
     };
     super::container::ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots: [
             (1, item(117, "Tough Jerky")),
@@ -1011,6 +1148,7 @@ mod tests {
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,
+                field_duration: 0,
                 petition: None,
                 already_bound: false,
                 occupied_seats: None,
@@ -1036,10 +1174,11 @@ mod tests {
                 flags: 0,
                 enchants: Vec::new(),
                 spell_0: false,
+                spell_charges: [0; 5],
             },
         );
         crate::script::container::ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }
@@ -1147,6 +1286,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         assert_eq!(ask(&mut s, "CursorHasItem"), NO);
         assert_eq!(ask(&mut s, "CursorHasSpell"), NO);
@@ -1411,6 +1551,7 @@ mod tests {
     #[test]
     fn the_entry_unlock_skips_a_trade_offer_only_while_the_window_is_open() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.open_trade_window();
         s.set_trade(Some(Default::default()));
         s.set_container(0, Some(super::two_item_bag()));
@@ -1438,6 +1579,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         s.run("DeleteCursorItem()").unwrap();
         assert!(
@@ -1451,7 +1593,7 @@ mod tests {
     fn split_of_the_whole_stack_degrades_to_a_plain_pickup() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(one_item_backpack())); // slot 1: a 5-stack
-        assert!(split_container_item(&s.lua, 0, 1, 5));
+        assert!(split_container_item(&s.lua, 0, 1, 5).unwrap());
         let held = s.cursor_item().expect("picked up");
         assert_eq!(held.count, None, "count == stack ⇒ whole-stack pickup");
     }
@@ -1463,6 +1605,7 @@ mod tests {
     #[test]
     fn a_clear_with_coins_held_signals_player_money() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_money(1_000);
         s.set_container(0, Some(one_item_backpack()));
         heard::listen(
@@ -1544,7 +1687,7 @@ mod tests {
         s.set_container(0, Some(one_item_backpack()));
         super::install_kind_probe(&s);
         s.set_cursor_for_test(CursorPayload::Macro(super::CursorMacro {
-            index: 1,
+            id: 1,
             texture: None,
         }));
         heard::listen(
@@ -1588,6 +1731,22 @@ mod tests {
                 "ACTIONBAR_HIDEGRID 1 nil",
                 "CURSOR_UPDATE nil nil"
             ]
+        );
+    }
+
+    /// `SplitContainerItem` stops an armed spell's targeting inside the call (`0x4fa07d`,
+    /// `0x6e4900`) with a host lent.
+    #[test]
+    fn a_split_stops_targeting_in_the_call_with_a_host_lent() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(one_item_backpack()));
+        s.set_spell_targeting(true);
+        assert_eq!(
+            crate::script::host::test_support::applied_in_call(
+                &mut s,
+                "SplitContainerItem(0, 1, 2)"
+            ),
+            vec![crate::script::ScriptCall::SpellStopTargeting]
         );
     }
 }

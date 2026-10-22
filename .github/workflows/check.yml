@@ -34,7 +34,11 @@ jobs:
       # which the cache above keeps.
       - name: toolchain (scripts/web-setup.sh)
         run: scripts/web-setup.sh
+      # With the target features `scripts/web-build.sh` ships (simd128), so glam's wasm SIMD
+      # paths are the ones checked.
       - name: cargo check, wasm32
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: -C target-feature=+simd128
         run: cargo check --target wasm32-unknown-unknown -p wenilla --no-default-features --features webgpu
   realm:
     runs-on: ubuntu-latest

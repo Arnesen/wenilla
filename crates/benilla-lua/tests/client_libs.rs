@@ -333,6 +333,72 @@ fn the_math_library_answers_the_clients_specials() {
     );
 }
 
+/// 5.0's `getfenv` and `setfenv` (`0x702ac0`, `0x702be0`): an environment's raw `__fenv` field
+/// (`aux_getfenv`, `0x702ba0`) is what `getfenv` answers and makes `setfenv` refuse, a metafield
+/// is not read, and `setfenv` answers nothing.
+#[test]
+fn fenv_protection_is_the_clients() {
+    assert_eq!(
+        ok("local function f() return x end
+            local env = {x = 1, __fenv = 'locked'}
+            setfenv(f, env)
+            local ok, e = pcall(setfenv, f, {})
+            return getfenv(f), ok, e, f()"),
+        [
+            "locked",
+            "false",
+            "`setfenv' cannot change a protected environment",
+            "1"
+        ]
+    );
+    assert_eq!(
+        ok("local function f() end
+            local env = setmetatable({}, {__fenv = 1})
+            local function count(...) return arg.n end
+            local n = count(setfenv(f, env))
+            return getfenv(f) == env, n, pcall(setfenv, f, {})"),
+        ["true", "0", "true"]
+    );
+}
+
+/// `math_random` (`0x7fb310`) over MSVC's `rand` (`0x7400e5`): from `srand(1)` the CRT's own
+/// first draws 41, 18467, 6334, 26500, 19169, each `% 32767` times `1/32767` (`0x822d38`), an
+/// interval's low end added to the `int` floor. A new state is seeded from the clock (`0x5b800b`).
+#[test]
+fn math_random_is_msvcs_rand() {
+    let draws = |call: &str| {
+        ok(&format!(
+            "math.randomseed(1) local f = math.{call} return f(), f(), f(), f(), f()"
+        ))
+    };
+    assert_eq!(
+        draws("random"),
+        [
+            "0.0012512588885159",
+            "0.56358531449324",
+            "0.19330423902097",
+            "0.80874050111393",
+            "0.58500930814539"
+        ]
+    );
+    assert_eq!(
+        ok("math.randomseed(1) local r = math.random \
+            return r(100), r(100), r(100), r(-5, 1000000), r(-5, 1000000)"),
+        ["1", "57", "20", "808740", "585007"]
+    );
+    // Every draw is on the 1/32767 grid.
+    assert_eq!(
+        ok("for i = 1, 1000 do local x = math.random() * 32767 \
+              if math.abs(x - math.floor(x + 0.5)) > 1e-6 then return i end end return 0"),
+        ["0"]
+    );
+    // An unseeded state does not draw `srand(1)`'s sequence.
+    assert_ne!(
+        ok("local r = math.random return r(32767), r(32767), r(32767), r(32767), r(32767)"),
+        ["42", "18468", "6335", "26501", "19170"]
+    );
+}
+
 /// 5.0's `ipairs` (`0x702cd0`), each answer the client's own, run in its opened state: a loop's
 /// start answers the global `ipairs`, the table and 0; a second argument, even nil, steps once;
 /// a loop keeps the generator it started with, which is the global read at its start.

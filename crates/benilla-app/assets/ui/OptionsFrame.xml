@@ -585,7 +585,7 @@
             SetCVar(row.partner.cvar, v)
         end
 
-        -- A uvar's default is captured at OnLoad, before the saved-variables chunk runs.
+        -- A uvar's default is captured at OnLoad, before the saved-variables file is read.
         function BenillaOptionsRow_Default(row)
             if row.uvar then return row.udefault end
             if row.getFunc then return row.fdefault end
@@ -791,7 +791,8 @@
             end
             getglobal(control:GetName() .. "Value"):SetText(BenillaOptionsRow_FormatValue(row, value))
             if BenillaOptionsRow_HasStore(row) and not row.refreshing then
-                -- Trailing zeros stripped, so a value at its default stays out of the config file.
+                -- Two decimals, trailing zeros stripped: a whole value writes "1", not "1.00",
+                -- which still differs from a default registered as "1.0" and so is saved.
                 local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
                 if row.deferred then
                     -- Stored on Apply; a pending equal to the committed value is dropped.
@@ -2412,7 +2413,12 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Saved globals in 1.12; the mode greys with its switch
-                                             (UIOptionsFrame.lua:697-701). -->
+                                             (UIOptionsFrame.lua:697-701). Neither row applies anything:
+                                             1.12's options only write the uvars (UIOptionsFrame.lua:65),
+                                             and the target frames' OnUpdates show or hide the frame on
+                                             the next frame (TargetFrame.lua:492-501). Called from a row,
+                                             TargetofTarget_Update would refresh the row's debuffs
+                                             (RefreshBuffs(this, ...), TargetFrame.lua:538). -->
                                         <Frame name="$parentRowTargetOfTarget" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -2421,7 +2427,6 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsGlobalRow_OnLoad(this, "SHOW_TARGET_OF_TARGET",
                                                     "Show Target of Target", "OPTION_TOOLTIP_SHOW_TARGET_OF_TARGET")
-                                                this.applyFunc = "TargetofTarget_Update"
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- The label is ours, since 1.12 never sets this
@@ -2441,7 +2446,6 @@
                                                     { text = "Party or Raid", value = "4", tip = "OPTION_TOOLTIP_TARGETOFTARGET4" },
                                                     { text = "Always", value = "5", tip = "OPTION_TOOLTIP_TARGETOFTARGET5" },
                                                 })
-                                                this.applyFunc = "TargetofTarget_Update"
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- PLAYER_FLAGS bits, API rows
@@ -3041,13 +3045,14 @@
                         <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor></Anchors>
                         <Layers>
                             <Layer level="ARTWORK">
-                                <Texture name="$parentIcon" file="Interface\Buttons\UI-Panel-MinimizeButton-Up" alpha="0.5">
+                                <Texture name="$parentIcon" file="Interface\Buttons\UI-Panel-MinimizeButton-Up">
                                     <Size><AbsDimension x="17" y="17"/></Size>
                                     <Anchors><Anchor point="CENTER"/></Anchors>
                                 </Texture>
                             </Layer>
                         </Layers>
                         <Scripts>
+                            <OnLoad>getglobal(this:GetName() .. "Icon"):SetAlpha(0.5)</OnLoad>
                             <OnClick>
                                 BenillaOptionsFrameSearchBox:SetText("")
                                 BenillaOptionsFrameSearchBox:ClearFocus()

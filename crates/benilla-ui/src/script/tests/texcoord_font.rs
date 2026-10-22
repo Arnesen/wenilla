@@ -51,21 +51,30 @@ fn set_tex_coord_changes_extracted_uv() {
         "the affine form carries corners in screen winding, got {:?}",
         tex.content
     );
-    // A no-arg reset returns to the full texture.
-    s.run("t:SetTexCoord()").unwrap();
-    s.resolve();
-    let tex = s
-        .extract()
-        .into_iter()
-        .find(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains("Foo")))
-        .unwrap();
-    assert!(matches!(
-        &tex.content,
-        QuadContent::Texture {
-            tex_coords: None,
-            ..
-        }
-    ));
+    // Every count but 4 and 8 raises the usage (`0x79bf6c`, `0x87c538`) naming the texture, and
+    // the coordinates stay; the count is `lua_gettop`, so a trailing nil counts.
+    let usage = "Usage: TcTex:SetTexCoord(minX, maxX, minY, maxY) or SetTexCoord(ULx, ULy, LLx, \
+                 LLy, URx, URy, LRx, LRy)";
+    for call in [
+        "t:SetTexCoord()",
+        "t:SetTexCoord(0, 1, 0, 1, nil)",
+        "t:SetTexCoord(0, 1)",
+    ] {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains(usage), "{call}: {err}");
+    }
+    let unnamed = s
+        .run("f:CreateTexture():SetTexCoord()")
+        .expect_err("an unnamed texture raises too")
+        .to_string();
+    assert!(
+        unnamed.contains("Usage: <unnamed>:SetTexCoord("),
+        "{unnamed}"
+    );
+    let still: (f32, f32, f32, f32, f32, f32, f32, f32) = s.eval("return t:GetTexCoord()").unwrap();
+    assert_eq!(still, (0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0), "unchanged");
+    s.run("t:SetTexCoord(0, 1, 0, 1, nil, nil, nil, nil)")
+        .expect("eight with trailing nils is the corner form");
 }
 
 #[test]
@@ -76,12 +85,11 @@ fn set_font_object_repoints_fontstring() {
         "Big",
         FontObject {
             font: Some("Fonts\\MORPHEUS.TTF".into()),
-            height: Some(18.0),
-            color: Some([0.0, 0.0, 0.0, 1.0]),
+            height: Some(crate::layout::Len::Script(18.0)),
+            color: Some(crate::color::Rgba8::from_f32([0.0, 0.0, 0.0, 1.0])),
             outline: Outline::None,
             monochrome: false,
-            justify_h: None,
-            justify_v: None,
+            justify: None,
             shadow: None,
             spacing: None,
         },
@@ -90,12 +98,11 @@ fn set_font_object_repoints_fontstring() {
         "Small",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(10.0),
-            color: Some([1.0, 1.0, 1.0, 1.0]),
+            height: Some(crate::layout::Len::Script(10.0)),
+            color: Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0])),
             outline: Outline::None,
             monochrome: false,
-            justify_h: None,
-            justify_v: None,
+            justify: None,
             shadow: None,
             spacing: None,
         },
@@ -191,19 +198,26 @@ fn justify_v_defaults_middle_and_overrides() {
         "TopFont",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             color: None,
             outline: Outline::None,
             monochrome: false,
-            justify_h: None,
-            justify_v: Some(JustifyV::Top),
+            justify: Some({
+                let mut j = crate::justify::Justify::default();
+                j.set_v(JustifyV::Top);
+                j
+            }),
             shadow: None,
             spacing: None,
         },
     );
     s.run("fs:SetFontObject('TopFont')").unwrap();
     s.resolve();
-    assert_eq!(justify_v(&s), JustifyV::Bottom, "severance is permanent");
+    assert_eq!(
+        justify_v(&s),
+        JustifyV::Bottom,
+        "a cleared inherit bit is never set back"
+    );
 
     // A string that never set the axis takes the object's justification.
     s.run(

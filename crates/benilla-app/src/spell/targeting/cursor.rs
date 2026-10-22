@@ -7,7 +7,6 @@ use bevy::prelude::*;
 
 use benilla_formats::{RangeTargets, RangeUnit, SpellDisplay, SpellRange};
 
-use crate::net::SelfPlayer;
 use crate::spell::SpellModifiers;
 use crate::target::{CursorKind, PickOcclusion, WorldCursor};
 use crate::ui_action::Spells;
@@ -16,10 +15,11 @@ use super::{SpellTargeting, TargetingWants};
 
 /// What `GetMinMaxRange 0x6e3480` reads for the cursor's two range verdicts: the ground point
 /// (`CheckGroundPointInRange 0x6e6810`, a null target at `0x6e6879`) and the GameObject leg of
-/// `0x6e6460` (the object as target at `0x6e679b`). Neither passes a unit, which the function
-/// tests for at `0x6e34e1`-`0x6e34f9`: the ranged arm pads nothing and takes no moving bonus,
-/// and the melee arm sums the caster's reach with its auto-attack target's and asks that unit's
-/// motion, with the caster's, for the bonus.
+/// `0x6e6460` (the object as target at `0x6e679b`). Both ask it for the record's caster
+/// (`0xceac50`, resolved at `0x6e6849` and `0x6e64b2`), a pet's cast its pet. Neither passes a
+/// unit, which the function tests for at `0x6e34e1`-`0x6e34f9`: the ranged arm pads nothing and
+/// takes no moving bonus, and the melee arm sums the caster's reach with its auto-attack target's
+/// and asks that unit's motion, with the caster's, for the bonus.
 #[derive(Clone, Copy)]
 struct RangeCall<'a> {
     spell: &'a SpellDisplay,
@@ -29,17 +29,24 @@ struct RangeCall<'a> {
     attack_target: Option<RangeUnit>,
 }
 
-/// The call's inputs, or `None` where the data is absent (no catalog, an unknown spell, a row
-/// missing from `SpellRange`), which is permissive: the server judges every send.
-fn range_call<'a>(checks: &'a super::BindChecks, spell_id: u32) -> Option<RangeCall<'a>> {
+/// The call's inputs for `caster`, or `None` where the data is absent (no catalog, an unknown
+/// spell, a row missing from `SpellRange`), which is permissive: the server judges every send.
+fn range_call<'a>(
+    checks: &'a super::BindChecks,
+    spell_id: u32,
+    caster: Entity,
+) -> Option<RangeCall<'a>> {
     let spells = checks.spells.as_deref()?;
     let spell = spells.catalog.get(spell_id)?;
     Some(RangeCall {
         spell,
         row: spells.ranges.get(spell.range_index)?,
         mods: &checks.spell_mods,
-        caster: checks.range_units.caster(),
-        attack_target: checks.range_units.caster_attack_target(),
+        caster: checks
+            .range_units
+            .unit(caster)
+            .unwrap_or(RangeUnit::still(crate::spell::DEFAULT_REACH)),
+        attack_target: checks.range_units.attack_target(caster),
     })
 }
 
@@ -121,14 +128,13 @@ pub(crate) fn ground_cast_radius(
 /// [`SpellTargeting::can_target_unit`] and its corpse leg [`SpellTargeting::can_target_corpse`],
 /// over a corpse the pick admitted under a word in `0x8600`. The world-item leg is not built.
 ///
-/// Every seam shows the `Cast` kind, so this reads the whole-word [`SpellTargeting::spell`].
+/// Every seam shows the `Cast` kind, so this reads the whole word's spell and its caster.
 pub(crate) fn drive_targeting_cursor(
     targeting: Res<SpellTargeting>,
     checks: super::BindChecks,
     occlusion: Res<PickOcclusion>,
     hovered: Res<crate::target::Hovered>,
     hovered_object: Res<crate::target::HoveredObject>,
-    self_tf: Query<&Transform, With<SelfPlayer>>,
     go_tf: Query<&Transform>,
     stores: Query<(
         &crate::net::ObjectStore,
@@ -140,11 +146,15 @@ pub(crate) fn drive_targeting_cursor(
     lock_inputs: crate::target::lock::GoLockInputs,
     mut cursor: ResMut<WorldCursor>,
 ) {
-    let Some(spell_id) = targeting.spell() else {
+    let Some((spell_id, commit, _)) = targeting.pending() else {
         return;
     };
-    let range = range_call(&checks, spell_id);
-    let me = self_tf.single().ok().map(|tf| tf.translation);
+    // The record's caster (`0xceac50`); one not streamed fails both range legs (`0x6e6852`).
+    let caster = checks.caster(commit).map(|(e, _)| e);
+    let range = caster.and_then(|e| range_call(&checks, spell_id, e));
+    let me = caster
+        .and_then(|e| go_tf.get(e).ok())
+        .map(|tf| tf.translation);
     // The arm the click would take ([`super::world::commit_object_cast_on_click`]): a GameObject
     // word's nearest GameObject, else the picked unit or corpse, else the terrain.
     let able = if targeting.wants(TargetingWants::GameObject)
@@ -242,6 +252,7 @@ fn object_arm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::SelfPlayer;
 
     /// The call for a spell and row under these tables, with the default combat reach and no
     /// auto-attack target.
@@ -671,6 +682,89 @@ mod tests {
         assert!(verdict(MELEE_GROUND, false, 3.0, None, 7.0));
         assert!(verdict(MELEE_GROUND, false, 1.5, Some(4.0), 6.5));
         assert!(!verdict(MELEE_GROUND, false, 1.5, Some(4.0), 7.0));
+    }
+
+    /// `CheckGroundPointInRange` measures from the record's caster (`0xceac50`, resolved at
+    /// `0x6e6849`) and asks `GetMinMaxRange` for that caster (`0x6e68b0`, `ecx` the caster): a pet's
+    /// ground spell is in range around the pet, not around us, and its melee row reads the pet's
+    /// reach.
+    #[test]
+    fn the_terrain_verdict_measures_from_the_records_caster() {
+        use super::super::corpse_fixture as fx;
+        use bevy::ecs::system::RunSystemOnce;
+        use std::collections::HashMap;
+
+        const NEAR_GROUND: u32 = 100;
+        const MELEE_GROUND: u32 = 12684;
+        const PET: u64 = 0xF140_0000_0000_0009;
+        // The pet's place and reach, and the point; we stand at the origin with reach 1.5.
+        let verdict = |spell: u32, pet_at: f32, pet_reach: f32, d: f32| -> bool {
+            let mut world = World::new();
+            world.init_resource::<WorldCursor>();
+            world.init_resource::<SpellTargeting>();
+            world.init_resource::<crate::target::Hovered>();
+            world.init_resource::<crate::target::HoveredObject>();
+            world.init_resource::<crate::go_templates::GameObjectTemplates>();
+            world.init_resource::<crate::items::Items>();
+            world.init_resource::<SpellModifiers>();
+            world.insert_resource(crate::net::Reputations::default());
+            world.insert_resource(PickOcclusion {
+                distance: 10.0,
+                point: Some(Vec3::new(d, 0.0, 0.0)),
+                ray: None,
+            });
+            let display = |range_index| SpellDisplay {
+                range_index,
+                targets: 0x40,
+                ..SpellDisplay::default()
+            };
+            let mut spells = Spells::empty_for_tests();
+            spells.catalog = benilla_formats::SpellCatalog::from_displays(HashMap::from([
+                (NEAR_GROUND, display(4)),
+                (MELEE_GROUND, display(2)),
+            ]));
+            spells.ranges = benilla_formats::SpellRangeCatalog::from_rows(HashMap::from([
+                (
+                    4,
+                    SpellRange {
+                        min: 0.0,
+                        max: 10.0,
+                        flags: 0,
+                    },
+                ),
+                (
+                    2,
+                    SpellRange {
+                        min: 0.0,
+                        max: 5.0,
+                        flags: 1,
+                    },
+                ),
+            ]));
+            world.insert_resource(spells);
+            world.spawn((SelfPlayer, Transform::default(), fx::caster(1.5)));
+            let pet = world
+                .spawn((Transform::from_xyz(pet_at, 0.0, 0.0), fx::caster(pet_reach)))
+                .id();
+            world.insert_resource(crate::net::GuidIndex(HashMap::from([(PET, pet)])));
+            world.resource_mut::<SpellTargeting>().enter(
+                spell,
+                crate::spell::CastCommit::Pet { caster: PET },
+                0x0040,
+            );
+            world
+                .run_system_once(drive_targeting_cursor)
+                .expect("the targeting cursor drives");
+            !world.resource::<WorldCursor>().unable
+        };
+
+        // A 10 yd spell from a pet 40 yd out: 5 yd from the pet passes, 5 yd from us does not.
+        assert!(verdict(NEAR_GROUND, 40.0, 1.5, 35.0), "beside the pet");
+        assert!(!verdict(NEAR_GROUND, 40.0, 1.5, 5.0), "beside us");
+        // The melee row from a pet at our spot: its reach twice, 3.0 + 3.0 + 1.3333, reaches 7 yd,
+        // where ours, 1.5 + 1.5 + 1.3333 under the 5.0 floor, does not.
+        assert!(verdict(MELEE_GROUND, 0.0, 3.0, 7.0), "the pet's reach");
+        assert!(!verdict(MELEE_GROUND, 0.0, 1.5, 7.0));
     }
 
     /// `0x6e6460`'s GameObject leg asks the same range through the same call: a chest a lock spell

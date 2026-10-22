@@ -573,6 +573,7 @@ pub(super) fn resolve_spell_fx(
                             &mut instances,
                             *spell_id,
                             *class,
+                            true,
                             &fx,
                             now,
                             &mut commands,
@@ -604,12 +605,16 @@ pub(super) fn resolve_spell_fx(
                     }
                 }
                 SpellKitFx::Reap {
-                    spell_id, class, ..
+                    spell_id,
+                    class,
+                    force,
+                    ..
                 } => {
                     reap_matching(
                         &mut instances,
                         *spell_id,
                         *class,
+                        *force,
                         &fx,
                         now,
                         &mut commands,
@@ -669,10 +674,14 @@ fn replace_same_slot(
 
 /// The spell-id reap (`0x614150`): each persistent instance of `(spell_id, class)` plays `Decay`
 /// out, or goes at once without a model, a ready model or a `Decay` (`0x614187`–`0x6141a1`).
+/// Unforced it takes only a looping kit's, kinds 3 and 4 ([`FxStage::Relive`]): kind 2's state
+/// carries flag 0x1000 (`0x60eecd`), taken only when forced (`0x614179`), and kinds 0 and 1 carry
+/// 0x20 (`0x60eeb5`), never taken (`0x614181`).
 fn reap_matching(
     instances: &mut Vec<FxInstance>,
     spell_id: u32,
     class: FxClass,
+    force: bool,
     fx: &SpellFx,
     now: f32,
     commands: &mut Commands,
@@ -680,6 +689,9 @@ fn reap_matching(
 ) {
     instances.retain_mut(|i| {
         if i.decaying || !i.persistent || i.spell_id != spell_id || i.class != class {
+            return true;
+        }
+        if !force && i.stage != FxStage::Relive {
             return true;
         }
         let span = i
@@ -1172,6 +1184,48 @@ mod tests {
             slots_of(&app, unit),
             vec![(SPURT, FRONT), (SPURT + 1, FRONT)]
         );
+    }
+
+    /// `0x614150(spell, force)` never takes flag 0x20, kinds 0 and 1 (`0x614181`), and takes flag
+    /// 0x1000, kind 2's state (`0x60eecd`), only when forced (`0x614179`): a cast edge's reap ends
+    /// the spell's precast loop (kind 4, `0x60ee7e`) and spares its channel kit, which the channel's
+    /// own forced stop takes (`0x60d22b`).
+    #[test]
+    fn an_unforced_reap_spares_the_spells_state_effects() {
+        let (mut app, unit) = resolving();
+        let (looping, state) = (
+            app.world_mut().spawn_empty().id(),
+            app.world_mut().spawn_empty().id(),
+        );
+        let hold = |root, stage| FxInstance {
+            class: FxClass::Hold,
+            stage,
+            ..instance(root, true)
+        };
+        app.world_mut().entity_mut(unit).insert(FxAttached {
+            instances: vec![hold(looping, FxStage::Relive), hold(state, FxStage::State)],
+        });
+        let reap = |force| SpellKitFx::Reap {
+            entity: unit,
+            spell_id: 13033,
+            class: FxClass::Hold,
+            force,
+        };
+        let roots = |app: &App| {
+            app.world()
+                .entity(unit)
+                .get::<FxAttached>()
+                .unwrap()
+                .instances
+                .iter()
+                .map(|i| i.root)
+                .collect::<Vec<_>>()
+        };
+        send(&mut app, reap(false));
+        assert_eq!(roots(&app), [Some(state)], "the loop ends, the state stays");
+        assert!(app.world().get_entity(looping).is_err());
+        send(&mut app, reap(true));
+        assert!(roots(&app).is_empty(), "forced, the state goes too");
     }
 
     /// The walk skips tag -1 (`0x620913`): a second Thunder Clap ring does not eat the first.

@@ -34,10 +34,27 @@ fn load_unit_frames_with(s: &UiScript, extra: &[&str]) {
         "Interface\\FrameXML\\PetFrame.xml",
         // `FACTION_BAR_COLORS` (`ReputationFrame.lua:3`) for stock `GameTooltip_UnitColor`.
         r"Interface\FrameXML\ReputationFrame.lua",
+        // `GetDifficultyColor` (`QuestLogFrame.lua:585`), which `TargetFrame_CheckLevel` asks for
+        // an attackable target (`TargetFrame.lua:130`).
+        r"Interface\FrameXML\QuestLogFrame.lua",
+        // `StaticPopup_Hide`, which UIParent's `PLAYER_UNGHOST` arm calls (`UIParent.lua:251-257`)
+        // at a live arrival.
+        r"Interface\FrameXML\StaticPopup.xml",
     ];
     for file in super::test_ui::production_order(&[UNIT_FRAMES, extra]) {
         load_xml(s, file);
     }
+}
+
+/// The relation functions over us, a human player of guid 1, and `units`, as the relations feed
+/// pushes them for the six relation verbs.
+fn relate(s: &mut UiScript, units: &[crate::target::RelUnit]) {
+    use crate::target::relations::fixture::{factions, player, Scene, HUMAN};
+    let mut scene = Scene::new(player(1, HUMAN), Some(factions()));
+    for &u in units {
+        scene.hold(u);
+    }
+    s.set_unit_relations(Some(scene.relations()));
 }
 
 /// The stock unit frames driven by snapshots: bar fill, the target's hide and show, a late name.
@@ -65,6 +82,7 @@ fn shipped_unit_frames_drive_end_to_end() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             name: None,
             health: 72,
             max_health: 100,
@@ -90,7 +108,7 @@ fn shipped_unit_frames_drive_end_to_end() {
             local r, g, b = pb:GetStatusBarColor()
             return hb:GetValue() == 72 and hmax == 100
                and pb:GetValue() == 45 and pmax == 80 and pb:IsVisible()
-               and b == 1 and r == 0 -- mana blue
+               and math.abs(b - 1) < 1/255 and r == 0 -- mana blue
         "#,
         )
         .unwrap();
@@ -108,6 +126,7 @@ fn shipped_unit_frames_drive_end_to_end() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             name: Some("Benilla".into()),
             health: 72,
             max_health: 100,
@@ -129,10 +148,13 @@ fn shipped_unit_frames_drive_end_to_end() {
 
     // A powerless target's bar runs empty, not hidden: only a bar with a `TextString` hides when
     // trackless (`TextStatusBar.lua:55-56`), and `TargetFrame.xml:486-487` names undeclared ones.
+    // A wolf of no template: neutral to us.
+    relate(&mut s, &[crate::target::relations::fixture::creature(2, 0)]);
     s.set_unit(
         "target",
         Some(UnitState {
             exists: true,
+            guid: 2,
             name: Some("Young Wolf".into()),
             health: 30,
             max_health: 50,
@@ -191,8 +213,9 @@ fn shipped_unit_frames_drive_end_to_end() {
         "neutral name plate is yellow, got {plate:?}"
     );
 
-    // The health fill is 30/50 of the 119px bar (`TargetFrame.xml:253-255`).
-    s.resolve();
+    // The health fill is 30/50 of the 119px bar (`TargetFrame.xml:253-255`), written by the bar's
+    // update in the tick's walk (`0x7833c0`).
+    s.tick(0.0);
     let quads = s.extract();
     let bar_rect = quads
         .iter()
@@ -216,10 +239,16 @@ fn shipped_unit_frames_drive_end_to_end() {
         "deselect plays the lost-target kit"
     );
 
+    // A kobold of the orc template: hostile to us.
+    {
+        use crate::target::relations::fixture::{creature, ORC};
+        relate(&mut s, &[creature(3, ORC)]);
+    }
     s.set_unit(
         "target",
         Some(UnitState {
             exists: true,
+            guid: 3,
             name: Some("Kobold Vermin".into()),
             health: 40,
             max_health: 40,
@@ -294,10 +323,12 @@ fn unit_combat_drives_the_player_hit_indicator() {
         )
         .unwrap();
     assert!(ok, "physical wound paints the amount ({:?})", s.errors());
+    // `NumberFontNormalHuge` is already 30 (`Fonts.xml:174`), so `SetTextHeight(30)` changes
+    // nothing (`0x77161c`) and the string stays one-to-one, drawn at its font's 30.
     assert_eq!(
         extracted_text_height(&mut s, "17"),
-        Some(30.0),
-        "base height 30 (the SetTextHeight regime)"
+        None,
+        "base height 30 is the font's own, one-to-one"
     );
 
     s.fire_event("UNIT_COMBAT", ev("player", "WOUND", "CRITICAL", 64, 4));
@@ -355,6 +386,7 @@ fn unit_combat_drives_the_player_hit_indicator() {
 fn left_clicking_the_player_frame_targets_self() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
 
@@ -403,10 +435,9 @@ fn left_clicking_the_player_frame_targets_self() {
             name: "Alice".into(),
             guid: 0xA11CE,
         }],
-        leader_index: 0, // we lead
-        // The player's own guid, unset; 0 is also the ungrouped sentinel, but there is a member.
-        leader_guid: 0,
-        own_guid: 0,
+        leader_index: 0, // we lead: the leader cell holds our guid
+        leader_guid: 0x5E1F,
+        own_guid: 0x5E1F,
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
@@ -435,6 +466,11 @@ fn left_clicking_the_player_frame_targets_self() {
         "Loot Method is nested for the leader"
     );
     s.resolve();
+    // `LeaveParty` sends only with the player's object (`0x4e9196`).
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 0x5E1F,
+        ..Default::default()
+    });
     let (rx, ry) = s
         .eval::<(f64, f64)>("return DropDownList1Button4:GetCenter()")
         .unwrap();
@@ -459,6 +495,7 @@ fn left_clicking_the_player_frame_targets_self() {
 fn raid_mark_clicks_through_the_nested_level() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
 
@@ -478,13 +515,15 @@ fn raid_mark_clicks_through_the_nested_level() {
             guid: 0xA11CE,
         }],
         leader_index: 0, // we lead: the mark rows are leader-gated
-        leader_guid: 0,  // the player's own guid; this fixture leaves it unset
-        own_guid: 0,
+        leader_guid: 0x5E1F,
+        own_guid: 0x5E1F,
         raid: Vec::new(),
         loot_method: "group".into(),
         master_looter: None,
         loot_threshold: 2,
     });
+    // The resolver's inputs, which `SetRaidTarget` reads the token through (`0x4bbeff`).
+    s.seat_player_guid(0x5E1F);
     s.resolve();
 
     let (cx, cy) = s
@@ -533,7 +572,7 @@ fn raid_mark_clicks_through_the_nested_level() {
     assert_eq!(
         s.take_party_requests(),
         vec![benilla_ui::script::PartyRequest::SetRaidTarget {
-            unit: "player".into(),
+            guid: 0x5E1F,
             index: 8
         }],
         "Skull queues the mark intent for the menu's unit"
@@ -593,6 +632,7 @@ fn shipped_target_frame_runs_the_level_law() {
         "player",
         Some(UnitState {
             exists: true,
+            guid: 1,
             level: 3,
             is_player: true,
             player_controlled: true,
@@ -601,17 +641,25 @@ fn shipped_target_frame_runs_the_level_law() {
             ..UnitState::default()
         }),
     );
+    // We are a player and both targets creatures with no template: neutral, so attackable.
+    {
+        use crate::target::relations::fixture::{creature, player, Scene};
+        let mut scene = Scene::new(player(1, 1), None);
+        scene.hold(creature(2, 0));
+        scene.hold(creature(3, 0));
+        s.set_unit_relations(Some(scene.relations()));
+    }
 
     s.set_unit(
         "target",
         Some(UnitState {
             exists: true,
+            guid: 2,
             name: Some("Elder Mottled Boar".into()),
             health: 40,
             max_health: 40,
             level: 8,
             reaction: 4,
-            can_attack: true,
             ..UnitState::default()
         }),
     );
@@ -634,12 +682,12 @@ fn shipped_target_frame_runs_the_level_law() {
         "target",
         Some(UnitState {
             exists: true,
+            guid: 3,
             name: Some("Guard".into()),
             health: 400,
             max_health: 400,
             level: 13,
             reaction: 2,
-            can_attack: true,
             ..UnitState::default()
         }),
     );
@@ -875,7 +923,6 @@ fn flagged_friendly_player_plate_is_green() {
         is_player: true,
         player_controlled: true,
         reaction: 5,
-        can_attack: false,
         faction_group: Some("Alliance".into()),
         pvp,
         ..UnitState::default()
@@ -904,31 +951,36 @@ fn flagged_friendly_player_plate_is_green() {
 /// finds the last of `UnitReactionColor`'s seven entries (`TargetFrame.lua:6-14`, `:183`).
 #[test]
 fn an_exalted_npc_target_reads_revered_and_its_plate_is_green() {
-    use crate::net::ObjectStore;
-    use crate::target::{stormwind_fixture, HUMAN_WARRIOR};
-    use benilla_protocol::field::FIELD_UNIT_FACTIONTEMPLATE;
-    use benilla_protocol::ObjectFields;
+    use crate::target::relations::fixture::{creature, human_warrior, Scene};
+    use crate::target::stormwind_fixture;
 
-    /// `UNIT_FIELD_BYTES_0`, absolute descriptor index.
-    const BYTES_0: u16 = 36;
     let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
-    let me = ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, HUMAN_WARRIOR)]));
+    let me = human_warrior(1);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            guid: 1,
+            ..UnitState::default()
+        }),
+    );
 
     for total in [21_000, 42_000] {
         let (factions, template, reps) = stormwind_fixture(&mut chain, total);
-        let guard = ObjectStore(ObjectFields::from_pairs(&[(
-            FIELD_UNIT_FACTIONTEMPLATE,
-            template,
-        )]));
-        let reaction = crate::ui_unit::unit_reaction(Some(&factions), &reps, &guard, Some(&me));
+        let mut scene = Scene::new(me, Some(factions));
+        scene.reputations = reps;
+        let guard = scene.hold(creature(2, template));
+        s.set_unit_relations(Some(scene.relations()));
+        let reaction = crate::ui_unit::unit_reaction(&scene.rel(), &guard, Some(&me));
         s.set_unit(
             "target",
             Some(UnitState {
                 exists: true,
+                guid: 2,
                 name: Some("Stormwind Guard".into()),
                 health: 100,
                 max_health: 100,
@@ -958,14 +1010,15 @@ fn an_exalted_npc_target_reads_revered_and_its_plate_is_green() {
     }
 }
 
-/// A target whose faction template the server changes live recolours its plate: template 35
-/// (friendly) to 14 (hostile) names no side either way, so only the template's own watch fires
-/// `UNIT_FACTION` (bridge id 29). Pushing the new reaction alone, or another unit's watch, leaves
+/// A target whose faction template the server changes live recolours its plate: from a friendly
+/// template to a hostile one names no side either way, so only the template's own watch fires
+/// `UNIT_FACTION` (bridge id 29). The new relations pushed alone, or another unit's watch, leave
 /// the plate as it was.
 #[test]
 fn a_live_faction_template_change_recolours_the_target_plate() {
     benilla_formats::wow_data_or_skip!();
     use crate::field_watch::FieldNotice;
+    use crate::target::relations::fixture::{creature, factions, player, Scene, HUMAN, ORC};
     use crate::ui_unit::field_events::fire_unit_notice;
 
     const ME: u64 = 0x77;
@@ -978,6 +1031,20 @@ fn a_live_faction_template_change_recolours_the_target_plate() {
         target: MOB,
         ..Default::default()
     });
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            guid: ME,
+            ..UnitState::default()
+        }),
+    );
+    // We are a human; the mob's template is the human one, then the orc one.
+    let relations = |s: &mut UiScript, template| {
+        let mut scene = Scene::new(player(ME, HUMAN), Some(factions()));
+        scene.hold(creature(MOB, template));
+        s.set_unit_relations(Some(scene.relations()));
+    };
     let mob = |reaction: u8| UnitState {
         exists: true,
         has_object: true,
@@ -987,17 +1054,21 @@ fn a_live_faction_template_change_recolours_the_target_plate() {
         max_health: 100,
         level: 58,
         reaction,
-        can_attack: reaction < 4,
         ..UnitState::default()
     };
     let is_green = |c: [f32; 4]| c[0].abs() < 1e-6 && (c[1] - 1.0).abs() < 1e-6;
     let is_red = |c: [f32; 4]| (c[0] - 1.0).abs() < 1e-6 && c[1].abs() < 1e-6;
 
+    relations(&mut s, HUMAN);
     s.set_unit("target", Some(mob(5)));
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     let before = plate_color(&mut s);
-    assert!(is_green(before), "template 35 reads green, got {before:?}");
+    assert!(
+        is_green(before),
+        "a friendly template reads green, got {before:?}"
+    );
 
+    relations(&mut s, ORC);
     s.set_unit("target", Some(mob(2)));
     let stale = plate_color(&mut s);
     assert!(is_green(stale), "a push alone, no repaint, got {stale:?}");
@@ -1012,7 +1083,7 @@ fn a_live_faction_template_change_recolours_the_target_plate() {
     assert!(is_green(other), "another unit's watch, got {other:?}");
     fire_unit_notice(&mut s, FieldNotice::Unit { guid: MOB, id: 29 });
     let after = plate_color(&mut s);
-    assert!(is_red(after), "template 14 reads red, got {after:?}");
+    assert!(is_red(after), "a hostile template reads red, got {after:?}");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1023,7 +1094,6 @@ fn a_live_faction_template_change_recolours_the_target_plate() {
 /// pushed for the stock poll.
 #[test]
 fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event() {
-    use crate::field_watch::FieldNotice;
     use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
     use crate::target::Selection;
     use benilla_protocol::field::{FIELD_UNIT_HEALTH, FIELD_UNIT_MAXHEALTH};
@@ -1160,11 +1230,14 @@ fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event
             WOLF,
             ObjectType::Unit,
             &store.0,
-            &edges,
+            &crate::field_watch::Notified::new(
+                crate::field_watch::Sent::Fields(&[FIELD_UNIT_HEALTH]),
+                &edges,
+            ),
         )
     };
     app.world_mut()
-        .resource_mut::<Messages<FieldNotice>>()
+        .resource_mut::<crate::field_watch::NoticeLane>()
         .write_batch(notices);
     app.update();
     assert_eq!(seen(&mut app), ["UNIT_HEALTH:target"]);
@@ -1188,11 +1261,14 @@ fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event
             BOAR,
             ObjectType::Unit,
             &store.0,
-            &edges,
+            &crate::field_watch::Notified::new(
+                crate::field_watch::Sent::Fields(&[FIELD_UNIT_HEALTH]),
+                &edges,
+            ),
         )
     };
     app.world_mut()
-        .resource_mut::<Messages<FieldNotice>>()
+        .resource_mut::<crate::field_watch::NoticeLane>()
         .write_batch(notices);
     app.update();
     assert!(seen(&mut app).is_empty(), "no targettarget unit event");
@@ -1269,18 +1345,29 @@ fn a_forced_reaction_table_arriving_recolours_the_target_plate() {
         .add_message::<FieldChanged>()
         .insert_non_send_resource(s);
     crate::ui_unit::add_unit_feed(&mut app);
+    // A human warrior player: the guard's standing leg needs the player's type, flag `0x8` and
+    // template (`0x606576`-`0x6065b6`).
     app.world_mut().spawn((
         SelfPlayer,
         Guid(ME),
-        ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, HUMAN_WARRIOR)])),
+        ObjectStore(ObjectFields::from_pairs(&[
+            (2, 0x19), // OBJECT_FIELD_TYPE
+            (FIELD_UNIT_FACTIONTEMPLATE, 1),
+            (benilla_protocol::field::FIELD_UNIT_FLAGS, 0x8),
+            (BYTES_0, HUMAN_WARRIOR),
+        ])),
     ));
     let guard = app
         .world_mut()
-        .spawn(ObjectStore(ObjectFields::from_pairs(&[
-            (FIELD_UNIT_FACTIONTEMPLATE, template),
-            (FIELD_UNIT_HEALTH, 100),
-            (FIELD_UNIT_MAXHEALTH, 100),
-        ])))
+        .spawn((
+            Guid(GUARD),
+            ObjectStore(ObjectFields::from_pairs(&[
+                (2, 0x09), // OBJECT_FIELD_TYPE
+                (FIELD_UNIT_FACTIONTEMPLATE, template),
+                (FIELD_UNIT_HEALTH, 100),
+                (FIELD_UNIT_MAXHEALTH, 100),
+            ])),
+        ))
         .id();
     {
         let mut selection = app.world_mut().resource_mut::<Selection>();
@@ -1404,7 +1491,6 @@ fn target_frame_border_follows_the_classification_law() {
         max_health: 400,
         level: 26,
         reaction: 2,
-        can_attack: true,
         rank,
         ..UnitState::default()
     };
@@ -2235,9 +2321,9 @@ fn the_player_frame_wears_the_leader_and_master_looter_icons() {
             guid: 0x7A17,
         }],
         leader_index,
-        // Follows `leader_index`: 0 = the player (unset here), else the member who leads.
-        leader_guid: if leader_index == 0 { 0 } else { 0x7A17 },
-        own_guid: 0,
+        // Follows `leader_index`: 0 = the player, else the member who leads.
+        leader_guid: if leader_index == 0 { 0x5E1F } else { 0x7A17 },
+        own_guid: 0x5E1F,
         raid: Vec::new(),
         loot_method: method.into(),
         master_looter,

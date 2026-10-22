@@ -51,8 +51,18 @@ impl Plugin for FpsJournalPlugin {
     fn build(&self, app: &mut App) {
         // Bevy's per-pass render diagnostics, the source of the GPU columns and of Tracy's GPU
         // zones, registered in every build.
-        app.add_plugins(RenderDiagnosticsPlugin)
-            .init_resource::<FpsJournalSetting>()
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(RenderDiagnosticsPlugin);
+        // wenilla: in the browser only when the journal is armed from the URL — the per-pass
+        // spans and their readback cost ~5 % of a login-screen frame there.
+        #[cfg(target_arch = "wasm32")]
+        if ["WOW_FPS_JOURNAL", "fpsJournal"]
+            .iter()
+            .any(|k| crate::webenv::var(k).is_some_and(|v| !v.is_empty() && v != "0"))
+        {
+            app.add_plugins(RenderDiagnosticsPlugin);
+        }
+        app.init_resource::<FpsJournalSetting>()
             .add_observer(on_cvar)
             .insert_resource(FpsJournal {
                 #[cfg(not(target_arch = "wasm32"))]

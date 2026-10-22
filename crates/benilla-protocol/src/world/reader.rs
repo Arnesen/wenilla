@@ -2,9 +2,9 @@ use anyhow::{anyhow, Result};
 use benilla_srp::vanilla_header::DecrypterHalf;
 
 use crate::messages::{self, ServerPacket};
-use crate::transport::{ConnReader, ReadExactAsync};
+use crate::transport::ConnReader;
 
-use super::recv_packet;
+use super::{read_frame_async, recv_packet};
 
 /// The read half of a split [`WorldSession`](super::WorldSession): the connection's read half and
 /// decrypter, and what the connection learned before the split, for
@@ -15,6 +15,7 @@ pub struct WorldReader {
     pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
     pub(super) link: super::session::LinkFacts,
+    pub(super) traffic: std::sync::Arc<super::LinkTraffic>,
 }
 
 impl WorldReader {
@@ -26,7 +27,7 @@ impl WorldReader {
 
     /// Read + decrypt one server packet.
     pub async fn recv_async(&mut self) -> Result<ServerPacket> {
-        recv_packet(&mut self.reader, Some(&mut self.decrypter)).await
+        recv_packet(&mut self.reader, Some(&mut self.decrypter), &self.traffic).await
     }
 
     /// Read one packet and decode it into a [`crate::Poll`] (blocking) — the native twin of
@@ -44,18 +45,10 @@ impl WorldReader {
     /// `recv_packet` reads the whole body into a buffer before parsing, so a parse error leaves the
     /// stream aligned — we skip that packet rather than tear down the session.
     pub async fn poll_async(&mut self) -> Result<crate::Poll> {
-        let mut header = [0u8; 4];
-        if let Err(e) = self.reader.read_exact_async(&mut header).await {
-            return Err(anyhow!("world stream closed: {e}"));
-        }
-        self.decrypter.decrypt(&mut header);
-        let size = u16::from_be_bytes([header[0], header[1]]);
-        let opcode = u16::from_le_bytes([header[2], header[3]]);
-        let body_len = size.saturating_sub(2) as usize;
-        let mut body = vec![0u8; body_len];
-        if let Err(e) = self.reader.read_exact_async(&mut body).await {
-            return Err(anyhow!("world stream closed: {e}"));
-        }
+        let (opcode, body) =
+            read_frame_async(&mut self.reader, Some(&mut self.decrypter), &self.traffic)
+                .await
+                .map_err(|e| anyhow!("world stream closed: {e}"))?;
         match messages::parse_server_with_tail(opcode, &body) {
             Ok((packet, tail)) => Ok(crate::Poll::Events {
                 opcode,
@@ -66,8 +59,9 @@ impl WorldReader {
             Err(e) => Ok(crate::Poll::Skipped {
                 opcode,
                 reason: format!(
-                    "opcode {opcode:#06x} ({}): {e} [{body_len}B: {}]",
+                    "opcode {opcode:#06x} ({}): {e} [{}B: {}]",
                     messages::opcode_name(opcode).unwrap_or("?"),
+                    body.len(),
                     hex_preview(&body, 64)
                 ),
                 body,

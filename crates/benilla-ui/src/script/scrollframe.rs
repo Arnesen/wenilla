@@ -8,8 +8,10 @@
 
 use mlua::{Lua, Table, Value};
 
+use super::binding_abi;
 use super::object::{decode_id, frame_handle_of, frame_wrapper};
 use super::{event, Model};
+use crate::layout::SIZE_EPS;
 use crate::widget::{FrameHandle, KindState, ScrollFrameState};
 
 /// Registry key of the ScrollFrame method table.
@@ -34,83 +36,83 @@ fn with_scroll<T>(
     }
 }
 
-/// The axis of an offset or a range. `0x786e30` computes both ranges in one pass over one subtree
-/// union: `[+0x31c] = max(0, maxRIGHT − minLEFT − width) / scale`, and `[+0x320]` the same with
-/// top, bottom and height.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Axis {
-    Horizontal,
-    Vertical,
-}
-
-/// One range as the recompute `0x786e30` measures it: `max(0, content − frame)` from the resolved
-/// rects. The content is the scroll child's whole subtree, not its own rect
-/// (`0x786e30` calls the recursive `0x786f80`): stock `ItemTextPageScrollChild` is 10×10 around a
-/// 270×304 SimpleHTML (`ItemTextFrame.xml:198`). Each extent is divided by its frame's effective
-/// scale, since the offset is in local units; a range in screen px under-scrolls a scaled frame.
-fn scroll_range(model: &Model, h: FrameHandle, axis: Axis) -> f32 {
+/// Both ranges as the recompute `0x786e30` measures them in one pass, `[horizontal, vertical]`.
+/// The content box is the scroll child's whole subtree, not its own rect (`0x786e30` calls the
+/// recursive `0x786f80`): stock `ItemTextPageScrollChild` is 10×10 around a 270×304 SimpleHTML
+/// (`ItemTextFrame.xml:198`). Its left and bottom start at `f32::MAX` and its right and top at 0
+/// (`0x786e5d`, `0x786e64`). Each range is the box's extent less the frame's (`0x786e84`), raised to 0
+/// when not above it, NaN included (`0x786e8f`), times the reciprocal of the scroll frame's own
+/// effective scale (`+0x7c`): at full precision for the horizontal (`0x786e9f`-`0x786eaa`), rounded
+/// to f32 for the vertical (`0x786ea5`, `0x786ece`). The child's own scale is never read. All of it
+/// is in layout units, the rects' own, as the ranges are stored.
+fn scroll_ranges(model: &Model, h: FrameHandle) -> [f32; 2] {
     let child = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Scroll(s)) => s.child,
         _ => None,
     };
-    let Some(child) = child else { return 0.0 };
-    let scale_of = |f: FrameHandle| {
-        model
-            .arena
-            .frame(f)
-            .map(|x| x.effective_scale)
-            .filter(|s| s.abs() >= 1e-6)
-            .unwrap_or(1.0)
+    let (Some(child), Some(frame), Some(&rect)) =
+        (child, model.arena.frame(h), model.frame_rects.get(&h))
+    else {
+        return [0.0, 0.0];
     };
-    let Some(viewport) = model.resolved.get(&h).map(|r| {
-        let extent = match axis {
-            Axis::Horizontal => r.width(),
-            Axis::Vertical => r.height(),
-        };
-        extent / scale_of(h)
-    }) else {
-        return 0.0;
+    let mut content = SpanBox {
+        left: f32::MAX,
+        bottom: f32::MAX,
+        right: 0.0,
+        top: 0.0,
     };
-    let Some((far, near)) = subtree_span(model, child, axis) else {
-        return 0.0;
-    };
-    ((far - near) / scale_of(child) - viewport).max(0.0)
+    join_subtree(model, child, &mut content);
+    let floor = |x: f64| if x > 0.0 { x } else { 0.0 };
+    let inv = 1.0 / f64::from(frame.effective_scale);
+    let x =
+        floor(f64::from(content.right) - f64::from(content.left) - f64::from(rect.width())) * inv;
+    let y = floor(f64::from(content.top) - f64::from(content.bottom) - f64::from(rect.height()))
+        * f64::from(inv as f32);
+    [x as f32, y as f32]
 }
 
-/// The span of `f`'s subtree along `axis` in screen px, as `(far, near)`: its own rect unioned with
-/// its shown regions and visible child frames, recursively (`0x786f80`). Hidden parts add no range:
-/// the client guards both lists on visibility.
-fn subtree_span(model: &Model, f: FrameHandle, axis: Axis) -> Option<(f32, f32)> {
-    let edges = |r: &crate::layout::Rect| match axis {
-        Axis::Horizontal => (r.right, r.left),
-        Axis::Vertical => (r.top, r.bottom),
+/// The content box `0x786f80` grows, in the layout's units.
+struct SpanBox {
+    left: f32,
+    bottom: f32,
+    right: f32,
+    top: f32,
+}
+
+impl SpanBox {
+    /// Grow to cover `r`; a NaN edge leaves the box's (the unordered compares keep it).
+    fn join(&mut self, r: &crate::layout::Rect) {
+        self.left = self.left.min(r.left);
+        self.bottom = self.bottom.min(r.bottom);
+        self.right = self.right.max(r.right);
+        self.top = self.top.max(r.top);
+    }
+}
+
+/// `0x786f80`: join `f`'s own resolved rect, shown or not (`0x786fb0`), each shown region's
+/// (`0x78703b`), and recursively each child frame whose own shown bit is set (`+0xd0`,
+/// `0x7870e0`), so a shown descendant of a hidden scroll child still counts. A part with no
+/// resolved rect adds nothing.
+fn join_subtree(model: &Model, f: FrameHandle, content: &mut SpanBox) {
+    let Some(frame) = model.arena.frame(f) else {
+        return;
     };
-    let frame = model.arena.frame(f)?;
-    let mut span: Option<(f32, f32)> = model.resolved.get(&f).map(edges);
-    let union = |s: &mut Option<(f32, f32)>, far: f32, near: f32| {
-        *s = Some(match *s {
-            Some((of, on)) => (of.max(far), on.min(near)),
-            None => (far, near),
-        });
-    };
+    if let Some(r) = model.frame_rects.get(&f) {
+        content.join(r);
+    }
     for &rh in &frame.regions {
         if model.region_data.get(&rh).is_some_and(|d| d.hidden) {
             continue;
         }
-        if let Some(r) = model.region_resolved.get(&rh) {
-            let (far, near) = edges(r);
-            union(&mut span, far, near);
+        if let Some(r) = model.region_rects.get(&rh) {
+            content.join(r);
         }
     }
     for &ch in &frame.children {
-        if !model.arena.frame(ch).is_some_and(|c| c.effective_visible) {
-            continue;
-        }
-        if let Some((far, near)) = subtree_span(model, ch, axis) {
-            union(&mut span, far, near);
+        if model.arena.frame(ch).is_some_and(|c| c.shown) {
+            join_subtree(model, ch, content);
         }
     }
-    span
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -172,16 +174,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetVerticalScroll(px) (`0x786db0`): stores the offset unclamped (`[+0x328]`), re-anchors the
-    // child (`0x787100`) and fires `OnVerticalScroll(self, offset)`, all only on a change; the
-    // reference skips a change under 2⁻²² from the old offset, where this compares bits. The range
-    // is never read here: every clamp is FrameXML's, through the scroll bar's min and max.
+    // SetVerticalScroll(px) (`0x791400`): `lua_isnumber` (`0x791490`) else
+    // `Usage: %s:SetVerticalScroll(offset)` (`0x87b59c`) naming the frame. Then `0x786db0` stores
+    // the offset unclamped (`[+0x328]`), re-anchors the child (`0x787100`) and fires
+    // `OnVerticalScroll(self, offset)`, all only on a change: one under 2⁻²² layout units between
+    // the offsets as stored (`S`, `0x7914a8`; `0x786dc2`) is dropped whole, and a NaN, unordered,
+    // always stores and fires (`0x786dcd`). The range is never read here: every clamp
+    // is FrameXML's, through the scroll bar's min and max.
     m.set(
         "SetVerticalScroll",
-        lua.create_function(|lua, (this, px): (Table, f32)| {
+        lua.create_function(|lua, (this, px): (Table, Value)| {
+            with_scroll(lua, &this, |_| ())?;
+            let Some(px) = lua.coerce_number(px)? else {
+                return Err(binding_abi::usage(lua, &this, "SetVerticalScroll(offset)"));
+            };
+            let px = px as f32;
+            let units = script_units(lua);
             let changed = with_scroll(lua, &this, |s| {
-                let changed = s.vertical.to_bits() != px.to_bits();
-                s.vertical = px;
+                let changed = moved(units.store(s.vertical), units.store(px), SIZE_EPS);
+                if changed {
+                    s.vertical = px;
+                }
                 changed
             })?;
             if !changed {
@@ -189,46 +202,78 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // The re-anchor at the new offset (`0x786dd8` → `0x787100`).
             reanchor_child(lua, &this)?;
-            fire_scroll(lua, &this, "OnVerticalScroll", px)
+            fire_scroll(lua, &this, "OnVerticalScroll", units.load(units.store(px)))
         })?,
     )?;
     m.set(
         "GetVerticalScroll",
-        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.vertical))?,
+        lua.create_function(|lua, this: Table| {
+            let v = with_scroll(lua, &this, |s| s.vertical)?;
+            let units = script_units(lua);
+            Ok(units.load(units.store(v)))
+        })?,
     )?;
-    // The stored range (`0x7917d0` reads `[+0x320]` at `0x791873`), stale while the frame is
-    // hidden or its range unmarked.
+    // The stored range (`0x7917d0` reads `[+0x320]` at `0x791873`) through the getter steps,
+    // stale while the frame is hidden or its range unmarked.
     m.set(
         "GetVerticalScrollRange",
-        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.range[1]))?,
+        lua.create_function(|lua, this: Table| {
+            let range = with_scroll(lua, &this, |s| s.range[1])?;
+            Ok(script_units(lua).load(range))
+        })?,
     )?;
 
     // ── The horizontal axis ──
-    // SetHorizontalScroll(px) (`0x7912f0` → `0x786d30`) is the vertical setter's byte-clone on
-    // `[+0x324]`, firing `OnHorizontalScroll`. The sign is the reference's: `0x787100` anchors the
-    // child at `(+hScroll, +vScroll)`, so a positive x moves it right, where a positive y lifts it.
+    // SetHorizontalScroll(px) (`0x7912f0` → `0x786d30`, `Usage: %s:SetHorizontalScroll(offset)`
+    // `0x87b574`) is the vertical setter's byte-clone on `[+0x324]`, firing `OnHorizontalScroll`.
+    // The sign is the reference's: `0x787100` anchors the child at `(+hScroll, +vScroll)`, so a
+    // positive x moves it right, where a positive y lifts it.
     m.set(
         "SetHorizontalScroll",
-        lua.create_function(|lua, (this, px): (Table, f32)| {
+        lua.create_function(|lua, (this, px): (Table, Value)| {
+            with_scroll(lua, &this, |_| ())?;
+            let Some(px) = lua.coerce_number(px)? else {
+                return Err(binding_abi::usage(
+                    lua,
+                    &this,
+                    "SetHorizontalScroll(offset)",
+                ));
+            };
+            let px = px as f32;
+            let units = script_units(lua);
             let changed = with_scroll(lua, &this, |s| {
-                let changed = s.horizontal.to_bits() != px.to_bits();
-                s.horizontal = px;
+                let changed = moved(units.store(s.horizontal), units.store(px), SIZE_EPS);
+                if changed {
+                    s.horizontal = px;
+                }
                 changed
             })?;
             if !changed {
                 return Ok(());
             }
             reanchor_child(lua, &this)?;
-            fire_scroll(lua, &this, "OnHorizontalScroll", px)
+            fire_scroll(
+                lua,
+                &this,
+                "OnHorizontalScroll",
+                units.load(units.store(px)),
+            )
         })?,
     )?;
     m.set(
         "GetHorizontalScroll",
-        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.horizontal))?,
+        lua.create_function(|lua, this: Table| {
+            let v = with_scroll(lua, &this, |s| s.horizontal)?;
+            let units = script_units(lua);
+            Ok(units.load(units.store(v)))
+        })?,
     )?;
     m.set(
         "GetHorizontalScrollRange",
-        lua.create_function(|lua, this: Table| with_scroll(lua, &this, |s| s.range[0]))?,
+        lua.create_function(|lua, this: Table| {
+            let range = with_scroll(lua, &this, |s| s.range[0])?;
+            Ok(script_units(lua).load(range))
+        })?,
     )?;
     // UpdateScrollChildRect() (`0x7918b0`) marks the range and does nothing else (`0x791943`):
     // the frame's next update while shown recomputes it.
@@ -241,17 +286,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// The screen-scale cells the range getters convert through (`0x7916f0`, `0x7917d0`).
+fn script_units(lua: &Lua) -> crate::layout::LayoutUnits {
+    lua.app_data_ref::<Model>()
+        .expect("model app_data")
+        .layout_units()
+}
+
+/// Whether `new` is a change from `old` by the reference's `fabs; fcomp [0x8029d4]; test ah,5`
+/// (`0x786dc2`, `0x786ede`): at least `eps` apart, or unordered, so a NaN is always a change.
+fn moved(old: f32, new: f32, eps: f64) -> bool {
+    let d = (f64::from(new) - f64::from(old)).abs();
+    d >= eps || d.is_nan()
+}
+
 /// Fire `On{Vertical,Horizontal}Scroll(self, offset)`, the reference's script slots `[+0x334]` and
-/// `[+0x32c]`, outside any model borrow.
-fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f32) -> mlua::Result<()> {
+/// `[+0x32c]`, outside any model borrow. The offset is the stored one through the getter steps,
+/// `G([+0x328])` pushed as a double under `"%f"` (`0x786ded`–`0x786e10`, `0x835160`).
+fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f64) -> mlua::Result<()> {
     let id = {
         let h = frame_handle_of(lua, this)?;
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         model.frame_id(h)
     };
-    if let Err(e) =
-        event::fire_widget_handler(lua, id, script, vec![Value::Number(f64::from(value))])
-    {
+    if let Err(e) = event::fire_widget_handler(lua, id, script, vec![Value::Number(value)]) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
             .record_lua_error(&e);
@@ -264,9 +322,8 @@ fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f32) -> mlua::Resul
 /// marked range is recomputed (`0x787152`–`0x7871a0`, `0x786e30`) unless the frame has no rect
 /// (`0x787186`) or no scroll child (`0x786e42`), and the mark is cleared either way, after the
 /// notify (`0x7871a5`). The recompute stores both ranges (`0x786eaa`, `0x786ed1`) and fires
-/// `OnScrollRangeChanged(self, xRange, yRange)` when either moved by 2⁻²² (`[0x8029d4]`) or more
-/// in the reference's units (the screen diagonal as 1) (`0x786ed7`–`0x786efd`), which is that times the
-/// layout unit in ours.
+/// `OnScrollRangeChanged(self, xRange, yRange)` when either moved by 2⁻²² (`[0x8029d4]`) layout
+/// units or more (`0x786ed7`–`0x786efd`), each range through the getter steps.
 ///
 /// The rects it reads are the ones the pump's drain before the walk (`0x7656ba`) resolved: the
 /// recompute reads them through `0x768320`, which never resolves, so a resize made earlier in the
@@ -274,8 +331,9 @@ fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f32) -> mlua::Resul
 pub(super) fn update(lua: &Lua, h: FrameHandle) {
     let notify = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let rect = model.resolved.get(&h).copied();
-        let eps = model.size_eps();
+        let rect = model.frame_rects.get(&h).copied();
+        let eps = SIZE_EPS;
+        let units = model.layout_units();
         let Some(s) = scroll_state(&mut model, h) else {
             return;
         };
@@ -284,23 +342,19 @@ pub(super) fn update(lua: &Lua, h: FrameHandle) {
             return;
         }
         let has_child = s.child.is_some();
-        let measured = (rect.is_some() && has_child).then(|| {
-            [
-                scroll_range(&model, h, Axis::Horizontal),
-                scroll_range(&model, h, Axis::Vertical),
-            ]
-        });
+        let measured = (rect.is_some() && has_child).then(|| scroll_ranges(&model, h));
         let Some(s) = scroll_state(&mut model, h) else {
             return;
         };
         let moved = measured.filter(|new| {
             let old = std::mem::replace(&mut s.range, *new);
-            (0..2).any(|i| (f64::from(new[i]) - f64::from(old[i])).abs() >= eps)
+            // Unless both moved under 2^-22 (`0x786ede`, `0x786ef2`): a NaN fires.
+            (0..2).any(|i| moved(old[i], new[i], eps))
         });
         if moved.is_none() {
             s.range_dirty = false;
         }
-        moved.map(|range| (model.frame_id(h), range))
+        moved.map(|range| (model.frame_id(h), range.map(|r| units.load(r))))
     };
     let Some((id, [x_range, y_range])) = notify else {
         return;
@@ -311,10 +365,7 @@ pub(super) fn update(lua: &Lua, h: FrameHandle) {
         lua,
         id,
         "OnScrollRangeChanged",
-        vec![
-            Value::Number(f64::from(x_range)),
-            Value::Number(f64::from(y_range)),
-        ],
+        vec![Value::Number(x_range), Value::Number(y_range)],
     ) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
@@ -334,9 +385,9 @@ fn scroll_state(model: &mut Model, h: FrameHandle) -> Option<&mut ScrollFrameSta
     }
 }
 
-/// Note the frame's resolved size; a change since the last note marks the range, by the width or
-/// height move that fires `OnSizeChanged` ([`crate::layout::size_changed`] at `eps`,
-/// [`Model::size_eps`]). No rect, no note.
+/// Note the frame's resolved size in layout units; a change since the last note marks the range, by
+/// the width or height move that fires `OnSizeChanged` ([`crate::layout::size_changed`] at `eps`,
+/// [`crate::layout::SIZE_EPS`]). No rect, no note.
 fn see_size(s: &mut ScrollFrameState, rect: Option<crate::layout::Rect>, eps: f64) {
     let Some(r) = rect else { return };
     let size = [r.width(), r.height()];

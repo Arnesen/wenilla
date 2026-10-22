@@ -6,8 +6,8 @@
 //! (`0x4f4186`/`0x4f42e8`). The getters answer at any time, nil where nothing has landed.
 
 use benilla_ui::script::{
-    PetitionRecordView, PetitionRequest, PetitionState as VmPetition, UiScript,
-    PETITION_TYPE_CHARTER, PETITION_TYPE_PETITION,
+    PetitionRecordView, PetitionRequest, PetitionState as VmPetition, PETITION_TYPE_CHARTER,
+    PETITION_TYPE_PETITION,
 };
 use bevy::prelude::*;
 
@@ -47,7 +47,7 @@ pub(super) fn free_petition_signers_on_leave_world(mut petition: ResMut<Petition
 
 /// Build the snapshot, push it, drain the queued lines, and fire the four events on their edges.
 pub(super) fn feed_petition(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     registrar: Res<GuildRegistrarState>,
     mut petition: ResMut<PetitionState>,
     names: Res<NameCache>,
@@ -60,242 +60,252 @@ pub(super) fn feed_petition(
     mut fed_registrar: crate::ui_script::WindowMemo<Option<u64>>,
     mut closes: CoreCloses,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let fed_registrar = fed_registrar.get(&script);
-    if closes.since_last(&script, NpcWindow::Registrar) {
-        *fed_registrar = None;
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let fed_registrar = fed_registrar.get(script);
+        if closes.since_last(script, NpcWindow::Registrar) {
+            *fed_registrar = None;
+        }
 
-    // Shown before the snapshot, so a refusal lands the same frame as its state change; a key the
-    // VM's `GlobalStrings.lua` lacks shows nothing, as in the reference.
-    let composed = std::mem::take(&mut petition.lines);
-    let resolved: Vec<crate::ui_action::Shown> = composed
-        .iter()
-        .filter_map(|e| {
-            crate::ui_action::ui_error_text(e, &|key| {
-                script.lua().globals().get::<String>(key).ok()
+        // Shown before the snapshot, so a refusal lands the same frame as its state change; a key
+        // the VM's `GlobalStrings.lua` lacks shows nothing, as in the reference.
+        let composed = std::mem::take(&mut petition.lines);
+        let resolved: Vec<crate::ui_action::Shown> = composed
+            .iter()
+            .filter_map(|e| {
+                crate::ui_action::ui_error_text(e, &|key| {
+                    script.lua().globals().get::<String>(key).ok()
+                })
+                .map(|text| crate::ui_action::Shown::keyed(e.key, text))
             })
-            .map(|text| crate::ui_action::Shown::keyed(e.key, text))
-        })
-        .collect();
-    crate::ui_action::show_messages(&mut script, &mut sink, "ui_petition", resolved);
+            .collect();
+        crate::ui_action::show_messages(script, &mut sink, "ui_petition", resolved);
 
-    // Rebuilt every frame: reading the caches issues their queries, so a landing sets no flag and
-    // only a rebuild sees it.
-    let open = petition.open.clone();
-    let me = self_guid.0.unwrap_or(0);
-    // The getters only read (`0x4f45a1`, `0x4f4459`); the show looked the signers up.
-    let ask = Ask::at(std::mem::take(&mut petition.shown), &commands);
+        // Rebuilt every frame: reading the caches issues their queries, so a landing sets no flag
+        // and only a rebuild sees it.
+        let open = petition.open.clone();
+        let me = self_guid.0.unwrap_or(0);
+        // The getters only read (`0x4f45a1`, `0x4f4459`); the show looked the signers up.
+        let ask = Ask::at(std::mem::take(&mut petition.shown), &commands);
 
-    let signers: Vec<Option<String>> = open
-        .as_ref()
-        .map(|o| {
-            o.signers
-                .iter()
-                .map(|s| names.resolve_player(*s, ask).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+        let signers: Vec<Option<String>> = open
+            .as_ref()
+            .map(|o| {
+                o.signers
+                    .iter()
+                    .map(|s| names.resolve_player(*s, ask).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    let record = open.as_ref().and_then(|o| {
-        let r = petition.records.get(o.petition_id)?;
-        Some(PetitionRecordView {
-            petition_type: if r.is_charter {
-                PETITION_TYPE_CHARTER
-            } else {
-                PETITION_TYPE_PETITION
+        let record = open.as_ref().and_then(|o| {
+            let r = petition.records.get(o.petition_id)?;
+            Some(PetitionRecordView {
+                petition_type: if r.is_charter {
+                    PETITION_TYPE_CHARTER
+                } else {
+                    PETITION_TYPE_PETITION
+                }
+                .to_string(),
+                title: r.name.clone(),
+                body_text: r.body_text.clone(),
+                max_signatures: r.required,
+                // Nil until the name lands, and not waited for: only read (`0x4f4459`).
+                originator: names.resolve_player(o.owner, Ask::Read).map(str::to_string),
+                // The record's owner, which the binding compares (`0x4f447a`), not the packet's.
+                is_originator: r.owner == me,
+            })
+        });
+
+        // `CanSignPetition` (`0x4f45e0`). With no record the reference runs only the signer scan,
+        // over the real signers: the close path zeroes the array, then `0x4f40b0` refills it
+        // (`0x5eef29`).
+        let in_guild = self_q
+            .iter()
+            .next()
+            .is_some_and(|s| s.0.player_guild_id() != 0);
+        let can_sign = match (open.as_ref(), record.as_ref()) {
+            (Some(o), Some(r)) => {
+                // The guild-member and full-list refusals apply only to a charter.
+                let charter_refusal = r.petition_type == PETITION_TYPE_CHARTER
+                    && (in_guild || o.signers.len() as i32 >= r.max_signatures);
+                !charter_refusal && !r.is_originator && !o.signers.contains(&me)
             }
-            .to_string(),
-            title: r.name.clone(),
-            body_text: r.body_text.clone(),
-            max_signatures: r.required,
-            // Nil until the name lands, and not waited for: only read (`0x4f4459`).
-            originator: names.resolve_player(o.owner, Ask::Read).map(str::to_string),
-            // The record's owner, which the binding compares (`0x4f447a`), not the packet's.
-            is_originator: r.owner == me,
-        })
-    });
+            // No record: only the signer scan runs.
+            (Some(o), None) => !o.signers.contains(&me),
+            (None, _) => true,
+        };
 
-    // `CanSignPetition` (`0x4f45e0`). With no record the reference runs only the signer scan, over
-    // the real signers: the close path zeroes the array, then `0x4f40b0` refills it (`0x5eef29`).
-    let in_guild = self_q
-        .iter()
-        .next()
-        .is_some_and(|s| s.0.player_guild_id() != 0);
-    let can_sign = match (open.as_ref(), record.as_ref()) {
-        (Some(o), Some(r)) => {
-            // The guild-member and full-list refusals apply only to a charter.
-            let charter_refusal = r.petition_type == PETITION_TYPE_CHARTER
-                && (in_guild || o.signers.len() as i32 >= r.max_signatures);
-            !charter_refusal && !r.is_originator && !o.signers.contains(&me)
+        script.set_petition(VmPetition {
+            charter_cost: registrar.cost(),
+            signers: signers.clone(),
+            record: record.clone(),
+            can_sign,
+        });
+
+        // ── The registrar's open; its close is the core's ([`super::close_core`]), and a
+        //    disconnect's clear tells the VM nothing.
+        let now_registrar = registrar.npc();
+        if now_registrar.is_some() && *fed_registrar != now_registrar {
+            script.fire_event("GUILD_REGISTRAR_SHOW", vec![]);
         }
-        // No record: only the signer scan runs.
-        (Some(o), None) => !o.signers.contains(&me),
-        (None, _) => true,
-    };
+        *fed_registrar = now_registrar;
 
-    script.set_petition(VmPetition {
-        charter_cost: registrar.cost(),
-        signers: signers.clone(),
-        record: record.clone(),
-        can_sign,
-    });
-
-    // ── The registrar's open; its close is the core's ([`super::close_core`]), and a disconnect's
-    //    clear tells the VM nothing.
-    let now_registrar = registrar.npc();
-    if now_registrar.is_some() && *fed_registrar != now_registrar {
-        script.fire_event("GUILD_REGISTRAR_SHOW", vec![]);
-    }
-    *fed_registrar = now_registrar;
-
-    // ── The petition window's edges, once the record and every signer name have landed.
-    let ready = record.is_some() && signers.iter().all(Option::is_some);
-    let now_charter = open.as_ref().map(|o| o.item).filter(|_| ready);
-    let fed = &mut petition.fed;
-    match (fed.shown_charter, now_charter) {
-        (Some(a), Some(b)) if a != b => {
-            // Another charter while one is shown: drop the queued close intent, or the drain would
-            // close the new charter and send a `MSG_PETITION_DECLINE` for it.
-            script.fire_event("PETITION_CLOSED", vec![]);
-            script.fire_event("PETITION_SHOW", vec![]);
-            let _ = script.drop_petition_close_intents();
+        // ── The petition window's edges, once the record and every signer name have landed.
+        let ready = record.is_some() && signers.iter().all(Option::is_some);
+        let now_charter = open.as_ref().map(|o| o.item).filter(|_| ready);
+        let fed = &mut petition.fed;
+        match (fed.shown_charter, now_charter) {
+            (Some(a), Some(b)) if a != b => {
+                // Another charter while one is shown: drop the queued close intent, or the drain
+                // would close the new charter and send a `MSG_PETITION_DECLINE` for it.
+                script.fire_event("PETITION_CLOSED", vec![]);
+                script.fire_event("PETITION_SHOW", vec![]);
+                let _ = script.drop_petition_close_intents();
+            }
+            // The wait's end: the record landed or the last name resolved; fires once.
+            (None, Some(_)) => script.fire_event("PETITION_SHOW", vec![]),
+            (Some(_), None) => script.fire_event("PETITION_CLOSED", vec![]),
+            // A rename echo, or a name resolving after the window was already up.
+            (Some(_), Some(_)) if fed.shown != record || fed.shown_signers != signers => {
+                script.fire_event("PETITION_SHOW", vec![])
+            }
+            _ => {}
         }
-        // The wait's end: the record landed or the last name resolved; fires once.
-        (None, Some(_)) => script.fire_event("PETITION_SHOW", vec![]),
-        (Some(_), None) => script.fire_event("PETITION_CLOSED", vec![]),
-        // A rename echo, or a name resolving after the window was already up.
-        (Some(_), Some(_)) if fed.shown != record || fed.shown_signers != signers => {
-            script.fire_event("PETITION_SHOW", vec![])
-        }
-        _ => {}
-    }
-    fed.shown_charter = now_charter;
-    fed.shown = record;
-    fed.shown_signers = signers;
+        fed.shown_charter = now_charter;
+        fed.shown = record;
+        fed.shown_signers = signers;
+    })
 }
 
 /// Turn the Lua charter intents into sends. `ClosePetition` can send `MSG_PETITION_DECLINE`
 /// (`0x4f3f60`, `decline_on_close`); `CloseGuildRegistrar` sends nothing.
 pub(super) fn drain_petition(
-    script: Option<NonSendMut<UiScript>>,
+    // What the host also reaches, read before the VM runs with the host lent.
+    mut hosted: ParamSet<(Res<crate::target::Selection>, crate::script_calls::HostedVm)>,
     registrar: Res<GuildRegistrarState>,
     mut petition: ResMut<PetitionState>,
     names: Res<NameCache>,
     objects: Objects,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
-    selection: Res<crate::target::Selection>,
     commands: Res<NetCommands>,
     tabard: Res<crate::ui_tabard::TabardOpen>,
-    mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    errors: Res<crate::ui_action::UiErrorKeys>,
     mut world_commands: Commands,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let requests = script.take_petition_requests();
-    if requests.is_empty() {
-        return;
-    }
-    let me = self_guid.0.unwrap_or(0);
-    for request in requests {
-        match request {
-            PetitionRequest::Buy(name) => {
-                // The petition module's latch (`[0xbdceb0]`), not the target or `CGGameUI`'s NPC.
-                let Some(npc) = registrar.npc() else {
-                    debug!("ui_petition: BuyGuildCharter with no registrar open — dropped");
-                    continue;
-                };
-                let _ = commands.0.send(ClientCommand::PetitionBuy { npc, name });
-            }
-            PetitionRequest::TurnIn => {
-                // A fresh bag scan per call (`0x5ef2b0`); the charter's `max_count` is 1.
-                let charter = self_q.iter().next().and_then(|store| {
-                    find_item(
-                        &store.0,
-                        &objects,
-                        benilla_protocol::messages::CHARTER_ITEM_ENTRY,
-                        ItemSearch::default(),
-                    )
-                });
-                match charter {
-                    Some((_, _, item)) => {
-                        let _ = commands.0.send(ClientCommand::TurnInPetition { item });
+    let p = hosted.p0();
+    let selection = *p;
+    hosted.p1().run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let requests = script.take_petition_requests();
+        if requests.is_empty() {
+            return;
+        }
+        let me = self_guid.0.unwrap_or(0);
+        for request in requests {
+            match request {
+                PetitionRequest::Buy(name) => {
+                    // The petition module's latch (`[0xbdceb0]`), not the target or `CGGameUI`'s
+                    // NPC.
+                    let Some(npc) = registrar.npc() else {
+                        debug!("ui_petition: BuyGuildCharter with no registrar open — dropped");
+                        continue;
+                    };
+                    let _ = commands.0.send(ClientCommand::PetitionBuy { npc, name });
+                }
+                PetitionRequest::TurnIn => {
+                    // A fresh bag scan per call (`0x5ef2b0`); the charter's `max_count` is 1.
+                    let charter = self_q.iter().next().and_then(|store| {
+                        find_item(
+                            &store.0,
+                            &objects,
+                            benilla_protocol::messages::CHARTER_ITEM_ENTRY,
+                            ItemSearch::default(),
+                        )
+                    });
+                    match charter {
+                        Some((_, _, item)) => {
+                            let _ = commands.0.send(ClientCommand::TurnInPetition { item });
+                        }
+                        // No charter, no packet: a red line (`0x5ef49a`).
+                        None => petition.lines.push(lines::no_charter_line()),
                     }
-                    // No charter, no packet: a red line (`0x5ef49a`).
-                    None => petition.lines.push(lines::no_charter_line()),
                 }
-            }
-            // Sends nothing; the core runs.
-            PetitionRequest::CloseRegistrar => {
-                crate::ui_session::queue(&mut world_commands, super::close_core);
-            }
-            PetitionRequest::TabardInfo => {
-                let npc = registrar.npc().unwrap_or(0);
-                if let Some(store) = self_q.iter().next() {
-                    tabard_vendor_activate(
-                        npc,
-                        tabard.npc().unwrap_or(0),
-                        store,
-                        &commands,
-                        &mut errors,
-                    );
+                // Sends nothing; the core runs.
+                PetitionRequest::CloseRegistrar => {
+                    crate::ui_session::queue(&mut world_commands, super::close_core);
                 }
-                crate::ui_session::queue(&mut world_commands, super::close_core);
-            }
-            PetitionRequest::ClosePetition => {
-                petition.decline_on_close(me, &commands);
-                petition.close();
-            }
-            PetitionRequest::Sign(byte) => {
-                let Some(item) = petition.open_item() else {
-                    continue;
-                };
-                let _ = commands.0.send(ClientCommand::PetitionSign { item, byte });
-                // The in-flight latch: a close while our signature is outstanding is no decline.
-                petition.signing = true;
-            }
-            PetitionRequest::Offer => {
-                let Some(item) = petition.open_item() else {
-                    continue; // guard 1, silent
-                };
-                // `OfferPetition()` offers to the current target; with none it is silent (guard 2).
-                let Some(player) = selection.guid else {
-                    debug!("ui_petition: OfferPetition with no target — dropped");
-                    continue;
-                };
-                if player == me {
-                    // Guard 6; guards 3-5, 7 and 8 are not built, and the server refuses those.
-                    petition.lines.push(lines::self_offer_line());
-                    continue;
+                PetitionRequest::TabardInfo => {
+                    let npc = registrar.npc().unwrap_or(0);
+                    if let Some(store) = self_q.iter().next() {
+                        tabard_vendor_activate(
+                            npc,
+                            tabard.npc().unwrap_or(0),
+                            store,
+                            &commands,
+                            &errors,
+                        );
+                    }
+                    crate::ui_session::queue(&mut world_commands, super::close_core);
                 }
-                let _ = commands
-                    .0
-                    .send(ClientCommand::OfferPetition { item, player });
-                // Printed on the send, unconfirmed: the server answers only the target.
-                let name = names
-                    .resolve_player(player, Ask::Event(&commands))
-                    .unwrap_or_default()
-                    .to_string();
-                petition.lines.push(lines::offered_line(&name));
-            }
-            PetitionRequest::Rename(name) => {
-                let Some(item) = petition.open_item() else {
-                    continue;
-                };
-                let _ = commands
-                    .0
-                    .send(ClientCommand::PetitionRename { item, name });
-            }
-            // The client's own name validator refused it; no packet is built.
-            PetitionRequest::NameRefused(key) => {
-                petition.lines.push(lines::name_refused_line(key));
+                PetitionRequest::ClosePetition => {
+                    petition.decline_on_close(me, &commands);
+                    petition.close();
+                }
+                PetitionRequest::Sign(byte) => {
+                    let Some(item) = petition.open_item() else {
+                        continue;
+                    };
+                    let _ = commands.0.send(ClientCommand::PetitionSign { item, byte });
+                    // The in-flight latch: a close while our signature is outstanding is no
+                    // decline.
+                    petition.signing = true;
+                }
+                PetitionRequest::Offer => {
+                    let Some(item) = petition.open_item() else {
+                        continue; // guard 1, silent
+                    };
+                    // `OfferPetition()` offers to the current target; with none it is silent (guard
+                    // 2).
+                    let Some(player) = selection.guid else {
+                        debug!("ui_petition: OfferPetition with no target — dropped");
+                        continue;
+                    };
+                    if player == me {
+                        // Guard 6; guards 3-5, 7 and 8 are not built, and the server refuses those.
+                        petition.lines.push(lines::self_offer_line());
+                        continue;
+                    }
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::OfferPetition { item, player });
+                    // Printed on the send, unconfirmed: the server answers only the target.
+                    let name = names
+                        .resolve_player(player, Ask::Event(&commands))
+                        .unwrap_or_default()
+                        .to_string();
+                    petition.lines.push(lines::offered_line(&name));
+                }
+                PetitionRequest::Rename(name) => {
+                    let Some(item) = petition.open_item() else {
+                        continue;
+                    };
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::PetitionRename { item, name });
+                }
+                // The client's own name validator refused it; no packet is built.
+                PetitionRequest::NameRefused(key) => {
+                    petition.lines.push(lines::name_refused_line(key));
+                }
             }
         }
-    }
+    })
 }
 
 /// `0x5e00e0`, the designer's opener, for `GetTabardInfo` with the registrar's guid `npc`
@@ -307,13 +317,13 @@ fn tabard_vendor_activate(
     designer: u64,
     player: &ObjectStore,
     commands: &NetCommands,
-    errors: &mut crate::ui_action::UiErrorKeys,
+    errors: &crate::ui_action::UiErrorKeys,
 ) {
     if designer == npc {
         return;
     }
     if player.0.unit_displayid() != player.0.unit_native_displayid() {
-        errors.0.push(crate::ui_action::UiError::key(
+        errors.push(crate::ui_action::UiError::key(
             "ERR_EMBLEMERROR_NOTABARDGEOSET",
         ));
         return;
@@ -334,11 +344,11 @@ mod tests {
 
     fn run(npc: u64, designer: u64, me: &ObjectStore) -> (Vec<ClientCommand>, Vec<&'static str>) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let mut errors = UiErrorKeys::default();
-        tabard_vendor_activate(npc, designer, me, &NetCommands(tx), &mut errors);
+        let errors = UiErrorKeys::default();
+        tabard_vendor_activate(npc, designer, me, &NetCommands(tx), &errors);
         (
             rx.try_iter().collect(),
-            errors.0.iter().map(|e| e.key).collect(),
+            errors.snapshot().iter().map(|e| e.key).collect(),
         )
     }
 

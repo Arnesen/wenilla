@@ -23,10 +23,13 @@ use benilla_world::interact::WorldClick;
 
 use super::TargetingWants;
 
-/// The terrain leg (`0x492580`): bind the press's ground point and send, with no range check and
-/// no error path, then arm the pending cast and GCD and end the mode. No ground hit (sky) commits
-/// nothing and keeps the mode. [`crate::target::click::select_on_click`] holds off while targeting,
-/// so the click neither selects nor deselects.
+/// The terrain leg (`0x492c90` → `0x492580`), a left click the press found no object under: bind
+/// the press's ground point and send, with no range check and no error path, then arm the pending
+/// cast and GCD and end the mode. A word without a location bit binds nothing and the mode stays:
+/// `BindLocation 0x6e60f0` signals (`0x6e615d`, ahead of its bound test) and returns 0, and the
+/// click falls to `OnWorldClick 0x5e0320`, which deselects; both are
+/// [`crate::target::click::select_on_click`]'s, which runs first. No ground hit (sky) is the
+/// nothing leg (`0x492d30`), which never calls it.
 ///
 /// Runs after `select_on_click`, which reads the mode this clears.
 pub(crate) fn commit_ground_cast_on_click(
@@ -44,18 +47,29 @@ pub(crate) fn commit_ground_cast_on_click(
     if clicks.read().last().is_none() {
         return;
     }
-    // `TargetingWantsLocation 0x6e6320`: a word without it binds nothing and the mode stays.
-    let Some((spell_id, commit)) = ladder.ground.pending_for(TargetingWants::Location) else {
-        return;
-    };
     let Some(point) = occlusion.point else {
         // Sky: the nothing leg, no commit, the mode stays.
         return;
     };
+    // An object the press picked takes the object leg instead (`0x481fb8`,
+    // [`commit_object_cast_on_click`]); the word's pick flags decide what it can pick.
+    let hovered = &press.hovered;
+    if hovered.target.is_some()
+        || hovered.corpse.is_some()
+        || hovered.refused
+        || (ladder.ground.wants(TargetingWants::GameObject)
+            && go_is_nearest(hovered, &press.object))
+    {
+        return;
+    }
     let at = bevy_to_wow(point);
-    // `BindLocation 0x6e60f0`: SOURCE (`0x20`) first, then DEST (`0x40`). `None` cannot happen
-    // behind `pending_for(Location)`; the `let else` fails closed.
-    let Some(bound) = ladder.ground.location_bind(at) else {
+    // `BindLocation 0x6e60f0`: SOURCE (`0x20`) first, then DEST (`0x40`), from a word in
+    // `TargetingWantsLocation 0x6e6320`.
+    let (Some((spell_id, commit)), Some(bound)) = (
+        ladder.ground.pending_for(TargetingWants::Location),
+        ladder.ground.location_bind(at),
+    ) else {
+        debug!("ui_action: a terrain click binds nothing the word wants — the cursor stays");
         return;
     };
     debug!(
@@ -148,9 +162,12 @@ mod tests {
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();
         world.init_resource::<crate::spell::SpellModifiers>();
-        world.init_resource::<crate::ui_action::CastErrors>();
+        world.init_resource::<crate::ui_cast::CastReports>();
         world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<crate::creature_anim::AttackStopInFlight>();
+        world.init_resource::<crate::creature_anim::UnitEdits>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<super::super::SpellTargeting>();
         world.init_resource::<crate::spell::HeldForPick>();
@@ -255,6 +272,58 @@ mod tests {
             rx.try_recv(),
             Ok(ClientCommand::CastSpellAtSource { .. })
         ));
+    }
+
+    /// A unit word's terrain click binds nothing here: it sends nothing and keeps the cursor, and
+    /// its `BindLocation` signal (`0x6e615d`) and the deselect it falls to are the select's
+    /// ([`crate::target::click::select_on_click`]), so the commit adds no pair; a sky click (the
+    /// nothing leg) and a click on a unit the press picked (the object leg) never reach it.
+    #[test]
+    fn a_terrain_click_that_binds_nothing_leaves_the_rest_to_the_select() {
+        const HEAL: u32 = 2050;
+        let commit = crate::spell::cast_send::CastCommit::Spell;
+        let changes = |world: &mut World| {
+            let reports = world.resource_mut::<crate::ui_cast::CastReports>().take();
+            reports
+                .iter()
+                .filter(|r| matches!(r, crate::ui_cast::CastReport::Changed))
+                .count()
+        };
+        for (label, point, unit) in [
+            ("terrain", Some(Vec3::new(1.0, 2.0, 3.0)), false),
+            ("sky", None, false),
+            ("a unit", Some(Vec3::new(1.0, 2.0, 3.0)), true),
+        ] {
+            let (mut world, rx, _) = fixture();
+            let id = world.register_system(commit_ground_cast_on_click);
+            world
+                .resource_mut::<super::super::SpellTargeting>()
+                .enter(HEAL, commit, 0x0002);
+            let mut press = world.resource_mut::<crate::target::PressPick>();
+            press.occlusion = crate::target::PickOcclusion {
+                distance: 5.0,
+                point,
+                ray: None,
+            };
+            if unit {
+                press.hovered = Hovered {
+                    target: Some(Entity::from_raw_u32(2).unwrap()),
+                    guid: Some(0xF130_0000_0000_0001),
+                    distance: 5.0,
+                    ..Hovered::default()
+                };
+            }
+            world
+                .resource_mut::<Messages<WorldClick>>()
+                .write(WorldClick);
+            world.run_system(id).expect("the ground commit runs");
+            assert_eq!(changes(&mut world), 0, "{label}");
+            assert!(rx.try_recv().is_err(), "{label}: nothing sent");
+            assert!(
+                world.resource::<super::super::SpellTargeting>().active(),
+                "{label}: the cursor stays"
+            );
+        }
     }
 
     /// A lock word, a chest under the cursor, one click: the cast at the chest, the mode ended.
@@ -407,7 +476,9 @@ mod tests {
         click(&mut world, id);
         assert!(rx.try_recv().is_err(), "out of range sends nothing");
         assert_eq!(
-            std::mem::take(&mut world.resource_mut::<crate::ui_action::CastErrors>().0),
+            world
+                .resource_mut::<crate::ui_cast::CastReports>()
+                .take_refusals(),
             vec![crate::ui_action::CastFail::local(HEAL, 0x59)],
             "\"Out of range.\""
         );
@@ -428,8 +499,8 @@ mod tests {
             })
         ));
         assert!(world
-            .resource::<crate::ui_action::CastErrors>()
-            .0
+            .resource::<crate::ui_cast::CastReports>()
+            .refusals()
             .is_empty());
         assert!(!world.resource::<super::super::SpellTargeting>().active());
     }
@@ -476,8 +547,9 @@ mod tests {
             );
             click(&mut world, id);
             let sent = rx.try_recv().ok();
-            let errors =
-                std::mem::take(&mut world.resource_mut::<crate::ui_action::CastErrors>().0);
+            let errors = world
+                .resource_mut::<crate::ui_cast::CastReports>()
+                .take_refusals();
             let armed = world.resource::<super::super::SpellTargeting>().active();
             (sent, errors, armed)
         };
@@ -531,6 +603,7 @@ mod tests {
             bag_index: 255,
             slot: 24,
             entry: 7148,
+            guid: None,
             spell_index: 0,
             on_object: None,
         };

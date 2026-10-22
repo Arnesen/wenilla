@@ -175,8 +175,8 @@ fn addon_key(lua: &Lua, model: &Model, key: &Value, usage: &'static str) -> mlua
 /// Rebuild the Lua index array as `AddOn_ReadAddonInfoReply` (`0x51da70`) does in its tail,
 /// `[0x51dc30, 0x51dcdf)`, the array's only builder: hidden records dropped (`0x51dc4f`), the
 /// rest sorted case-insensitively by `## Title`, else folder name (`0x51deb0` through
-/// `AddOn_GetTitle 0x51df20`, `SStrCmpI`). Empty until the server replies. The reference's
-/// `qsort` (`0x73f727`) is unstable, which a stable sort refines.
+/// `AddOn_GetTitle 0x51df20`, `SStrCmpI`), by the CRT `qsort` (`0x73f727`) from the list's order.
+/// Titles that match without case sit where `qsort` leaves them. Empty until the server replies.
 fn rebuild_index(model: &mut Model) {
     let Some(reply) = model.addon_reply.take() else {
         model.addon_index = Vec::new(); // no reply yet, as in the reference
@@ -187,9 +187,12 @@ fn rebuild_index(model: &mut Model) {
     let mut index: Vec<usize> = (0..model.addons.len())
         .filter(|&i| !model.addons[i].hidden)
         .collect();
-    index.sort_by_key(|&i| {
+    let title = |i: usize| {
         let a = &model.addons[i];
-        a.title.as_deref().unwrap_or(&a.name).to_ascii_lowercase()
+        a.title.as_deref().unwrap_or(&a.name)
+    };
+    crate::crt::qsort(&mut index, |&a, &b| {
+        crate::crt::str_cmp_i(title(a), title(b))
     });
     model.addon_index = index;
 }
@@ -737,24 +740,24 @@ fn load_bindings(lua: &Lua, name: &str, read: &Reader) {
 
 /// Run the addon's saved-variables files, account then per-character (`0x51f4b5`, `0x51f53b`),
 /// as chunks in the shared globals with no `setfenv` (`0x704bc0`, `0x704ae0`), between its files
-/// and `ADDON_LOADED` so saved values win; a missing file is skipped (`0x51f4a9`, `0x51f530`).
+/// and `ADDON_LOADED` so saved values win. A file runs whenever it exists (`0x51f4a2`), whatever
+/// the toc declares, which gates only the write; a missing file is skipped (`0x51f4a9`, `0x51f530`).
 fn load_saved_variables(lua: &Lua, i: usize) {
-    let (name, account, character, has_account, has_character) = {
+    let (name, account, character) = {
         let model = lua.app_data_ref::<Model>().expect("model");
-        let a = &model.addons[i];
         (
-            a.name.clone(),
+            model.addons[i].name.clone(),
             model.addons_saved_account.clone(),
             model.addons_saved_character.clone(),
-            !a.saved_variables.is_empty(),
-            !a.saved_variables_per_character.is_empty(),
         )
     };
-    for (dir, declared) in [(account, has_account), (character, has_character)] {
-        if !declared {
-            continue; // declares none: no file is read, even if one exists
+    let hold = |path: std::path::PathBuf| {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        if !model.held_saved_files.contains(&path) {
+            model.held_saved_files.push(path);
         }
-        let Some(dir) = dir else { continue };
+    };
+    for dir in [account, character].into_iter().flatten() {
         let path = dir.join(format!("{name}.lua"));
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -763,28 +766,30 @@ fn load_saved_variables(lua: &Lua, i: usize) {
                 // Present but unreadable is held, like a file that will not run.
                 let msg = format!("{}: {e}", path.display());
                 log_error(lua, &msg, &msg);
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                if !model.held_saved_files.contains(&path) {
-                    model.held_saved_files.push(path);
-                }
+                hold(path);
                 continue;
             }
         };
-        if let Err(e) = run_chunk(
+        match run_chunk(
             lua,
             &bytes,
             &crate::script::addon_chunk_name(&name.to_string(), &format!("{name}.lua")),
         ) {
-            // Deviation: the reference fails silently; we report it, as a player needs to know,
-            // and hold the file so the shutdown write keeps it.
-            log_error(
-                lua,
-                &format!("{}: {e}", path.display()),
-                &super::lua_message(&e),
-            );
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            if !model.held_saved_files.contains(&path) {
-                model.held_saved_files.push(path);
+            Ok(()) => {
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                if !model.loaded_saved_files.contains(&path) {
+                    model.loaded_saved_files.push(path);
+                }
+            }
+            Err(e) => {
+                // Deviation: the reference fails silently; we report it, as a player needs to
+                // know, and hold the file so the shutdown write keeps it.
+                log_error(
+                    lua,
+                    &format!("{}: {e}", path.display()),
+                    &super::lua_message(&e),
+                );
+                hold(path);
             }
         }
     }
@@ -1044,16 +1049,14 @@ impl super::UiScript {
         }
     }
 
-    /// `(name, account names, per-character names)` to write at shutdown, for each loaded addon
-    /// that declares any: the reference gates the write on the loaded byte (`0x51f711`).
+    /// `(name, account names, per-character names)` to write at shutdown, for each loaded addon,
+    /// one declaring none included (its files go, `0x51f859`): the reference gates the write on
+    /// the loaded byte (`0x51f711`).
     pub fn addon_saved_variable_sets(&self) -> Vec<(String, Vec<String>, Vec<String>)> {
         self.model_ref()
             .addons
             .iter()
             .filter(|a| a.loaded)
-            .filter(|a| {
-                !a.saved_variables.is_empty() || !a.saved_variables_per_character.is_empty()
-            })
             .map(|a| {
                 (
                     a.name.clone(),

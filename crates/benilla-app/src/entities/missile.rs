@@ -291,16 +291,16 @@ fn ensure_ammo_model(
     Some(key)
 }
 
-/// A travelling spell's deferred miss word. `SMSG_SPELL_GO` skips its inline word when the
+/// A travelling spell's deferred miss. `SMSG_SPELL_GO` skips its inline miss list when the
 /// `Spell.dbc` Speed is nonzero (`0x6e7d4e`); the arrival re-resolves the spell from
-/// `[missile+0x18]` and calls the same emitter `0x607140`. Its source class, CVar gates and colour
-/// are `crate::combat_text::missile_miss_text`'s.
+/// `[missile+0x18]` and calls the same emitters: the word `0x607140`
+/// (`crate::combat_text::missile_miss_text`), `UNIT_COMBAT` and the line (`crate::combat_log`).
 #[derive(Message, Clone, Copy)]
 pub(crate) struct MissileMiss {
-    /// The colour law's source class (`K`).
+    /// The colour law's source class (`K`), and the line's caster.
     pub(crate) caster: Entity,
-    /// Always the missed target (`0x61ddb3`; `0x61d9dc`'s is the per-entry target). Unlike the
-    /// inline site the arrival floats Reflect over the target, and the caster's word belongs to
+    /// Always the missed target (`0x61ddb3`; `0x61d9dc`'s is the per-entry target). Reflect
+    /// floats over the target, as at the inline site (`0x6e7dd4`); the caster's word belongs to
     /// the re-launched flight, which is not built.
     pub(crate) anchor: Entity,
     /// The colour law's `B` bit resolves off its record.
@@ -943,16 +943,16 @@ mod tests {
     }
 
     /// The `0x61dd50` arm: a miss plays the victim's dodge or block clip, never the impact, and
-    /// floats its word over the target. A parry reads Deflect, rewritten at launch; a Reflect
+    /// floats its word over the target. A parry reads `DEFLECT`, rewritten at launch; a Reflect
     /// floats over the target, where the inline site re-anchors it to the caster (`0x6e7e51`).
     #[test]
     fn missed_arrival_words_the_target_deflects_a_parry_and_plays_dodge_or_block() {
         for (code, expect_state, expect_word) in [
-            (3u8, Some(2u32), "Dodge"),
-            (5, Some(5), "Block"),
-            (1, None, "Miss"),
-            (4, None, "Deflect"),
-            (11, None, "Reflect"),
+            (3u8, Some(2u32), "DODGE"),
+            (5, Some(5), "BLOCK"),
+            (1, None, "MISS"),
+            (4, None, "DEFLECT"),
+            (11, None, "REFLECT"),
         ] {
             let mut app = app();
             let caster = caster(&mut app, Vec3::ZERO);

@@ -17,14 +17,14 @@ const BOB: u64 = 0x12;
 
 /// A world holding everything [`super::feed::feed_chat`] reads, the stock chat stack in its VM,
 /// `ChatFrame1` carrying `Mychan`, and our slots `World`, `Trade - City` and `Mychan` (3).
-struct Feed {
-    world: World,
+pub(super) struct Feed {
+    pub(super) world: World,
     /// The outbound side of `NetCommands`, where the name queries land.
     sent: crossbeam_channel::Receiver<crate::net::ClientCommand>,
 }
 
 impl Feed {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let s = chat_vm();
         s.run(SPY).unwrap();
         s.run(
@@ -47,7 +47,7 @@ impl Feed {
 
         let mut channels = super::edit::ChannelState::default();
         for name in ["World", "Trade - City", "Mychan"] {
-            channels.claim_slot(name);
+            channels.claim_slot(name, channels.channels.zone_channel_id(name));
         }
         let (tx, sent) = crossbeam_channel::unbounded();
 
@@ -66,6 +66,7 @@ impl Feed {
         world.insert_resource(crate::world_state::WorldStates::default());
         world.insert_resource(super::language::ChatLanguages::default());
         world.insert_resource(crate::items::Items::default());
+        world.insert_resource(crate::go_templates::GameObjectTemplates::default());
         world.insert_resource(crate::text_filter::TextFilter::default());
         world.insert_resource(crate::text_filter::TextFilterSwitches::default());
         Feed { world, sent }
@@ -84,11 +85,11 @@ impl Feed {
     }
 
     /// One frame of the drain.
-    fn drain(&mut self) {
+    pub(super) fn drain(&mut self) {
         self.world.run_system_once(super::feed::feed_chat).unwrap();
     }
 
-    fn script(&self) -> &UiScript {
+    pub(super) fn script(&self) -> &UiScript {
         self.world.non_send_resource::<UiScript>()
     }
 

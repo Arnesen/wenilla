@@ -9,9 +9,9 @@ pub fn open(vm: &mut Vm) {
     let t = vm.heap.new_table(0, 0);
     let fns: [(&'static str, crate::heap::NativeFn); 24] = [
         ("abs", |vm, n| un(vm, n, f64::abs)),
-        ("sin", |vm, n| un(vm, n, f64::sin)),
-        ("cos", |vm, n| un(vm, n, f64::cos)),
-        ("tan", |vm, n| un(vm, n, f64::tan)),
+        ("sin", |vm, n| un(vm, n, sin)),
+        ("cos", |vm, n| un(vm, n, cos)),
+        ("tan", |vm, n| un(vm, n, tan)),
         ("asin", |vm, n| un(vm, n, f64::asin)),
         ("acos", |vm, n| un(vm, n, f64::acos)),
         ("atan", |vm, n| un(vm, n, f64::atan)),
@@ -67,6 +67,41 @@ fn deg(x: f64) -> f64 {
 /// `math_rad`: a product with `RADIANS_PER_DEGREE`.
 fn rad(x: f64) -> f64 {
     x * RADIANS_PER_DEGREE
+}
+
+/// 2^63: `fsin`, `fcos` and `fptan` reduce only an operand below it in magnitude, and leave a
+/// finite one at or past it unchanged, with C2 set (Intel SDM, `FSIN`).
+const X87_TRIG_RANGE: f64 = 9_223_372_036_854_775_808.0;
+
+/// `math_sin` (`0x7fae10`) is a bare `fsin` (`0x7fae1d`): past the x87's range the operand is the
+/// answer.
+fn sin(x: f64) -> f64 {
+    if x.is_finite() && x.abs() >= X87_TRIG_RANGE {
+        x
+    } else {
+        x.sin()
+    }
+}
+
+/// `math_cos` (`0x7fae40`) is a bare `fcos` (`0x7fae4d`): past the x87's range the operand is the
+/// answer.
+fn cos(x: f64) -> f64 {
+    if x.is_finite() && x.abs() >= X87_TRIG_RANGE {
+        x
+    } else {
+        x.cos()
+    }
+}
+
+/// `math_tan` (`0x7fae70`): `fptan` (`0x7fae7d`) pushes 1.0 over the tangent and `0x7fae84` pops
+/// it. Past the x87's range `fptan` pushes nothing, so that pop takes the operand and the `fstp`
+/// at `0x7fae86` stores from an empty stack, the masked underflow's indefinite.
+fn tan(x: f64) -> f64 {
+    if x.is_finite() && x.abs() >= X87_TRIG_RANGE {
+        f64::from_bits(crate::number::INDEFINITE)
+    } else {
+        x.tan()
+    }
 }
 
 /// `math_exp` (`0x7fb100`) computes inline on the x87, `2^(x·log2 e)` split at `frndint`; for an
@@ -186,59 +221,48 @@ fn max(vm: &mut Vm, nargs: usize) -> R<usize> {
     Ok(vm.ret1(Value::Num(m)))
 }
 
-/// glibc's `rand()`: `random_r`'s additive feedback generator (`TYPE_3`, `r[i] = r[i-3] +
-/// r[i-31]`), as the script host's 5.1 build called it on Linux, on every platform. The client
-/// runs MSVC's clock-seeded `rand`, which is later work (#1258). Its state is the process's in C,
-/// shared by every VM; here it is the VM's own, so a fork or a clone draws its own sequence.
+/// MSVC's `rand` (`0x7400e5`): `s = s·214013 + 2531011`, answering `(s >> 16) & 0x7fff`, so
+/// `RAND_MAX` is 32767. The client's state is the main thread's, seeded with the millisecond
+/// clock before `WinMain` (`0x5b800b` → `0x5d1c70`, `srand` at `0x5d1c8b`). Deviation: the
+/// client's one process-wide stream is shared with its engine draws; here each VM holds its own,
+/// seeded from the wall clock when it is built, so a fork or a clone draws its own sequence.
 #[derive(Clone)]
-pub(crate) struct GlibcRand {
-    r: [i32; 34],
-    i: usize,
-}
+pub(crate) struct CrtRand(u32);
 
-impl GlibcRand {
-    /// `srandom_r`: the 31 words from `seed` by `16807 * w % (2^31 - 1)`, then 310 outputs dropped.
-    pub(crate) fn seeded(seed: u32) -> GlibcRand {
-        let mut r = [0i32; 34];
-        let mut word = if seed == 0 { 1 } else { seed as i32 };
-        r[0] = word;
-        for slot in r.iter_mut().take(31).skip(1) {
-            let (hi, lo) = (word / 127_773, word % 127_773);
-            word = 16807i32
-                .wrapping_mul(lo)
-                .wrapping_sub(2836i32.wrapping_mul(hi));
-            if word < 0 {
-                word = word.wrapping_add(2_147_483_647);
-            }
-            *slot = word;
-        }
-        for k in 31..34 {
-            r[k] = r[k - 31];
-        }
-        let mut g = GlibcRand { r, i: 34 };
-        for _ in 0..310 {
-            g.next();
-        }
-        g
+impl CrtRand {
+    /// `srand` (`0x7400d8`): the state is the seed.
+    pub(crate) fn seeded(seed: u32) -> CrtRand {
+        CrtRand(seed)
     }
 
-    fn next(&mut self) -> u32 {
-        let v = self.r[(self.i + 34 - 31) % 34].wrapping_add(self.r[(self.i + 34 - 3) % 34]);
-        self.r[self.i % 34] = v;
-        self.i += 1;
-        (v as u32) >> 1
+    /// The start-up seed, `OsGetAsyncTimeMs` (`0x42c010`): milliseconds, as a 32-bit integer.
+    pub(crate) fn from_clock() -> CrtRand {
+        // wenilla: std's wall clock panics on wasm32; `web-time` reads the page's.
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::{SystemTime, UNIX_EPOCH};
+        #[cfg(target_arch = "wasm32")]
+        use web_time::{SystemTime, UNIX_EPOCH};
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(1, |d| d.as_millis() as u32);
+        CrtRand(ms)
+    }
+
+    fn next(&mut self) -> i32 {
+        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
+        ((self.0 >> 16) & 0x7fff) as i32
     }
 }
 
-fn rand(vm: &mut Vm) -> u32 {
-    vm.rand.next()
-}
+/// MSVC's `RAND_MAX`.
+const RAND_MAX: i32 = 0x7fff;
 
-/// glibc's `RAND_MAX`.
-const RAND_MAX: u32 = 0x7fff_ffff;
-
+/// `math_random` (`0x7fb310`): `rand() % 32767` (`0x7fb324`) times the stored `1/32767`
+/// (`0x822d38`), a multiply; an interval's `floor` is taken to an `int` by `__ftol` and its low
+/// end added as an `int` (`0x7fb3bb`, `0x7fb419`).
 fn random(vm: &mut Vm, nargs: usize) -> R<usize> {
-    let r = (rand(vm) % RAND_MAX) as f64 / RAND_MAX as f64;
+    const RECIP: f64 = 1.0 / RAND_MAX as f64;
+    let r = f64::from(vm.rand.next() % RAND_MAX) * RECIP;
     let v = match nargs {
         0 => r,
         1 => {
@@ -246,7 +270,7 @@ fn random(vm: &mut Vm, nargs: usize) -> R<usize> {
             if u < 1 {
                 return Err(vm.arg_error(1, "interval is empty"));
             }
-            (r * u as f64).floor() + 1.0
+            f64::from(crate::api::c_int((r * f64::from(u)).floor()).wrapping_add(1))
         }
         2 => {
             let l = vm.check_int(nargs, 1)?;
@@ -254,40 +278,26 @@ fn random(vm: &mut Vm, nargs: usize) -> R<usize> {
             if l > u {
                 return Err(vm.arg_error(2, "interval is empty"));
             }
-            // `floor(r*(u-l+1))+l`: the width in C's `int`, which wraps.
-            (r * u.wrapping_sub(l).wrapping_add(1) as f64).floor() + l as f64
+            // The width in C's `int`, which wraps.
+            let w = u.wrapping_sub(l).wrapping_add(1);
+            f64::from(crate::api::c_int((r * f64::from(w)).floor()).wrapping_add(l))
         }
         _ => return Err(vm.error_at(1, "wrong number of arguments")),
     };
     Ok(vm.ret1(Value::Num(v)))
 }
 
+/// `math_randomseed` (`0x7fb450`): `srand` of argument 1 through `__ftol`.
 fn randomseed(vm: &mut Vm, nargs: usize) -> R<usize> {
     let s = vm.check_int(nargs, 1)?;
-    vm.rand = GlibcRand::seeded(s as u32);
+    vm.srand(s as u32);
     Ok(0)
 }
 
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::GlibcRand;
-
-    extern "C" {
-        fn srand(seed: u32);
-        fn rand() -> i32;
-    }
-
-    /// The emulation against the C library the build links.
-    #[test]
-    fn rand_is_glibcs() {
-        for seed in [1u32, 0, 42, 7, 123_456_789, u32::MAX, 0x8000_0000] {
-            let mut g = GlibcRand::seeded(seed);
-            // SAFETY: plain libc calls; no other test in this binary uses `rand`.
-            unsafe { srand(seed) };
-            for _ in 0..1000 {
-                assert_eq!(g.next() as i32, unsafe { rand() }, "seed {seed}");
-            }
-        }
+impl Vm {
+    /// `srand` (`0x7400d8`) from the host: `math.random`'s state becomes `seed`.
+    pub fn srand(&mut self, seed: u32) {
+        self.rand = CrtRand::seeded(seed);
     }
 }
 

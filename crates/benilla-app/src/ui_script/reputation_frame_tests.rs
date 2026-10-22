@@ -251,7 +251,11 @@ fn a_bar_row_paints_name_standing_and_the_faction_bar_colour() {
         .unwrap();
     assert_eq!(
         (r, g, b),
-        (0.0, 0.6, 0.1),
+        (
+            0.0,
+            benilla_ui::color::quant::read32(0.6),
+            benilla_ui::color::quant::read32(0.1)
+        ),
         "FACTION_BAR_COLORS[5] — the green every friendly-and-better rank shares"
     );
 
@@ -407,7 +411,11 @@ fn clicking_a_bar_opens_the_detail_popup_on_that_faction() {
         .unwrap();
     assert_eq!(
         (r, g, b),
-        (0.5, 0.5, 0.5),
+        (
+            benilla_ui::color::quant::read32(0.5),
+            benilla_ui::color::quant::read32(0.5),
+            benilla_ui::color::quant::read32(0.5)
+        ),
         "and its label greys with it (GRAY_FONT_COLOR)"
     );
     assert!(!checked(&mut s, "ReputationDetailInactiveCheckBox"));
@@ -552,8 +560,16 @@ fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
     let (r, g, b) = s
         .eval::<(f32, f32, f32)>("return ReputationWatchStatusBar:GetStatusBarColor()")
         .unwrap();
-    assert_eq!((r, g, b), (0.0, 0.6, 0.1), "FACTION_BAR_COLORS[5] again");
-    assert_eq!(
+    benilla_ui::assert_near!(
+        (r, g, b),
+        (
+            0.0,
+            benilla_ui::color::quant::read32(0.6),
+            benilla_ui::color::quant::read32(0.1)
+        ),
+        "FACTION_BAR_COLORS[5] again"
+    );
+    benilla_ui::assert_near!(
         s.eval::<(f64, f64)>("return ReputationWatchStatusBar:GetMinMaxValues()")
             .unwrap(),
         (0.0, 6000.0)
@@ -567,7 +583,7 @@ fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
         "rep end art up"
     );
     assert!(!shown(&mut s, "ReputationXPBarTexture0"), "dwarf art down");
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return ReputationWatchStatusBar:GetHeight()")
             .unwrap(),
         8.0
@@ -575,14 +591,14 @@ fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
 
     // A stacked bar makes the manage pass add each row's `reputation` offset (UIParent.lua:1618):
     // `PETACTIONBAR_YPOS`, a plain global, is baseY 97 plus 9 (UIParent.lua:1589).
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return PETACTIONBAR_YPOS").unwrap(),
         106.0,
         "the bottom stack lifts by the row's 9 while the stacked watch bar is up"
     );
     s.run("ReputationWatchBar:Hide() UIParent_ManageFramePositions()")
         .unwrap();
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return PETACTIONBAR_YPOS").unwrap(),
         97.0,
         "and drops back to the base when it goes"
@@ -613,7 +629,7 @@ fn the_watch_bar_shows_the_watched_factions_progress_and_swaps_at_max_level() {
     );
     assert!(shown(&mut s, "ReputationXPBarTexture0"), "dwarf art up");
     assert!(!shown(&mut s, "ReputationWatchBarTexture0"), "rep art down");
-    assert_eq!(
+    benilla_ui::assert_near!(
         s.eval::<f64>("return ReputationWatchStatusBar:GetHeight()")
             .unwrap(),
         13.0
@@ -702,7 +718,7 @@ fn the_show_as_experience_bar_box_sends_the_watch_and_the_server_brings_the_bar_
         )
         .unwrap();
     // "Ironforge" is nine characters: 54 at 6 a character.
-    assert_eq!(
+    benilla_ui::assert_near!(
         check_l - name_l,
         54.0,
         "the mark sits the name's own string width to its right"

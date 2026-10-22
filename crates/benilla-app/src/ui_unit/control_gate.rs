@@ -9,7 +9,6 @@ use bevy::prelude::*;
 
 use benilla_formats::{cc_exemption, SpellCatalog, SpellDisplay};
 use benilla_protocol::ObjectFields;
-use benilla_ui::script::UiScript;
 
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::ui_script::VmMemo;
@@ -70,36 +69,39 @@ pub(crate) fn bypass_candidates(catalog: &SpellCatalog) -> Vec<u32> {
 /// Push [`control_bypass_spells`] into the VM while control is lost, and the empty set once it is
 /// back; only a change is pushed, and a fresh VM gets it again.
 pub(super) fn feed_control_bypass(
-    script: Option<NonSendMut<UiScript>>,
-    player: Option<Res<crate::player::Player>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
+    own_control: Option<Res<crate::player::OwnControlLost>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut pushed: Local<VmMemo<HashSet<u32>>>,
     mut candidates: Local<Option<Vec<u32>>>,
 ) {
-    let (Some(mut script), Some(player)) = (script, player) else {
-        return;
-    };
-    if spells.as_ref().is_some_and(|s| s.is_changed()) {
-        *candidates = None;
-    }
-    let want = match (player.own_control_lost, spells.as_deref(), self_q.single()) {
-        (true, Some(spells), Ok(store)) => {
-            let list = candidates.get_or_insert_with(|| bypass_candidates(&spells.catalog));
-            control_bypass_spells(&spells.catalog, list, &store.0)
+    hosted_vm.run(|script| {
+        let (Some(script), Some(own_control)) = (script, own_control) else {
+            return;
+        };
+        if spells.as_ref().is_some_and(|s| s.is_changed()) {
+            *candidates = None;
         }
-        _ => HashSet::new(),
-    };
-    let pushed = pushed.get(&script);
-    if *pushed != want {
-        *pushed = want.clone();
-        script.set_control_bypass(want);
-    }
+        let want = match (own_control.0, spells.as_deref(), self_q.single()) {
+            (true, Some(spells), Ok(store)) => {
+                let list = candidates.get_or_insert_with(|| bypass_candidates(&spells.catalog));
+                control_bypass_spells(&spells.catalog, list, &store.0)
+            }
+            _ => HashSet::new(),
+        };
+        let pushed = pushed.get(script);
+        if *pushed != want {
+            *pushed = want.clone();
+            script.set_control_bypass(want);
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::script::UiScript;
 
     const FEAR_AURA: u32 = 5782;
     const INSIGNIA: u32 = 7744;
@@ -225,16 +227,18 @@ mod tests {
         use benilla_ui::script::{ContainerSlot, ContainerState};
         let mut app = App::new();
         app.init_resource::<crate::player::Player>()
+            .init_resource::<crate::player::OwnControlLost>()
             .insert_resource(crate::ui_action::Spells {
                 catalog: catalog(),
                 ..crate::ui_action::Spells::empty_for_tests()
             })
             .add_systems(Update, feed_control_bypass);
         let mut script = UiScript::new().unwrap();
+        script.keep_calls();
         script.set_container(
             0,
             Some(ContainerState {
-                name: Some("Backpack".into()),
+                name: None,
                 num_slots: 16,
                 slots: [(
                     1,
@@ -260,8 +264,8 @@ mod tests {
             ))
             .id();
         app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .own_control_lost = true;
+            .resource_mut::<crate::player::OwnControlLost>()
+            .0 = true;
         app.update();
 
         let calls = |app: &mut App| {

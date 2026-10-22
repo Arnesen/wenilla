@@ -57,8 +57,9 @@ mod glue_booth;
 /// A model file's own authored lights, folded as the reference's gather does (`0x718960`).
 pub(crate) use glue_booth::{scene_rig, SceneRig};
 pub(crate) use glue_booth::{
-    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueScene, PetLook,
-    PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SelectLook, GLUE_SLOT,
+    CreateLook, GhostKit, GlueLook, GluePetBake, GluePreview, GluePreviewBake, GlueSceneFile,
+    PetLook, PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider, SceneFog, SceneRoot,
+    SelectLook, GLUE_SLOT,
 };
 mod light;
 pub(crate) use light::{material_variant, VariantLane};
@@ -66,6 +67,8 @@ use light::{studio_light, BoothLight};
 mod panes;
 pub(crate) use panes::{PaneDisplays, PaneRequest, PaneRequests};
 pub(crate) mod test_bake;
+#[cfg(test)]
+mod unheld_tests;
 
 /// The round portrait slots, each with its own layer and camera. `"npc"` is an interaction
 /// window's NPC ([`crate::ui_session::InteractNpc`]); `"targettarget"` resolves only while drawn,
@@ -674,7 +677,10 @@ impl Plugin for PortraitPlugin {
                     gate_booth_cameras,
                 )
                     .chain()
-                    .after(GluePreviewFeed),
+                    .after(GluePreviewFeed)
+                    // After the VM pass, whose script calls may change the unit a portrait shows;
+                    // the booths' transforms and cameras are none a call reads.
+                    .after(crate::vm_pass::VmPass::End),
             )
             // The character panes: the VM's paint list, after its paint pass armed the turns and
             // the extract published the panes' geometry; before the camera gate reads the marks.
@@ -1111,7 +1117,11 @@ fn sync_portraits(
         let mut occupant: Option<u64> = None;
         let unit: Option<Entity> = match token {
             "player" => self_q.single().ok(),
-            "target" => selection.target,
+            "target" => {
+                let subject = target_subject(&selection, &party.roster, &party.names);
+                (occupant, unseen) = (subject.occupant, subject.unseen);
+                subject.entity
+            }
             // Gated on the UI drawing the slot: its frame ships hidden (`SHOW_TARGET_OF_TARGET`
             // defaults to `"0"`), and ungated it would re-bake on every target switch.
             "targettarget" => party
@@ -1175,13 +1185,8 @@ fn sync_portraits(
                 occupant = member.map(|m| m.guid);
                 let entity = member.and_then(|m| party.index.0.get(&m.guid)).copied();
                 if entity.is_none() {
-                    unseen = member.map(|m| {
-                        let traits = party.names.player_traits(m.guid);
-                        player_temporary_portrait(
-                            traits.map(|(race, _, _)| race),
-                            traits.map(|(_, _, sex)| sex),
-                        )
-                    });
+                    unseen =
+                        member.and_then(|m| unseen_portrait(&party.roster, &party.names, m.guid));
                 }
                 entity
             }
@@ -1609,6 +1614,54 @@ fn party_pet_subject<'a>(
             None,
             roster.pet_record(pet).map(|_| pet_temporary_portrait()),
         ),
+    }
+}
+
+/// What a portrait slot shows: the object to bake, the guid the bake cache files it under, and the
+/// stand-in for a unit the object manager does not hold.
+#[derive(Debug, Default, PartialEq)]
+struct Subject {
+    entity: Option<Entity>,
+    occupant: Option<u64>,
+    unseen: Option<String>,
+}
+
+/// `"target"`'s subject: the selection's object, or, for a selection with no object, a party
+/// member out of range, the guid's cached bake or stand-in, as any unit the object manager does not
+/// hold (`0x519fe6`).
+fn target_subject(
+    selection: &Selection,
+    roster: &crate::ui_party::GroupState,
+    names: &crate::names::NameCache,
+) -> Subject {
+    match (selection.target, selection.guid) {
+        (None, Some(guid)) => Subject {
+            entity: None,
+            occupant: Some(guid),
+            unseen: unseen_portrait(roster, names, guid),
+        },
+        (entity, _) => Subject {
+            entity,
+            ..Subject::default()
+        },
+    }
+}
+
+/// The stand-in of a guid the object manager does not hold (`0x519fe6`): a player's by the race
+/// and sex of its name record (`0x51a08e` → `0x51a0b4`, `0x525ba0`), none with no record
+/// (`0x51a095`); any other guid's from the group's pet record (`0x51a0c7` → `0x525cb0`), none with
+/// no pet record (`0x51a0ce`).
+fn unseen_portrait(
+    roster: &crate::ui_party::GroupState,
+    names: &crate::names::NameCache,
+    guid: u64,
+) -> Option<String> {
+    if benilla_protocol::guid::is_player(guid) {
+        names
+            .player_traits(guid)
+            .map(|(race, _, sex)| player_temporary_portrait(Some(race), Some(sex)))
+    } else {
+        roster.pet_record(guid).map(|_| pet_temporary_portrait())
     }
 }
 

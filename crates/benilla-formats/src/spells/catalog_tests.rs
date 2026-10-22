@@ -287,6 +287,22 @@ fn real_spell_catalog_pins_the_skin_latch_effects() {
     );
 }
 
+/// The value the unit tooltip's skinnable line colours by (`0x529f4e`): Skinning's `SKINNING`
+/// effect, `0 + 1 + 5.0×(skill/5)`, the skill down to a multiple of 5, plus one.
+#[test]
+fn real_spell_catalog_computes_the_skinning_value() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+    for id in [8613, 8617, 8618, 10768] {
+        let d = cat.get(id).unwrap();
+        assert_eq!(d.effects[0], crate::SPELL_EFFECT_SKINNING, "spell {id}");
+        assert_eq!(d.effect_points_int(0, 300), 301, "spell {id}");
+        assert_eq!(d.effect_points_int(0, 149), 146, "spell {id}");
+        assert_eq!(d.effect_points_int(0, 0), 1, "spell {id}");
+    }
+}
+
 /// The left side of the client's lock test (`0x5f850f`), with the player's skill as the level
 /// term (`0x5ea690`). Its columns (27, 28, 64, 67, 70, 73, 76) are pinned by result, against
 /// values known from the game; the below-cap rows are the ones a caster-level term would miss.
@@ -1209,9 +1225,9 @@ fn real_spell_catalog_cost_columns() {
         (0, 0, 6)
     );
 
-    // `manaPerSecondPerLevel` (column 35) is zero on every row, so it stays unparsed;
-    // `manaCostPerlevel` (33) is nonzero on 72 creature spells, so `power_cost` applies it though
-    // no player tooltip shows it.
+    // `manaPerSecondPerLevel` (column 35) is zero on every row, so the per-second cost's level term
+    // never moves a 5875 tooltip; `manaCostPerlevel` (33) is nonzero on 72 creature spells, so
+    // `power_cost` applies it though no player tooltip shows it.
     let bytes = chain.read_file(super::SPELL).expect("reading Spell.dbc");
     let rs = super::parse(&bytes, super::spell_schema(), "Spell.dbc").expect("Spell.dbc");
     let mut per_level_rows = 0u32;
@@ -1238,6 +1254,21 @@ fn real_spell_catalog_cost_columns() {
         (0xFFFF_FFFE, 180, 9, 24),
         "Dark Offering: the per-level term's health-lane row"
     );
+}
+
+/// `MinFactionId` and `MinReputation` (columns 170, 171), the spell tooltip's reputation line
+/// (`0x52f2ae`): set on one 5875 row, 6994, Gadgetzan (369) at Friendly (4).
+#[test]
+fn real_spell_catalog_reputation_columns() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    let rows: Vec<(u32, u32, u32)> = cat
+        .iter()
+        .filter(|(_, d)| d.min_faction_id != 0)
+        .map(|(id, d)| (id, d.min_faction_id, d.min_reputation))
+        .collect();
+    assert_eq!(rows, [(6994, 369, 4)]);
 }
 
 /// A chat language reaches its skill only through the spell whose `Effect_1` is

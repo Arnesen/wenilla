@@ -5,8 +5,8 @@
 //! - Tiles: one 256² BLP per ADT tile (533.33 yd), `map<X>_<Y>.blp` resolved through
 //!   `md5translate.trs` ([`benilla_formats::MinimapTranslate`]), indexed in ADT order.
 //! - Zoom to radius (`0x6da9b0`): two zoom indices, picked by WMO containment, each persisted
-//!   (`minimapZoom`, `minimapInsideZoom`); outdoors a chunk-count half-extent, indoors
-//!   [`INTERIOR_ZOOM_RADIUS`] yards.
+//!   (`minimapZoom`, `minimapInsideZoom`); outdoors a chunk-count half-extent, indoors a yard
+//!   table ([`benilla_ui::widget::minimap_radius_yd`]).
 //! - North up: screen up is world +X, screen left world +Y.
 
 pub(crate) mod blips;
@@ -30,7 +30,7 @@ use benilla_formats::{tile_to_world, world_to_tile, MinimapTranslate};
 
 use interior::{interior_group_selection, wmo_minimap_stem};
 
-use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
+use benilla_ui::widget::{MinimapArt, MinimapArtSlot, MINIMAP_DEFAULT_ZOOM};
 
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
@@ -41,31 +41,16 @@ use benilla_world::wmo_portal::{
 };
 use benilla_world::world_map::CurrentMap;
 
-/// Yards per ADT tile / per MCNK chunk (16 chunks per tile edge).
+/// Yards per ADT tile.
 const TILE_YARDS: f32 = 533.333_3;
-const CHUNK_YARDS: f32 = TILE_YARDS / 16.0;
 
-/// The outdoor zoom table (`0x8116d0`): view diameter in chunks per zoom index; half-extent =
-/// `chunks · 0.5 · 33.333` yd (`0x6da9b0`).
-const ZOOM_CHUNKS: [f32; 6] = [14.0, 12.0, 10.0, 8.0, 6.0, 4.0];
-
-/// The indoor view radius in yards per indoor zoom index: table `0x8116e8`, indexed by `0x86f69c`
-/// (`minimapInsideZoom`). The on-screen radius is exactly this (the composite at `1.5·c`,
-/// `0x4ec090`, blits its middle two-thirds, `0x4ec440`), and the same `c` sizes the selection box
-/// (`0x6d96b6`).
-///
-/// Not a constant: the `10.0f` at `0x4ed9eb` is only the field's static initializer, and
-/// `0x6d98f5` writes `radiusTable[indoorZoom]` into it whenever the zoom or indoor state changes.
-const INTERIOR_ZOOM_RADIUS: [f32; 6] = [150.0, 120.0, 90.0, 60.0, 40.0, 25.0];
-
-/// How far the map reaches, in yards; both branches of [`emit_minimap`] and the ping read it here.
-fn view_radius_yd(zoom: u8, inside_zoom: u8, inside: bool) -> f32 {
-    let clamp = |z: u8| usize::from(z.min(5));
-    if inside {
-        INTERIOR_ZOOM_RADIUS[clamp(inside_zoom)]
-    } else {
-        ZOOM_CHUNKS[clamp(zoom)] * 0.5 * CHUNK_YARDS
-    }
+/// How far the map reaches, in yards (`0x6da9b0`), for both branches of [`emit_minimap`]. Indoors
+/// the on-screen radius is exactly the table's (the composite at `1.5·c`, `0x4ec090`, blits its
+/// middle two-thirds, `0x4ec440`), and the same `c` sizes the selection box (`0x6d96b6`); the
+/// `10.0f` at `0x4ed9eb` is only the field's static initializer, which `0x6d98f5` rewrites from
+/// the table whenever the zoom or indoor state changes.
+fn view_radius_yd(zoom: u32, inside_zoom: u32, inside: bool) -> f32 {
+    benilla_ui::widget::minimap_radius_yd(zoom, inside_zoom, inside)
 }
 
 /// The outer-edge bleed: a tile on its group grid's boundary grows 1 yd on that side, so groups
@@ -88,10 +73,6 @@ fn texel_stretch(extent_yd: f32) -> f32 {
 /// (blending off) leaves it to `SetRenderState`'s cascade, `.data 0x85ad20[1] = 224` times the f32
 /// reciprocal of 255: one ULP above 224/255, and fragments are compared against those exact bits.
 pub(crate) const INTERIOR_TILE_ALPHA_REF: f32 = f32::from_bits(0x3F60_E0E2);
-
-/// The corpse blip's edge as a fraction of the widget side (the POIIcons cell's 16 px on a 140 px
-/// minimap); an estimate, the reference's in-range corpse blip size being untraced.
-const CORPSE_BLIP_FRACTION: f32 = 0.11;
 
 /// The day-night tint the reference modulates outdoor tiles by (tile draw `0x4eccdd`–`0x4ecd69`),
 /// from `color_a`, the Direct band (`LightIntBand` 0), and `color_b`, the Ambient band (1):
@@ -167,24 +148,25 @@ pub(crate) struct MinimapInside(pub(crate) bool);
 #[derive(Resource)]
 pub(crate) struct MinimapZoom {
     /// `minimapZoom`, the outdoor index.
-    pub(crate) outdoor: u8,
+    pub(crate) outdoor: u32,
     /// `minimapInsideZoom`, the indoor index, persisted apart from the outdoor level.
-    pub(crate) inside: u8,
+    pub(crate) inside: u32,
 }
 
-/// The zoom CVars' change callback: each lands on its own field, clamped at 5 like the reference's
-/// `set_zoom` (`0x6daa10`).
+/// The app's mirror of the two zoom CVars, each on its own field: the record's integer as the
+/// reference's raw copy takes it into the zoom cell (`0x6d9013`), unclamped.
 pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut zoom: ResMut<MinimapZoom>) {
     match ev.key().as_str() {
-        "minimapzoom" => zoom.outdoor = zoom_index(ev.num()),
-        "minimapinsidezoom" => zoom.inside = zoom_index(ev.num()),
+        "minimapzoom" => zoom.outdoor = zoom_index(&ev.new),
+        "minimapinsidezoom" => zoom.inside = zoom_index(&ev.new),
         _ => {}
     }
 }
 
-/// A stored zoom level to an index, truncated and clamped into `[0, MINIMAP_ZOOM_LEVELS)`.
-fn zoom_index(v: f32) -> u8 {
-    v.clamp(0.0, f32::from(benilla_ui::widget::MINIMAP_ZOOM_LEVELS - 1)) as u8
+/// A stored zoom level as its cell holds it: the record's integer (`rec+0x28`, `SStrToInt` at
+/// `0x63e127`) as an unsigned 32-bit value.
+fn zoom_index(text: &str) -> u32 {
+    benilla_ui::script::s_str_to_int(text) as u32
 }
 
 impl Default for MinimapZoom {
@@ -201,8 +183,8 @@ pub(crate) struct MinimapSlot {
     pub(crate) rect: Rect,
     pub(crate) z: u128,
     /// The outdoor zoom index; `inside_zoom` is the indoor one, picked by WMO containment.
-    pub(crate) zoom: u8,
-    pub(crate) inside_zoom: u8,
+    pub(crate) zoom: u32,
+    pub(crate) inside_zoom: u32,
     pub(crate) alpha: f32,
 }
 
@@ -210,23 +192,41 @@ pub(crate) struct MinimapSlot {
 #[derive(Resource, Default)]
 struct MinimapAssets {
     translate: MinimapTranslate,
-    /// The disc's mask, the reference's one process-wide texture (`0xbc7968`): the default until
-    /// `Minimap:SetMaskTexture` replaces it, and no VM owns it, so a new VM inherits it.
-    mask: Option<Handle<Image>>,
-    /// `Textures\MinimapMask`, which every world entry loads into [`Self::mask`] (`0x4ed810`).
-    default_mask: Option<Handle<Image>>,
-    arrow: Option<Handle<Image>>,
-    /// The POI atlas (`Interface\Minimap\POIIcons`), for the corpse skull.
-    poi: Option<Handle<Image>>,
-    /// The four rim-arrow arts: the reference's one `minimapArrowModel`
-    /// (`Rotating-MinimapArrow.mdx`) shows exactly one of these layers per blip source's looping
-    /// sequence, so one flat sprite each draws the same ([`blips::RimArrow`]).
-    rim_arrows: blips::RimArrowArt,
-    /// The unit-blip atlas (`Interface\Minimap\ObjectIcons`, five 32-px dot cells).
-    object_icons: Option<Handle<Image>>,
+    /// The three process-wide textures by [`MinimapArtSlot`]: the disc's mask (`0xbc7968`), the
+    /// landmark atlas `Interface\Minimap\POIIcons` (`0xbc827c`) and the dot atlas
+    /// `Interface\Minimap\ObjectIcons` (`0xbc822c`). No VM owns them, so a new VM inherits them.
+    art: [MinimapTex; 3],
     /// `SpellShapeshiftForm.dbc`, the tracking dots' creature-type override (a cat-form druid is a
     /// Beast).
     forms: Option<HashMap<u32, benilla_formats::ShapeshiftForm>>,
+}
+
+/// One of the minimap's process-wide textures as drawn.
+#[derive(Default, Clone)]
+struct MinimapTex {
+    /// The handle the draw uses; `None` is the null handle an empty name leaves.
+    current: Option<Handle<Image>>,
+    /// What every world entry loads (`0x4ed810`): the default file, else the green solid.
+    default: Option<Handle<Image>>,
+    /// The 8×8 solid `0xff00ff00` a name that does not load gives (`[0x90582c]`).
+    missing: Option<Handle<Image>>,
+}
+
+impl MinimapAssets {
+    /// The texture drawn for `slot`, `None` for a null handle.
+    fn tex(&self, slot: MinimapArtSlot) -> Option<&Handle<Image>> {
+        self.art[slot as usize].current.as_ref()
+    }
+}
+
+/// `TextureCreate`'s green placeholder, `0xff00ff00` (`0x447c00`), as an 8×8 image (`0x44a900`).
+fn green_solid(mask: bool) -> Image {
+    let rgba = [0u8, 255, 0, 255].repeat(64);
+    if mask {
+        benilla_assets::mask_image(8, 8, rgba)
+    } else {
+        benilla_assets::sprite_image(8, 8, rgba)
+    }
 }
 
 /// Tile handles by ADT index for one [`CurrentMap`], `None` for a tile with no art (open ocean);
@@ -256,26 +256,33 @@ fn setup_minimap(
         Ok(translate) => {
             info!("minimap: md5translate.trs — {} tiles", translate.len());
             // The default mask and icons open from the archives alone, as `0x4ed810`'s
-            // `TextureCreate` calls pass file flag 0 (`0x4ed862`, `0x4ed88b`, `0x4ed8b4`). The
-            // arrows are model textures (`MinimapArrow.m2`, `Rotating-MinimapArrow.m2`), and
-            // `CGMinimapFrame::LoadArrowModel` creates the models with flags 4 (`0x4ee181`), which
-            // their textures' opens keep (`0x71da64`), so they open loose-flagged.
+            // `TextureCreate` calls pass file flag 0 (`0x4ed862`, `0x4ed88b`, `0x4ed8b4`).
             let archives = LooseOpen::Archives;
-            let mask = assets.mask_texture("Textures\\MinimapMask", archives, &mut images);
-            let arrow = assets.sprite_texture(blips::PLAYER_ARROW_TEXTURE, &mut images);
-            let poi =
-                assets.sprite_texture_opened("Interface\\Minimap\\POIIcons", archives, &mut images);
-            let mut rim_arrows = blips::RimArrowArt::default();
-            for kind in blips::RimArrow::ALL {
-                rim_arrows.set(kind, assets.sprite_texture(kind.texture(), &mut images));
-            }
-            let object_icons = assets.sprite_texture_opened(
-                "Interface\\Minimap\\ObjectIcons",
-                archives,
-                &mut images,
-            );
-            if mask.is_none() {
-                warn!("minimap: MinimapMask.blp missing — the map will draw square");
+            // The three defaults (`0x84c6e4`, `0x84c6c8`, `0x84c6a8`); one that does not load is
+            // the green solid, as `TextureCreate` gives it.
+            let mut art: [MinimapTex; 3] = Default::default();
+            for slot in [
+                MinimapArtSlot::Mask,
+                MinimapArtSlot::Icons,
+                MinimapArtSlot::Blips,
+            ] {
+                let is_mask = slot == MinimapArtSlot::Mask;
+                let missing = images.add(green_solid(is_mask));
+                let path = default_art_path(slot);
+                let loaded = if is_mask {
+                    assets.mask_texture(path, archives, &mut images)
+                } else {
+                    assets.sprite_texture_opened(path, archives, &mut images)
+                };
+                if loaded.is_none() {
+                    warn!("minimap: {path} missing — the green placeholder stands in");
+                }
+                let default = Some(loaded.unwrap_or_else(|| missing.clone()));
+                art[slot as usize] = MinimapTex {
+                    current: default.clone(),
+                    default,
+                    missing: Some(missing),
+                };
             }
             let forms = {
                 let mut chain = assets.chain.lock_recover();
@@ -289,12 +296,7 @@ fn setup_minimap(
             };
             commands.insert_resource(MinimapAssets {
                 translate,
-                default_mask: mask.clone(),
-                mask,
-                arrow,
-                poi,
-                rim_arrows,
-                object_icons,
+                art,
                 forms,
             });
         }
@@ -354,7 +356,7 @@ fn emit_minimap(
     wmos: Res<Assets<WmoModel>>,
     world: benilla_world::world_point::WorldPoint,
     asset_server: Res<AssetServer>,
-    death_net: Res<crate::death::DeathNet>,
+    corpse: Res<MinimapCorpse>,
     blip_inputs: blips::BlipInputs,
     mut composite: ResMut<composite::MinimapComposite>,
     rig: Option<Res<composite::CompositeRig>>,
@@ -374,14 +376,9 @@ fn emit_minimap(
         locks,
         poi_marker,
         pois,
-        mut ping,
-        script,
     ) = blip_inputs;
     // Hover resets every frame; the blip pass re-establishes it while the map draws.
     *blip_hover = blips::MinimapBlipHover::None;
-    // Drain the `Minimap:PingLocation` click before any early return: it is spent in the frame it
-    // was made, and a click on a frame the map does not draw is not a ping.
-    let click = script.and_then(|mut s| s.take_minimap_ping_request());
     let (Some(slot), Some(assets), Some(map), Some(catalog)) =
         (widget.0.as_ref(), assets, map, catalog)
     else {
@@ -398,11 +395,11 @@ fn emit_minimap(
         return; // the composite rig's Startup system has not run yet
     };
     // `WOW_MM_ZOOM=0..5` forces both zoom indices, a capture instrument.
-    static ZOOM_OVERRIDE: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
+    static ZOOM_OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let zoom_override = *ZOOM_OVERRIDE.get_or_init(|| {
         std::env::var("WOW_MM_ZOOM")
             .ok()
-            .and_then(|s| s.parse::<u8>().ok())
+            .and_then(|s| s.parse::<u32>().ok())
     });
     let zoom = zoom_override.unwrap_or(slot.zoom);
     let inside_zoom = zoom_override.unwrap_or(slot.inside_zoom);
@@ -413,17 +410,17 @@ fn emit_minimap(
     // The drawn family's world-to-px scale, for the point blips drawn after the tiles.
     let mut blip_px_per_yd = 0.0_f32;
 
-    let mask = assets.mask.as_ref().map(|m| UiQuadMask {
-        texture: m.clone(),
-        rect: slot.rect,
-    });
+    let (mask, tile_mask) = stage_masks(assets.tex(MinimapArtSlot::Mask), slot.rect);
 
     let interior = minimap_interior(&player, &instances, &wmos, &world, &asset_server);
 
     // For the dots' indoor test; the branch below consumes `interior`.
     let player_indoors = interior.is_some();
     let view_radius = view_radius_yd(zoom, inside_zoom, player_indoors);
-    if let Some((world_from_local, model, stem, in_group)) = interior {
+    if assets.tex(MinimapArtSlot::Mask).is_none() {
+        // An empty mask name leaves no texture, and the render returns at once (`0x4ec959`,
+        // `0x4ec968`): no tiles, and with no scale no landmarks, rim arrows or dots either.
+    } else if let Some((world_from_local, model, stem, in_group)) = interior {
         // Interior: the WMO's own per-group tiles, drawn white. They are baked in the model frame
         // (north = model +X), so each sits at its model-space centre through the placement and the
         // whole set turns by one placement yaw (`0x6da180`).
@@ -597,15 +594,16 @@ fn emit_minimap(
                     gamma_texel: true,
                     // No CPU clip: the mask shader zeroes everything outside `mask_rect`, and an
                     // unclipped panning tile is a pure translation that never rewrites its mesh.
-                    mask: mask.clone(),
+                    mask: tile_mask.clone(),
                     ..default()
                 });
             }
         }
     }
 
-    // ── The blip layer: landmarks under the player arrow, the dots above it (the reference's
-    // order).
+    // ── The blip layer: the landmark icons, then the dots, last in the render (`0x4ed7b7`). The
+    // arrows are the minimap's engine children, drawn at their own levels above all of it
+    // ([`feed_minimap_arrows`]).
     // Our own descriptor's tracking state (private fields, only on the self entity).
     let me = self_store.iter().next();
     // Our own guid: our own pet and minions never take a dot (`0x4eac0d`).
@@ -621,11 +619,7 @@ fn emit_minimap(
         static BLIP_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *BLIP_PROBE.get_or_init(|| std::env::var_os("WOW_MM_BLIP_PROBE").is_some()) {
             eprintln!(
-                "BLIP-PROBE: arrow_art={} pois={} map={} wx={wx:.0} wy={wy:.0} px_per_yd={blip_px_per_yd:.3} track_c={:#x} track_r={:#x} track_s={}",
-                blips::RimArrow::ALL
-                    .iter()
-                    .filter(|k| assets.rim_arrows.get(**k).is_some())
-                    .count(),
+                "BLIP-PROBE: pois={} map={} wx={wx:.0} wy={wy:.0} px_per_yd={blip_px_per_yd:.3} track_c={:#x} track_r={:#x} track_s={}",
                 pois.as_ref().map(|c| c.0.len()).unwrap_or(0),
                 map.0,
                 tracking.creatures,
@@ -633,9 +627,7 @@ fn emit_minimap(
                 tracking.stealthed,
             );
         }
-        let win = window.iter().next();
-        let cursor = win.and_then(|w| w.cursor_position());
-        let seam = win.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
+        let cursor = window.iter().next().and_then(|w| w.cursor_position());
         // The pan origin snapped to a half-logical-pixel grid: every blip offset and rim bearing
         // derives from `wx`/`wy`, so the layer steps together instead of rewriting the batch mesh
         // every frame while walking. Blip world positions stay exact.
@@ -651,68 +643,29 @@ fn emit_minimap(
             wy: (wy / q).round() * q,
             wz: wow[2],
             cursor,
-            seam,
         }
     });
     let mut hover = blips::MinimapBlipHover::None;
     if let Some(ctx) = &blip_ctx {
-        // The guard-directions marker rides this pass as a landmark, as the reference appends its
-        // static blip slot after the DBC scan, so it draws even without `AreaPOI.dbc`.
-        if assets.rim_arrows.any() {
-            blips::emit_landmarks(
-                ctx,
-                pois.as_ref().map(|p| &p.0),
-                poi_marker.on_map(map.0),
-                map.0,
-                &assets.rim_arrows,
-                assets.poi.as_ref(),
-                &mut quads,
-                &mut hover,
-            );
-            // The party and corpse rim arrows (the out-of-range half of `0x6dad10`), before the
-            // player arrow, in the reference's order.
-            let corpse = death_net
-                .corpse
-                .filter(|cp| cp.display_map == map.0 as i32)
-                .map(|cp| cp.position);
-            blips::emit_party_arrows(
-                ctx,
-                &group,
-                &guids,
-                &unit_pos,
-                corpse,
-                &assets.rim_arrows,
-                &mut quads,
-            );
-        }
+        // The guard-directions marker and the corpse ride this pass as landmarks, as the reference
+        // appends its static blip slots after the DBC scan, so they draw even without
+        // `AreaPOI.dbc`. The icons need only their atlas (`0x4ed21f`).
+        blips::emit_landmarks(
+            ctx,
+            pois.as_ref().map(|p| &p.0),
+            poi_marker.on_map(map.0),
+            corpse.0.as_ref(),
+            map.0,
+            assets.tex(MinimapArtSlot::Icons),
+            &mut quads,
+            &mut hover,
+        );
     }
 
-    // The player arrow: centered, spun to the facing. WoW orientation 0 = north (screen up),
-    // growing counterclockwise (toward west = screen left); our quad rotation is clockwise on
-    // screen, so the arrow angle is the negated facing.
-    if let Some(arrow) = &assets.arrow {
-        // `blips::PLAYER_ARROW_QUAD_PX`: MinimapArrow.m2's single quad at 1280 px/unit on the
-        // 140.8 basis, its authored centre offset rotating with the facing.
-        let s = side * (blips::PLAYER_ARROW_QUAD_PX / blips::BLIP_BASIS_PX);
-        let rotation = -player.facing();
-        let (sin, cos) = rotation.sin_cos();
-        let off = blips::PLAYER_ARROW_OFFSET_PX * (side / blips::BLIP_BASIS_PX);
-        let off = Vec2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
-        let rect = Rect::from_center_size(center + off, Vec2::splat(s));
-        quads.overlays.push(UiQuad {
-            rect,
-            z_key: slot.z,
-            texture: Some(arrow.clone()),
-            color: [1.0, 1.0, 1.0, slot.alpha],
-            rotation,
-            ..default()
-        });
-    }
-
-    // The object dots draw last, above the player arrow (`0x4ed7b7`): tracking dots (cells 0/1),
+    // The object dots, last of the minimap's own draw (`0x4ed7b7`): tracking dots (cells 0/1),
     // then quest (3) and party (4) dots.
     if let Some(ctx) = &blip_ctx {
-        if let Some(icons) = &assets.object_icons {
+        if let Some(icons) = assets.tex(MinimapArtSlot::Blips) {
             blips::emit_tracking_dots(
                 ctx,
                 tracking,
@@ -746,45 +699,15 @@ fn emit_minimap(
         }
     }
     *blip_hover = hover;
-
-    // The corpse blip in range: the POIIcons skull, the reference's world-map corpse art (its
-    // in-range minimap art is untraced). Out of range it is the rim arrow above, the fifth slot
-    // of `0x6dad10`. Same map only: a dungeon corpse's display coords are the entrance.
-    if let (Some(poi), Some(cp)) = (&assets.poi, death_net.corpse) {
-        if cp.display_map == map.0 as i32 && blip_px_per_yd > 0.0 {
-            let off = Vec2::new(
-                (wy - cp.position[1]) * blip_px_per_yd,
-                -(cp.position[0] - wx) * blip_px_per_yd,
-            );
-            if off.length() <= side * 0.5 * 0.8 {
-                let s = side * CORPSE_BLIP_FRACTION;
-                let rect = Rect::from_center_size(center + off, Vec2::splat(s));
-                quads.overlays.push(UiQuad {
-                    rect,
-                    z_key: slot.z,
-                    texture: Some(poi.clone()),
-                    uv: crate::ui_pass::UvRect::from_tex_coords([0.875, 1.0, 0.0, 0.125]),
-                    color: [1.0, 1.0, 1.0, slot.alpha],
-                    ..default()
-                });
-            }
-        }
-    }
-
-    // Seat the click against this frame's geometry; the marker is the stock `MiniMapPing`
-    // `<Model>`, drawn over the widget by `crate::ui_models`.
-    if let Some(ctx) = &blip_ctx {
-        ping::seat_click(ctx, &mut ping, click);
-    }
 }
 
-/// Push the player's WMO containment onto the Minimap widget (`0xceaa60`), so the zoom buttons
-/// drive the indoor index indoors and the outdoor one outside; the verdict is [`emit_minimap`]'s,
-/// as the reference keeps one flag. Pushed on the edge and whenever the VM's Minimap-creation
-/// count moves, so a widget built later is still told. The edge also fires `MINIMAP_UPDATE_ZOOM`,
-/// on which the stock `Minimap_OnEvent` re-syncs the +/- buttons to the other index's level.
+/// Push the player's WMO containment, the indoor byte `0xceaa60`, so the zoom buttons drive the
+/// indoor index indoors and the outdoor one outside; the verdict is [`emit_minimap`]'s, as the
+/// reference keeps one flag. Pushed on the edge, which a new VM's first frame is. The edge also
+/// fires `MINIMAP_UPDATE_ZOOM`, on which the stock `Minimap_OnEvent` re-syncs the +/- buttons to
+/// the other index's level.
 fn feed_minimap_inside(
-    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     world: benilla_world::world_point::WorldPoint,
     player: Res<Player>,
     instances: Query<&WmoPortalInstance>,
@@ -792,101 +715,215 @@ fn feed_minimap_inside(
     asset_server: Res<AssetServer>,
     mut inside_res: ResMut<MinimapInside>,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
-    mut pushed_at: Local<crate::ui_script::VmMemo<u64>>,
 ) {
-    let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
-    inside_res.0 = inside;
-    let Some(mut script) = script else { return };
-    let edge = *was_inside.get(&script) != Some(inside);
-    let created = script.minimap_widgets_created();
-    if edge || *pushed_at.get(&script) != created {
-        script.set_minimap_inside(inside);
-        *pushed_at.get(&script) = created;
-    }
-    if edge {
-        *was_inside.get(&script) = Some(inside);
-        script.fire_event("MINIMAP_UPDATE_ZOOM", vec![]);
-    }
+    hosted_vm.run(|script| {
+        let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
+        inside_res.0 = inside;
+        let Some(script) = script else { return };
+        if *was_inside.get(script) != Some(inside) {
+            script.set_minimap_inside(inside);
+            *was_inside.get(script) = Some(inside);
+            script.fire_event("MINIMAP_UPDATE_ZOOM", vec![]);
+        }
+    })
 }
 
-/// A world entry puts the default mask back before the interface loads: `CGGameUI::InitializeGame`
-/// (`0x48f480`, from `0x401570`, the glue's enter-world step at `0x46c236`) calls `0x4ed810` at
-/// `0x48f590`, which loads `Textures\MinimapMask` over the process-wide mask `0xbc7968`. So an
-/// addon's mask lasts to the next logout (`ClientDestroyGame` `0x401ee0` runs `ShutdownGame`, which
-/// releases it at `0x49118c`). A `ReloadUI` (`0x490bd0`, `0x48fbf0`) and a worldport (`0x401bc0`)
-/// reach neither, and keep it; an addon that sets its mask while it loads wins, being applied
-/// after this ([`feed_minimap_mask`]).
+/// A world entry puts the three default textures back before the interface loads:
+/// `CGGameUI::InitializeGame` (`0x48f480`, from `0x401570`, the glue's enter-world step at
+/// `0x46c236`) calls `0x4ed810` at `0x48f590`, which loads them over the process-wide handles. So
+/// an addon's texture lasts to the next logout (`ClientDestroyGame` `0x401ee0` runs
+/// `ShutdownGame`, which releases them at `0x49118c`). A `ReloadUI` (`0x490bd0`, `0x48fbf0`) and a
+/// worldport (`0x401bc0`) reach neither, and keep them; an addon that sets one while it loads wins,
+/// being applied after this ([`feed_minimap_art`]).
 pub(crate) fn restore_default_mask(world: &mut World) {
     if let Some(mut assets) = world.get_resource_mut::<MinimapAssets>() {
-        assets.mask = assets.default_mask.clone();
+        for tex in &mut assets.art {
+            tex.current = tex.default.clone();
+        }
     }
 }
 
-/// Swap the disc's mask for the one `Minimap:SetMaskTexture` names (a 1.12 method). Memoised on the
-/// path per VM, so a new VM whose Minimap has set nothing leaves the process-wide mask as it is
-/// ([`restore_default_mask`] owns the world-entry reset); a path that fails to load keeps the
-/// current mask and warns.
-fn feed_minimap_mask(
-    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
+/// The default file of each texture (`0x84c6e4`, `0x84c6c8`, `0x84c6a8`).
+fn default_art_path(slot: MinimapArtSlot) -> &'static str {
+    match slot {
+        MinimapArtSlot::Mask => benilla_ui::widget::MINIMAP_DEFAULT_MASK,
+        MinimapArtSlot::Icons => "Interface\\Minimap\\POIIcons",
+        MinimapArtSlot::Blips => "Interface\\Minimap\\ObjectIcons",
+    }
+}
+
+/// Apply each texture setter's call (`SetMaskTexture`, `SetIconTexture`, `SetBlipTexture`) to the
+/// process-wide handle, once per call: a file loads with the loose flag the setters pass
+/// (`0x4ee5ce`), and one the probe passed that still fails to load is the green solid, as
+/// `TextureCreate` gives; the VM's verdict of a miss is the green solid too, and an empty name the
+/// null handle. A new VM whose Minimap has set nothing leaves the handles as they are.
+fn feed_minimap_art(
+    mut hosted_vm: crate::script_calls::HostedVm,
     assets: Option<ResMut<MinimapAssets>>,
     world_assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
-    mut last: Local<crate::ui_script::VmMemo<Option<String>>>,
+    mut applied: Local<crate::ui_script::VmMemo<[u64; 3]>>,
 ) {
-    let (Some(script), Some(mut assets), Some(mut world_assets)) = (script, assets, world_assets)
-    else {
-        return;
-    };
-    let want = script.minimap_mask_texture();
-    let last = last.get(&script);
-    if *last == want {
-        return;
-    }
-    *last = want.clone();
-    // `SetMaskTexture` opens with the loose flag (`0x4ee5e4`); the default, with flag 0 (`0x4ed862`).
-    let (path, open) = match want.as_deref() {
-        Some(path) => (path, LooseOpen::Index),
-        None => (
-            benilla_ui::widget::MINIMAP_DEFAULT_MASK,
-            LooseOpen::Archives,
-        ),
-    };
-    match world_assets.mask_texture(path, open, &mut images) {
-        Some(handle) => assets.mask = Some(handle),
-        None => {
-            warn!("minimap: SetMaskTexture(\"{path}\") — no such texture; keeping the current mask")
+    hosted_vm.run(|script| {
+        let (Some(script), Some(mut assets)) = (script, assets) else {
+            return;
+        };
+        let mut world_assets = world_assets;
+        let applied = applied.get(script);
+        for slot in [
+            MinimapArtSlot::Mask,
+            MinimapArtSlot::Icons,
+            MinimapArtSlot::Blips,
+        ] {
+            let Some((stamp, art)) = script.minimap_art(slot) else {
+                continue;
+            };
+            if applied[slot as usize] == stamp {
+                continue;
+            }
+            applied[slot as usize] = stamp;
+            let tex = &mut assets.art[slot as usize];
+            tex.current = match art {
+                MinimapArt::File(path) => {
+                    let loaded = world_assets.as_mut().and_then(|w| {
+                        if slot == MinimapArtSlot::Mask {
+                            w.mask_texture(&path, LooseOpen::Index, &mut images)
+                        } else {
+                            w.sprite_texture_opened(&path, LooseOpen::Index, &mut images)
+                        }
+                    });
+                    loaded.or_else(|| tex.missing.clone())
+                }
+                MinimapArt::Missing => tex.missing.clone(),
+                MinimapArt::Null => None,
+            };
         }
-    }
+    })
+}
+
+/// The mask as the interior blit and the outdoor tiles bind it, in that order. The outdoor tile
+/// binds it to stage 1 with preset 1, modulate on colour and alpha (`0x4eae74`, `0x4eae83`), so
+/// the tile's colour is times the mask's RGB too. The interior blit binds it (`0x4ec668`) without
+/// setting the stage's preset, which it inherits, untraced, so it keeps the coverage alone.
+fn stage_masks(
+    mask: Option<&Handle<Image>>,
+    rect: Rect,
+) -> (Option<UiQuadMask>, Option<UiQuadMask>) {
+    let blit = mask.map(|m| UiQuadMask {
+        texture: m.clone(),
+        rect,
+        modulate_rgb: false,
+    });
+    let tile = blit.clone().map(|m| UiQuadMask {
+        modulate_rgb: true,
+        ..m
+    });
+    (blit, tile)
+}
+
+/// The corpse's static blip while the corpse is on the player's map, set by
+/// [`feed_minimap_arrows`] (which reads its `CORPSE_RED` name off the VM) for the landmark draw.
+#[derive(Resource, Default)]
+pub(crate) struct MinimapCorpse(pub(crate) Option<benilla_formats::AreaPoi>);
+
+/// Aim the minimap's arrow children, the arrow half of its render (`0x4ec950`), after the tick and
+/// before the paint that draws them: the landmark selection's three records (rebuilt when its
+/// identities change) and the party and pet records, by bearing. With an empty mask name the render
+/// returns before any of it (`0x4ec968`), so the arrows keep what they had.
+fn feed_minimap_arrows(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    assets: Option<Res<MinimapAssets>>,
+    player: Res<Player>,
+    map: Option<Res<CurrentMap>>,
+    pois: Option<Res<crate::area_poi::AreaPoiRes>>,
+    poi_marker: Res<crate::poi_marker::PoiMarker>,
+    group: Res<crate::ui_party::GroupState>,
+    guids: Res<crate::net::GuidIndex>,
+    // Never a world camera, so it shares nothing with the camera pose's write.
+    unit_pos: Query<
+        &GlobalTransform,
+        (
+            With<crate::net::NetEntity>,
+            Without<benilla_world::view::WorldCamera>,
+        ),
+    >,
+    death_net: Res<crate::death::DeathNet>,
+    self_store: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    mut corpse: ResMut<MinimapCorpse>,
+    inside: Res<MinimapInside>,
+    mut listed: Local<crate::ui_script::VmMemo<Option<Vec<blips::ArrowKey>>>>,
+) {
+    hosted_vm.run(|script| {
+        let (Some(script), Some(assets), Some(map)) = (script, assets, map) else {
+            return;
+        };
+        // Same map only: a dungeon corpse's display coords are the entrance.
+        let dead = death_net
+            .corpse
+            .filter(|cp| cp.display_map == map.0 as i32)
+            .map(|cp| cp.position);
+        let named = corpse.0.as_ref().map(|c| (c.pos, c.continent_id));
+        if dead.map(|p| (p, map.0)) != named {
+            corpse.0 =
+                dead.map(|p| blips::corpse_landmark(p, map.0, script.global_text("CORPSE_RED")));
+        }
+        if assets.tex(MinimapArtSlot::Mask).is_none() || !player.active {
+            return;
+        }
+        let wow = bevy_to_wow(player.pos);
+        let (wx, wy) = (wow[0], wow[1]);
+        let radius = script.minimap_radius_yd();
+        let sel = blips::select_landmarks(
+            pois.as_ref()
+                .into_iter()
+                .flat_map(|p| p.0.rows().map(|(_, poi)| poi)),
+            poi_marker.on_map(map.0),
+            corpse.0.as_ref(),
+            map.0,
+            wx,
+            wy,
+            radius,
+        );
+        let (rim, keys) = blips::rim_arrow_records(&sel, wx, wy);
+        let last = listed.get(script);
+        let rebuilt = last.as_ref() != Some(&keys);
+        if rebuilt {
+            *last = Some(keys);
+        }
+        let pet = self_store.iter().next().and_then(|s| s.0.unit_pet_guid());
+        let records = blips::group_arrow_records(wx, wy, radius, &group, &guids, &unit_pos, pet);
+        script.set_minimap_arrows(&rim, rebuilt, inside.0, &records);
+    })
 }
 
 /// Push the player's facing onto the Minimap's player-arrow `Model` every frame, as the reference's
 /// per-frame `CMinimap::SetPlayerFacing` (`0x4eb8e0`) writes `[+0x39c]`, what `Model:GetFacing()`
 /// reads. `player.facing()` is an unbounded accumulator, so it is normalized to `[0, 2π)`, the
 /// wire value vmangos's `VerifyMovementInfo` requires.
-fn feed_minimap_player_facing(
-    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
-    player: Res<Player>,
-) {
-    let Some(mut script) = script else { return };
-    script.set_minimap_player_facing(player.facing().rem_euclid(std::f32::consts::TAU));
+fn feed_minimap_player_facing(mut hosted_vm: crate::script_calls::HostedVm, player: Res<Player>) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else { return };
+        script.set_minimap_player_facing(player.facing().rem_euclid(std::f32::consts::TAU));
+    })
 }
 
-/// Push the game clock `GetGameTime()` answers when the minute ticks, the API's own resolution.
-/// Before the first `SMSG_LOGIN_SETTIMESPEED` it reads 0:00.
+/// Push the game clock `GetGameTime()` answers when its hour or minute changes, the API's own
+/// resolution: the clock's fields as they stand (`0x515ee0`), -1, -1 while it is unset.
 fn feed_game_time(
-    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     time: Res<crate::net::ServerTime>,
-    mut last: Local<crate::ui_script::VmMemo<Option<u32>>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<(i32, i32)>>>,
 ) {
-    let Some(mut script) = script else { return };
-    let last = last.get(&script);
-    let Some(gt) = time.0 else { return };
-    let minute = gt.minute_of_day();
-    if *last == Some(minute) {
-        return;
-    }
-    *last = Some(minute);
-    script.set_game_time(minute / 60, minute % 60);
+    hosted_vm.run(|script| {
+        let Some(script) = script else { return };
+        let last = last.get(script);
+        let now = (time.0.hour(), time.0.minute());
+        if *last == Some(now) {
+            return;
+        }
+        *last = Some(now);
+        script.set_game_time(now.0, now.1);
+    })
 }
 
 /// The app half of the `<Minimap>` widget. The zone label feed is `crate::area`'s: the reference
@@ -904,6 +941,7 @@ impl Plugin for MinimapPlugin {
             .init_resource::<blips::MinimapBlipHover>()
             .init_resource::<MinimapInside>()
             .init_resource::<MinimapPing>()
+            .init_resource::<MinimapCorpse>()
             .init_resource::<composite::MinimapComposite>()
             .add_systems(Startup, setup_minimap.after(AssetSet::Open))
             .add_systems(Startup, composite::setup_composite)
@@ -925,17 +963,42 @@ impl Plugin for MinimapPlugin {
                     feed_minimap_inside.in_set(crate::ui_script::UiFeed),
                     // Before the script tick, so an addon's OnUpdate reads this frame's heading.
                     feed_minimap_player_facing.in_set(crate::ui_script::UiFeed),
-                    // After the tick that can set the mask, before the emit that draws with it.
-                    feed_minimap_mask
-                        .after(crate::ui_script::UiInput)
+                    // After this frame's movement (the plate driver's set is past it), the art
+                    // the tick set and every drain that moves a group, death or marker record,
+                    // before the paint that draws the arrows, as the reference aims them inside
+                    // its draw. Unordered against the terrain stream and the snap-hold release,
+                    // which touch nothing it reads, so the paint never waits on streaming.
+                    feed_minimap_arrows
+                        .after(crate::vplates::VPlateSet)
+                        .after(crate::ui_chat::ChatDrain)
+                        .after(crate::ui_party::drain_party)
+                        .after(crate::death::drain_death)
+                        .after(crate::poi_marker::expire_marker)
+                        .after(crate::poi_marker::clear_on_world_entry)
+                        .after(feed_minimap_art)
+                        .before(crate::ui_script::UiPaint),
+                    // After the tick that can set the art, before the emit that draws with it.
+                    feed_minimap_art
+                        .in_set(crate::ui_script::UiDrain)
                         .before(UiQuadAppend),
-                    // Before the script tick, after the containment verdict it reads. Gated on the
-                    // in-game UI: a member's ping in the login burst would otherwise spend its
-                    // `fresh` latch on the glue VM, which has no `MiniMapPing` frame.
+                    // Before the script tick, after the indoor push the radius reads. Gated on the
+                    // in-game UI: a member's ping in the login burst has no player to land on
+                    // (`0x4ee341`), so it is dropped, not signalled to the glue VM.
                     ping::drive_minimap_ping
                         .after(feed_minimap_inside)
                         .in_set(crate::ui_script::UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
+                    ping::drop_inbound_pings
+                        .after(ping::drive_minimap_ping)
+                        .in_set(crate::ui_script::UiFeed)
+                        .run_if(not(crate::ui_script::ingame_ui_up)),
+                    // A drain of what the Lua asked, after the tick whose `PingLocation` calls it
+                    // sends, and the chat and group drains, so a ping from a slash handler goes
+                    // against this frame's roster.
+                    ping::send_own_pings
+                        .in_set(crate::ui_script::UiDrain)
+                        .after(crate::ui_chat::ChatDrain)
+                        .after(crate::ui_party::drain_party),
                     // Before the script tick, so GameTimeFrame reads this frame's minute.
                     feed_game_time.in_set(crate::ui_script::UiFeed),
                     // In the feed, off the hover the last walk left; after the world drive only so
@@ -956,17 +1019,130 @@ pub(crate) fn seat_mask_for_test(
     default_mask: Handle<Image>,
     current: Handle<Image>,
 ) {
-    world.insert_resource(MinimapAssets {
-        default_mask: Some(default_mask),
-        mask: Some(current),
-        ..default()
-    });
+    let mut assets = MinimapAssets::default();
+    assets.art[MinimapArtSlot::Mask as usize] = MinimapTex {
+        current: Some(current),
+        default: Some(default_mask),
+        missing: None,
+    };
+    world.insert_resource(assets);
 }
 
 /// The mask now drawn.
 #[cfg(test)]
 pub(crate) fn mask_for_test(world: &World) -> Option<Handle<Image>> {
-    world.resource::<MinimapAssets>().mask.clone()
+    world.resource::<MinimapAssets>().art[MinimapArtSlot::Mask as usize]
+        .current
+        .clone()
+}
+
+#[cfg(test)]
+mod stage_mask_tests {
+    use super::*;
+
+    /// The tiles' mask modulates colour (`0x4eae74`); the interior blit's keeps coverage alone.
+    #[test]
+    fn the_tiles_mask_modulates_colour_and_the_blits_does_not() {
+        let tex = Handle::<Image>::default();
+        let rect = Rect::new(0.0, 0.0, 140.0, 140.0);
+        let (blit, tile) = stage_masks(Some(&tex), rect);
+        assert!(!blit.unwrap().modulate_rgb, "the interior blit");
+        let tile = tile.unwrap();
+        assert!(tile.modulate_rgb, "the outdoor tiles");
+        assert_eq!(tile.rect, rect);
+        assert!(matches!(stage_masks(None, rect), (None, None)));
+    }
+}
+
+#[cfg(test)]
+mod art_tests {
+    use super::*;
+    use benilla_ui::script::UiScript;
+
+    const DEFAULT: Handle<Image> =
+        bevy::asset::uuid_handle!("d0000000-0000-4000-8000-0000000000b1");
+    const GREEN: Handle<Image> = bevy::asset::uuid_handle!("d0000000-0000-4000-8000-0000000000b2");
+
+    fn art_app() -> App {
+        let mut app = App::new();
+        let mut assets = MinimapAssets::default();
+        for tex in &mut assets.art {
+            *tex = MinimapTex {
+                current: Some(DEFAULT),
+                default: Some(DEFAULT),
+                missing: Some(GREEN),
+            };
+        }
+        app.insert_resource(assets)
+            .init_resource::<Assets<Image>>()
+            .add_systems(Update, feed_minimap_art);
+        let mut script = UiScript::new().unwrap();
+        script.set_texture_probe(Box::new(|path: &str| !path.contains("Nope")));
+        script
+            .run(r#"m = CreateFrame("Minimap", "Minimap")"#)
+            .unwrap();
+        app.insert_non_send_resource(script);
+        app
+    }
+
+    fn run(app: &mut App, chunk: &str) {
+        let _ = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(chunk);
+        app.update();
+    }
+
+    fn drawn(app: &App, slot: MinimapArtSlot) -> Option<Handle<Image>> {
+        app.world().resource::<MinimapAssets>().tex(slot).cloned()
+    }
+
+    /// A missing file draws the green solid the setter stored before it raised; an empty name
+    /// leaves the null handle, on which the render draws no map (`0x4ec968`); the next world
+    /// entry's load puts the default back, and a new VM that sets nothing changes nothing.
+    #[test]
+    fn the_mask_setter_s_result_is_what_the_map_draws_with() {
+        let mut app = art_app();
+        assert_eq!(drawn(&app, MinimapArtSlot::Mask), Some(DEFAULT));
+        run(&mut app, r#"m:SetMaskTexture("Interface\\Nope")"#);
+        assert_eq!(drawn(&app, MinimapArtSlot::Mask), Some(GREEN));
+        run(&mut app, r#"m:SetMaskTexture("")"#);
+        assert_eq!(
+            drawn(&app, MinimapArtSlot::Mask),
+            None,
+            "no texture, no map"
+        );
+
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.update();
+        assert_eq!(
+            drawn(&app, MinimapArtSlot::Mask),
+            None,
+            "the process's handle stands"
+        );
+
+        restore_default_mask(app.world_mut());
+        assert_eq!(drawn(&app, MinimapArtSlot::Mask), Some(DEFAULT));
+    }
+
+    /// The two atlases follow their own setters the same way, each slot apart.
+    #[test]
+    fn the_icon_and_blip_atlases_follow_their_setters() {
+        let mut app = art_app();
+        run(&mut app, r#"m:SetIconTexture("")"#);
+        assert_eq!(
+            drawn(&app, MinimapArtSlot::Icons),
+            None,
+            "no landmark icons"
+        );
+        assert_eq!(drawn(&app, MinimapArtSlot::Blips), Some(DEFAULT));
+        run(&mut app, r#"m:SetBlipTexture("Nope")"#);
+        assert_eq!(drawn(&app, MinimapArtSlot::Blips), Some(GREEN));
+        assert_eq!(drawn(&app, MinimapArtSlot::Mask), Some(DEFAULT));
+        restore_default_mask(app.world_mut());
+        assert_eq!(drawn(&app, MinimapArtSlot::Icons), Some(DEFAULT));
+        assert_eq!(drawn(&app, MinimapArtSlot::Blips), Some(DEFAULT));
+    }
 }
 
 #[cfg(test)]

@@ -1,9 +1,10 @@
-//! The aura bindings, over the lists the app pushes in display order: the player's in the
-//! reference's insertion-ordered cache (`0xbc6040`), kept by `benilla::ui_aura`, every other unit's
-//! by guid, in ascending aura slot. A token resolves to its guid as the reference's resolver
-//! `0x515970` does ([`super::UnitGuids`]), so `"mouseover"`, `"party1target"` and `"PLAYER"` read
-//! the list of the unit they name, and a token naming the player reads the player's list in cache
-//! order, where the reference's `UnitBuff("player", i)` reads by slot.
+//! The aura bindings, over the lists the app pushes: the player's buff cache in the reference's
+//! insertion order (`0xbc6040`), kept by `benilla::ui_aura`, which the `GetPlayerBuff` family and
+//! `GameTooltip:SetPlayerBuff` read; and every unit's by guid, the player's too, in ascending aura
+//! slot, which `UnitBuff`, `UnitDebuff` and `GameTooltip:SetUnitBuff` read, as the reference walks
+//! the unit's own fields for every unit (`0x51960f`, `0x534bfb`). A token resolves to its guid as
+//! the reference's resolver `0x515970` does ([`super::UnitGuids`]), so `"mouseover"`,
+//! `"party1target"` and `"PLAYER"` read the list of the unit they name.
 //!
 //! `UnitBuff` and `UnitDebuff` take a token and a 1-based index into the sign-filtered list and
 //! answer nothing past the end. The 1.12 `GetPlayerBuff`
@@ -31,6 +32,10 @@ pub struct AuraState {
     pub icon: Option<String>,
     /// Stack count, at least 1; the reference shows it only above 1.
     pub count: u8,
+    /// The slot's `UNIT_FIELD_AURALEVELS` byte, the caster's level (vmangos `SpellAuras.cpp:6746`),
+    /// which the aura tooltip's per-level terms read (`0x534ceb`, `0x532bc3`); 0 on a roster
+    /// record, which holds none (`0x534da8`).
+    pub level: u8,
     /// `"Magic"`, `"Curse"`, `"Disease"`, `"Poison"` or `None`; the debuff border tints by it.
     pub debuff_type: Option<String>,
     /// Seconds, from the last apply or refresh; 0 when permanent or on a unit not the player.
@@ -47,6 +52,31 @@ pub struct AuraState {
     pub until_cancelled: bool,
     /// `AttributesEx & 0x4` (`SPELL_ATTR_EX_IS_CHANNELED`), [`cancel_authorized`]'s second arm.
     pub channeled: bool,
+    /// Kept by a set `raidFilter`: a buff the player could cast (`0x4b3870`), a debuff whose
+    /// dispel type a spell the player knows removes (`0x4b3920`). Read on a unit's list alone.
+    pub raid_listed: bool,
+}
+
+/// One unit's auras as the app pushes them ([`crate::script::UiScript::set_unit_auras`]): every
+/// live aura in ascending slot, and `UnitBuff`'s unit gate over the helpful half.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UnitAuraList {
+    pub auras: Vec<AuraState>,
+    /// `UnitBuff 0x519500`'s unit gate on a live unit (`0x5195aa`-`0x5195f7`): false answers nil
+    /// at every buff index. `UnitDebuff` has none, nor has `GameTooltip:SetUnitBuff`, whose walk
+    /// follows the same lookup straight into the slots (`0x534bee`-`0x534bfb`); a roster record's
+    /// list is never gated (`0x519735`).
+    pub buffs_visible: bool,
+}
+
+impl From<Vec<AuraState>> for UnitAuraList {
+    /// An ungated list.
+    fn from(auras: Vec<AuraState>) -> Self {
+        Self {
+            auras,
+            buffs_visible: true,
+        }
+    }
 }
 
 /// The player's active tracking aura, the reference's tracking global (`0xbc6378`): the cache
@@ -89,26 +119,42 @@ fn returns(lua: &Lua, a: &AuraState, with_dispel_type: bool) -> mlua::Result<Mul
 }
 
 /// The list of the unit `token` names, through the resolver (`0x515970`, which `UnitBuff` calls at
-/// `0x519542`): the player's cache list for the player, else that guid's; `None` for nobody or a
-/// unit with no list. A token the resolver does not recognise raises `Unknown unit name`.
-pub(crate) fn auras_of<'m>(model: &'m Model, token: &str) -> mlua::Result<Option<&'m [AuraState]>> {
-    let guids = &model.unit_guids;
-    Ok(guids.guid_of(token)?.and_then(|g| {
-        if g == guids.player {
-            Some(model.player_auras.as_slice())
-        } else {
-            model.unit_auras.get(&g).map(Vec::as_slice)
-        }
-    }))
+/// `0x519542`), the player's by slot as any unit's; `None` for nobody or a unit with no list. A
+/// token the resolver does not recognise raises `Unknown unit name`.
+pub(crate) fn auras_of<'m>(
+    model: &'m Model,
+    token: &str,
+) -> mlua::Result<Option<&'m UnitAuraList>> {
+    Ok(model
+        .unit_guids
+        .guid_of(token)?
+        .and_then(|g| model.unit_auras.get(&g)))
 }
 
-/// The `index`-th (1-based) buff (`helpful`) or debuff of `token`, in pushed order; out of range
-/// answers one nil on every miss leg (`0x5195fe`, `0x5197d4`, `0x519a51`), the loop terminator.
+/// `UnitBuff`'s and `UnitDebuff`'s walk over `list`: the half the verb names, the buffs only
+/// through the unit gate ([`UnitAuraList::buffs_visible`]).
+fn listed(list: &UnitAuraList, helpful: bool) -> impl Iterator<Item = &AuraState> {
+    let gate_open = !helpful || list.buffs_visible;
+    list.auras
+        .iter()
+        .filter(move |a| gate_open && a.helpful == helpful)
+}
+
+/// The `raidFilter` argument, read as a script flag with default 0 (`0x6f1c10` at `0x51958b`,
+/// `0x534bda`): nonzero keeps only the [`AuraState::raid_listed`] auras.
+pub(crate) fn raid_filter_arg(v: Option<&Value>) -> bool {
+    crate::script::binding_abi::flag_or_default(v, 0) != 0
+}
+
+/// The `index`-th (1-based) buff (`helpful`) or debuff of `token`, in pushed order, counting only
+/// the `raid_listed` ones under `raid`; out of range answers one nil on every miss leg
+/// (`0x5195fe`, `0x5197d4`, `0x519a51`), the loop terminator.
 fn nth_aura(
     lua: &Lua,
     token: &Option<String>,
     index: i64,
     helpful: bool,
+    raid: bool,
 ) -> mlua::Result<MultiValue> {
     // The token resolves before the index is read (`0x519542`, then `0x51957a`), so a bad token
     // raises at any index.
@@ -118,8 +164,8 @@ fn nth_aura(
             Some(t) => auras_of(&model, t)?
                 .filter(|_| index >= 1)
                 .and_then(|list| {
-                    list.iter()
-                        .filter(|a| a.helpful == helpful)
+                    listed(list, helpful)
+                        .filter(|a| !raid || a.raid_listed)
                         .nth((index - 1) as usize)
                         .cloned()
                 }),
@@ -133,14 +179,16 @@ fn nth_aura(
 }
 
 impl super::UiScript {
-    /// Push the player's aura list in the cache's order (`0xbc6040`), durations joined.
+    /// Push the player's buff cache in its order (`0xbc6040`), durations joined: the `GetPlayerBuff`
+    /// family's list. The player's slots, which `UnitBuff("player")` reads, are its
+    /// [`Self::set_unit_auras`] list.
     pub fn set_player_auras(&mut self, auras: Vec<AuraState>) {
         self.model_mut().player_auras = auras;
     }
 
-    /// Push or clear a unit's aura list by guid, in ascending aura slot; any token naming the unit
-    /// reads it. The player's is [`Self::set_player_auras`].
-    pub fn set_unit_auras(&mut self, guid: u64, auras: Option<Vec<AuraState>>) {
+    /// Push or clear a unit's aura list by guid, in ascending aura slot, the player's too; any token
+    /// naming the unit reads it.
+    pub fn set_unit_auras(&mut self, guid: u64, auras: Option<UnitAuraList>) {
         let mut model = self.model_mut();
         match auras {
             Some(a) => {
@@ -189,12 +237,7 @@ impl super::UiScript {
         auras_of(&model, token)
             .ok()
             .flatten()
-            .map(|list| {
-                list.iter()
-                    .filter(|a| a.helpful == helpful)
-                    .map(|a| a.spell_id)
-                    .collect()
-            })
+            .map(|list| listed(list, helpful).map(|a| a.spell_id).collect())
             .unwrap_or_default()
     }
 
@@ -211,22 +254,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // UnitBuff(unit, index [, raidFilter]) and UnitDebuff: the verb fixes the sign, `0x519500`
     // reading aura slots 0..31 and `0x5198f0` slots 32..47. A non-zero `raidFilter` keeps only
-    // buffs the player can cast (`0x4b3870`) or debuffs they can dispel (`0x4b3920`); it is
-    // accepted, not applied, as `AuraState` holds neither fact, so the pet frame's buff row and the
-    // dispellable-debuff rows show every aura.
+    // buffs the player can cast (`0x4b3870`) or debuffs they can dispel (`0x4b3920`), and the
+    // index counts those alone.
     g.set(
         "UnitBuff",
         lua.create_function(
-            |lua, (token, index, _raid_filter): (Option<String>, i64, Option<Value>)| {
-                nth_aura(lua, &token, index, true)
+            |lua, (token, index, raid_filter): (Value, Value, Option<Value>)| {
+                // `is-number-or-string` on arg 1, `is-number` on arg 2 else `Usage: UnitBuff("unit",
+                // index [,raidFilter])` (`0x8512b8`, `0x519847`).
+                const USAGE: &str = r#"Usage: UnitBuff("unit", index [,raidFilter])"#;
+                let token = Some(crate::script::binding_abi::string_arg(lua, token, USAGE)?);
+                let index = i64::from(crate::script::binding_abi::number_arg(lua, index, USAGE)?);
+                let raid = raid_filter_arg(raid_filter.as_ref());
+                nth_aura(lua, &token, index, true, raid)
             },
         )?,
     )?;
     g.set(
         "UnitDebuff",
         lua.create_function(
-            |lua, (token, index, _raid_filter): (Option<String>, i64, Option<Value>)| {
-                nth_aura(lua, &token, index, false)
+            |lua, (token, index, raid_filter): (Value, Value, Option<Value>)| {
+                // `is-number-or-string` on arg 1, `is-number` on arg 2 else `Usage: UnitDebuff("unit",
+                // index [,raidFilter])` (`0x8512e8`, `0x519c79`).
+                const USAGE: &str = r#"Usage: UnitDebuff("unit", index [,raidFilter])"#;
+                let token = Some(crate::script::binding_abi::string_arg(lua, token, USAGE)?);
+                let index = i64::from(crate::script::binding_abi::number_arg(lua, index, USAGE)?);
+                let raid = raid_filter_arg(raid_filter.as_ref());
+                nth_aura(lua, &token, index, false, raid)
             },
         )?,
     )?;
@@ -262,7 +316,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::script::{AuraState, TrackingState, UiScript, UnitGuids};
+    use crate::script::{AuraState, TrackingState, UiScript, UnitAuraList, UnitGuids};
 
     const ME: u64 = 0x10;
     const TARGET: u64 = 0xF130_0000_0000_0001;
@@ -284,6 +338,7 @@ mod tests {
             name: Some(name.into()),
             icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
             count: 1,
+            level: 0,
             debuff_type: None,
             duration: 0.0,
             expiration_time: 0.0,
@@ -291,17 +346,24 @@ mod tests {
             cancelable,
             until_cancelled: false,
             channeled: false,
+            raid_listed: false,
         }
     }
 
     #[test]
     fn unit_buff_enumerates_the_pushed_order_not_the_spell_id_order() {
         let mut s = script();
-        s.set_player_auras(vec![
-            aura(2457, "Battle Stance", true, true),
-            aura(1126, "Mark of the Wild", true, true),
-            aura(589, "Shadow Word: Pain", false, false),
-        ]);
+        s.set_unit_auras(
+            ME,
+            Some(
+                vec![
+                    aura(2457, "Battle Stance", true, true),
+                    aura(1126, "Mark of the Wild", true, true),
+                    aura(589, "Shadow Word: Pain", false, false),
+                ]
+                .into(),
+            ),
+        );
         assert_eq!(
             s.eval::<String>(r#"return (UnitBuff("player", 1))"#)
                 .unwrap(),
@@ -349,7 +411,7 @@ mod tests {
         let mut debuff = aura(589, "Shadow Word: Pain", false, false);
         debuff.count = 3;
         debuff.debuff_type = Some("Magic".into());
-        s.set_unit_auras(TARGET, Some(vec![buff, debuff]));
+        s.set_unit_auras(TARGET, Some(vec![buff, debuff].into()));
 
         let (icon, count, third) = s
             .eval::<(String, i64, Option<String>)>(
@@ -380,12 +442,10 @@ mod tests {
             )
             .unwrap());
 
-        // The raidFilter flag is accepted and not applied.
-        assert_eq!(
-            s.eval::<String>(r#"return (UnitDebuff("target", 1, 1))"#)
-                .unwrap(),
-            "Interface\\Icons\\Spell_589"
-        );
+        // A set raidFilter keeps only a debuff the player can dispel, which this one is not.
+        assert!(s
+            .eval::<bool>(r#"return UnitDebuff("target", 1, 1) == nil"#)
+            .unwrap());
     }
 
     #[test]
@@ -427,11 +487,13 @@ mod tests {
     #[test]
     fn an_emptied_player_list_answers_nil() {
         let mut s = script();
-        s.set_player_auras(vec![aura(2457, "Stance", true, true)]);
+        s.set_unit_auras(ME, Some(vec![aura(2457, "Stance", true, true)].into()));
         assert!(s
             .eval::<bool>(r#"return UnitBuff("player", 1) ~= nil"#)
             .unwrap());
-        s.set_player_auras(Vec::new());
+        // The buff cache is the `GetPlayerBuff` family's, never `UnitBuff`'s.
+        s.set_player_auras(vec![aura(2457, "Stance", true, true)]);
+        s.set_unit_auras(ME, Some(Vec::new().into()));
         assert!(s
             .eval::<bool>(r#"return UnitBuff("player", 1) == nil"#)
             .unwrap());
@@ -463,11 +525,17 @@ mod tests {
             .collect(),
             ..Default::default()
         });
-        s.set_player_auras(vec![
-            aura(2457, "Battle Stance", true, true),
-            aura(1126, "Mark of the Wild", true, true),
-            aura(11976, "Strike", false, false),
-        ]);
+        s.set_unit_auras(
+            ME,
+            Some(
+                vec![
+                    aura(2457, "Battle Stance", true, true),
+                    aura(1126, "Mark of the Wild", true, true),
+                    aura(11976, "Strike", false, false),
+                ]
+                .into(),
+            ),
+        );
         for (guid, base, name) in [
             (TARGET, 100, "on the target"),
             (MOB, 200, "on the mouseover"),
@@ -476,10 +544,13 @@ mod tests {
         ] {
             s.set_unit_auras(
                 guid,
-                Some(vec![
-                    aura(base + 1, name, true, true),
-                    aura(base + 2, name, false, false),
-                ]),
+                Some(
+                    vec![
+                        aura(base + 1, name, true, true),
+                        aura(base + 2, name, false, false),
+                    ]
+                    .into(),
+                ),
             );
         }
         s
@@ -521,8 +592,8 @@ mod tests {
             .unwrap());
     }
 
-    /// A token naming the player, in any case or down a chain, reads the player's list in cache
-    /// order, as `"player"` does.
+    /// A token naming the player, in any case or down a chain, reads the player's list, as
+    /// `"player"` does.
     #[test]
     fn a_token_naming_the_player_reads_the_player_list() {
         let s = group_script();
@@ -600,5 +671,99 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Unknown unit name: bogus"), "{err}");
+    }
+
+    /// A set `raidFilter`, read as a script flag (`0x6f1c10`), counts only the `raid_listed`
+    /// auras, in `UnitBuff`, `UnitDebuff` and the tooltip's setters alike (`0x51967b`,
+    /// `0x519a1a`, `0x534c6c`, `0x534fec`).
+    #[test]
+    fn a_raid_filter_counts_the_listed_auras_alone() {
+        let mut s = group_script();
+        let listed = |id, helpful, raid_listed| AuraState {
+            raid_listed,
+            ..aura(id, &format!("aura {id}"), helpful, true)
+        };
+        s.set_unit_auras(
+            MOB,
+            Some(
+                vec![
+                    listed(201, true, false),
+                    listed(202, true, true),
+                    listed(203, false, false),
+                    listed(204, false, true),
+                ]
+                .into(),
+            ),
+        );
+        for (call, want) in [
+            (r#"UnitBuff("mouseover", 1)"#, Some(201)),
+            (r#"UnitBuff("mouseover", 1, 1)"#, Some(202)),
+            (r#"UnitBuff("mouseover", 1, true)"#, Some(202)),
+            (r#"UnitBuff("mouseover", 1, "1")"#, Some(202)),
+            (r#"UnitBuff("mouseover", 1, "0")"#, Some(201)),
+            (r#"UnitBuff("mouseover", 1, 0.5)"#, Some(201)),
+            (r#"UnitBuff("mouseover", 1, nil)"#, Some(201)),
+            (r#"UnitBuff("mouseover", 2, 1)"#, None),
+            (r#"UnitDebuff("mouseover", 1)"#, Some(203)),
+            (r#"UnitDebuff("mouseover", 1, 1)"#, Some(204)),
+        ] {
+            assert_eq!(
+                icon_of(&s, call),
+                want.map(|id| format!("Interface\\Icons\\Spell_{id}")),
+                "{call}"
+            );
+        }
+        s.run(
+            r#"local a = CreateFrame("Button", "TF1")
+               a:SetPoint("CENTER", 0, 0) a:SetWidth(10) a:SetHeight(10)
+               TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+               TT:SetOwner(a, "ANCHOR_BOTTOMRIGHT")
+               TT:SetUnitBuff("mouseover", 1, 1)
+               assert(TTTextLeft1:GetText() == "aura 202", TTTextLeft1:GetText())
+               TT:SetUnitDebuff("mouseover", 1, 1)
+               assert(TTTextLeft1:GetText() == "aura 204", TTTextLeft1:GetText())
+               TT:SetUnitDebuff("mouseover", 1)
+               assert(TTTextLeft1:GetText() == "aura 203", TTTextLeft1:GetText())"#,
+        )
+        .unwrap();
+    }
+
+    /// A closed unit gate answers nil at every `UnitBuff` index (`0x5195aa`-`0x5195f7`) and
+    /// leaves `UnitDebuff` alone; `GameTooltip:SetUnitBuff` has no gate (`0x534bfb`) and still
+    /// shows the buff.
+    #[test]
+    fn a_closed_unit_gate_hides_the_buffs_from_unit_buff_alone() {
+        let mut s = group_script();
+        s.set_unit_auras(
+            MOB,
+            Some(UnitAuraList {
+                auras: vec![
+                    aura(201, "a buff", true, true),
+                    aura(202, "a debuff", false, false),
+                ],
+                buffs_visible: false,
+            }),
+        );
+        assert_eq!(s.arity(r#"UnitBuff("mouseover", 1)"#).unwrap(), 1);
+        assert!(s
+            .eval::<bool>(r#"return UnitBuff("mouseover", 1) == nil"#)
+            .unwrap());
+        assert_eq!(
+            icon_of(&s, r#"UnitDebuff("mouseover", 1)"#).as_deref(),
+            Some("Interface\\Icons\\Spell_202")
+        );
+        assert!(s.aura_spell_ids("mouseover", true).is_empty());
+        s.run(
+            r#"local a = CreateFrame("Button", "TF1")
+               a:SetPoint("CENTER", 0, 0) a:SetWidth(10) a:SetHeight(10)
+               TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+               TT:SetOwner(a, "ANCHOR_BOTTOMRIGHT")
+               TT:SetUnitBuff("mouseover", 1)"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<String>("return TTTextLeft1:GetText()").unwrap(),
+            "a buff"
+        );
     }
 }

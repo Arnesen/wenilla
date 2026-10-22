@@ -22,6 +22,17 @@ fn int(s: &UiScript, expr: &str) -> i64 {
     s.eval::<i64>(&format!("return {expr}")).unwrap()
 }
 
+/// `OnSizeChanged`'s size in layout units (`0x76b623`) over one root unit's store: in root units.
+fn root(s: &UiScript, layout: f64) -> f64 {
+    layout / f64::from(s.model_ref().layout_units().store(1.0))
+}
+
+/// Set `PER`, one root unit's store, so a handler can log its size in root units.
+fn set_per(s: &UiScript) {
+    let per = f64::from(s.model_ref().layout_units().store(1.0));
+    s.lua().globals().set("PER", per).unwrap();
+}
+
 fn num(s: &UiScript, expr: &str) -> f64 {
     s.eval::<f64>(&format!("return {expr}")).unwrap()
 }
@@ -65,7 +76,11 @@ fn a_size_change_while_hidden_fires_once_inside_show() {
         1,
         "the show resolves it, inside Show"
     );
-    assert_eq!(num(&s, "last_w"), 30.0, "once, with the last size");
+    crate::assert_near!(
+        root(&s, num(&s, "last_w")),
+        30.0,
+        "once, with the last size"
+    );
     assert_eq!(
         s.eval::<String>("return table.concat(log, ',')").unwrap(),
         "size,show",
@@ -129,8 +144,8 @@ fn a_getter_on_a_hidden_frame_answers_the_new_size_and_leaves_it_deferred() {
     assert_eq!(int(&s, "fires"), 1);
 
     s.run("DeferRead:Hide(); DeferRead:SetWidth(20)").unwrap();
-    assert_eq!(num(&s, "DeferRead:GetRight() - DeferRead:GetLeft()"), 20.0);
-    assert_eq!(num(&s, "DeferRead:GetWidth()"), 20.0);
+    crate::assert_near!(num(&s, "DeferRead:GetRight() - DeferRead:GetLeft()"), 20.0);
+    crate::assert_near!(num(&s, "DeferRead:GetWidth()"), 20.0);
     s.resolve();
     assert_eq!(
         int(&s, "fires"),
@@ -199,13 +214,13 @@ fn a_visible_frame_anchored_to_a_hidden_one_resolves_through_it() {
     )
     .unwrap();
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         int(&s, "read_fires"),
         1,
         "the reader's anchor read resolved it"
     );
-    assert_eq!(int(&s, "unread_fires"), 0, "nothing read this one");
-    assert_eq!(int(&s, "link_fires"), 0, "the link only moved");
+    crate::assert_near!(int(&s, "unread_fires"), 0, "nothing read this one");
+    crate::assert_near!(int(&s, "link_fires"), 0, "the link only moved");
 
     s.run(
         r#"
@@ -214,9 +229,9 @@ fn a_visible_frame_anchored_to_a_hidden_one_resolves_through_it() {
     "#,
     )
     .unwrap();
-    assert_eq!(num(&s, "reader_left"), num(&s, "target_right") + 5.0);
-    assert_eq!(num(&s, "root_left - DeferRoot:GetRight()"), -300.0);
-    assert_eq!(
+    crate::assert_near!(num(&s, "reader_left"), num(&s, "target_right") + 5.0);
+    crate::assert_near!(num(&s, "root_left - DeferRoot:GetRight()"), -300.0);
+    crate::assert_near!(
         num(&s, "tail_right"),
         num(&s, "root_left") - 20.0,
         "the tail reads through the hidden link to the hidden root"
@@ -225,7 +240,7 @@ fn a_visible_frame_anchored_to_a_hidden_one_resolves_through_it() {
     // The read cleared the target's deferral for good: hidden, it now resolves at the drain.
     s.run("DeferTarget:SetWidth(250)").unwrap();
     s.resolve();
-    assert_eq!(int(&s, "read_fires"), 2);
+    crate::assert_near!(int(&s, "read_fires"), 2);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -249,15 +264,15 @@ fn a_region_of_a_hidden_frame_waits_with_it() {
     )
     .unwrap();
     s.resolve();
-    assert_eq!(int(&s, "fires"), 1);
-    assert_eq!(num(&s, "DeferArt:GetRight() - DeferArt:GetLeft()"), 100.0);
+    crate::assert_near!(int(&s, "fires"), 1);
+    crate::assert_near!(num(&s, "DeferArt:GetRight() - DeferArt:GetLeft()"), 100.0);
 
     s.run("DeferOwner:Hide(); DeferOwner:SetWidth(60)").unwrap();
     s.resolve();
-    assert_eq!(int(&s, "fires"), 1, "the frame waits");
-    assert_eq!(num(&s, "DeferArt:GetRight() - DeferArt:GetLeft()"), 60.0);
+    crate::assert_near!(int(&s, "fires"), 1, "the frame waits");
+    crate::assert_near!(num(&s, "DeferArt:GetRight() - DeferArt:GetLeft()"), 60.0);
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         int(&s, "fires"),
         2,
         "the region's read resolved its anchor target, the frame"
@@ -265,14 +280,14 @@ fn a_region_of_a_hidden_frame_waits_with_it() {
 
     s.run("DeferOwner:SetWidth(80)").unwrap();
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         int(&s, "fires"),
         3,
         "that anchor read cleared the frame's deferral for good"
     );
     s.run("DeferOwner:Show()").unwrap();
     s.resolve();
-    assert_eq!(num(&s, "DeferArt:GetRight() - DeferArt:GetLeft()"), 80.0);
+    crate::assert_near!(num(&s, "DeferArt:GetRight() - DeferArt:GetLeft()"), 80.0);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -388,7 +403,7 @@ fn a_region_hidden_on_a_visible_frame_waits_and_its_show_resolves_it() {
     let held = s.extract().len();
     s.run("DeferMark:Show()").unwrap();
     s.resolve();
-    assert_eq!(num(&s, "DeferMark:GetLeft() - DeferBase:GetLeft()"), 7.0);
+    crate::assert_near!(num(&s, "DeferMark:GetLeft() - DeferBase:GetLeft()"), 7.0);
     assert!(s.extract().len() > held, "it draws again");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
@@ -409,11 +424,12 @@ fn a_getter_fires_the_size_change_it_resolves_inside_the_read() {
     "#,
     )
     .unwrap();
+    set_per(&s);
     s.resolve();
     s.run(
         r#"
         DeferGet:SetScript("OnSizeChanged", function()
-            table.insert(log, "size " .. arg1)
+            table.insert(log, "size " .. floor(arg1 / PER + 0.5))
         end)
         DeferGet:Hide(); DeferGet:SetWidth(20)
     "#,
@@ -456,11 +472,12 @@ fn a_getter_on_a_queued_visible_frame_fires_inside_the_read() {
     "#,
     )
     .unwrap();
+    set_per(&s);
     s.resolve();
     s.run(
         r#"
         QueuedGet:SetScript("OnSizeChanged", function()
-            table.insert(log, "size " .. arg1)
+            table.insert(log, "size " .. floor(arg1 / PER + 0.5))
         end)
         QueuedGet:SetWidth(25)
         table.insert(log, "read")
@@ -547,7 +564,7 @@ fn a_scale_change_clears_a_deferred_anchorless_regions_rect() {
         let m = s.model_ref();
         let host = m.arena.lookup("ScaleHost").expect("host");
         let rh = m.arena.frame(host).expect("frame").regions[0];
-        m.region_resolved.get(&rh).copied()
+        m.region_rect(rh)
     };
     assert!(rect(&s).is_some());
     s.run("ScaleTex:ClearAllPoints(); ScaleHost:Hide()")

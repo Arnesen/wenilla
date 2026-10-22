@@ -142,6 +142,27 @@ impl LooseFile {
                 .ok(),
         }
     }
+
+    /// The entry's first `max` bytes, or all of it when shorter: a file on disk is read no
+    /// further, a member of an archive is inflated whole.
+    pub fn read_prefix(&self, max: usize) -> Option<Vec<u8>> {
+        match self {
+            LooseFile::Plain(path) => {
+                let mut bytes = Vec::with_capacity(max);
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(std::fs::File::open(path).ok()?, max as u64),
+                    &mut bytes,
+                )
+                .ok()?;
+                Some(bytes)
+            }
+            LooseFile::Archive { .. } => {
+                let mut bytes = self.read()?;
+                bytes.truncate(max);
+                Some(bytes)
+            }
+        }
+    }
 }
 
 /// The data folder the second walk takes, `0xc520c8` (`Data\`); the walk skips a folder whose
@@ -429,7 +450,7 @@ pub fn install_loose_interface_folders() -> Vec<&'static str> {
 }
 
 /// `dir`'s folder named `name` without regard to case, as `OsMoveFile` finds it on Windows.
-fn child_dir_ignoring_case(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn child_dir_ignoring_case(dir: &Path, name: &str) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -477,6 +498,20 @@ mod tests {
 
     fn body(file: Option<LooseFile>) -> Option<String> {
         file.map(|f| String::from_utf8(f.read().unwrap()).unwrap())
+    }
+
+    /// A prefix reads no further than asked and all of a shorter file.
+    #[test]
+    fn a_prefix_of_a_plain_file_reads_only_its_head() {
+        let tree = Tree::new("prefix");
+        let path = tree.file("a.bin", "0123456789");
+        let file = LooseFile::Plain(path);
+        assert_eq!(file.read_prefix(4).as_deref(), Some(&b"0123"[..]));
+        assert_eq!(file.read_prefix(10).as_deref(), Some(&b"0123456789"[..]));
+        assert_eq!(file.read_prefix(99).as_deref(), Some(&b"0123456789"[..]));
+        assert_eq!(file.read_prefix(0).as_deref(), Some(&b""[..]));
+        let gone = LooseFile::Plain(tree.0.join("missing"));
+        assert_eq!(gone.read_prefix(4), None);
     }
 
     /// Both walks enter files by their path below the folder walked, the base folder's first, and

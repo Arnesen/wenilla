@@ -12,7 +12,7 @@ use std::collections::{HashSet, VecDeque};
 
 use mlua::Lua;
 
-use crate::layout::{Anchor, Anchors, Point};
+use crate::layout::{Anchor, Anchors, Len, Point};
 use crate::order::DrawLayer;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle, RegionKind};
 
@@ -83,9 +83,9 @@ pub struct PlateState {
     pub level_colour: [f32; 3],
     /// The raid-target mark, 0-based, or `None`.
     pub raid_icon: Option<u8>,
-    /// The plate's alpha: exactly 1.0 for the target, dimmed otherwise. Addons find the target
+    /// The plate's alpha byte: 255 for the target, dimmed otherwise. Addons find the target
     /// plate by `GetAlpha() == 1`.
-    pub alpha: f32,
+    pub alpha: u8,
     /// Mouseover or target: the bar brightens.
     pub lit: bool,
     /// The pointer is on the plate: the name goes yellow (`0x7cb850`) and the glow region shows.
@@ -103,7 +103,8 @@ struct Plate {
     skull: RegionHandle,
     raid: RegionHandle,
     bar: FrameHandle,
-    fill: RegionHandle,
+    /// `None` when the fill's file failed to load (`0x7831b4`).
+    fill: Option<RegionHandle>,
     /// Last frame's state, so [`Plate::drive`] writes only what moved; `None` while retired.
     last: Option<PlateState>,
     /// The geometry its anchors were written under, `None` before the first lay-out. Kept per
@@ -140,6 +141,8 @@ pub(crate) struct NamePlates {
     /// The verbs' writes to the two script bits, drained by
     /// [`UiScript::take_nameplate_bit_writes`].
     bit_writes: PlateBitWrites,
+    /// The fills of the lit plates, which draw boosted ([`lit_fill_boost`]).
+    lit_fills: std::collections::HashSet<RegionHandle>,
 }
 
 impl NamePlates {
@@ -526,25 +529,16 @@ impl Plate {
         let bar = model.arena.create(FrameKind::StatusBar, None, Some(frame));
         model.arena.set_frame_strata(bar, strata);
         model.arena.set_frame_level(bar, BAR_LEVEL, true);
-        let fill = model
-            .arena
-            .create_region(bar, RegionKind::Texture, DrawLayer::Artwork, 0)
+        // The fill is `SetStatusBarTexture`'s path leg on layer 2 (`0x7cb31a`-`0x7cb329`), so it
+        // is installed, flagged to cut its rect and pinned to the bar like any bar texture; a file
+        // that fails to load leaves the bar without one. The bar's ctor (`0x7cc340` → `0x782d80`)
+        // sets no range and no value.
+        super::statusbar::set_bar_path_model(model, bar, BAR_FILL_TEXTURE, DrawLayer::Artwork)
             .expect("live bar");
-        model.set_texel(
-            fill,
-            super::texel::TexSet::File(BAR_FILL_TEXTURE.to_string()),
-        );
-        let fill_data = model.region_data.entry(fill).or_default();
-        // The fill keeps `CSimpleTexture`'s default BLEND (`0x76fc40`), written out as a fact.
-        fill_data.blend = BlendMode::Blend;
-        if let Some(KindState::StatusBar(sb)) =
-            model.arena.frame_mut(bar).map(|f| &mut f.kind_state)
-        {
-            sb.bar = Some(fill);
-            sb.min = 0.0;
-            sb.max = 1.0;
-            sb.value = 0.0;
-        }
+        let fill = match model.arena.frame(bar).map(|f| &f.kind_state) {
+            Some(KindState::StatusBar(sb)) => sb.bar,
+            _ => None,
+        };
 
         for rh in [glow, skull, raid] {
             model.set_region_hidden(rh, true);
@@ -585,8 +579,8 @@ impl Plate {
 
         // The plate's size; its position is per-frame, in `drive`.
         let input = model.layout_inputs.entry(frame).or_default();
-        input.width = g.width;
-        input.height = g.height;
+        input.width = crate::layout::Len::Script(g.width);
+        input.height = crate::layout::Len::Script(g.height);
 
         for rh in [border, glow] {
             model.region_data.entry(rh).or_default().anchors = Anchors::from([
@@ -603,8 +597,8 @@ impl Plate {
             g.bar_off_x,
             g.bar_off_y,
         )]);
-        bar_input.width = g.bar_width;
-        bar_input.height = g.bar_height;
+        bar_input.width = crate::layout::Len::Script(g.bar_width);
+        bar_input.height = crate::layout::Len::Script(g.bar_height);
 
         // The name's (`0x7cb456`) and level's (`0x7cb7f5`) anchors, which `_Nameplates` checks.
         let name_data = model.region_data.entry(name).or_default();
@@ -615,12 +609,15 @@ impl Plate {
             0.0,
             0.0,
         )]);
-        name_data.font_height = Some(g.name_height);
+        name_data.font_height = Some(Len::Script(g.name_height));
 
         for rh in [name, level] {
             model.region_data.entry(rh).or_default().font_shadow = Some(FontShadow {
-                offset: [g.shadow_offset, -g.shadow_offset],
-                color: [0.0, 0.0, 0.0, 1.0],
+                offset: [
+                    crate::layout::Len::Script(g.shadow_offset),
+                    crate::layout::Len::Script(-g.shadow_offset),
+                ],
+                color: crate::color::Rgba8::BLACK,
             });
         }
 
@@ -632,8 +629,7 @@ impl Plate {
             -g.level_off_x,
             g.level_off_y,
         )]);
-        level_data.font_height = Some(g.level_height);
-        level_data.font_explicit.height = true;
+        level_data.font_height = Some(Len::Script(g.level_height));
         model.touch_measure(level);
 
         let skull_data = model.region_data.entry(skull).or_default();
@@ -644,12 +640,12 @@ impl Plate {
             -g.level_off_x,
             g.level_off_y,
         )]);
-        skull_data.size = Some((g.skull_size, g.skull_size));
+        skull_data.size = Some((Len::Script(g.skull_size), Len::Script(g.skull_size)));
 
         let raid_data = model.region_data.entry(raid).or_default();
         raid_data.anchors =
             Anchors::from([Anchor::new(Point::Right, plate_id, Point::Left, 0.0, 0.0)]);
-        raid_data.size = Some((g.raid_size, g.raid_size));
+        raid_data.size = Some((Len::Script(g.raid_size), Len::Script(g.raid_size)));
 
         // Once per geometry change: each node it wrote is invalidated, as the plate setup's
         // `SetPoint`/`SetAllPoints` with the invalidate flag do (`0x7cb456`..`0x7cb806`).
@@ -705,27 +701,37 @@ impl Plate {
         }
 
         // Raw health on the bar; the fill's reaction colour brightens while lit (`LIT_BOOST`).
-        if last
-            .as_ref()
-            .is_none_or(|l| l.health != state.health || l.max_health != state.max_health)
-        {
-            if let Some(KindState::StatusBar(sb)) =
-                model.arena.frame_mut(bar).map(|f| &mut f.kind_state)
-            {
-                sb.min = 0.0;
-                sb.max = state.max_health;
-                sb.value = state.health.clamp(0.0, state.max_health);
+        // The assignment drives it once (`0x7cc42c`); after that one watcher per field, HEALTH and
+        // MAXHEALTH (`0x7cc53b`, `0x7cc562`), runs for each that changed (`0x4655bb`).
+        let runs = match &last {
+            None => 1,
+            Some(l) => {
+                usize::from(l.health != state.health)
+                    + usize::from(l.max_health != state.max_health)
             }
-            effects.values.push((bar, state.health));
+        };
+        for _ in 0..runs {
+            let fires = super::statusbar::set_health(model, bar, state.max_health, state.health);
+            effects
+                .values
+                .extend(fires.into_iter().flatten().map(|v| (bar, v)));
         }
         if last
             .as_ref()
             .is_none_or(|l| l.bar_colour != state.bar_colour || l.lit != state.lit)
         {
-            let boost = if state.lit { LIT_BOOST } else { 1.0 };
-            let c = state.bar_colour;
-            model.region_data.entry(fill).or_default().vertex_color =
-                Some([c[0] * boost, c[1] * boost, c[2] * boost, 1.0]);
+            // The boost rides the draw ([`lit_fill_boost`]): it can pass 1, which the packed
+            // colour cannot hold.
+            if let Some(fill) = fill {
+                if state.lit {
+                    model.nameplates.lit_fills.insert(fill);
+                } else {
+                    model.nameplates.lit_fills.remove(&fill);
+                }
+                let c = state.bar_colour;
+                model.region_data.entry(fill).or_default().vertex_color =
+                    Some(crate::color::Rgba8::from_f32([c[0], c[1], c[2], 1.0]));
+            }
         }
 
         if last.as_ref().is_none_or(|l| l.name != state.name) {
@@ -739,9 +745,9 @@ impl Plate {
         }
         if last.as_ref().is_none_or(|l| l.hovered != state.hovered) {
             let c = if state.hovered {
-                [1.0, 1.0, 0.0, 1.0]
+                crate::color::Rgba8::rgba(255, 255, 0, 255)
             } else {
-                [1.0, 1.0, 1.0, 1.0]
+                crate::color::Rgba8::WHITE
             };
             model
                 .region_data
@@ -767,7 +773,9 @@ impl Plate {
                     let shown = model.localized_text(n.to_string());
                     let data = model.region_data.entry(level).or_default();
                     data.text = Some(shown);
-                    data.set_vertex_color(Some([c[0], c[1], c[2], 1.0]));
+                    data.set_vertex_color(Some(crate::color::Rgba8::from_f32([
+                        c[0], c[1], c[2], 1.0,
+                    ])));
                     model.set_region_hidden(level, false);
                     model.set_region_hidden(skull, true);
                     model.touch_measure(level);
@@ -862,8 +870,9 @@ fn font_string(
         .create_region(frame, RegionKind::FontString, DrawLayer::Overlay, 0)
         .expect("live plate");
     let data = model.region_data.entry(rh).or_default();
+    // The engine's own load (`0x7714f0`) clears no inherit bit, so a later `SetFontObject`
+    // repaints the plate's text as any FontString's.
     data.font_path = font;
-    data.font_explicit.face = true;
     data.justify.set_v(justify_v);
     rh
 }
@@ -881,6 +890,15 @@ pub(super) fn is_world_seated(model: &Model, frame: FrameHandle) -> bool {
 /// pipeline. The art has no alpha and is mostly black, so as BLEND it would be an opaque box.
 pub(super) fn is_unpainted_glow(data: &RegionData) -> bool {
     data.blend == BlendMode::Add && data.tex.path().as_deref() == Some(GLOW_TEXTURE)
+}
+
+/// The draw-time multiply of plate fill `rh`'s tint: [`LIT_BOOST`] while its plate is lit.
+pub(super) fn lit_fill_boost(model: &Model, rh: RegionHandle) -> Option<f32> {
+    model
+        .nameplates
+        .lit_fills
+        .contains(&rh)
+        .then_some(LIT_BOOST)
 }
 
 /// The lit bar's brighten, a multiply of the fill tint in encoded sRGB like the client's modulate:

@@ -7,9 +7,9 @@
 
 use mlua::{Lua, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::{Model, ScriptValue};
-use crate::script::binding_abi::{number_arg, Idx32};
+use crate::script::binding_abi::number_arg;
 
 /// `rollType` 0, the one vote the bind-on-pickup gate never intercepts.
 const PASS: i32 = 0;
@@ -109,7 +109,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // template does there.
     g.set(
         "GetLootRollItemInfo",
-        lua.create_function(|lua, Idx32(roll_id): Idx32| {
+        lua.create_function(|lua, roll_id: Value| {
+            // `is-number` else `Usage: GetLootRollItemInfo(id)` (`0x8480e0`, `0x4c307e`).
+            let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: GetLootRollItemInfo(id)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(r) = find(&model, roll_id) else {
                 return lua.pack_multi((
@@ -134,7 +136,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `nil` for an unknown id or while the item template is in flight.
     g.set(
         "GetLootRollItemLink",
-        lua.create_function(|lua, Idx32(roll_id): Idx32| {
+        lua.create_function(|lua, roll_id: Value| {
+            // `is-number` else `Usage: GetLootRollItemLink(id)` (`0x848100`, `0x4c321e`).
+            let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: GetLootRollItemLink(id)")?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 find(&model, roll_id).and_then(|r| r.link.clone())
@@ -150,7 +154,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // (`LootFrame.lua:290-293`).
     g.set(
         "GetLootRollTimeLeft",
-        lua.create_function(|lua, Idx32(roll_id): Idx32| {
+        lua.create_function(|lua, roll_id: Value| {
+            // `is-number` else `Usage: GetLootRollTimeLeft(id)` (`0x848120`, `0x4c32e8`).
+            let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: GetLootRollTimeLeft(id)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(find(&model, roll_id).map_or(0, |r| r.time_left_ms))
         })?,

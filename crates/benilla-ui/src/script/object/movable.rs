@@ -13,7 +13,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::layout::{Anchor, Anchors, Point};
+use crate::layout::{Anchor, Anchors, Len, Point};
 use crate::script::binding_abi::bool_or_default;
 use crate::script::{Model, UiScript, SCREEN};
 use crate::widget::FrameHandle;
@@ -28,7 +28,7 @@ pub(crate) struct FrameMove {
     frame: FrameHandle,
     /// The grip (`root+0xd04`): CENTER moves the frame, any other point resizes it from there.
     grip: Point,
-    /// The cursor position at the last pump (`root+0xd08`/`+0xd0c`), UI px, y-up.
+    /// The cursor position at the last pump (`root+0xd08`/`+0xd0c`), in layout units, y-up.
     sample: (f32, f32),
     /// Whether mouse-up ends the drag, the drag mode as Lua sees it: `0x766420` ends modes 1
     /// (modifier drag) and 2 (title region), never 3 (`StartMoving`, `StartSizing`).
@@ -67,8 +67,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     //
     // `SetMinResize 0x776020`, `GetMinResize 0x775f20`, `SetMaxResize 0x7762a0`,
     // `GetMaxResize 0x7761a0`. Both arguments must pass `lua_isnumber` (`0x6f34d0`), else `Usage:`
-    // (`0x8797b8`/`0x8797e4`); the pair is stored raw, with no layout touch and no `min > max`
-    // check. The getters always answer two numbers, 0 meaning unbounded.
+    // (`0x8797b8`/`0x8797e4`); the pair is stored as `S` stores it (min: width at `+0x84`, height
+    // at `+0x80`, `0x77610f`, `0x776138`; max at `+0x8c` and `+0x88`), with no layout touch and no
+    // `min > max` check. The getters always answer two numbers through `G` (`0x775fda`,
+    // `0x775ffe`; `0x77625a`, `0x77627e`), 0 meaning unbounded. benilla keeps the script number and
+    // takes both steps at the read.
     for (name, upper) in [("MinResize", false), ("MaxResize", true)] {
         m.set(
             format!("Set{name}"),
@@ -89,11 +92,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 };
                 let (Some(w), Some(hgt)) = (num(&pair.0), num(&pair.1)) else {
                     let model = lua.app_data_ref::<Model>().expect("model");
-                    let who = model
-                        .arena
-                        .frame(h)
-                        .and_then(|f| f.name.clone())
-                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    let who = crate::script::binding_abi::frame_name(&model, h);
                     let (verb, a, b) = if upper {
                         ("SetMaxResize", "maxWidth", "maxHeight")
                     } else {
@@ -106,9 +105,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 if let Some(f) = model.arena.frame_mut(h) {
                     if upper {
-                        f.max_resize = (w, hgt);
+                        f.max_resize = (Len::Script(w), Len::Script(hgt));
                     } else {
-                        f.min_resize = (w, hgt);
+                        f.min_resize = (Len::Script(w), Len::Script(hgt));
                     }
                 }
                 Ok(())
@@ -119,14 +118,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             lua.create_function(move |lua, this: Table| {
                 let h = frame_handle_of(lua, &this)?;
                 let model = lua.app_data_ref::<Model>().expect("model");
-                let (w, hgt) = model.arena.frame(h).map_or((0.0, 0.0), |f| {
-                    if upper {
-                        f.max_resize
-                    } else {
-                        f.min_resize
-                    }
-                });
-                Ok((f64::from(w), f64::from(hgt)))
+                let units = model.layout_units();
+                Ok(model.arena.frame(h).map_or((0.0, 0.0), |f| {
+                    let (w, hgt) = if upper { f.max_resize } else { f.min_resize };
+                    (w.get(units), hgt.get(units))
+                }))
             })?,
         )?;
     }
@@ -246,14 +242,10 @@ fn get_flag(lua: &Lua, this: &Table, which: Flag) -> mlua::Result<Value> {
     ))
 }
 
-/// The family's refusal, naming the frame as the reference does. The wording is ours: the strings
-/// at `0x879810`, `0x879828` and `0x879844` are unread, known only by their symbol names.
+/// The family's refusal: `Frame %s is not movable` (`0x879810`), `… resizable` (`0x879828`) or
+/// `… movable or resizable` (`0x879844`, `SetUserPlaced`), naming the frame (`0x77679b`).
 fn not_flagged(model: &Model, h: FrameHandle, want: &str) -> mlua::Error {
-    let who = model
-        .arena
-        .frame(h)
-        .and_then(|f| f.name.clone())
-        .unwrap_or_else(|| "<anonymous>".into());
+    let who = crate::script::binding_abi::frame_name(model, h);
     mlua::Error::runtime(format!("Frame {who} is not {want}"))
 }
 
@@ -307,14 +299,15 @@ pub(crate) fn start_layout_drag(
 }
 
 /// `0x765320`'s sizing grip: with the layout resolved (`0x76533e` → `0x7680e0`), the cell of a 3×3
-/// grid of the frame's rect (`0x768320`) that `at` falls in, each axis cut at a quarter and three
-/// quarters (`0.25` at `0x8029b0`, `3.0` at `0x80297c`), a cut belonging to the cell past it; the
-/// middle cell is CENTER, a move (`0x765384`–`0x765464`). The x offset and the quarter-width stay
-/// in x87 registers, the y offset and the quarter-height are stored as floats (`0x765390`,
-/// `0x7653ab`). None when the frame has no rect (`0x765379`).
+/// grid of the frame's rect (`0x768320`) that `at` falls in, both in layout units, each axis cut at
+/// a quarter and three quarters (`0.25` at `0x8029b0`, `3.0` at `0x80297c`), a cut belonging to the
+/// cell past it; the middle cell is CENTER, a move (`0x765384`–`0x765464`). The x offset and the
+/// quarter-width stay in x87 registers, the y offset and the quarter-height are stored as floats
+/// (`0x765390`, `0x7653ab`). None when the frame has no rect (`0x765379`).
 fn grid_grip(model: &mut Model, h: FrameHandle, (x, y): (f32, f32)) -> Option<Point> {
     UiScript::resolve_layout(model);
-    let r = *model.resolved.get(&h)?;
+    let r = *model.frame_rects.get(&h)?;
+    let (x, y) = model.layout_space().cursor_layout(x, y);
     let dx = f64::from(x) - f64::from(r.left);
     let quarter_w = (f64::from(r.right) - f64::from(r.left)) * 0.25;
     let dy = f64::from((f64::from(y) - f64::from(r.bottom)) as f32);
@@ -363,10 +356,12 @@ fn begin_drag(model: &mut Model, h: FrameHandle, grip: Point, auto_stop: bool) -
     if repinned {
         mark_user_placed_change(model, h);
     }
+    let (x, y) = model.cursor_pos;
+    let sample = model.layout_space().cursor_layout(x, y);
     model.moving = Some(FrameMove {
         frame: h,
         grip,
-        sample: model.cursor_pos,
+        sample,
         auto_stop,
     });
     true
@@ -375,9 +370,10 @@ fn begin_drag(model: &mut Model, h: FrameHandle, grip: Point, auto_stop: bool) -
 /// `0x768430` against the screen root. With the layout settled first (`0x768464`–`0x76846f`), read
 /// the frame's rect (`0x76847a`), clear its anchors (`0x767620`), set one TOPLEFT on the screen's
 /// TOPLEFT at the rect's top-left moved by `travel` (`0x767c70`), and give it an explicit size,
-/// `size` per axis or the rect's where that is 0 (`0x7684e1`, `0x768508`). Offsets and size are in
-/// the frame's own units, screen over its effective scale (`[G+0x58]`). None when the frame has no
-/// rect (`0x768481`); else whether its anchors or size changed.
+/// `size` per axis or the rect's where that is 0 (`0x7684e1`, `0x768508`). All of it is layout
+/// units the pin writes itself, the offsets and size over the frame's layout scale (`[G+0x58]`),
+/// so `GetPoint` and `GetWidth` answer `G` of them. None when the frame has no rect
+/// (`0x768481`); else whether its anchors or size changed.
 fn pin_top_left(
     model: &mut Model,
     h: FrameHandle,
@@ -385,8 +381,8 @@ fn pin_top_left(
     travel: (f32, f32),
 ) -> Option<bool> {
     UiScript::resolve_layout(model);
-    let r = *model.resolved.get(&h)?;
-    let root = model.screen;
+    let r = *model.frame_rects.get(&h)?;
+    let root = model.layout_space().root();
     let scale = f64::from(eff_scale(model, h));
     let inv = 1.0 / scale;
     let x = ((f64::from(r.left) + f64::from(travel.0)) - f64::from(root.left)) * inv;
@@ -401,17 +397,21 @@ fn pin_top_left(
     } else {
         size.1
     };
-    let pin = Anchors::from([Anchor::new(
+    let pin = Anchors::from([Anchor::new_layout(
         Point::TopLeft,
         SCREEN,
         Point::TopLeft,
         x as f32,
         y as f32,
     )]);
+    let (w, ht) = (Len::Layout(w), Len::Layout(ht));
+    let input = model.layout_inputs.entry(h).or_default();
+    let authored = (input.anchors, input.width, input.height);
+    model.drag_authored.entry(h).or_insert(authored);
     let input = model.layout_inputs.entry(h).or_default();
     let changed = !input.anchors.bits_eq(&pin)
-        || input.width.to_bits() != w.to_bits()
-        || input.height.to_bits() != ht.to_bits();
+        || input.width.bits() != w.bits()
+        || input.height.bits() != ht.bits();
     input.anchors = pin;
     input.width = w;
     input.height = ht;
@@ -440,6 +440,9 @@ pub(crate) fn pump_move_or_size(model: &mut Model, pos: (f32, f32)) -> bool {
         model.moving = None;
         return false;
     }
+    // The pump works in the cursor's layout units: the delta from the sample, stored as floats
+    // (`0x7655c4`–`0x7655d3`).
+    let pos = model.layout_space().cursor_layout(pos.0, pos.1);
     let (dx, dy) = (pos.0 - mv.sample.0, pos.1 - mv.sample.1);
     // A zero delta on both axes skips the step (`0x7655d6`–`0x7655f4`).
     if dx != 0.0 || dy != 0.0 {
@@ -462,7 +465,7 @@ pub(crate) fn cancel_on_hide(model: &mut Model, h: FrameHandle) {
     }
 }
 
-/// One pump step, `0x768710` by way of `0x76a660`, for the cursor delta `(dx, dy)` in screen units.
+/// One pump step, `0x768710` by way of `0x76a660`, for the cursor delta `(dx, dy)` in layout units.
 /// The grips read the explicit size (`vtbl+0x1c`/`+0x20`, `G+0x50`/`+0x54`), size it by the travel
 /// over the frame's scale, clamp it, and re-pin TOPLEFT shifted by the left and top travel only
 /// (`0x768974` → `0x768430`); a move adds to the TOPLEFT anchor itself.
@@ -470,15 +473,15 @@ fn drag_step(model: &mut Model, mv: FrameMove, dx: f32, dy: f32) {
     let h = mv.frame;
     let scale = f64::from(eff_scale(model, h));
     let inv = 1.0 / scale;
-    let (mut w, mut ht) = model
-        .layout_inputs
-        .get(&h)
-        .map_or((0.0, 0.0), |i| (i.width, i.height));
-    // `G+0x60`/`+0x68` bound the width and `G+0x5c`/`+0x64` the height.
-    let (min, max) = model
-        .arena
-        .frame(h)
-        .map_or(((0.0, 0.0), (0.0, 0.0)), |f| (f.min_resize, f.max_resize));
+    let units = model.layout_units();
+    let (mut w, mut ht) = model.layout_inputs.get(&h).map_or((0.0, 0.0), |i| {
+        (i.width.layout(units), i.height.layout(units))
+    });
+    // `G+0x60`/`+0x68` bound the width and `G+0x5c`/`+0x64` the height, as `S` stored them.
+    let (min, max) = model.arena.frame(h).map_or(((0.0, 0.0), (0.0, 0.0)), |f| {
+        let st = |(a, b): (Len, Len)| (a.layout(units), b.layout(units));
+        (st(f.min_resize), st(f.max_resize))
+    });
     let (mut dx, mut dy) = (dx, dy);
     let add = |v: f32, by: f64| (f64::from(v) + by) as f32;
     let x = Axis::new(min.0, max.0, scale);
@@ -493,8 +496,8 @@ fn drag_step(model: &mut Model, mv: FrameMove, dx: f32, dy: f32) {
                 .get_mut(&h)
                 .and_then(|i| i.anchors.offset_mut(Point::TopLeft))
                 .map(|(x_off, y_off)| {
-                    *x_off = add(*x_off, f64::from(dx) / scale);
-                    *y_off = add(*y_off, f64::from(dy) / scale);
+                    *x_off = Len::Layout(add(x_off.layout(units), f64::from(dx) / scale));
+                    *y_off = Len::Layout(add(y_off.layout(units), f64::from(dy) / scale));
                 })
                 .is_some();
             if moved {
