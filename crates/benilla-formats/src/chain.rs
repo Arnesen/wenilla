@@ -413,6 +413,23 @@ impl Chain {
         self.read(name)
     }
 
+    /// The names under `prefix` the native [`Chain::enumerate_archive_files`] lists, off the web
+    /// host's name index (`/data/__index`) in place of the archives' listfiles, through the same
+    /// line walk. The host's index is the whole chain, so the native walk's skip of the base
+    /// archives has nothing to act on; an unreachable index lists nothing.
+    pub fn enumerate_archive_files(&self, prefix: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(entries) = self.list() {
+            let listfile = entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            listfile_lines(listfile.as_bytes(), prefix, &mut out);
+        }
+        out
+    }
+
     /// List the chain's named files via `GET /data/__index` (the Data URL scheme's third route) —
     /// a JSON array of names. Sizes aren't part of that route (dev/extract tooling is the only
     /// consumer and doesn't run on the web target), so every entry reports `size: 0`.

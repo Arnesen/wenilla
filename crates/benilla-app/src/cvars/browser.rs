@@ -3,7 +3,9 @@ use super::{CvarChanged, Cvars};
 
 pub(super) fn apply_override(cvars: &mut Cvars, name: &str, value: &str) {
     let Some(row) = cvars.row(name) else { return };
-    if row.numeric() && value.trim().parse::<f32>().is_err() {
+    // A row whose default is a number takes only a number from the URL.
+    let numeric = row.default.trim().parse::<f32>().is_ok();
+    if numeric && value.trim().parse::<f32>().is_err() {
         return;
     }
     let name = row.name.clone();

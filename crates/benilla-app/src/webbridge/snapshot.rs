@@ -24,7 +24,7 @@ use crate::names::NameCache;
 use crate::net::{Guid, NetEntity, NetStatus, ObjectStore, Reputations, SelfGuid, SelfPlayer};
 use crate::player::Player;
 use crate::spell::{ActiveChannel, PendingCast};
-use crate::target::{ring_reaction, Factions, Hovered, Selection};
+use crate::target::{Factions, Hovered, RelUnit, Relations, Selection, UnitLookup};
 use crate::ui_chat::ChatEvent;
 
 use super::BridgeConfig;
@@ -73,8 +73,28 @@ pub(crate) struct BridgeReadout<'w, 's> {
     names: Option<Res<'w, NameCache>>,
     factions: Option<Res<'w, Factions>>,
     reputations: Option<Res<'w, Reputations>>,
+    group: Option<Res<'w, crate::spell::group_relation::GroupRoster>>,
     classes: Option<Res<'w, ChrClassTable>>,
     races: Option<Res<'w, ChrRaceTable>>,
+}
+
+/// The object manager's unit lookup for the relation functions' owner legs: the self row and the
+/// unit rows this readout already queries.
+impl UnitLookup for BridgeReadout<'_, '_> {
+    fn unit(&self, guid: u64) -> Option<RelUnit> {
+        let own = self.self_guid.as_ref().and_then(|g| g.0) == Some(guid);
+        let store = if own {
+            self.self_q.single().ok().map(|(store, _, _)| store)
+        } else {
+            self.units
+                .iter()
+                .find(|(g, ..)| g.0 == guid)
+                .and_then(|(_, _, _, store, _)| store)
+        };
+        store
+            .filter(|s| s.is_unit())
+            .map(|store| RelUnit::of(guid, store))
+    }
 }
 
 impl BridgeReadout<'_, '_> {
@@ -160,7 +180,7 @@ impl BridgeReadout<'_, '_> {
                     "casting".into(),
                     self.pending_cast
                         .as_ref()
-                        .and_then(|p| p.current(now))
+                        .and_then(|p| p.current())
                         .map_or(PlainValue::Null, spell_payload),
                 ));
                 u.push((
@@ -277,11 +297,26 @@ impl BridgeReadout<'_, '_> {
         let mut u = match store {
             Some(store) => {
                 let reaction = match (self.reputations.as_deref(), net.kind) {
-                    // `ring_reaction` returns the raw 0..7 rank, which is `UnitReaction − 1`; the
-                    // `+ 1` lands it on the Lua 1..8 scale every other caller uses (`ui_unit.rs`,
-                    // `ui_tooltip`) — and the one `unit_fields`' `hostile`/`friendly` classify on.
+                    // `Relations::reaction` returns the raw 0..7 rank, which is `UnitReaction − 1`;
+                    // the `+ 1` lands it on the Lua 1..8 scale every other caller uses
+                    // (`ui_unit.rs`, `ui_tooltip`) — and the one `unit_fields`' `hostile`/
+                    // `friendly` classify on. The unit toward the player, as the ring asks it.
                     (Some(reps), EntityKind::Player | EntityKind::Unit) => {
-                        ring_reaction(self.factions.as_deref(), reps, Some(store), self_store) + 1
+                        let me = self.self_guid.as_ref().and_then(|g| g.0);
+                        let rel = Relations {
+                            factions: self.factions.as_deref(),
+                            reputations: reps,
+                            me,
+                            roster: self.group.as_deref(),
+                            units: self,
+                        };
+                        let rank = self_store.zip(me).map_or(
+                            benilla_formats::Reaction::Neutral as u8,
+                            |(own, me)| {
+                                rel.reaction(&RelUnit::of(guid, store), &RelUnit::of(me, own))
+                            },
+                        );
+                        rank + 1
                     }
                     _ => 0,
                 };
