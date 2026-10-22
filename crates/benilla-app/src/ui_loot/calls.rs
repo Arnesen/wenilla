@@ -1,9 +1,9 @@
-//! The loot window's reference functions, shared by the verbs' calls and the feed's turns
+//! The loot window's reference functions, shared by the verbs' calls and the loot lane's turns
 //! ([`LootSteps`]): the take dispatcher `0x4c2790`, `EndLootWindow 0x48f200` with the VM at hand,
 //! the auto-loot sweep `0x4c1fa0`, the interactions' `SetAutoLoot 0x5df460`, `OpenItem
 //! 0x5edc80`'s send and the master-loot give `0x4c2940`. A function that signals goes
 //! on once its listeners have returned (`SignalEvent` runs them in place), so what it does after
-//! the signal is a [`Then`], run by the call's tail ([`UiScript::resume_loot`]) or by the feed's
+//! the signal is a [`Then`], run by the call's tail ([`UiScript::resume_loot`]) or by the lane's
 //! next turn ([`super::run_then`]): the listeners read the state as the signal left it.
 
 use benilla_protocol::messages::{loot_type, slot_type};
@@ -59,7 +59,7 @@ pub(super) enum Then {
 }
 
 /// The loot window's state and what its functions send and signal through: the engine half of
-/// the loot calls ([`crate::script_calls::ScriptCallHost`]) and of the feed's and the drain's
+/// the loot calls ([`crate::script_calls::ScriptCallHost`]) and of the lane's and the drain's
 /// turns.
 #[derive(SystemParam)]
 pub(crate) struct LootSteps<'w, 's> {
@@ -293,7 +293,10 @@ impl LootSteps<'_, '_> {
     /// The copier's end (`0x4c1ea8`-`0x4c1ee6`, the cache callback's `0x4c2afe`-`0x4c2b37`): the
     /// sweep while the auto-loot byte is set (`0x4c1ed3`, `0x4c2b29`), else `LOOT_OPENED`. With
     /// `autoLootDefault` on, a pickpocket or disenchant window, which no interaction stores the
-    /// byte for, stores it here from the Shift held now ([`LootConfig`]'s deviation).
+    /// byte for, stores it here from the Shift held now ([`LootConfig`]'s deviation). The
+    /// reference ends the copier inside its packet, its window open; a close the lane fires
+    /// behind it has already taken the window, which leaves nothing to sweep, so the end clears
+    /// the byte as the sweep's would (`0x4c2219`) and signals `LOOT_OPENED`.
     pub(super) fn copier_end(&mut self, script: &mut UiScript) {
         if self.cfg.auto_loot
             && matches!(
@@ -303,9 +306,10 @@ impl LootSteps<'_, '_> {
         {
             self.byte.0 = interaction_byte(&self.cfg, script.shift_key_down());
         }
-        if self.byte.0 {
+        if self.byte.0 && self.loot.window.source.is_some() {
             self.sweep(script, false);
         } else {
+            self.byte.0 = false;
             script.fire_event("LOOT_OPENED", vec![]);
         }
     }

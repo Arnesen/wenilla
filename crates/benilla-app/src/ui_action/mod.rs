@@ -41,8 +41,7 @@ pub(crate) use ranks::normalize_action_ranks;
 mod reactive;
 #[cfg(test)]
 mod reactive_tests;
-mod recount;
-pub(crate) use recount::recount_item_actions;
+pub(crate) mod recount;
 mod state;
 pub(crate) mod toggle;
 mod weapon_icon;
@@ -350,8 +349,7 @@ impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
         // A UI-only harness has no net stack; declaring a message twice is idempotent.
-        app.add_message::<crate::item_watch::ItemNotice>()
-            .add_message::<crate::net::FieldChanged>()
+        app.add_message::<crate::net::FieldChanged>()
             .init_resource::<state::ActionEvents>()
             .add_message::<crate::net::WorldEnterCascadeMessage>()
             .init_resource::<PlayerActions>()
@@ -374,8 +372,7 @@ impl Plugin for UiActionPlugin {
                     ranks::normalize_action_ranks
                         .in_set(UnitFeed)
                         .before(feed::feed_actions),
-                    // The item watchers' recounts, after the server's unlocks, which each handler
-                    // runs first (`0x5d94af` before `0x5d94e1`).
+                    // Our player's arrival recount, after the server's unlocks.
                     recount::recount_item_actions
                         .in_set(UnitFeed)
                         .after(crate::ui_items::locks::apply_item_releases)

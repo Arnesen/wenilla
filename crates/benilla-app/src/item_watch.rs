@@ -1,7 +1,8 @@
 //! The item watchers: the reference's handlers that run when one of the active player's items,
-//! or a seat that holds one, changes. The object packets write one [`ItemNotice`] per handler run,
-//! in wire order, and the systems that care read the stream instead of diffing snapshots: the
-//! action bar recounts (`0x4e5c70`) and the trade re-signals its slot (`0x4bfb10`, `0x4bfb60`).
+//! or a seat that holds one, changes. The object packets ready one [`Run`] per handler run, its
+//! [`ItemNotice`] and the unit signals it ends in, onto the item lane ([`crate::item_lane`]), which
+//! fires each whole at its packet's place: the action bar recounts (`0x4e5c70`), the trade
+//! re-signals its slot (`0x4bfb10`, `0x4bfb60`) and the quest log asks for its item (`0x4df7b0`).
 //!
 //! A block's notify runs each watcher whose watched bytes now differ from the copy its object's last
 //! write in the packet took, once, at the first field of its range the block visits (`0x465570`
@@ -20,13 +21,13 @@ use benilla_protocol::messages::{ObjectType, ITEM_FLAG_CHARTER};
 use benilla_protocol::ObjectFields;
 use bevy::prelude::*;
 
-use crate::field_watch::{id, FieldNotice};
+use crate::field_watch::{id, FieldNotice, List, Place};
 use crate::items::Items;
 use crate::query_cache::Ask;
 
 /// One run of a reference handler on the active player's items, in the order the packets ran
 /// them. Entries are `OBJECT_FIELD_ENTRY` values; an item the handler could not find has none.
-#[derive(Message, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ItemNotice {
     /// `CGItem_C::Deactivate` (`0x5d8660`) on our item, from a destroy or the out-of-range list
     /// (`0x464920` runs it for both): the interface refreshes from `0x5d8786` on.
@@ -79,6 +80,22 @@ pub(crate) enum TradeTouch {
     /// The item restacked or took an enchantment: its slot is placed again (`0x5d94f0`,
     /// `0x5d9b0c`).
     Changed(u64),
+}
+
+/// One run of an item watcher's callback, readied at its packet: the notice our item's readers act
+/// on, when the item is ours, and the unit signals the run ends in, in its order. A record set-up
+/// on another's item runs the owner's signal alone (`0x5d8521` → `0x5d85ed`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Run {
+    pub(crate) notice: Option<ItemNotice>,
+    pub(crate) signals: Vec<FieldNotice>,
+}
+
+impl Run {
+    /// Whether the run does nothing.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.notice.is_none() && self.signals.is_empty()
+    }
 }
 
 impl ItemNotice {
@@ -193,6 +210,7 @@ where
 
     /// The notices of one block's notify on `guid` ([`crate::field_watch::Notified`]): `fields`
     /// is the store now.
+    #[cfg(test)]
     pub(crate) fn values(
         &self,
         guid: u64,
@@ -200,20 +218,38 @@ where
         fields: &ObjectFields,
         block: &crate::field_watch::Notified,
     ) -> Vec<ItemNotice> {
+        self.placed_values(guid, kind, fields, block)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect()
+    }
+
+    /// The notices of one block's notify on `guid` ([`crate::field_watch::Notified`]), `fields` the
+    /// store now, each with its watch's place in the notify pass
+    /// ([`crate::field_watch::in_watch_order`]): the item type watchers `0x5d9360` registers
+    /// (`0x468070`) and the visible-item ones of `0x5e2510`, on the type list; the seat watchers
+    /// `0x4f8cc0` and `0x4f932a` register on the player and on each bag (`0x467e70`), on the
+    /// object's own.
+    pub(crate) fn placed_values(
+        &self,
+        guid: u64,
+        kind: ObjectType,
+        fields: &ObjectFields,
+        block: &crate::field_watch::Notified,
+    ) -> Vec<(Place, ItemNotice)> {
         if block.is_quiet() {
             return Vec::new();
         }
         let old_of = |index: u16, now: u32| block.edge(index).map_or(now, |(old, _)| old);
-        let moved = |range: std::ops::Range<u16>| block.runs(range);
-        // `(first index of the watched range, notice)`, sorted at the end.
-        let mut out: Vec<(u16, ItemNotice)> = Vec::new();
+        let place = |range: std::ops::Range<u16>, list: List| block.place(range, list);
+        let mut out: Vec<(Place, ItemNotice)> = Vec::new();
         match kind {
             ObjectType::Item | ObjectType::Container if self.ours(fields) => {
                 let entry = fields.object_entry().unwrap_or(0);
-                if moved(FIELD_OBJECT_ENTRY..FIELD_OBJECT_ENTRY + 1) {
+                if let Some(at) = place(FIELD_OBJECT_ENTRY..FIELD_OBJECT_ENTRY + 1, List::Type) {
                     let old = old_of(FIELD_OBJECT_ENTRY, entry);
                     out.push((
-                        FIELD_OBJECT_ENTRY,
+                        at,
                         ItemNotice::Entry {
                             guid,
                             old,
@@ -222,17 +258,17 @@ where
                         },
                     ));
                 }
-                if moved(FIELD_ITEM_STACK_COUNT..FIELD_ITEM_STACK_COUNT + 1) {
-                    out.push((
-                        FIELD_ITEM_STACK_COUNT,
-                        ItemNotice::StackCount { guid, entry },
-                    ));
+                if let Some(at) = place(
+                    FIELD_ITEM_STACK_COUNT..FIELD_ITEM_STACK_COUNT + 1,
+                    List::Type,
+                ) {
+                    out.push((at, ItemNotice::StackCount { guid, entry }));
                 }
-                if moved(FIELD_ITEM_SPELL_CHARGES..FIELD_ITEM_SPELL_CHARGES + 5) {
-                    out.push((
-                        FIELD_ITEM_SPELL_CHARGES,
-                        ItemNotice::SpellCharges { guid, entry },
-                    ));
+                if let Some(at) = place(
+                    FIELD_ITEM_SPELL_CHARGES..FIELD_ITEM_SPELL_CHARGES + 5,
+                    List::Type,
+                ) {
+                    out.push((at, ItemNotice::SpellCharges { guid, entry }));
                 }
                 // `0x5d9a90`: a record missing reads flags 0 and passes; the owner must be the
                 // active player, found live (`0x5d9acd`, `0x5d9ae8`).
@@ -240,14 +276,13 @@ where
                     .items
                     .template(entry, 0, Ask::Read)
                     .is_some_and(|t| t.flags & ITEM_FLAG_CHARTER != 0);
-                if moved(FIELD_ITEM_ENCHANTMENT..FIELD_ITEM_ENCHANTMENT + 21)
-                    && !charter
-                    && self.in_world()
-                {
-                    out.push((
-                        FIELD_ITEM_ENCHANTMENT,
-                        ItemNotice::Enchantment { guid, entry },
-                    ));
+                if let Some(at) = place(
+                    FIELD_ITEM_ENCHANTMENT..FIELD_ITEM_ENCHANTMENT + 21,
+                    List::Type,
+                ) {
+                    if !charter && self.in_world() {
+                        out.push((at, ItemNotice::Enchantment { guid, entry }));
+                    }
                 }
             }
             _ => {}
@@ -262,9 +297,9 @@ where
                 let count = fields.container_num_slots().unwrap_or(0);
                 for j in 0..36u8 {
                     let lo = FIELD_CONTAINER_SLOT_1 + 2 * u16::from(j);
-                    if !moved(lo..lo + 2) {
+                    let Some(at) = place(lo..lo + 2, List::Object) else {
                         continue;
-                    }
+                    };
                     // A seat past the bag's count reads empty (`0x4f9106`).
                     let now = if u32::from(j) < count {
                         fields.container_slot(j).unwrap_or(0)
@@ -274,7 +309,7 @@ where
                     let was = guid_of(old_of(lo, now as u32), old_of(lo + 1, (now >> 32) as u32));
                     if was != now {
                         out.push((
-                            lo,
+                            at,
                             ItemNotice::Seat {
                                 old: self.entry_of(was),
                                 new: self.entry_of(now),
@@ -290,12 +325,12 @@ where
                     continue;
                 }
                 let base = FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 12 * u16::from(i);
-                if !moved(base..base + 12) {
+                let Some(at) = place(base..base + 12, List::Type) else {
                     continue;
-                }
+                };
                 let new = fields.player_visible_item_entry(i).unwrap_or(0);
                 out.push((
-                    base,
+                    at,
                     ItemNotice::Visible {
                         old: old_of(base + 2, new),
                         new,
@@ -307,9 +342,9 @@ where
                     continue;
                 };
                 let lo = FIELD_PLAYER_INV_SLOT_HEAD + 2 * u16::from(seat);
-                if !moved(lo..lo + 2) {
+                let Some(at) = place(lo..lo + 2, List::Object) else {
                     continue;
-                }
+                };
                 let now = seat_guid(fields, seat);
                 match watcher {
                     // `0x4f8ec0`: no equality test; a container's items, each found live.
@@ -324,14 +359,14 @@ where
                                     .collect()
                             })
                             .unwrap_or_default();
-                        out.push((lo, ItemNotice::Bag { entries }));
+                        out.push((at, ItemNotice::Bag { entries }));
                     }
                     SeatWatcher::Item => {
                         let was =
                             guid_of(old_of(lo, now as u32), old_of(lo + 1, (now >> 32) as u32));
                         if was != now {
                             out.push((
-                                lo,
+                                at,
                                 ItemNotice::Seat {
                                     old: self.entry_of(was),
                                     new: self.entry_of(now),
@@ -343,7 +378,29 @@ where
             }
         }
         out.sort_by_key(|&(at, _)| at);
-        out.into_iter().map(|(_, n)| n).collect()
+        out
+    }
+
+    /// The run of the watcher behind `notice`, with the unit signals it ends in ([`Self::signals`]).
+    pub(crate) fn run(&self, notice: ItemNotice) -> Run {
+        Run {
+            signals: self.signals(&notice),
+            notice: Some(notice),
+        }
+    }
+
+    /// A first create's record set-up ([`Self::created`], [`Self::created_signal`]): the notice
+    /// for our item, then the owner's signal for any.
+    pub(crate) fn created_run(&self, guid: u64, fields: &ObjectFields) -> Run {
+        Run {
+            notice: self.created(guid, fields),
+            signals: self.created_signal(fields).into_iter().collect(),
+        }
+    }
+
+    /// A destroy's run ([`Self::destroyed`]), for our item.
+    pub(crate) fn destroyed_run(&self, guid: u64) -> Option<Run> {
+        self.destroyed(guid).map(|n| self.run(n))
     }
 
     /// A first create of an item: the record set up at once when cached (`0x5d8300` into
@@ -362,39 +419,6 @@ where
             entry: fields.object_entry().unwrap_or(0),
         })
     }
-
-    /// A record answer for `entry` that the cache did not hold. Every item of ours with that
-    /// entry still waiting on its create's request finishes its set-up (`0x5d8390` into
-    /// `0x5d8440`), in guid order, while in the world; then each [`ItemNotice::Entry`] miss
-    /// waiting on it (`entry_waiters`, in request order) runs its callback `0x5d96b0`, ungated.
-    /// `held` lists the live objects.
-    pub(crate) fn record_landed<'b>(
-        &self,
-        entry: u32,
-        held: impl IntoIterator<Item = (u64, &'b ObjectFields)>,
-        entry_waiters: &[u64],
-    ) -> Vec<ItemNotice> {
-        let mut guids: Vec<u64> = if self.in_world() {
-            held.into_iter()
-                .filter(|(g, f)| {
-                    self.ours(f) && f.object_entry() == Some(entry) && !entry_waiters.contains(g)
-                })
-                .map(|(g, _)| g)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        guids.sort_unstable();
-        guids
-            .into_iter()
-            .map(|guid| ItemNotice::Record { guid, entry })
-            .chain(
-                entry_waiters
-                    .iter()
-                    .map(|&guid| ItemNotice::EntryRecord { guid, entry }),
-            )
-            .collect()
-    }
 }
 
 impl<'a, F> Watch<'a, F>
@@ -404,7 +428,7 @@ where
     /// The unit signals a notice's handler ends in: `NotifyItemSlotChanged` ([`Self::slot_changed`])
     /// closes the destroy (`0x5d87c1`), the stack count's (`0x5d950e`), the entry's once its record
     /// is cached (`0x5d9694`) or answered (`0x5d96d5`), and the enchantment's (`0x5d9b2a`). The
-    /// record set-up's signal is [`Self::created_signal`]'s and [`Self::landed_signals`]'.
+    /// record set-up's signal is [`Self::created_signal`]'s and [`Self::set_up_run`]'s.
     pub(crate) fn signals(&self, notice: &ItemNotice) -> Vec<FieldNotice> {
         match *notice {
             ItemNotice::Destroyed { guid, .. }
@@ -462,34 +486,30 @@ where
             .flatten()
     }
 
-    /// A record answer's unit signals, in its callbacks' order ([`Self::record_landed`]): the
-    /// set-up's for each item it finishes, whoever's, in guid order (`0x5d8390`), while in the
-    /// world; then each entry change's slot run (`0x5d96d5`), ungated.
-    pub(crate) fn landed_signals<'b>(
-        &self,
-        entry: u32,
-        held: impl IntoIterator<Item = (u64, &'b ObjectFields)>,
-        entry_waiters: &[u64],
-    ) -> Vec<FieldNotice> {
-        let mut finished: Vec<(u64, &ObjectFields)> = if self.in_world() {
-            held.into_iter()
-                .filter(|(g, f)| {
-                    f.is_item() && f.object_entry() == Some(entry) && !entry_waiters.contains(g)
-                })
-                .collect()
-        } else {
-            Vec::new()
+    /// The create set-up's callback `0x5d8390` on `guid`, as its record answers: it finds the item
+    /// (mask 2) and finishes its set-up (`0x5d8440`) while in the world (`0x5d84ff`), one of ours
+    /// as an [`ItemNotice::Record`], and anyone's with its owner's signal at the end (`0x5d85ed`-
+    /// `0x5d8606`). An item gone since runs nothing.
+    pub(crate) fn set_up_run(&self, guid: u64, entry: u32) -> Run {
+        let Some(f) = (self.lookup)(guid).filter(|f| f.is_item()) else {
+            return Run::default();
         };
-        finished.sort_unstable_by_key(|&(g, _)| g);
-        finished
-            .into_iter()
-            .filter_map(|(_, f)| owner_signal(f))
-            .chain(
-                entry_waiters
-                    .iter()
-                    .flat_map(|&guid| self.slot_changed(guid)),
-            )
-            .collect()
+        if !self.in_world() {
+            return Run::default();
+        }
+        Run {
+            notice: self.ours(f).then_some(ItemNotice::Record { guid, entry }),
+            signals: owner_signal(f).into_iter().collect(),
+        }
+    }
+
+    /// An entry change's callback `0x5d96b0` on `guid`, as its record answers, ungated: the new
+    /// entry's slots recount (`0x5d96bd`), then its slot run (`0x5d96d5`).
+    pub(crate) fn entry_run(&self, guid: u64, entry: u32) -> Run {
+        Run {
+            notice: Some(ItemNotice::EntryRecord { guid, entry }),
+            signals: self.slot_changed(guid),
+        }
     }
 }
 
@@ -812,26 +832,20 @@ mod tests {
         // Before our player arrives, the latch is clear.
         w.objects.remove(&ME);
         assert_eq!(w.watch().created(POTION, &potion), None);
-        assert!(w
-            .watch()
-            .record_landed(POTION_ID, [(POTION, &potion)], &[])
-            .is_empty());
+        w.objects.insert(POTION, potion);
+        assert!(w.watch().set_up_run(POTION, POTION_ID).is_empty());
         w.objects.insert(ME, player(&[]));
-        let other = item(POTION_ID, ME);
         assert_eq!(
-            w.watch()
-                .record_landed(POTION_ID, [(ARROWS, &other), (POTION, &potion)], &[]),
-            [
-                ItemNotice::Record {
-                    guid: POTION,
-                    entry: POTION_ID
-                },
-                ItemNotice::Record {
-                    guid: ARROWS,
-                    entry: POTION_ID
-                }
-            ],
-            "in guid order"
+            w.watch().set_up_run(POTION, POTION_ID).notice,
+            Some(ItemNotice::Record {
+                guid: POTION,
+                entry: POTION_ID
+            }),
+            "the answer's callback finds the item (`0x5d8390`)"
+        );
+        assert!(
+            w.watch().set_up_run(ARROWS, POTION_ID).is_empty(),
+            "an item gone since"
         );
     }
 
@@ -942,8 +956,7 @@ mod tests {
 
     /// The record set-up's last act signals `UNIT_INVENTORY_CHANGED` for the tokens of the item's
     /// owner, whoever's the item, while in the world (`0x5d8504`, `0x5d85ed`-`0x5d8606`): at a
-    /// create whose record is cached, and for each item a landed answer finishes, in guid order,
-    /// ahead of the entry changes' callbacks (`0x5d96d5`).
+    /// create whose record is cached, and from the callback of each item an answer finishes.
     #[test]
     fn a_record_set_up_signals_its_owner_and_an_answer_its_waiters_after() {
         const HELM: u64 = 0x4000_0000_0000_0201;
@@ -960,21 +973,15 @@ mod tests {
         assert_eq!(w.watch().created_signal(&ours), Some(owner(ME)));
         assert_eq!(w.watch().created_signal(&theirs), Some(owner(OTHER)));
         w.objects.insert(ME, player(&[(0, HELM)]));
-        assert_eq!(
-            w.watch().landed_signals(
-                POTION_ID,
-                [(ARROWS, &theirs), (POTION, &ours), (HELM, &ours)],
-                &[HELM]
-            ),
-            [owner(ME), owner(OTHER), INVENTORY],
-            "the set-ups in guid order, then the entry change's slot run"
-        );
+        w.objects.insert(ARROWS, theirs);
+        w.objects.insert(POTION, ours.clone());
+        assert_eq!(w.watch().set_up_run(POTION, POTION_ID).signals, [owner(ME)]);
+        let run = w.watch().set_up_run(ARROWS, POTION_ID);
+        assert_eq!(run.notice, None, "another's item: its owner's signal alone");
+        assert_eq!(run.signals, [owner(OTHER)]);
         w.objects.remove(&ME);
         assert_eq!(w.watch().created_signal(&ours), None, "out of the world");
-        assert!(w
-            .watch()
-            .landed_signals(POTION_ID, [(POTION, &ours)], &[])
-            .is_empty());
+        assert!(w.watch().set_up_run(POTION, POTION_ID).is_empty());
     }
 
     /// A trade getter's record callback (`0x4c0340`) touches neither the bar nor a trade slot.
@@ -1002,30 +1009,15 @@ mod tests {
     #[test]
     fn an_entry_miss_runs_its_own_callback_when_the_answer_lands() {
         let mut w = World::new();
-        let potion = item(POTION_ID, ME);
-        let changed = item(POTION_ID, ME);
-        let both = || [(POTION, &potion), (ARROWS, &changed)];
-        assert_eq!(
-            w.watch().record_landed(POTION_ID, both(), &[ARROWS]),
-            [
-                ItemNotice::Record {
-                    guid: POTION,
-                    entry: POTION_ID
-                },
-                ItemNotice::EntryRecord {
-                    guid: ARROWS,
-                    entry: POTION_ID
-                }
-            ]
-        );
+        w.objects.insert(ARROWS, item(POTION_ID, ME));
         w.objects.remove(&ME);
         assert_eq!(
-            w.watch().record_landed(POTION_ID, both(), &[ARROWS]),
-            [ItemNotice::EntryRecord {
+            w.watch().entry_run(ARROWS, POTION_ID).notice,
+            Some(ItemNotice::EntryRecord {
                 guid: ARROWS,
                 entry: POTION_ID
-            }],
-            "out of the world only the callback runs"
+            }),
+            "out of the world the callback still runs"
         );
         assert_eq!(
             ItemNotice::EntryRecord {
