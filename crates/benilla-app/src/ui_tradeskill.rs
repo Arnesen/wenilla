@@ -187,18 +187,33 @@ fn open_trade_skill(
     }
 }
 
-/// A skill line's raw `(value, max)` off `PLAYER_SKILL_INFO`, which the rank bar shows as is,
-/// where the reference's `GetTradeSkillLine` (`0x4fdd40`) adds the permanent skill bonus to each
-/// nonzero half (`0x4fddf7`, `0x4fde6a`).
+/// The open line's `PLAYER_SKILL_INFO` slot, `None` for a line the player lacks.
+fn skill_slot(
+    store: &ObjectStore,
+    skill_id: u32,
+) -> Option<benilla_protocol::messages::PlayerSkillSlot> {
+    (0..PLAYER_SKILL_SLOTS)
+        .filter_map(|i| store.0.player_skill(i))
+        .find(|s| u32::from(s.skill_id) == skill_id)
+}
+
+/// `GetTradeSkillLine`'s rank and maximum (`0x4fdd40`): each half of the slot plus the permanent
+/// bonus, read unsigned, when the half is above 0 (`0x4fddf0`-`0x4fddff`, `0x4fde63`-`0x4fde71`).
 fn skill_rank(store: &ObjectStore, skill_id: u32) -> (u32, u32) {
-    for i in 0..PLAYER_SKILL_SLOTS {
-        if let Some(s) = store.0.player_skill(i) {
-            if u32::from(s.skill_id) == skill_id {
-                return (u32::from(s.value), u32::from(s.max));
-            }
-        }
-    }
-    (0, 0)
+    let Some(s) = skill_slot(store, skill_id) else {
+        return (0, 0);
+    };
+    let bonus = u32::from(s.perm_bonus as u16);
+    let with_bonus = |half: u16| match u32::from(half) {
+        0 => 0,
+        v => v + bonus,
+    };
+    (with_bonus(s.value), with_bonus(s.max))
+}
+
+/// The slot's raw value, which the recipe colours band on (`0x4fcc31`-`0x4fcc41`).
+fn skill_value(store: &ObjectStore, skill_id: u32) -> u32 {
+    skill_slot(store, skill_id).map_or(0, |s| u32::from(s.value))
 }
 
 /// The difficulty band (`0x4fcbfc`), with a zero `trivialLow` read as `trivialHigh - 25`; the
@@ -377,7 +392,8 @@ fn feed_trade_skill(
             let spells = spells.as_deref()?;
             let skill_lines = skill_lines.as_deref()?;
             let store = self_store.single().ok()?;
-            let (rank, max_rank) = skill_rank(store, line);
+            let rank = skill_value(store, line);
+            let (line_rank, max_rank) = skill_rank(store, line);
             let line_name = skill_lines
                 .catalog
                 .line(line)
@@ -416,7 +432,7 @@ fn feed_trade_skill(
             Some(TradeSkillState {
                 line,
                 line_name,
-                rank,
+                rank: line_rank,
                 max_rank,
                 recipes,
             })
@@ -533,6 +549,31 @@ mod tests {
         ItemDisplay, ItemDisplayCatalog, SpellDisplay, SPELL_EFFECT_ENCHANT_ITEM,
     };
     use std::collections::HashMap;
+
+    /// `GetTradeSkillLine` (`0x4fdd40`) adds the slot's permanent bonus to the value and to the
+    /// maximum, each only when it is above 0 (`0x4fddf0`-`0x4fddff`, `0x4fde63`-`0x4fde71`): a
+    /// gnome's Engineering at 225/300 with Engineering Specialization's +15 reads 240/315.
+    #[test]
+    fn the_line_rank_adds_the_permanent_bonus_to_each_nonzero_half() {
+        let store = |value: u32, max: u32, perm: u32| {
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (718, 202),
+                (719, (max << 16) | value),
+                (720, (perm << 16) | 7),
+            ]))
+        };
+        assert_eq!(skill_rank(&store(225, 300, 15), 202), (240, 315));
+        assert_eq!(
+            skill_rank(&store(0, 0, 15), 202),
+            (0, 0),
+            "no bonus on a zero"
+        );
+        assert_eq!(
+            skill_rank(&store(225, 300, 15), 164),
+            (0, 0),
+            "another line"
+        );
+    }
 
     /// A recipe with its own spell icon, so a wrong arm names itself in the assertion.
     fn recipe(effect: u32, item: u32) -> SpellDisplay {
