@@ -2,8 +2,8 @@
 //! FrameXML dependencies and fed a synthetic service list.
 
 use benilla_ui::script::{
-    ExtractedQuad, QuadContent, ScriptValue, SoundRequest, TrainerAbilityReq, TrainerService,
-    TrainerServiceCategory, TrainerSkillReq, TrainerState, UiScript,
+    ExtractedQuad, QuadContent, ScriptValue, SoundRequest, TrainerAbilityReq, TrainerCall,
+    TrainerService, TrainerServiceCategory, TrainerSkillReq, TrainerState, UiScript,
 };
 
 use super::test_ui::load_ui as load_xml;
@@ -23,6 +23,7 @@ pub(super) fn trainer_script() -> UiScript {
 /// is a width-0 `<ButtonText>`, sized to its text.
 fn trainer_script_base() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_text_measurer(Box::new(super::FixedWidthFont(7.0)));
     // In the production order: the window calls
@@ -140,6 +141,7 @@ fn service(
         skill_req,
         ability_reqs,
         is_trade_skill: false,
+        learn_spell: Some(false),
         group_key: skill_line,
         group_name: line_name.into(),
         skill_step: false,
@@ -153,6 +155,7 @@ fn service(
 ///   4 H:Fury · 5 Rend(used,30c) · 6 Thunder Clap(avail,500c)
 pub(super) fn menu() -> TrainerState {
     TrainerState {
+        guid: 0,
         greeting: "Well met. Let me show you the way of the warrior.".into(),
         trainer_type: 0,
         groups: Vec::new(),
@@ -183,7 +186,8 @@ pub(super) fn menu() -> TrainerState {
                 }),
                 // Gated by level and skill, but the prerequisite is learned, so it reads white.
                 vec![TrainerAbilityReq {
-                    name: "Charge (Rank 1)".into(),
+                    spell_id: 100,
+                    name: Some("Charge (Rank 1)".into()),
                     met: true,
                 }],
             ),
@@ -264,8 +268,13 @@ fn shipped_trainer_frame_drives_end_to_end() {
 
     s.run("BuyTrainerService(GetTrainerSelectionIndex())")
         .unwrap();
-    assert_eq!(s.take_trainer_buys(), vec![78]);
-    assert!(s.take_trainer_buys().is_empty(), "drained");
+    assert_eq!(
+        s.take_trainer_calls(),
+        vec![TrainerCall::Buy {
+            trainer: 0,
+            spell_id: 78
+        }]
+    );
 
     // Thunder Clap (row 6) is available but unaffordable: Train disables and the cost reddens.
     s.run("this = ClassTrainerSkill6; ClassTrainerSkillButton_OnClick('LeftButton')")
@@ -431,6 +440,7 @@ fn filter_rows_toggle_through_the_dropdown_kit() {
 /// One skill line of 15 services, a 16-row tree over 11 visible rows, so the list scrolls.
 fn long_menu() -> TrainerState {
     TrainerState {
+        guid: 0,
         greeting: "Much to learn.".into(),
         trainer_type: 0,
         groups: Vec::new(),
@@ -750,7 +760,9 @@ fn a_new_list_packet_resets_the_filter_mask_and_the_collapse_set() {
         .unwrap());
     assert!(s.eval::<i64>("return GetNumTrainerServices()").unwrap() < 6);
 
+    // The list's reset, then its push, which lays the rows out and finalizes them (`0x4d7b3b`).
     s.reset_trainer_list_state(0);
+    s.set_trainer(Some(menu()));
     assert!(
         !s.eval::<bool>("return GetTrainerServiceTypeFilter('used') == 1")
             .unwrap(),
@@ -805,6 +817,7 @@ fn recipe_menu() -> TrainerState {
     );
     short.subtext = Some("Rank 1".into());
     TrainerState {
+        guid: 0,
         greeting: "Can I teach you how to turn beast hides into armor?".into(),
         trainer_type: 2,
         groups: Vec::new(),
@@ -1068,8 +1081,11 @@ fn learning_a_spell_takes_the_detail_pane_with_it_instead_of_stranding_the_last_
     );
     s.run("ClassTrainerTrainButton:Click()").unwrap();
     assert_eq!(
-        s.take_trainer_buys(),
-        vec![78],
+        s.take_trainer_calls(),
+        vec![TrainerCall::Buy {
+            trainer: 0,
+            spell_id: 78
+        }],
         "the Train button bought the selected row"
     );
 

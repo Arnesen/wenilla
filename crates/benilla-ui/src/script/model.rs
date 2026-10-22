@@ -837,15 +837,11 @@ pub(crate) struct Model {
     pub(crate) repair_all_cost: u32,
     /// The repair costs `SetInventoryItem` and `SetBagItem` return.
     pub(crate) repair_costs: merchant::RepairCosts,
-    pub(crate) merchant_buys: Vec<(u32, u32)>,
-    /// The held `(bag, slot)` when `PickupMerchantItem` sells, sent as `CMSG_SELL_ITEM`.
-    pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
-    /// A held vendor row dropped in a bag, `(bag, slot, item entry)`, for `CMSG_BUY_ITEM_IN_SLOT`.
+    /// A held vendor row a drop verb bought into a slot, `(bag, slot, item entry)`, handed to the
+    /// host as the verb returns ([`merchant::MerchantCall::BuyInSlot`]).
     pub(crate) merchant_slot_buys: Vec<(i64, u32, u32)>,
     pub(crate) merchant_close: bool,
-    /// `BuybackItem` 1-based slots, the `RepairAllItems` flag and repair mode (`InRepairMode`).
-    pub(crate) merchant_buybacks: Vec<u32>,
-    pub(crate) repair_all: bool,
+    /// Repair mode (`InRepairMode`).
     pub(crate) repair_mode: bool,
 
     /// The stable window: snapshot, selection, drag and queued calls, reset together on close.
@@ -856,10 +852,9 @@ pub(crate) struct Model {
     pub(crate) bank_purchase: bool,
     pub(crate) bank_close: bool,
 
-    /// The open trainer, its buys, selection and close. The selection is a spell id, since
-    /// filters, collapses and re-lists all move row numbers.
+    /// The open trainer, its selection and close. The selection is a spell id, since filters,
+    /// collapses and re-lists all move row numbers.
     pub(crate) trainer: Option<trainer::TrainerState>,
-    pub(crate) trainer_buys: Vec<u32>,
     pub(crate) trainer_selection: Option<u32>,
     pub(crate) trainer_close: bool,
     /// Available, unavailable and used filters, all on by default; they hide services, not headers.
@@ -868,12 +863,16 @@ pub(crate) struct Model {
     pub(crate) trainer_collapsed: HashSet<u32>,
     /// The skill-line filter `ds:0xb73a20`: bit n set shows header group n, every bit on a list.
     pub(crate) trainer_line_filter: u32,
-    /// `OpenTrainer` asked for the player's own trainer list; the app drains it.
-    pub(crate) trainer_open_own: bool,
+    /// The whole row array `ds:0xb737b0` in its last sorted order, and the visible count
+    /// `ds:0xb73a18`: each finalize sorts it from the order it left (`0x4d857e`).
+    pub(crate) trainer_rows: Vec<trainer::Row>,
+    pub(crate) trainer_visible: usize,
+    /// A list packet reset the array: the next push lays it out as the builder does.
+    pub(crate) trainer_rows_fresh: bool,
 
-    /// The open taxi map, the `TakeTaxiNode` calls, whether `CloseTaxiMap` ran and whether we ride.
+    /// The open taxi map, whether a `CloseTaxiMap` call left the latch to release, and whether
+    /// we ride.
     pub(crate) taxi: Option<taxi::TaxiUiState>,
-    pub(crate) taxi_takes: Vec<usize>,
     pub(crate) taxi_close: bool,
     pub(crate) taxi_riding: bool,
 
@@ -1700,27 +1699,23 @@ impl Model {
             merchant: None,
             repair_all_cost: 0,
             repair_costs: Default::default(),
-            merchant_buys: Vec::new(),
-            merchant_cursor_sells: Vec::new(),
             merchant_slot_buys: Vec::new(),
             merchant_close: false,
-            merchant_buybacks: Vec::new(),
-            repair_all: false,
             repair_mode: false,
             stable: Default::default(),
             bank: None,
             bank_purchase: false,
             bank_close: false,
             trainer: None,
-            trainer_buys: Vec::new(),
             trainer_selection: None,
             trainer_close: false,
             trainer_filter: [true; 3],
             trainer_collapsed: HashSet::new(),
             trainer_line_filter: u32::MAX,
-            trainer_open_own: false,
+            trainer_rows: Vec::new(),
+            trainer_visible: 0,
+            trainer_rows_fresh: false,
             taxi: None,
-            taxi_takes: Vec::new(),
             taxi_close: false,
             taxi_riding: false,
             trade_skill: None,

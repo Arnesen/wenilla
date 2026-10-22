@@ -81,7 +81,10 @@ fn resolve_service(
             trainer_type,
             spells,
             skill_lines,
-            known,
+            &ReqBooks {
+                player: known,
+                pet: None,
+            },
             None,
             &deps.items,
             Ask::New(&deps.commands),
@@ -113,7 +116,10 @@ fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
             open,
             spells,
             None,
-            &BTreeSet::new(),
+            &ReqBooks {
+                player: &BTreeSet::new(),
+                pet: None,
+            },
             None,
             &deps.items,
             Ask::New(&deps.commands),
@@ -521,7 +527,9 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
     assert_eq!(svc.cost, 1000);
     assert_eq!(svc.category, TrainerServiceCategory::Unavailable);
     assert_eq!(svc.level_req, 20);
-    // The skill gate follows the category; the ability gate is unmet as the player lacks 78.
+    // The skill gate follows the category; the ability gate reads met, as no service spell
+    // record reaches the known test (`0x4d9842`), and a requirement with no record answers nil
+    // (`0x4d97c8`, `0x4d98d1`). Every slot stays in place (`0x4d97a5`).
     assert_eq!(
         svc.skill_req,
         Some(TrainerSkillReq {
@@ -532,12 +540,25 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
     );
     assert_eq!(
         svc.ability_reqs,
-        vec![TrainerAbilityReq {
-            name: "Spell 78".to_string(),
-            met: false,
-        }]
+        vec![
+            TrainerAbilityReq {
+                spell_id: 78,
+                name: None,
+                met: true,
+            },
+            TrainerAbilityReq {
+                spell_id: 0,
+                name: None,
+                met: true,
+            },
+            TrainerAbilityReq {
+                spell_id: 0,
+                name: None,
+                met: true,
+            },
+        ]
     );
-    assert!(svc.is_trade_skill, "trainer_type 2 → tradeskill");
+    assert!(!svc.is_trade_skill, "no record: nil (`0x4d9fcf`)");
     assert!(svc.prof_first_rank == w.is_primary_prof_first_rank);
     // No catalog at a tradeskill trainer: the learn group, as type 2 never drops a row.
     assert_eq!(svc.group_key, 2);
@@ -551,7 +572,10 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
         &BTreeSet::new(),
     );
     assert_eq!(plain.skill_req, None);
-    assert!(plain.ability_reqs.is_empty());
+    assert!(plain
+        .ability_reqs
+        .iter()
+        .all(|r| r.spell_id == 0 && r.name.is_none()));
     assert!(!plain.is_trade_skill);
 }
 
@@ -559,7 +583,12 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
 /// reads met.
 #[test]
 fn ability_req_met_tracks_known_spells_not_the_service_category() {
-    let spells = empty_catalog();
+    // The service spell and the requirement have records, so the known test is reached
+    // (`0x4d97c8`, `0x4d9842`).
+    let spells = SpellCatalog::from_displays(HashMap::from([
+        (845, taught_ability()),
+        (78, taught_ability()),
+    ]));
     let mut w = wire(845, trainer_spell_state::RED, 100, 20, 0); // unavailable (gated by level)
     w.req_spells = [78, 0, 0]; // requires Heroic Strike (78)
 
@@ -591,15 +620,31 @@ fn ability_req_shows_the_required_rank_on_real_data() {
     let svc = resolve_service(&w, 0, &spells, None, &known);
     assert_eq!(
         svc.ability_reqs,
-        vec![TrainerAbilityReq {
-            name: "Heroic Strike (Rank 1)".to_string(),
-            met: true,
-        }],
+        vec![
+            TrainerAbilityReq {
+                spell_id: 78,
+                name: Some("Heroic Strike (Rank 1)".to_string()),
+                met: true,
+            },
+            TrainerAbilityReq {
+                spell_id: 0,
+                name: None,
+                met: true,
+            },
+            TrainerAbilityReq {
+                spell_id: 0,
+                name: None,
+                met: true,
+            },
+        ],
         "the prereq shows its rank and reads met because the player knows it"
     );
     let svc = resolve_service(&w, 0, &spells, None, &BTreeSet::new());
     assert!(!svc.ability_reqs[0].met);
-    assert_eq!(svc.ability_reqs[0].name, "Heroic Strike (Rank 1)");
+    assert_eq!(
+        svc.ability_reqs[0].name.as_deref(),
+        Some("Heroic Strike (Rank 1)")
+    );
 }
 
 /// `GetTrainerServiceDescription 0x4d9b40`: a class trainer's plain ability row expands the wire
@@ -903,7 +948,10 @@ fn service_description_on_real_data_reads_astral_recalls_bind_area() {
             0,
             &spells,
             None,
-            &BTreeSet::new(),
+            &ReqBooks {
+                player: &BTreeSet::new(),
+                pet: None,
+            },
             None,
             &deps.items,
             Ask::New(&deps.commands),
@@ -1614,6 +1662,7 @@ fn the_group_header_keys_resolve_in_the_real_global_strings() {
 /// (`0x4d8d24`), the open window included.
 #[test]
 fn open_trainer_closes_the_window_and_asks_for_the_players_own_list() {
+    use bevy::ecs::system::RunSystemOnce;
     const ME: u64 = 0x10;
     const TRAINER: u64 = 0xF130_0000_4500_0001;
     let run = |with_player: bool| {
@@ -1629,10 +1678,24 @@ fn open_trainer_closes_the_window_and_asks_for_the_players_own_list() {
         app.world_mut()
             .resource_mut::<TrainerOpen>()
             .open(TRAINER, 0, Vec::new(), String::new());
-        app.world_mut()
-            .non_send_resource::<UiScript>()
-            .run("OpenTrainer()")
+        let mut calls = {
+            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            script.keep_calls();
+            script.run("OpenTrainer()").unwrap();
+            script.take_trainer_calls()
+        };
+        let tails = app
+            .world_mut()
+            .run_system_once(move |mut steps: TrainerSteps| {
+                std::mem::take(&mut calls)
+                    .into_iter()
+                    .filter_map(|call| steps.apply(call))
+                    .collect::<Vec<_>>()
+            })
             .unwrap();
+        for tail in tails {
+            tail(&mut app.world_mut().non_send_resource_mut::<UiScript>());
+        }
         app.update();
         let open = app.world().resource::<TrainerOpen>().trainer;
         (open, rx.try_iter().collect::<Vec<_>>())
@@ -1702,4 +1765,193 @@ fn a_refused_product_is_asked_at_the_next_list_never_by_a_frame() {
     list(&mut app);
     app.update();
     assert_eq!(product_asks(&rx), 1, "the next list does, once");
+}
+
+/// [`resolve_service`] with the pet's book beside the player's, as `GetTrainerServiceAbilityReq`
+/// asks it for a `LEARN_PET_SPELL` service (`0x4d9850`-`0x4d9882`).
+fn resolve_with_pet(
+    wire: &TrainerSpell,
+    spells: &SpellCatalog,
+    skill_lines: Option<&SkillLineCatalog>,
+    player: &BTreeSet<u32>,
+    pet: Option<&BTreeSet<u32>>,
+) -> TrainerService {
+    let deps = Deps::new();
+    with_text(spells, 0, 0, None, |text| {
+        super::resolve_service(
+            wire,
+            0,
+            spells,
+            skill_lines,
+            &ReqBooks { player, pet },
+            None,
+            &deps.items,
+            Ask::New(&deps.commands),
+            text,
+            &probe_strings,
+        )
+    })
+}
+
+/// `IsTrainerServiceTradeSkill` (`0x4d9f70`) answers from the wire spell's effects, never the
+/// trainer's type: 1 for a `LEARN_SPELL` (36) slot teaching a spell with `Attributes & 0x20`
+/// (`0x4d9fe0`-`0x4d9ffe`). A profession rank at a tradeskill trainer teaches a plain spell, and a
+/// rogue's poison at a class trainer teaches a 0x20 one; a wire spell with no record answers nil.
+#[test]
+fn trade_skill_answers_from_the_taught_spells_attribute_not_the_trainer_type() {
+    let poison = SpellDisplay {
+        name: "Instant Poison".into(),
+        attributes: SPELL_ATTR_IS_TRADESKILL,
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([
+        (2020, wrapper(SPELL_EFFECT_LEARN_SPELL, 0, 2018)),
+        (2018, taught_ability()),
+        (8681, wrapper(SPELL_EFFECT_LEARN_SPELL, 1, 8680)),
+        (8680, poison),
+    ]));
+    let rank = |spell, trainer_type| {
+        resolve_service(
+            &wire(spell, trainer_spell_state::GREEN, 10, 5, 0),
+            trainer_type,
+            &spells,
+            None,
+            &BTreeSet::new(),
+        )
+    };
+    assert!(!rank(2020, TRAINER_TYPE_TRADESKILL).is_trade_skill);
+    assert!(rank(8681, 0).is_trade_skill);
+    assert!(!rank(9999, TRAINER_TYPE_TRADESKILL).is_trade_skill);
+}
+
+/// `GetTrainerServiceAbilityReq` (`0x4d96e0`) reads a requirement met when the player knows it
+/// (`0x60c740`) or a later rank of it (`0x60c8d0`, the `SkillLineAbility` successor chain): a
+/// learned Heroic Strike rank 2 lists rank 1, which left the book with the learn.
+#[test]
+fn ability_req_is_met_by_a_known_higher_rank() {
+    const RANK1: u32 = 78;
+    const RANK2: u32 = 284;
+    let spells = SpellCatalog::from_displays(HashMap::from([
+        (285, wrapper(SPELL_EFFECT_LEARN_SPELL, 0, RANK2)),
+        (RANK1, taught_ability()),
+        (RANK2, taught_ability()),
+    ]));
+    let row = |skill_id, forward| benilla_formats::SlaInfo {
+        skill_id,
+        req_skill_value: 0,
+        forward_spell_id: forward,
+        trivial_low: 0,
+        trivial_high: 0,
+    };
+    let lines = SkillLineCatalog::from_abilities([(RANK1, row(26, RANK2)), (RANK2, row(26, 0))]);
+    let mut w = wire(285, trainer_spell_state::GRAY, 10, 8, 0);
+    w.req_spells = [RANK1, 0, 0];
+    let known: BTreeSet<u32> = [RANK2].into_iter().collect();
+    let svc = resolve_with_pet(&w, &spells, Some(&lines), &known, None);
+    assert!(svc.ability_reqs[0].met, "rank 2 known: rank 1 is met");
+    let svc = resolve_with_pet(&w, &spells, Some(&lines), &BTreeSet::new(), None);
+    assert!(!svc.ability_reqs[0].met, "neither rank known");
+}
+
+/// The flag starts at 1 (`0x4d9761`) and only a resolved service spell reaches the tests
+/// (`0x4d9821`-`0x4d9842`), so a wire spell with no record reads met whatever the book holds.
+/// A `LEARN_PET_SPELL` (57) service asks the pet's book (`0x4d9850`-`0x4d9882`), and with no pet
+/// the flag stays 1 (`0x4d9884`).
+#[test]
+fn ability_req_asks_the_pets_book_for_a_pet_spell_and_none_without_a_record() {
+    let spells = SpellCatalog::from_displays(HashMap::from([
+        (700, wrapper(SPELL_EFFECT_LEARN_PET_SPELL, 0, 301)),
+        (300, taught_ability()),
+    ]));
+    let mut w = wire(700, trainer_spell_state::GREEN, 10, 1, 0);
+    w.req_spells = [300, 0, 0];
+    let player: BTreeSet<u32> = [300].into_iter().collect();
+    let empty = BTreeSet::new();
+    let met = |pet: Option<&BTreeSet<u32>>, player: &BTreeSet<u32>| {
+        resolve_with_pet(&w, &spells, None, player, pet).ability_reqs[0].met
+    };
+    assert!(!met(Some(&empty), &player), "the pet lacks it: unmet");
+    assert!(met(Some(&player), &empty), "the pet knows it: met");
+    assert!(met(None, &empty), "no pet: met");
+
+    let mut stray = wire(9999, trainer_spell_state::GREEN, 10, 1, 0);
+    stray.req_spells = [300, 0, 0];
+    assert!(
+        resolve_with_pet(&stray, &spells, None, &empty, None).ability_reqs[0].met,
+        "no record for the service spell: met"
+    );
+}
+
+/// The rows sort only where the reference finalizes them, the list (`0x4d7b3b`) and the state
+/// pass `0x4d7d40`, each from the order the last left (`0x4d857e`): an identical re-list lays them
+/// out anew and the re-derive after it carries them, and a name that lands re-sorts nothing, so
+/// rows the comparator ties (here four with no `Spell.dbc` record, `0x4d87cd`) keep their places.
+#[test]
+fn the_trainer_rows_sort_only_at_a_list_and_a_re_derive() {
+    const TRAINER: u64 = 0x10;
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>()
+        .insert_resource(NetCommands(tx))
+        .init_resource::<TrainerOpen>()
+        .init_resource::<TrainerErrors>()
+        .init_resource::<TrainerTooltipSubjects>()
+        .init_resource::<PlayerActions>()
+        .init_resource::<Items>()
+        .init_resource::<NameCache>()
+        .init_resource::<GuidIndex>()
+        .init_resource::<crate::ui_pet::PetBar>()
+        .init_resource::<crate::spell::SpellModifiers>()
+        .insert_resource(Spells {
+            catalog: icon_catalog(),
+            ..Spells::empty_for_tests()
+        })
+        .insert_resource(SkillLines {
+            catalog: benilla_formats::SkillLineCatalog::from_spell_lines([]),
+        })
+        .add_systems(Update, feed_trainer);
+    app.insert_non_send_resource(UiScript::new().unwrap());
+    let list = |app: &mut App| {
+        app.world_mut().resource_mut::<TrainerOpen>().open(
+            TRAINER,
+            TRAINER_TYPE_TRADESKILL,
+            (1..=4)
+                .map(|cost| wire(300 + cost, trainer_spell_state::GREEN, cost, 1, 0))
+                .collect(),
+            String::new(),
+        );
+    };
+    // Each row by its cost, a header as 0.
+    let rows = |app: &mut App| -> Vec<i64> {
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .eval::<Vec<i64>>(
+                "local out = {} for i = 1, 5 do out[i] = (GetTrainerServiceCost(i)) end return out",
+            )
+            .unwrap()
+    };
+    list(&mut app);
+    app.update();
+    let first = rows(&mut app);
+    app.world_mut()
+        .resource_mut::<NameCache>()
+        .insert_player(TRAINER, "Trainer".into(), None);
+    app.update();
+    assert_eq!(rows(&mut app), first, "a landed name re-sorts nothing");
+    list(&mut app);
+    app.update();
+    assert_eq!(
+        rows(&mut app),
+        first,
+        "an identical re-list lays the rows out anew"
+    );
+    app.world_mut()
+        .resource_mut::<TrainerOpen>()
+        .trigger_re_derive();
+    app.update();
+    let carried = rows(&mut app);
+    assert_ne!(
+        carried, first,
+        "the re-derive sorts from the order the list left"
+    );
 }
