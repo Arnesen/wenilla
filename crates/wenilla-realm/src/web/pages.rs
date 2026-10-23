@@ -1,4 +1,4 @@
-//! Unauthenticated pages: `/healthz`, `/about`, `/privacy`.
+//! Unauthenticated pages: `/healthz`, `/about`, `/privacy`, `/docs/bridge`.
 
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/healthz", get(healthz))
         .route("/about", get(about))
         .route("/privacy", get(privacy))
+        .route("/docs/bridge", get(bridge_docs))
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
@@ -37,6 +38,12 @@ async fn about(State(state): State<Arc<AppState>>) -> Response {
 
 async fn privacy(State(state): State<Arc<AppState>>) -> Response {
     render(templates::Privacy {
+        realm_name: state.realm_name().await,
+    })
+}
+
+async fn bridge_docs(State(state): State<Arc<AppState>>) -> Response {
+    render(templates::BridgeDocs {
         realm_name: state.realm_name().await,
     })
 }

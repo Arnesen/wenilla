@@ -20,7 +20,8 @@ changing client code, and treat this file as authoritative for the fork's crates
 | `crates/wenilla-host` | local dev server: static files, `/data/*`, `/ws/*` relay. Loopback only. | ours |
 | `crates/wenilla-realm` | the realm service: login, play page, admin panel, relay. This runs in prod. | ours |
 | `crates/wenilla-realm/templates/play.html` | the realm's player page (Askama, compiled into the binary) | ours |
-| `web/` | the page side: `index.html` (dev page), `boot.js`, `platform.js`, `bridge.js`, `examples/`, `wasi_stubs.js` | ours |
+| `web/` | the page side: `index.html` (dev page), `boot.js`, `platform.js`, `bridge.js`, `automate.js` (`wenilla.auto`), `examples/`, `wasi_stubs.js` | ours |
+| `crates/wenilla-realm/templates/bridge_docs.html` | the bridge's player-facing reference, public at `/docs/bridge` | ours |
 | `scripts/web-setup.sh`, `scripts/web-build.sh` | toolchain and build for the wasm | ours |
 | `third_party/mlua-sys` | Lua 5.1's C build for wasm | ours (vendored) |
 | `.github/workflows/check.yml` | the PR gate: wasm check + realm tests | ours |

@@ -23,6 +23,7 @@ pub(crate) use imp::{
 mod imp {
     use super::*;
     use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
+    use super::super::act::{parse_guid, ActOp};
     use js_sys::{Array, Function, Object, Reflect};
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
@@ -112,6 +113,38 @@ mod imp {
                 }),
                 "chat" => str_of("text").map(BridgeCommand::Chat),
                 "release" => Some(BridgeCommand::Release),
+                "target" | "interact" | "moveto" | "stop" | "path" => {
+                    let guid = || str_of("guid").as_deref().and_then(parse_guid);
+                    let pos = || {
+                        get(&obj, "pos")
+                            .dyn_into::<Array>()
+                            .ok()
+                            .filter(|a| a.length() >= 3)
+                            .and_then(|a| {
+                                let n = |i| a.get(i).as_f64().filter(|v| v.is_finite());
+                                Some([n(0)? as f32, n(1)? as f32, n(2)? as f32])
+                            })
+                    };
+                    let op = match op.as_str() {
+                        "target" => guid().map(ActOp::Target),
+                        "interact" => guid().map(|guid| ActOp::Interact {
+                            guid,
+                            auto_loot: get(&obj, "autoLoot").as_bool().unwrap_or(false),
+                        }),
+                        "moveto" => pos().map(ActOp::MoveTo),
+                        "path" => pos().map(|to| ActOp::Path {
+                            to,
+                            budget: num_of("budget").map_or(super::super::path_budget(), |b| {
+                                (b.max(1.0) as usize).min(100_000)
+                            }),
+                        }),
+                        _ => Some(ActOp::Stop),
+                    };
+                    op.map(|op| BridgeCommand::Act {
+                        id: num_of("id").unwrap_or(0.0) as u32,
+                        op,
+                    })
+                }
                 _ => None,
             };
             match parsed {

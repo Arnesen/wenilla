@@ -38,6 +38,14 @@ pub struct Privacy {
     pub realm_name: String,
 }
 
+/// `/docs/bridge`: the JavaScript bridge's reference for players who script (`web/bridge.js`,
+/// `web/automate.js`).
+#[derive(Template)]
+#[template(path = "bridge_docs.html")]
+pub struct BridgeDocs {
+    pub realm_name: String,
+}
+
 #[derive(Template)]
 #[template(path = "setup.html")]
 pub struct Setup {

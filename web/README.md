@@ -115,8 +115,18 @@ wenilla.gamepad.start(); wenilla.notify.enable()   // the 🔔 button does the l
 
 `?bridge=hud` mounts `web/examples/hud.js` (self, zone, target, the nearest units with distance
 and bearing, chat lines with how far the speaker is — the proximity prerequisite made visible);
-`?bridge=idle` runs `web/examples/idle.js`, a 30-line attack-nearest loop. `?bridge=0` turns the
-bridge off for the session.
+`?bridge=idle` runs `web/examples/idle.js`, a 30-line attack-nearest loop; `?bridge=grind` runs
+`web/examples/grind.js`, a leveling bot on the automation library. `?bridge=0` turns the bridge
+off for the session.
+
+**Automation.** `web/automate.js` (loaded by `bridge.js`, `wenilla.auto`) is a library over the
+contract below for scripting play end to end: unit filters (`nearest({service: 'vendor'})`,
+`{hostile, lootable, questStatus, …}`), `goto` (planned paths) / `moveTo` / `approach`, `fight`
+with a rotation callback, `loot` / `gather`, bags, vendors (`open`, `buy`, `sell`, `sellJunk`,
+`repair`), quests (`questGiver` hands in and accepts, `questLog`), trainers (`trainAll`), `rest`,
+`release` / `corpseRun`, recorded routes. Its player-facing reference is a page the realm serves
+without sign-in, `/docs/bridge` (`crates/wenilla-realm/templates/bridge_docs.html`) — keep the two
+in step.
 
 ### How it works, and what it stands on
 
@@ -150,10 +160,17 @@ A fire is a tap: the press now and the release a frame later, which is what make
 button cast; its amount scales the one-shot the body fires (the wheel's zoom notch). Movement, jump, sit, sheath,
 autorun and interaction have no Lua verbs in 1.12, which is why the bridge goes under the
 bindings instead of through the VM for them. Casting, targeting by name, quests, bags and
-reading state back out go through the VM: `lua(chunk)` evaluates a chunk and returns its
-results as plain values (tables to depth 4, at most 512 values). Turning is
-`Player::turn_aim` — the scripted mouse-turn the probe harness uses. NPC and gameobject
-interaction (a right-click) is not exposed yet.
+reading state back out go through the VM: `lua(chunk)` evaluates a chunk with the call host
+lent, as every FrameXML script runs, so a chunk that casts or uses an item applies inside the
+call; it returns its results as plain values (tables to depth 4, at most 512 values; a table is
+read up to Lua's length, so a row with a nil inside is cut there — substitute a value). Turning is
+`Player::turn_aim` — the scripted mouse-turn the probe harness uses. The world verbs
+(`webbridge/act.rs`) are the client's own: `target` is `SetSelection` by guid (which 1.12's Lua
+cannot name), `interact` the right-click's object dispatch (`target::Interact`; `autoLoot` opens
+with 1.12's auto-loot, the only way a script loots, since the client refuses a scripted
+loot-button click as the reference does), `moveto` Click to Move's ground walk, and `path` an A*
+over a one-yard grid through the loaded collision (`webbridge/path.rs`: floors by a downward ray,
+edges by a body sweep, then pulled tight).
 
 Considered and not chosen: synthesizing DOM key events on the canvas (no Rust change, but
 chord-addressed and fragile for mouse-look), Bevy's raw input messages (the probe fleet's shape,
@@ -184,13 +201,17 @@ guids are hex strings (`"0xf130000000000001"`), because a u64 does not fit a JS 
 { v: 1, seq, t,                      // t: seconds since the app started
   session: { state: 'login'|'charselect'|'charcreate'|'inworld', connected },
   map: { id }, zone: { id, name, realZone, subzone, minimapText, indoor, pvpType, pvpFaction, arena } | null,
-  self:   Unit + { pos, facing, mounted, casting: {spellId}|null, channeling: {spellId}|null } | null,
+  self:   Unit + { pos, facing, mounted, autoMove, casting: {spellId}|null, channeling: {spellId}|null } | null,
   target: Unit | null,  hover: { guid } | null,
   units: [ Unit… ] }
 Unit = { guid, kind: 'player'|'unit'|'go'|'corpse'|'dyn', name|null, pos, dist, displayId,
          health, maxHealth, power, maxPower, powerType, level, dead, ghost, inCombat,
          reaction (1..8, 0 unknown), hostile, friendly, isPlayer, pvp, class, race, targetGuid,
-         moveFlags, moving, swimming, falling, speed, standState, stealthed }
+         moveFlags, moving, swimming, falling, speed, standState, stealthed,
+         entry, npcFlags, services: ['vendor'|'repair'|'trainer'|'questgiver'|…],
+         questStatus: 'available'|'reward'|'incomplete'|'unavailable'|null,
+         lootable, tapped, skinnable,          // units
+         goType, goTypeName }                  // game objects (no name: GO names are not cached)
 ```
 
 Events (`wenilla.on(name, cb)`):
@@ -205,6 +226,7 @@ Events (`wenilla.on(name, cb)`):
 | `chat` | `{ event: 'CHAT_MSG_SAY', kind: 'SAY', text, sender, senderGuid, language, channel, channelNumber, target, flag }` — every routed line |
 | `event` | `{ name, args }` — a Lua event you subscribed to; `wenilla.on('PLAYER_DEAD', …)` subscribes for you |
 | `lua` | `{ id, ok, values }` or `{ id, ok: false, error }` — `wenilla.lua()` turns these into a promise |
+| `act` | `{ id, op, ok, reason? }` (+ `points`, `partial`, `expanded` for `path`) — the world verbs' answers |
 | `input` | `{ heldCleared: true }` — the wasm dropped every held command (world exit, the object vanished, `release`) |
 | `error` | `{ reason, cmd? }` — an unknown command name (reported once) or a malformed queue entry |
 
@@ -218,6 +240,11 @@ Commands (`queue` entries; the `wenilla.*` methods build them):
 | `lua` | `id, chunk` | evaluate; answered by a `lua` event with that `id` |
 | `chat` | `text` | a line as if typed and submitted — `/say`, `/target`, `/follow`, `/sit`, `.gm` |
 | `release` | | drop every hold |
+| `target` | `id, guid` | select a unit by guid — answered by an `act` event |
+| `interact` | `id, guid, autoLoot?` | right-click an object: talk, loot, skin, use, attack — `act` |
+| `moveto` | `id, pos` | walk straight to `[x, y, z]` (Click to Move); `self.autoMove` while under way — `act` |
+| `stop` | `id` | end a walk — `act` |
+| `path` | `id, pos, budget?` | a walkable path to `[x, y, z]`: `act` carries `points`, `partial`, `expanded` |
 
 ### Background tabs and notifications
 
