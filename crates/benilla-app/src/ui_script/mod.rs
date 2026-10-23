@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{ActionSlot, ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{ActionSlot, ScriptValue, UnitState};
 
 use crate::ui_unit::UnitFeed;
 use benilla_world::schedule::WorldStage;
@@ -230,9 +230,9 @@ pub(crate) fn run_or_warn(script: &benilla_ui::script::UiScript, chunk: &str) {
 }
 
 /// The reference's `uiScale` CVar, which the VM makes `UIParent`'s own scale
-/// ([`UiScript::set_ui_scale`]): the screen root stays 768 units tall, so `uiScale = 768/screenH`
-/// is pixel-perfect inside `UIParent`, and a frame outside it is not scaled. Tests pin the
-/// `Default` 1.0.
+/// ([`benilla_ui::script::UiScript::set_ui_scale`]): the screen root stays 768 units tall, so
+/// `uiScale = 768/screenH` is pixel-perfect inside `UIParent`, and a frame outside it is not
+/// scaled. Tests pin the `Default` 1.0.
 #[derive(Resource)]
 pub(crate) struct UiScaleCvar(pub(crate) f32);
 
@@ -302,9 +302,13 @@ fn console_reload_ui(world: &mut World, _args: &str) -> Vec<String> {
     if let Some(mut rebuild) = world.get_resource_mut::<glue::GlueRebuild>() {
         rebuild.request();
     }
-    if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
-        script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
-    }
+    crate::script_calls::with_hosted_vm(world, |script| {
+        if let Some(Err(e)) =
+            script.map(|s| s.session_call(benilla_ui::script::SessionRequest::ReloadUi))
+        {
+            debug!("console: reloadUI with no interface to reload: {e}");
+        }
+    });
     Vec::new()
 }
 
@@ -361,10 +365,18 @@ impl Plugin for UiScriptPlugin {
                 OnEnter(crate::client_state::ClientState::InWorld),
                 lifecycle::arm_entry_ui_load,
             )
-            // The shutdown tail: events, then writes, in the reference's order.
+            // The shutdown tail: events, then writes, in the reference's order; the clears of what
+            // the dying state shows after its `PLAYER_LOGOUT`, then the glue VM.
+            .configure_sets(
+                OnExit(crate::client_state::ClientState::InWorld),
+                (SessionEnd::Shutdown, SessionEnd::Clears, SessionEnd::Glue).chain(),
+            )
             .add_systems(
                 OnExit(crate::client_state::ClientState::InWorld),
-                end_ui_session,
+                (
+                    lifecycle::shut_down_session.in_set(SessionEnd::Shutdown),
+                    lifecycle::install_session_glue.in_set(SessionEnd::Glue),
+                ),
             )
             // `init_` here and in `UiUnitPlugin`: either plugin may be built alone in a test.
             .init_world_leave_sweep()
@@ -525,8 +537,8 @@ fn arbitrate_pointer_over_ui(
 /// The session lifecycle: the VM's birth, identity, death and reload.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity,
-    PendingEntryUiLoad, ReloadUiPending,
+    ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity, PendingEntryUiLoad,
+    ReloadUiPending, SessionEnd,
 };
 /// The leave-world sweep `0x490a80`: its latch, its schedule and its legs' order.
 mod sweep;
@@ -545,7 +557,7 @@ pub(crate) use lifecycle::load_ingame_ui_on_world_entry;
 use lifecycle::shutdown_on_exit;
 #[cfg(test)]
 pub(crate) use lifecycle::{
-    finish_ui_load, is_emote_token_line, seat_from_roster, shutdown_ui_state,
+    end_ui_session, finish_ui_load, is_emote_token_line, seat_from_roster, shutdown_ui_state,
 };
 
 /// The 30 world-frame times `GetFramerate()` averages (`0xc631c8`).

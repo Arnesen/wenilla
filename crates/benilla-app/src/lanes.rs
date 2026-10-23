@@ -125,11 +125,14 @@ pub(crate) fn firing<R>(at: Stamp, f: impl FnOnce() -> R) -> (R, bool) {
     (r, CLOCK.load(Ordering::Relaxed) != before)
 }
 
-/// What a lane's firing may fire: the stamps below `bound`, the lowest of the other lanes' heads,
-/// among those whose outermost push came before the drain began.
+/// What a lane's firing may fire, among the stamps whose outermost push came before the drain
+/// began: those below `before`, the lowest head of the lanes registered ahead of it, and up to
+/// `through`, the lowest head of the lanes after it. Equal heads fire in lane order, so a tie
+/// never stalls the drain.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Until {
-    bound: Option<Stamp>,
+    before: Option<Stamp>,
+    through: Option<Stamp>,
     fence: u64,
 }
 
@@ -138,13 +141,16 @@ impl Until {
     #[cfg(test)]
     pub(crate) fn all() -> Self {
         Self {
-            bound: None,
+            before: None,
+            through: None,
             fence: CLOCK.load(Ordering::Relaxed),
         }
     }
 
     pub(crate) fn admits(&self, stamp: Stamp) -> bool {
-        stamp.first() < self.fence && self.bound.is_none_or(|b| stamp < b)
+        stamp.first() < self.fence
+            && self.before.is_none_or(|b| stamp < b)
+            && self.through.is_none_or(|b| stamp <= b)
     }
 }
 
@@ -285,16 +291,22 @@ pub(crate) fn fire_in_order(world: &mut World) {
             break;
         };
         // A head at the origin is a view's frame-start push, which raises nothing and commutes
-        // with another view's: it bounds no other lane.
-        let bound = heads
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .filter_map(|(_, h)| *h)
-            .filter(|h| *h != Stamp::origin())
-            .min();
+        // with another view's: it bounds no other lane. The pick is the first lane holding the
+        // lowest head, so a later lane's equal head bounds it inclusively.
+        let lowest = |lanes: &[Option<Stamp>]| {
+            lanes
+                .iter()
+                .filter_map(|h| *h)
+                .filter(|h| *h != Stamp::origin())
+                .min()
+        };
+        let until = Until {
+            before: lowest(&heads[..i]),
+            through: lowest(&heads[i + 1..]),
+            fence,
+        };
         let lane = &lanes.0[i];
-        if let Err(e) = world.run_system_with(lane.fire, Until { bound, fence }) {
+        if let Err(e) = world.run_system_with(lane.fire, until) {
             error!("lanes: `{}` did not fire: {e}", lane.name);
             break;
         }
@@ -413,6 +425,21 @@ mod unit_tests {
         push::<0>(w, "d");
         push::<1>(w, "e");
         assert_eq!(drain(&mut app), ["a", "b", "c", "d", "e"]);
+    }
+
+    /// Two lanes holding one stamp fire in lane order, the first lane's item then the second's,
+    /// and the drain goes on to the next stamp: a tie never stalls it.
+    #[test]
+    fn equal_heads_fire_in_lane_order_and_the_drain_goes_on() {
+        let mut app = app(&[]);
+        let w = app.world_mut();
+        let tie = stamp();
+        w.resource_mut::<Toy<0>>().0.push((tie, "a"));
+        w.resource_mut::<Toy<1>>().0.push((tie, "b"));
+        push::<1>(w, "c");
+        push::<0>(w, "d");
+        assert_eq!(drain(&mut app), ["a", "b", "c", "d"]);
+        assert_eq!(drain(&mut app), Vec::<&str>::new(), "nothing left behind");
     }
 
     /// A signal raised inside a listener runs to its end before the outer signal returns
