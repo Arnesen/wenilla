@@ -838,6 +838,17 @@ pub(crate) struct Model {
     pub(crate) trainer_filter: u32,
     /// The item records the trainer getters' calls missed, one per call, until the app takes them.
     pub(crate) trainer_item_waits: Vec<u32>,
+    /// The item records the profession getters' calls missed, one per call, each waiting with the
+    /// callback `0x4fdc30` (`0x4fdb90`, `0x4fdf77`, `0x4ff6cd`, `0x4ffac6`).
+    pub(crate) trade_skill_item_waits: Vec<u32>,
+    /// The profession build's pending count (`0xbde048`).
+    pub(crate) trade_skill_pending: u32,
+    /// The product records the builds missed, one per miss, each waiting with the callback
+    /// `0x4fc8e0` (`0x4fcd32`).
+    pub(crate) trade_skill_build_waits: Vec<u32>,
+    /// The item records the craft getters' calls missed, one per call, each waiting with the
+    /// callback `0x4f7710` (`0x4f75dd`, `0x4f79f2`).
+    pub(crate) craft_item_waits: Vec<u32>,
     /// Collapsed skill-line ids, kept across a re-push and cleared when the trainer closes.
     pub(crate) trainer_collapsed: HashSet<u32>,
     /// The skill-line filter `ds:0xb73a20`: bit n set shows header group n, every bit on a list.
@@ -862,8 +873,12 @@ pub(crate) struct Model {
     pub(crate) trade_skill_open: bool,
     /// `DoTradeSkill` calls, `(spell id, count)`.
     pub(crate) trade_skill_dos: Vec<(u32, u32)>,
-    /// The 1-based selection, 0 for none, carried across a re-push by the recipe's spell id.
-    pub(crate) trade_skill_selection: u32,
+    /// The row array as the last sort left it (`0xbddfc0`, full count `0xbde04c`), the displayed
+    /// rows first, and the displayed count (`0xbde054`).
+    pub(crate) trade_skill_rows: Vec<tradeskill::view::Row>,
+    pub(crate) trade_skill_visible: usize,
+    /// The header array as the last sort left it (`0xbde000`).
+    pub(crate) trade_skill_headers: Vec<tradeskill::view::TradeSkillGroup>,
     pub(crate) trade_skill_close: bool,
     /// Collapsed recipe groups by `(ItemClass, ItemSubClass)` (`0x55ba30`), kept across a re-push
     /// and a same-profession reopen like the mask `0x84dd68`; a profession switch resets them.
@@ -1184,13 +1199,17 @@ pub(crate) struct Model {
     /// The GM survey's tables and answer buffer.
     pub(crate) gm_survey: super::gm_survey::SurveyState,
 
-    /// The reputation pane's snapshot and the display tree built from it.
+    /// The reputation pane's snapshot.
     pub(crate) reputation: reputation::ReputationState,
-    pub(crate) reputation_groups: Vec<reputation::FactionGroup>,
+    /// The list entries (`0xb73258`) in the order the last sort left them, the added ones after.
+    pub(crate) reputation_rows: Vec<reputation::ListEntry>,
+    /// The displayed count (`0xb73764`).
+    pub(crate) reputation_visible: usize,
     /// Folded headers by key (a `Faction.dbc` id, 0 "Other", -1 "Inactive"): the mask `0x84a0a4`.
     pub(crate) reputation_collapsed: HashSet<i64>,
-    /// The header keys registered since the last rebuild (`0x4d5c20`), empty before the first.
-    pub(crate) reputation_headers: HashSet<i64>,
+    /// The header objects registered since the last rebuild (`0xb736c0`, `0x4d5c20`), in the order
+    /// the last sort left them; empty before the first.
+    pub(crate) reputation_headers: Vec<reputation::HeaderObject>,
     /// The selection as a faction id, a header's key included (`0xb73768`); 0 until set.
     pub(crate) reputation_selected: i64,
     /// Every faction with a reputation index under 64, by `Faction.dbc` id: the base for the
@@ -1674,6 +1693,10 @@ impl Model {
             trainer_close: false,
             trainer_filter: 7,
             trainer_item_waits: Vec::new(),
+            trade_skill_item_waits: Vec::new(),
+            trade_skill_pending: 0,
+            trade_skill_build_waits: Vec::new(),
+            craft_item_waits: Vec::new(),
             trainer_collapsed: HashSet::new(),
             trainer_line_filter: u32::MAX,
             trainer_rows: Vec::new(),
@@ -1685,7 +1708,9 @@ impl Model {
             trade_skill: None,
             trade_skill_open: false,
             trade_skill_dos: Vec::new(),
-            trade_skill_selection: 0,
+            trade_skill_rows: Vec::new(),
+            trade_skill_visible: 0,
+            trade_skill_headers: Vec::new(),
             trade_skill_close: false,
             trade_skill_collapsed: HashSet::new(),
             trade_skill_subclass_hidden: HashSet::new(),
@@ -1857,9 +1882,10 @@ impl Model {
             unserved_sends: Vec::new(),
             gm_survey: Default::default(),
             reputation: reputation::ReputationState::default(),
-            reputation_groups: Vec::new(),
+            reputation_rows: Vec::new(),
+            reputation_visible: 0,
             reputation_collapsed: HashSet::new(),
-            reputation_headers: HashSet::new(),
+            reputation_headers: Vec::new(),
             reputation_selected: 0,
             faction_standings: HashMap::new(),
         }

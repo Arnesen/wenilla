@@ -15,7 +15,7 @@
 //! `RemoveSkillUp`, `CancelSkillUps` and every rebuild take back. Each point costs 0: the cost
 //! comes from `SkillCostsData.dbc` through `SkillLine.skillCostsID` (`0x6de110`), and that id is 0
 //! in every row, so no pending point ever uses the player's skill points, `AcceptSkillUps` finds
-//! nothing to send, and the points left (`GetAdjustedSkillPoints`) stay the points held.
+//! nothing to send, and `GetAdjustedSkillPoints` answers the points held.
 //! `stepCost` and `rankCost` are always nil, by the data: `SkillLine.skillCostsID` is 0 in every
 //! row and no line a player holds carries the step-cost flags.
 
@@ -466,13 +466,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetAdjustedSkillPoints() → 0 here; the reference answers `PLAYER_CHARACTER_POINTS2` less the
-    // cost of the points `AddSkillUp` has chosen (`0x4d3cb0`), 0 each (module doc). The stock pane
-    // reads it only under its
-    // `stepCost` and `rankCost` branches, which 1.12 data never opens.
+    // GetAdjustedSkillPoints() (`0x4d3cb0`): `PLAYER_CHARACTER_POINTS2` (`+0xe4c`, `0x4d3d09`) less
+    // the cost of the points `AddSkillUp` has chosen (`0xb731d0`, `0x4d3d0f`), 0 each (module
+    // doc), pushed as a signed dword; 0 with no player, which the points' default is.
     g.set(
         "GetAdjustedSkillPoints",
-        lua.create_function(|_, ()| Ok(0i64))?,
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(i64::from(model.talents.points.1 as i32))
+        })?,
     )?;
 
     // AbandonSkill(index): `CMSG_UNLEARN_SKILL` with the row's skill line inside the call, a header's
@@ -1136,6 +1138,33 @@ mod tests {
                 "slot 1 must stay nil — it drives the stock file's own `if (not skillName)` early-out"
             );
         }
+    }
+
+    /// `GetAdjustedSkillPoints` (`0x4d3cb0`) answers `PLAYER_CHARACTER_POINTS2` (`+0xe4c`,
+    /// `0x4d3d09`) less the staged cost (`0xb731d0`, `0x4d3d0f`), pushed as a signed dword
+    /// (`fild dword` at `0x4d3d23`): a fresh character's 2 free professions read 2.
+    #[test]
+    fn adjusted_skill_points_answer_the_second_character_points_value() {
+        let mut s = UiScript::new().unwrap();
+        s.set_skills(state());
+        for (points, want) in [(2u32, 2i64), (0, 0), (u32::MAX, -1)] {
+            s.set_talents(crate::script::TalentUiState {
+                points: (5, points),
+                ..Default::default()
+            });
+            assert_eq!(
+                s.eval::<i64>("return GetAdjustedSkillPoints()").unwrap(),
+                want,
+                "points {points:#x}"
+            );
+        }
+        // A chosen point costs 0 (module doc), so staging one leaves the answer.
+        s.set_talents(crate::script::TalentUiState {
+            points: (0, 2),
+            ..Default::default()
+        });
+        s.run("AddSkillUp(2)").unwrap();
+        assert_eq!(s.eval::<i64>("return GetAdjustedSkillPoints()").unwrap(), 2);
     }
 
     #[test]

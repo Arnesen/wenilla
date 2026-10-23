@@ -252,7 +252,7 @@ pub use container::{
     BagAutoStore, ContainerMove, ContainerSlot, ContainerState, ContainerUse, EnchantView,
     PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
 };
-pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use craft::{CraftDifficulty, CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::equip::{AutoEquip, BIND_WHEN_EQUIPPED};
 pub use cursor::money::coin_icon;
 pub use cursor::{
@@ -353,7 +353,7 @@ pub(crate) use region::{
     load_blend_mode, load_texture_file, load_texture_name, load_xml_font_file,
     texture_name_verdict, FileLoad,
 };
-pub use reputation::{FactionEntry, ReputationCall, ReputationState};
+pub use reputation::{FactionEntry, ReputationCall, ReputationListOp, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
 pub(crate) use simplehtml::{

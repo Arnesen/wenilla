@@ -629,7 +629,13 @@ fn spell_book(
     for &spell_id in &spell_ids {
         list_opener(spell_id, spells, actions);
     }
-    actions.spells = spell_ids.into_iter().collect();
+    actions.spells.clear();
+    actions.profession_order.clear();
+    actions.craft_order.clear();
+    for spell_id in spell_ids {
+        actions.spells.insert(spell_id);
+        list_learn(spell_id, actions);
+    }
     actions.dirty = true;
     let now = Instant::now();
     for cd in &initial_cooldowns {
@@ -665,9 +671,34 @@ fn learned_spell(
     if actions.spells.insert(spell_id) {
         actions.dirty = true;
     }
+    list_learn(spell_id, actions);
     list_opener(spell_id, spells, actions);
     announce_learn(spell_id, spells, errors);
     tab_flash.0.push(spell_id);
+}
+
+/// `LearnSpell 0x5e9c20`'s list legs: the profession lists append with no duplicate check
+/// (`0x5e9d72`), the craft lists only a spell they lack (`0x5e9db3`, `0x5e9e0f`).
+fn list_learn(spell_id: u32, actions: &mut PlayerActions) {
+    actions.profession_order.push(spell_id);
+    if !actions.craft_order.contains(&spell_id) {
+        actions.craft_order.push(spell_id);
+    }
+}
+
+/// `UnlearnSpell 0x5e9fe0`'s list legs: the profession lists' backward scan takes out the last
+/// copy (`0x5ea0fe`, `0x5ea123`), the craft lists' forward scan the first (`0x5ea1b8`).
+fn list_unlearn(spell_id: u32, actions: &mut PlayerActions) {
+    if let Some(at) = actions
+        .profession_order
+        .iter()
+        .rposition(|&id| id == spell_id)
+    {
+        actions.profession_order.remove(at);
+    }
+    if let Some(at) = actions.craft_order.iter().position(|&id| id == spell_id) {
+        actions.craft_order.remove(at);
+    }
 }
 
 /// `SPELL_EFFECT_OPEN_LOCK` in `Effect[0]`, the registrar's test for the opener list (`0x4b265e`).
@@ -734,6 +765,7 @@ fn removed_spell(
     if actions.spells.remove(&spell_id) {
         actions.dirty = true;
     }
+    list_unlearn(spell_id, actions);
     // `UnlearnSpell 0x5e9fe0` does nothing for a spell with no record (`0x5ea02a`); otherwise it
     // clears the bar slots that stand for the spell (`0x5ea253`), which the bar's queue makes.
     if spells.is_some_and(|s| s.catalog.get(spell_id).is_some()) {
@@ -769,8 +801,12 @@ fn superceded_spell(
     tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
+    // The player's unlearn of the old rank, then its learn of the new one at the tail
+    // (`0x5e6392`, `0x5e63a4`).
     actions.spells.remove(&old_spell_id);
+    list_unlearn(old_spell_id, actions);
     actions.spells.insert(new_spell_id);
+    list_learn(new_spell_id, actions);
     actions.superseded.push((old_spell_id, new_spell_id));
     actions.dirty = true;
     // `0x4b2f50` unlists the old rank and registers the new one at the tail; the player's own
@@ -1647,6 +1683,7 @@ mod tests {
 
     mod cooldown_sites;
     mod dispatch;
+    mod learned;
     mod openers;
 
     /// `SMSG_COOLDOWN_EVENT` (`0x6e9670`): the event moves the held record's one start, which the

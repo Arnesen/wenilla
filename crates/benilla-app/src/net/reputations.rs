@@ -55,6 +55,9 @@ impl Default for Slots {
 pub(crate) struct Reputations {
     slots: Arc<Slots>,
     pub(crate) forced: Vec<(u32, u32)>,
+    /// What each message did to the pane's list, in arrival order, for the reputation feed to
+    /// hand over after the snapshot ([`crate::ui_reputation::feed_reputation`]).
+    pub(crate) list_ops: Vec<benilla_ui::script::ReputationListOp>,
 }
 
 impl Reputations {

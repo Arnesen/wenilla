@@ -322,7 +322,8 @@ pub(crate) fn reputation_row(
 /// The by-value inputs of the feed's gate, `(race, class, watched)`; the other two are resources.
 type ReputationInputs = Option<(u8, u8, Option<u32>)>;
 
-/// Push the snapshot when it differs from the list the VM holds; it signals nothing. The messages
+/// Push the snapshot when it differs from the list the VM holds, then hand over the messages' list
+/// ops ([`Reputations::list_ops`]); it signals nothing. The messages
 /// signal `UPDATE_FACTION` at their packets on the notice lane, which fires after this push
 /// (`0x4d5699`, `0x4d56f6`, `0x4d5984` and the sort's `0x4d5dab`), the list's verbs in their calls,
 /// and the world-enter rebuild in its cascade. The build (54 rows of names and descriptions) runs
@@ -330,21 +331,24 @@ type ReputationInputs = Option<(u8, u8, Option<u32>)>;
 /// into a VM comes on the frame the world-enter cascade runs over it
 /// (`crate::ui_unit::WorldEnterSeats`).
 pub(crate) fn feed_reputation(
-    mut vm: crate::script_calls::VmWith<Res<'static, Reputations>>,
+    mut vm: crate::script_calls::VmWith<ResMut<'static, Reputations>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     factions: Option<Res<Factions>>,
     mut last: Local<crate::ui_script::VmMemo<Option<ReputationState>>>,
     mut last_inputs: Local<crate::ui_script::VmMemo<ReputationInputs>>,
 ) {
-    vm.turn(|script, reputations| {
+    vm.turn(|script, mut reputations| {
         let Some(script) = script else {
             return;
         };
         let last = last.get(script);
         let last_inputs = last_inputs.get(script);
+        // Without the player or the catalog there is no snapshot, and the list ops wait for one.
         let (Ok(store), Some(factions_res)) = (self_store.single(), factions.as_ref()) else {
             return;
         };
+        // Taken unmarked, so the take alone wakes no rebuild of the snapshot.
+        let ops = std::mem::take(&mut reputations.bypass_change_detection().list_ops);
         let catalog = factions_res.catalog();
         let (race, class) = (
             store.0.unit_race().unwrap_or(0),
@@ -361,6 +365,7 @@ pub(crate) fn feed_reputation(
             || last_inputs.as_ref() != Some(&inputs)
             || last.is_none();
         if !moved {
+            script.push_reputation(None, ops);
             return;
         }
         *last_inputs = Some(inputs);
@@ -380,11 +385,11 @@ pub(crate) fn feed_reputation(
         entries.sort_by_key(|e| e.faction_id);
 
         let fresh = ReputationState { entries, watched };
-        if script.reputation_matches(&fresh) {
-            *last = Some(fresh);
-            return;
-        }
-        script.set_reputation(fresh.clone());
+        // The messages' list ops, over the snapshot they wrote.
+        script.push_reputation(
+            (!script.reputation_matches(&fresh)).then(|| fresh.clone()),
+            ops,
+        );
         *last = Some(fresh);
     })
 }
@@ -825,6 +830,33 @@ mod tests {
             None,
             "no template"
         );
+    }
+
+    /// The messages' list ops wait for a snapshot to apply to: with no faction catalog yet the
+    /// feed keeps them, and takes them once it pushes.
+    #[test]
+    fn the_list_ops_wait_for_the_snapshot_they_apply_to() {
+        use benilla_formats::FactionCatalog;
+        use benilla_ui::script::ReputationListOp;
+        let mut app = App::new();
+        app.init_resource::<Reputations>()
+            .add_systems(Update, feed_reputation);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.world_mut()
+            .spawn((SelfPlayer, ObjectStore(Default::default())));
+        let queued = |app: &App| app.world().resource::<Reputations>().list_ops.len();
+        app.world_mut()
+            .resource_mut::<Reputations>()
+            .list_ops
+            .push(ReputationListOp::Visible(3));
+        app.update();
+        assert_eq!(queued(&app), 1, "no catalog: nothing to apply them to");
+        app.insert_resource(Factions::from_catalog(FactionCatalog::from_rows(
+            Default::default(),
+            Default::default(),
+        )));
+        app.update();
+        assert_eq!(queued(&app), 0);
     }
 }
 
