@@ -361,6 +361,8 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_unit::feed_unit_reach", &["Transform", "names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
         "ui_party::GroupState", "ui_pet::PetBar"]),
+    // The chain ends' snapshots read their stores as of the drain's place (`ui_unit::views`); their
+    // names, relations, raid marks and guild read as the frame left them.
     ("::ui_unit::held::feed_chain_units", &["names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
         "ui_guild::GuildState", "ui_party::GroupState"]),
@@ -373,6 +375,9 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations"]),
     ("::ui_unit::feed_default_language", &["net::ObjectStore"]),
     ("::ui_unit::feed_known_languages", &["net::ObjectStore", "ui_action::PlayerActions"]),
+    // The party and raid tokens read the members' stores and records as of the drain's place
+    // (`ui_unit::views`); the roster `GetRaidRosterInfo` reads, the slots' presence edges and
+    // every snapshot's names, relations and roster read as the frame left them.
     ("::ui_party::feed::feed_party", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
         "net::SelfGuid", "net::reputations::Reputations", "ui_guild::GuildState",
         "ui_party::GroupState"]),
@@ -446,6 +451,9 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "spell::inflight::PendingCast", "spell::inflight::QueuedMeleeSpell",
         "spell::targeting::SpellTargeting", "target::Selection", "ui_loot::LootLatch",
         "ui_loot::LootState", "ui_party::GroupState", "ui_pet::PetAttackLatch"]),
+    // Each unit's list reads its store and record as of the drain's place (`ui_unit::views`), and
+    // the buff cache is rebuilt at each packet's watcher; the resolver's inputs, the unit gate's
+    // relations and the world entry's rebuild read as the frame left them.
     ("::ui_aura::feed_auras", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
         "net::SelfGuid", "net::reputations::Reputations", "target::Selection",
         "ui_action::PlayerActions", "ui_aura::AuraDurations", "ui_party::GroupState",
@@ -464,6 +472,8 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_pet::bar::feed_pet_bar", &["net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "ui_pet::PetAttackLatch", "ui_pet::PetBar"]),
     ("::ui_pet::bar::fire_pet_cooldown_events", &["ui_pet::PetBar"]),
+    // The pet's snapshot reads its store as of the drain's place (`ui_unit::views`); the bar's
+    // guid, its name and the `UNIT_PET` edge read as the frame left them.
     ("::ui_pet::unit::feed_pet_unit", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
         "net::SelfGuid", "ui_party::GroupState", "ui_pet::PetBar"]),
     ("::ui_pet::menu::feed_pet_menu", &["net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
@@ -675,6 +685,30 @@ fn lane_types() -> [TypeId; 11] {
         // The party lane: the group's signal log and the lane's place in it.
         TypeId::of::<crate::ui_party::GroupState>(),
         TypeId::of::<crate::ui_party::PartyLane>(),
+    ]
+}
+
+/// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
+/// so another lane's read of the same type shows as the state it is.
+fn lane_queue_owners() -> [(&'static str, TypeId); 11] {
+    [
+        ("bag view", TypeId::of::<crate::ui_items::feed::BagView>()),
+        ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
+        (
+            "field notices",
+            TypeId::of::<crate::field_watch::NoticeLane>(),
+        ),
+        ("item watchers", TypeId::of::<crate::item_lane::ItemLane>()),
+        ("equip errors", TypeId::of::<crate::ui_items::EquipErrors>()),
+        ("loot", TypeId::of::<crate::ui_loot::LootState>()),
+        ("chat", TypeId::of::<crate::ui_chat::ChatLog>()),
+        ("cast reports", TypeId::of::<crate::ui_cast::CastReports>()),
+        (
+            "auction house",
+            TypeId::of::<crate::ui_auction::HouseLane>(),
+        ),
+        ("party", TypeId::of::<crate::ui_party::GroupState>()),
+        ("party", TypeId::of::<crate::ui_party::PartyLane>()),
     ]
 }
 
@@ -1475,4 +1509,140 @@ fn every_view_push_of_what_a_handler_writes_is_listed() {
         wrong.join("\n  ")
     );
     assert!(stale.is_empty(), "stale rows: {stale:?}");
+}
+
+/// The lane firings that read what a handler writes as the frame left it, by lane, beside
+/// [`READS_FRAME_FINAL`]'s feeds: what a firing reads past the call host's own reads and its own
+/// lane's queues ([`lane_queue_owners`]), the field watchers' callbacks among them (the notice lane's). A listener fired
+/// there reads it as the frame's last packet left it, not as its own did (`0x537ae5`). The list
+/// only shrinks: a read goes once a log versions it ([`crate::ui_unit::views`]), and a row that no
+/// longer matches its firing fails.
+#[rustfmt::skip]
+const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
+    // The watchers' callbacks: the drunk line's name, the quest log's slots, the skill line's race
+    // and class and the bonus bar's form off our live descriptor, and the aura watcher's join of
+    // the durations the duration packet writes (`0x4e4390` into `0xbc5f68`), as the frame left them
+    // (#2217); the aura watcher's own store is the one its packet left.
+    ("field notices", &["names::NameCache", "net::ObjectStore", "ui_aura::AuraDurations"]),
+    // The views lane reads the stores and records it rewinds as of each packet; the names, the
+    // relations' stores and reputations, the selection, the guild and the bar's pet as the frame
+    // left them (#2217).
+    // The roster too: the members its party and raid tokens and readable guids come from, past
+    // the records it rewinds, as the frame left it (#2217).
+    ("unit views", &["names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
+        "net::reputations::Reputations", "target::Selection", "ui_guild::GuildState",
+        "ui_party::GroupState", "ui_pet::PetBar"]),
+    ("cast reports", &["items::Countdowns", "items::Items", "net::GuidIndex", "net::ObjectStore",
+        "ui_action::cast_lines::CastFailRedisplays"]),
+    ("item watchers", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",
+        "net::ObjectStore", "ui_trade::TradeSession"]),
+    ("equip errors", &["items::Countdowns", "items::Items", "net::GuidIndex", "net::ObjectStore"]),
+    ("auction house", &["items::Items", "names::NameCache", "net::SelfGuid",
+        "ui_auction::AuctionOpen"]),
+    // The master-loot candidates placed and named off the raid roster's subgroups as the frame
+    // left it, not as the push's packet did (`0x61c550`, #2217).
+    ("loot", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",
+        "net::ObjectStore", "ui_loot::AutoLootByte", "ui_loot::LootLatch",
+        "ui_loot::LootMoveStart", "ui_party::GroupState"]),
+    ("chat", &["go_templates::GameObjectTemplates", "items::Items", "names::NameCache",
+        "net::GuidIndex", "net::ObjectStore", "net::SelfGuid", "ui_chat::edit::ChannelState",
+        "world_state::WorldStates"]),
+];
+
+/// Every lane firing's read of what a handler writes is listed in [`LANE_READS_FRAME_FINAL`],
+/// found as [`every_view_push_of_what_a_handler_writes_is_listed`] finds a feed's.
+#[test]
+fn every_lane_reads_of_what_a_handler_writes_is_listed() {
+    use bevy::ecs::query::{ComponentAccessKind, FilteredAccess};
+    let mut app = headless_client();
+    let (components, resources) = {
+        let handlers = app.world().resource::<crate::net::handlers::NetHandlers>();
+        let mut components = BTreeSet::new();
+        let mut resources = BTreeSet::new();
+        for (_, access) in &handlers.accesses {
+            let access = access.combined_access();
+            if let Ok(kinds) = access.try_iter_component_access() {
+                components.extend(kinds.filter_map(|k| match k {
+                    ComponentAccessKind::Exclusive(id) => Some(id),
+                    _ => None,
+                }));
+            }
+            resources.extend(access.resource_writes());
+        }
+        (components, resources)
+    };
+    let world = app.world_mut();
+    let vm = world
+        .components()
+        .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
+    let host: Vec<FilteredAccess> = {
+        use bevy::ecs::system::System;
+        let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
+        System::initialize(&mut host, world)
+            .filtered_accesses()
+            .to_vec()
+    };
+    if !name(world, vm.expect("the VM's resource")).contains("benilla_ui") {
+        eprintln!("skipped: this build carries no type names");
+        return;
+    }
+    let owners = lane_queue_owners();
+    assert_eq!(
+        owners.map(|(_, t)| t).into_iter().collect::<BTreeSet<_>>(),
+        lane_types().into_iter().collect::<BTreeSet<_>>(),
+        "every lane queue has its owning lane"
+    );
+    let lane_queues: Vec<(&str, String)> = owners
+        .iter()
+        .filter_map(|(lane, t)| Some((*lane, world.components().get_resource_id(*t)?)))
+        .map(|(lane, id)| (lane, short_name(&name(world, id))))
+        .collect();
+    let lanes = world.resource::<super::Lanes>();
+    let mut found: Vec<(&str, BTreeSet<String>)> = Vec::new();
+    for (lane, access) in lanes.names().into_iter().zip(&lanes.1) {
+        let mut own: Vec<&FilteredAccess> = access.filtered_accesses().iter().collect();
+        for h in &host {
+            if let Some(i) = own.iter().position(|o| *o == h) {
+                own.remove(i);
+            }
+        }
+        let mut inputs = BTreeSet::new();
+        for access in own.iter().map(|o| o.access()) {
+            let read_c = components
+                .iter()
+                .filter(|&&id| access.has_component_read(id));
+            let read_r = resources.iter().filter(|&&id| access.has_resource_read(id));
+            for &id in read_c.chain(read_r) {
+                let n = name(world, id);
+                if Some(id) != vm && !n.contains("Messages<") {
+                    inputs.insert(short_name(&n));
+                }
+            }
+        }
+        inputs.retain(|n| {
+            !QUEUES_NOT_VIEWS.contains(&n.as_str())
+                && !lane_queues.iter().any(|(l, q)| *l == lane && q == n)
+        });
+        found.push((lane, inputs));
+    }
+    let wrong: Vec<String> = found
+        .iter()
+        .filter(|(lane, inputs)| {
+            let listed = LANE_READS_FRAME_FINAL.iter().find(|(l, _)| l == lane);
+            let listed: BTreeSet<String> = listed
+                .map(|(_, i)| i.iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            listed != *inputs
+        })
+        .map(|(lane, inputs)| {
+            let inputs: Vec<String> = inputs.iter().map(|i| format!("{i:?}")).collect();
+            format!("({lane:?}, &[{}]),", inputs.join(", "))
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "these lanes' firings read state a handler writes as the frame left it: version it, or \
+         give each its row in LANE_READS_FRAME_FINAL as it stands:\n  {}",
+        wrong.join("\n  ")
+    );
 }
