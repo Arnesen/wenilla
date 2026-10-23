@@ -422,6 +422,8 @@ export function install(w) {
   };
   /** Gather a GameObject (herb, vein, chest): use it with auto-loot and wait out the cast. */
   auto.gather = (node) => auto.loot(node, { timeout: 8000 });
+  /** Skin a looted, skinnable body: the right-click casts Skinning, then the hide is auto-looted. */
+  auto.skin = (body) => auto.loot(body, { timeout: 8000 });
 
   // ── bags ──
 
@@ -649,6 +651,28 @@ export function install(w) {
     spellIndex = null;
     return seq(learned);
   };
+
+  // ── travel ──
+
+  /**
+   * Fly from the nearest flight master to a known node whose name matches `dest` (a string, a
+   * part of one, or a RegExp). Resolves true once the flight has been booked; `self.mounted`
+   * and a moving position follow, and `waitFor(s => !s.self.mounted)` waits out the flight.
+   */
+  auto.fly = async (dest, master) => {
+    if (!(await auto.open('flightmaster', master))) throw new Error('fly: no flight map opened');
+    const [nodes] = await w.lua('local t = {} for i = 1, NumTaxiNodes() do table.insert(t, {i, TaxiNodeName(i) or "", TaxiNodeGetType(i) or ""}) end return t');
+    const list = seq(nodes).map((r) => seq(r, 3)).map(([index, name, type]) => ({ index, name, type }));
+    const hit = list.find((n) => n.type === 'REACHABLE' && (dest instanceof RegExp ? dest.test(n.name) : n.name.toLowerCase().includes(String(dest).toLowerCase())));
+    if (!hit) {
+      await w.lua('CloseTaxiMap()');
+      throw new Error(`fly: no reachable node matching ${dest} (known: ${list.filter((n) => n.type !== 'NONE').map((n) => n.name).join(', ')})`);
+    }
+    await w.lua(`TakeTaxiNode(${hit.index})`);
+    return true;
+  };
+  /** Use the Hearthstone (a 10-second cast; check its cooldown with `cooldown` on the item). */
+  auto.hearth = () => auto.useItem('Hearthstone');
 
   // ── rest, death ──
 

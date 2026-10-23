@@ -211,7 +211,7 @@ Unit = { guid, kind: 'player'|'unit'|'go'|'corpse'|'dyn', name|null, pos, dist, 
          entry, npcFlags, services: ['vendor'|'repair'|'trainer'|'questgiver'|…],
          questStatus: 'available'|'reward'|'incomplete'|'unavailable'|null,
          lootable, tapped, skinnable,          // units
-         goType, goTypeName }                  // game objects (no name: GO names are not cached)
+         goType, goTypeName, locked }          // game objects; name from the GO template cache
 ```
 
 Events (`wenilla.on(name, cb)`):

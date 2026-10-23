@@ -80,6 +80,8 @@ pub(crate) struct BridgeReadout<'w, 's> {
     approach: Option<Res<'w, crate::player::Approach>>,
     /// The questgiver dialog statuses the overhead `!`/`?` draw from (`questStatus`).
     quest: Option<Res<'w, crate::ui_quest::QuestGiver>>,
+    /// GameObject templates, for an object row's name and lock (the hover tooltip's source).
+    go_templates: Option<Res<'w, crate::go_templates::GameObjectTemplates>>,
 }
 
 /// The object manager's unit lookup for the relation functions' owner legs: the self row and the
@@ -301,7 +303,14 @@ impl BridgeReadout<'_, '_> {
         dist: f32,
         chr: crate::ui_unit::UnitNames<'_>,
     ) -> PlainValue {
-        let name = self.peek_name(guid);
+        let go = match (net.kind, store, self.go_templates.as_deref()) {
+            (EntityKind::GameObject, Some(store), Some(t)) => t.of(&store.0),
+            _ => None,
+        };
+        let name = match go {
+            Some(t) if !t.name.is_empty() => Some(t.name.clone()),
+            _ => self.peek_name(guid),
+        };
         let mut u = match store {
             Some(store) => {
                 let reaction = match (self.reputations.as_deref(), net.kind) {
@@ -347,6 +356,9 @@ impl BridgeReadout<'_, '_> {
                 ),
             ],
         };
+        if let Some(t) = go {
+            u.push(("locked".into(), PlainValue::Bool(t.lock_id != 0)));
+        }
         if let Some(store) = store {
             u.extend(object_fields(
                 guid,

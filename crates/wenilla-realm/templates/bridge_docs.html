@@ -67,7 +67,7 @@ grind.start({ neutral: true });       // grind.stop() to end it</pre>
     <tr><td><code>services</code></td><td>What an NPC offers: <code>vendor</code>, <code>repair</code>, <code>trainer</code>, <code>questgiver</code>, <code>gossip</code>, <code>flightmaster</code>, <code>innkeeper</code>, <code>banker</code>, <code>auctioneer</code>, <code>spirithealer</code>, <code>battlemaster</code>, <code>stablemaster</code>, …</td></tr>
     <tr><td><code>questStatus</code></td><td>The mark over its head: <code>'available'</code> (yellow !), <code>'reward'</code> (yellow ?), <code>'incomplete'</code> (grey ?), <code>'unavailable'</code> (grey !), or null.</td></tr>
     <tr><td><code>lootable, tapped, skinnable</code></td><td>A body with loot for you; a mob someone else tagged; a skinnable body.</td></tr>
-    <tr><td><code>goType, goTypeName</code></td><td>For objects: <code>chest</code> (also herbs and veins), <code>mailbox</code>, <code>questgiver</code>, <code>goober</code>, <code>fishinghole</code>, …</td></tr>
+    <tr><td><code>goType, goTypeName, locked</code></td><td>For objects: <code>chest</code> (also herbs and veins, which are <code>locked</code> behind a gathering skill), <code>mailbox</code>, <code>questgiver</code>, <code>goober</code>, <code>fishinghole</code>, …; <code>name</code> is the object's own (<code>'Peacebloom'</code>, <code>'Copper Vein'</code>).</td></tr>
     <tr><td><code>moving, swimming, falling, standState, isPlayer, pvp, class, race</code></td><td>As named.</td></tr>
   </table>
   <p><code>self.autoMove</code> is true while a walk started by <code>moveTo</code> is under way.</p>
@@ -135,7 +135,7 @@ grind.start({ neutral: true });       // grind.stop() to end it</pre>
 });</pre>
   <h3>Looting and bags</h3>
   <table>
-    <tr><td><code>await loot(body) / gather(node)</code></td><td>Open a body, or a herb, vein or chest, and take everything that fits.</td></tr>
+    <tr><td><code>await loot(body) / gather(node) / skin(body)</code></td><td>Open a body, or a herb, vein or chest, or skin a looted body, and take everything that fits.</td></tr>
     <tr><td><code>await bags() / freeSlots()</code></td><td>Every bag item <code>{ bag, slot, name, id, quality, count, link }</code>; free slots.</td></tr>
     <tr><td><code>await useItem(name)</code></td><td>Use, eat, drink, open or equip a bag item.</td></tr>
   </table>
@@ -146,6 +146,11 @@ grind.start({ neutral: true });       // grind.stop() to end it</pre>
     <tr><td><code>await openTrainer() · trainAll() · closeTrainer()</code></td><td>Learn everything affordable.</td></tr>
     <tr><td><code>await questGiver(npc, { accept, reward })</code></td><td>Hand in what it takes and accept what it offers; <code>reward(names)</code> picks a reward index. Returns <code>{ accepted, completed }</code>.</td></tr>
     <tr><td><code>await questLog() · abandon(title)</code></td><td>The quest log with objectives and completion.</td></tr>
+  </table>
+  <h3>Travel</h3>
+  <table>
+    <tr><td><code>await fly(destination)</code></td><td>Book a flight from the nearest flight master to a known node whose name matches (<code>'Stormwind'</code>, a RegExp).</td></tr>
+    <tr><td><code>await hearth()</code></td><td>Use the Hearthstone.</td></tr>
   </table>
   <h3>Resting and dying</h3>
   <table>
