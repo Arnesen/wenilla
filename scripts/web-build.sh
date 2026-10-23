@@ -4,7 +4,7 @@
 #
 #   scripts/web-build.sh            # WebGPU backend (the world needs it: storage buffers)
 #   WEB_BACKEND=webgl2 scripts/web-build.sh   # WebGL2: every browser, glue screens only
-#   WEB_PROFILE=release scripts/web-build.sh # faster rebuilds than the fat-LTO `ship` default
+#   WEB_PROFILE=ship scripts/web-build.sh    # fat LTO: ~3 % less CPU, 80 -> 70 MB; needs >16 GB RAM
 #   WEB_DEBUG=1 scripts/web-build.sh          # keep the wasm name section (symbolic stack traces)
 #
 # Then serve web/dist with wenilla-host:
@@ -16,10 +16,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DIST=web/dist
 BACKEND="${WEB_BACKEND:-webgpu}"
-# `ship` (fat LTO, one codegen unit) by default: measured against `release` on the login screen,
-# ~3 % less CPU per frame and a 13 % smaller module (80 -> 70 MB), at ~2.5x the cold build time.
-# `WEB_PROFILE=release` for a faster edit-build loop.
-PROFILE="${WEB_PROFILE:-ship}"
+# `release` by default. `ship` (fat LTO, one codegen unit) measured ~3 % less CPU per frame on the
+# login screen and a 13 % smaller module (80 -> 70 MB), but its single LTO link of the whole
+# client needs more memory than a 16 GB GitHub runner has: the realm image build was SIGKILLed
+# there (wenilla-realm images run 39849039838). Opt in on a bigger machine.
+PROFILE="${WEB_PROFILE:-release}"
 case "${PROFILE}" in
   release|ship) ;;
   *) echo "WEB_PROFILE must be release or ship" >&2; exit 1 ;;

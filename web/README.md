@@ -77,7 +77,7 @@ own accounts (a second login on one account kicks the first, as in the real clie
   does today.
 - **Performance** — the client is CPU-bound on its single wasm thread (Bevy's task pools are
   single-threaded on `wasm32`): ~11 ms/frame in an outdoor scene on a laptop iGPU, scaling
-  with visible objects, not pixels. `scripts/web-build.sh` builds the fat-LTO `ship` profile with wasm SIMD and runs `wasm-opt -O3` (+6 %); see docs/PERFORMANCE.md for what each measured. Any CVar
+  with visible objects, not pixels. `scripts/web-build.sh` builds with wasm SIMD and runs `wasm-opt -O3` (+6 %); `WEB_PROFILE=ship` adds fat LTO on a machine with more than 16 GB; see docs/PERFORMANCE.md for what each measured. Any CVar
   can be pinned from the URL for that session (`?renderScale=0.75&farclip=200&worlddetail=0`) —
   `renderScale` helps a weak GPU, the others a weak CPU. On a high-refresh display an 11 ms
   frame alternates between 2 and 3 refresh intervals, which reads as judder; a 60 Hz mode is
