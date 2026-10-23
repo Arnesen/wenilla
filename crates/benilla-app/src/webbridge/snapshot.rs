@@ -76,6 +76,12 @@ pub(crate) struct BridgeReadout<'w, 's> {
     group: Option<Res<'w, crate::spell::group_relation::GroupRoster>>,
     classes: Option<Res<'w, ChrClassTable>>,
     races: Option<Res<'w, ChrRaceTable>>,
+    /// Click to Move's walk in flight (`self.autoMove`).
+    approach: Option<Res<'w, crate::player::Approach>>,
+    /// The questgiver dialog statuses the overhead `!`/`?` draw from (`questStatus`).
+    quest: Option<Res<'w, crate::ui_quest::QuestGiver>>,
+    /// GameObject templates, for an object row's name and lock (the hover tooltip's source).
+    go_templates: Option<Res<'w, crate::go_templates::GameObjectTemplates>>,
 }
 
 /// The object manager's unit lookup for the relation functions' owner legs: the self row and the
@@ -176,6 +182,10 @@ impl BridgeReadout<'_, '_> {
                     PlainValue::Num(f64::from(player.facing().rem_euclid(std::f32::consts::TAU))),
                 ));
                 u.push(("mounted".into(), PlainValue::Bool(mounted)));
+                u.push((
+                    "autoMove".into(),
+                    PlainValue::Bool(self.approach.as_ref().is_some_and(|a| a.active())),
+                ));
                 u.push((
                     "casting".into(),
                     self.pending_cast
@@ -293,7 +303,14 @@ impl BridgeReadout<'_, '_> {
         dist: f32,
         chr: crate::ui_unit::UnitNames<'_>,
     ) -> PlainValue {
-        let name = self.peek_name(guid);
+        let go = match (net.kind, store, self.go_templates.as_deref()) {
+            (EntityKind::GameObject, Some(store), Some(t)) => t.of(&store.0),
+            _ => None,
+        };
+        let name = match go {
+            Some(t) if !t.name.is_empty() => Some(t.name.clone()),
+            _ => self.peek_name(guid),
+        };
         let mut u = match store {
             Some(store) => {
                 let reaction = match (self.reputations.as_deref(), net.kind) {
@@ -339,6 +356,17 @@ impl BridgeReadout<'_, '_> {
                 ),
             ],
         };
+        if let Some(t) = go {
+            u.push(("locked".into(), PlainValue::Bool(t.lock_id != 0)));
+        }
+        if let Some(store) = store {
+            u.extend(object_fields(
+                guid,
+                net.kind,
+                store,
+                self.quest.as_ref().and_then(|q| q.statuses().get(&guid).copied()),
+            ));
+        }
         u.push(("pos".into(), pos_payload(transform.translation)));
         u.push(("dist".into(), PlainValue::Num(f64::from(dist))));
         u.push((
@@ -348,6 +376,100 @@ impl BridgeReadout<'_, '_> {
         ));
         PlainValue::Map(u)
     }
+}
+
+/// `UNIT_NPC_FLAGS` bits (1.12, vmangos `UnitDefines.h`), as the `services` names a page filters on.
+const NPC_SERVICES: [(u32, &str); 15] = [
+    (0x1, "gossip"),
+    (0x2, "questgiver"),
+    (0x4, "vendor"),
+    (0x8, "flightmaster"),
+    (0x10, "trainer"),
+    (0x20, "spirithealer"),
+    (0x40, "spiritguide"),
+    (0x80, "innkeeper"),
+    (0x100, "banker"),
+    (0x200, "petitioner"),
+    (0x400, "tabarddesigner"),
+    (0x800, "battlemaster"),
+    (0x1000, "auctioneer"),
+    (0x2000, "stablemaster"),
+    (0x4000, "repair"),
+];
+/// `UNIT_DYNAMIC_FLAGS`: a body with loot for us, and one another player or group tapped.
+const DYNFLAG_LOOTABLE: u32 = 0x1;
+const DYNFLAG_TAPPED: u32 = 0x4;
+/// `UNIT_FLAG_SKINNABLE` in `UNIT_FIELD_FLAGS`.
+const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
+/// `GAMEOBJECT_TYPE_ID` names, 1.12's `GameobjectTypes` (herbs and veins are chests with a lock).
+const GO_TYPES: [&str; 26] = [
+    "door", "button", "questgiver", "chest", "binder", "generic", "trap", "chair", "spellfocus",
+    "text", "goober", "transport", "areadamage", "camera", "mapobject", "motransport",
+    "duelarbiter", "fishingnode", "ritual", "mailbox", "auctionhouse", "guardpost", "spellcaster",
+    "meetingstone", "flagstand", "fishinghole",
+];
+
+/// What a row adds for automation: the template entry, an NPC's services and overhead quest
+/// status, a body's loot/tap/skin state, a GameObject's type. `questStatus` folds the dialog
+/// statuses (see `quest_markers::marker_model`) to what the mark means: `available` (yellow `!`),
+/// `reward` (yellow or blue `?`), `incomplete` (grey `?`), `unavailable` (grey `!`, too low).
+fn object_fields(
+    guid: u64,
+    kind: EntityKind,
+    store: &ObjectStore,
+    quest_status: Option<u32>,
+) -> Vec<(String, PlainValue)> {
+    let s = &store.0;
+    let mut u = vec![(
+        "entry".into(),
+        s.object_entry()
+            .or_else(|| benilla_protocol::guid::entry(guid))
+            .map_or(PlainValue::Null, |e| PlainValue::Num(f64::from(e))),
+    )];
+    match kind {
+        EntityKind::Unit | EntityKind::Player => {
+            let npc = s.unit_npc_flags();
+            let dynamic = s.unit_dynamic_flags();
+            u.push(("npcFlags".into(), PlainValue::Num(f64::from(npc))));
+            u.push((
+                "services".into(),
+                PlainValue::List(
+                    NPC_SERVICES
+                        .iter()
+                        .filter(|(bit, _)| npc & bit != 0)
+                        .map(|(_, name)| PlainValue::Str((*name).into()))
+                        .collect(),
+                ),
+            ));
+            u.push(("lootable".into(), PlainValue::Bool(dynamic & DYNFLAG_LOOTABLE != 0)));
+            u.push(("tapped".into(), PlainValue::Bool(dynamic & DYNFLAG_TAPPED != 0)));
+            u.push((
+                "skinnable".into(),
+                PlainValue::Bool(s.unit_flags() & UNIT_FLAG_SKINNABLE != 0),
+            ));
+            let status = match quest_status {
+                Some(5) => PlainValue::Str("available".into()),
+                Some(4 | 6 | 7) => PlainValue::Str("reward".into()),
+                Some(3) => PlainValue::Str("incomplete".into()),
+                Some(1) => PlainValue::Str("unavailable".into()),
+                _ => PlainValue::Null,
+            };
+            u.push(("questStatus".into(), status));
+        }
+        EntityKind::GameObject => {
+            let ty = s.gameobject_type_id();
+            u.push(("goType".into(), PlainValue::Num(f64::from(ty))));
+            u.push((
+                "goTypeName".into(),
+                usize::try_from(ty)
+                    .ok()
+                    .and_then(|i| GO_TYPES.get(i))
+                    .map_or(PlainValue::Null, |n| PlainValue::Str((*n).into())),
+            ));
+        }
+        _ => {}
+    }
+    u
 }
 
 /// The unit fields every row shares with the unit frames' own snapshot.

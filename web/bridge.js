@@ -3,8 +3,9 @@
 // The wasm looks up `window.__wenilla_bridge` once a frame and, when it is there, calls
 // `onFrame(snapshot)` and `onEvent(name, payload)` on it and drains its `queue` of command
 // objects. This module creates that object and wraps the raw contract in `wenilla`: a
-// listener registry, promise-returning Lua evaluation, a gamepad mapper, the hidden-tab
-// keepalive, and desktop notifications. `web/README.md` § "JavaScript bridge" documents the
+// listener registry, promise-returning Lua evaluation and world verbs, a gamepad mapper, the
+// hidden-tab keepalive, and desktop notifications. The automation library on top of it
+// (`wenilla.auto`) is `automate.js`, loaded from here. `web/README.md` § "JavaScript bridge" documents the
 // snapshot and event schema; this file is the API.
 //
 // Dynamic, unawaited, never load-bearing — the same posture as platform.js: a page that never
@@ -35,12 +36,28 @@ const emit = (name, payload) => {
 
 const pendingLua = new Map();
 let luaSeq = 0;
+const pendingAct = new Map();
+let actSeq = 0;
+/** A guid as the wasm takes it: a unit row, or its hex string. */
+const guidOf = (u) => (typeof u === 'string' ? u : u?.guid);
+const act = (op, fields = {}, timeoutMs = 5000) => {
+  const id = ++actSeq;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingAct.delete(id);
+      resolve({ op, ok: false, reason: 'timed out (is the game running?)' });
+    }, timeoutMs);
+    pendingAct.set(id, { resolve, timer });
+    push({ op, id, ...fields });
+  });
+};
 const push = (cmd) => hook.queue.push(cmd);
 
 // Bridge-level event names; anything else passed to `on()` is taken as a Lua event name and
 // subscribed to on the page's behalf.
 const BRIDGE_EVENTS = new Set([
-  'frame', 'ready', 'commands', 'state', 'map', 'zone', 'chat', 'lua', 'event', 'input', 'error',
+  'frame', 'ready', 'commands', 'state', 'map', 'zone', 'chat', 'lua', 'act', 'event', 'input',
+  'error',
 ]);
 
 hook.onFrame = (snapshot) => {
@@ -60,6 +77,13 @@ hook.onEvent = (name, payload) => {
       pendingLua.delete(payload.id);
       clearTimeout(p.timer);
       payload.ok ? p.resolve(payload.values) : p.reject(new Error(payload.error));
+    }
+  } else if (name === 'act') {
+    const p = pendingAct.get(payload.id);
+    if (p) {
+      pendingAct.delete(payload.id);
+      clearTimeout(p.timer);
+      p.resolve(payload);
     }
   } else if (name === 'event') {
     emit(payload.name, payload.args);
@@ -129,6 +153,81 @@ export const wenilla = {
   /** A line as if typed into the chat box: `/say hi`, `/target Bob`, `/follow`, `.gm on`. */
   chat(text) {
     push({ op: 'chat', text });
+  },
+
+  // World verbs. Each resolves to the wasm's answer, `{op, ok, reason?}` — it never rejects.
+  /** Select a unit (a `units[]` row or its guid) — what a left-click on it does. */
+  target(unit) {
+    return act('target', { guid: guidOf(unit) });
+  },
+  /**
+   * Interact with an object (a row or a guid) — what a right-click on it does: talk to an NPC,
+   * loot or skin a body, use a GameObject, attack an enemy. In the client's own reach only.
+   * `{autoLoot: true}` opens a body or container with 1.12's auto-loot (the Shift-click), which
+   * takes everything — the only way a script loots: the client refuses a scripted loot-button
+   * click, as the original did.
+   */
+  interact(unit, { autoLoot = false } = {}) {
+    return act('interact', { guid: guidOf(unit), ...(autoLoot ? { autoLoot: true } : {}) });
+  },
+  /**
+   * Start walking in a straight line to a WoW position `[x, y, z]` (Click to Move's ground walk).
+   * Resolves when the walk starts; `state.self.autoMove` turns false when it ends — arrived,
+   * blocked, or cancelled by any movement command. `wenilla.auto.moveTo` waits for arrival.
+   */
+  moveTo(pos) {
+    return act('moveto', { pos: [pos[0], pos[1], pos[2]] });
+  },
+  /** End a walk in flight. */
+  stop() {
+    return act('stop');
+  },
+  /**
+   * Find a walkable way from the player to `pos` through the loaded collision world (A* on a
+   * one-yard grid). Resolves `{ok, points, partial, expanded}`: `points` are WoW positions, the
+   * player's first; `partial` means the goal was out of reach and the points end at the nearest
+   * place found. `budget` caps the cells searched (default 12000, ~0.1-0.5 s of one frame).
+   */
+  path(pos, { budget } = {}) {
+    return act('path', { pos: [pos[0], pos[1], pos[2]], ...(budget ? { budget } : {}) }, 15000);
+  },
+
+  /** Resolve with the next payload of a bridge or Lua event, or null after `timeoutMs`. */
+  once(name, timeoutMs = 10000) {
+    return new Promise((resolve) => {
+      const off = this.on(name, (p) => {
+        clearTimeout(timer);
+        off();
+        resolve(p ?? true);
+      });
+      const timer = setTimeout(() => {
+        off();
+        resolve(null);
+      }, timeoutMs);
+    });
+  },
+  /** Resolve when `pred(state)` holds on a frame (true), or false after `timeoutMs`. */
+  waitFor(pred, timeoutMs = 10000) {
+    return new Promise((resolve) => {
+      const check = (s) => {
+        try {
+          return s && pred(s);
+        } catch {
+          return false;
+        }
+      };
+      if (check(this.state)) return resolve(true);
+      const off = this.on('frame', (s) => {
+        if (!check(s)) return;
+        clearTimeout(timer);
+        off();
+        resolve(true);
+      });
+      const timer = setTimeout(() => {
+        off();
+        resolve(false);
+      }, timeoutMs);
+    });
   },
   /** Live knobs: `{hz, radius, maxUnits, backgroundHz}`. */
   set({ hz, radius, maxUnits, backgroundHz } = {}) {
@@ -405,4 +504,9 @@ window.addEventListener('gamepadconnected', (e) => {
 });
 
 window.wenilla = wenilla;
+// The automation library (`wenilla.auto`): dynamic like this module, so a build without it is a
+// console warning, not a broken bridge.
+import('./automate.js')
+  .then((m) => m.install(wenilla))
+  .catch((e) => console.warn('automate.js:', e));
 export default wenilla;

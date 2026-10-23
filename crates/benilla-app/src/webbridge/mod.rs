@@ -41,6 +41,13 @@
 //! ([`ChatWindows::routed`]), the zone resolve's resource ([`crate::area::ZoneInfo`]), and the
 //! same snapshot builder the unit frames use ([`crate::ui_unit::snapshot`]).
 
+mod act;
+mod path;
+
+/// The `path` verb's default search budget (cells), when the page names none.
+fn path_budget() -> usize {
+    path::MAX_EXPANSIONS
+}
 mod sink;
 mod snapshot;
 
@@ -142,6 +149,8 @@ pub(crate) enum BridgeCommand {
     Chat(String),
     /// Drop every synthetic hold.
     Release,
+    /// A world verb ([`act`]): answered by an `act` event carrying `id`.
+    Act { id: u32, op: act::ActOp },
 }
 
 /// What the page asked for, resolved to commands and held until the systems that own each
@@ -160,6 +169,11 @@ pub(crate) struct BridgeInput {
     look: f32,
     lua: Vec<(u32, String)>,
     chat: Vec<String>,
+    /// World verbs, in the order the page queued them.
+    act: Vec<(u32, act::ActOp)>,
+    /// The player's auto-loot setting while an auto-loot interact is being dispatched, and the
+    /// frames left before it is put back ([`act::run_object_ops`]).
+    auto_loot_restore: Option<(bool, u8)>,
     /// Drop every synthetic latch this frame (a `release`, or the hook object vanishing).
     drop_holds: bool,
 }
@@ -184,6 +198,7 @@ impl BridgeInput {
                 self.held.clear();
                 self.drop_holds = true;
             }
+            BridgeCommand::Act { id, op } => self.act.push((id, op)),
         }
     }
 }
@@ -285,6 +300,17 @@ impl Plugin for WebBridgePlugin {
             )
             .add_systems(
                 Update,
+                (
+                    (act::run_object_ops, act::run_move_ops, act::run_path_ops)
+                        .chain()
+                        .run_if(in_state(ClientState::InWorld)),
+                    act::refuse_world_ops.run_if(not(in_state(ClientState::InWorld))),
+                )
+                    .after(drain_page_queue)
+                    .in_set(BridgeIn),
+            )
+            .add_systems(
+                Update,
                 apply_synth_input
                     .in_set(UiInput)
                     .after(BindingSet)
@@ -367,43 +393,48 @@ fn commands_value(commands: &[(String, String)]) -> PlainValue {
 
 /// The ops that need the VM: arming the event tap, chat lines, Lua evaluation.
 fn run_vm_ops(
-    script: Option<NonSendMut<UiScript>>,
+    mut vm: crate::script_calls::HostedVm,
     cfg: Res<BridgeConfig>,
     mut input: ResMut<BridgeInput>,
     mut memo: ResMut<BridgeMemo>,
     mut out: ResMut<BridgeOutbox>,
 ) {
-    let Some(mut script) = script else {
-        // No VM (the character screen): a chunk cannot run, and saying so beats a promise that
-        // never resolves.
-        for (id, _) in input.lua.drain(..) {
-            out.push("lua", lua_result(id, Err("no VM in this state".into())));
+    // The host is lent around the whole body, as every FrameXML script gets it: a page's chunk
+    // that casts, attacks or uses an item applies inside the call, like a macro's. Without it
+    // those calls are refused ("no call host is lent").
+    vm.run(|script| {
+        let Some(script) = script else {
+            // No VM (the character screen): a chunk cannot run, and saying so beats a promise
+            // that never resolves.
+            for (id, _) in input.lua.drain(..) {
+                out.push("lua", lua_result(id, Err("no VM in this state".into())));
+            }
+            input.chat.clear();
+            return;
+        };
+        // The command list follows the VM's binding table: a fresh VM, an addon's bindings.
+        let generation = script.keybinds_generation();
+        let seen = memo.commands_seen.get(script);
+        if *seen != Some(generation) {
+            *seen = Some(generation);
+            memo.commands = command_list(script);
+            if memo.hook {
+                out.push("commands", commands_value(&memo.commands));
+            }
         }
-        input.chat.clear();
-        return;
-    };
-    // The command list follows the VM's binding table: a fresh VM, an addon's bindings.
-    let generation = script.keybinds_generation();
-    let seen = memo.commands_seen.get(&script);
-    if *seen != Some(generation) {
-        *seen = Some(generation);
-        memo.commands = command_list(&script);
-        if memo.hook {
-            out.push("commands", commands_value(&memo.commands));
+        let want = memo.hook && cfg.events != EventFilter::None;
+        let armed = memo.tap.get(script);
+        if *armed != want {
+            script.set_event_tap(want);
+            *armed = want;
         }
-    }
-    let want = memo.hook && cfg.events != EventFilter::None;
-    let armed = memo.tap.get(&script);
-    if *armed != want {
-        script.set_event_tap(want);
-        *armed = want;
-    }
-    for line in input.chat.drain(..) {
-        script.push_chat_input(line);
-    }
-    for (id, chunk) in input.lua.drain(..) {
-        out.push("lua", lua_result(id, script.eval_plain(&chunk)));
-    }
+        for line in input.chat.drain(..) {
+            script.push_chat_input(line);
+        }
+        for (id, chunk) in input.lua.drain(..) {
+            out.push("lua", lua_result(id, script.eval_plain(&chunk)));
+        }
+    });
 }
 
 fn lua_result(id: u32, result: Result<Vec<PlainValue>, String>) -> PlainValue {

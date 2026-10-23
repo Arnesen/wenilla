@@ -45,7 +45,7 @@ mkdir -p "${DIST}"
 strip=(--remove-name-section --remove-producers-section)
 [ "${WEB_DEBUG:-0}" = 1 ] && strip=()
 wasm-bindgen --target web --no-typescript "${strip[@]}" --out-dir "${DIST}" "${WASM}"
-cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js "${DIST}/"
+cp web/index.html web/wasi_stubs.js web/boot.js web/platform.js web/bridge.js web/automate.js "${DIST}/"
 # The bridge examples (web/README.md § "JavaScript bridge"): a HUD, an idle loop.
 mkdir -p "${DIST}/examples" && cp web/examples/*.js "${DIST}/examples/"
 # The boot prefetch manifest (see web/boot.js) — optional so a tree that hasn't captured one

@@ -479,6 +479,16 @@ async fn admin_creates_player_who_can_fetch_hidden_game_credentials() {
         .any(|c| c == "ban account WR000002 -1 web"));
 }
 
+/// The bridge reference is public, like `/about`: a player reads it before signing in.
+#[tokio::test]
+async fn the_bridge_docs_are_public() {
+    let h = harness().await;
+    run_setup(&h).await;
+    let page = send(&h.app, get("/docs/bridge", None)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("wenilla.auto"), "the library reference is on the page");
+}
+
 #[tokio::test]
 async fn game_routes_are_locked_without_a_session() {
     let h = harness().await;
