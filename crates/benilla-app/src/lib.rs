@@ -445,6 +445,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     });
 
     app.add_plugins(webbridge::WebBridgePlugin);
+    // Addon saved variables are read back from the page's state store (`benilla_ui::web_saved`).
+    #[cfg(target_arch = "wasm32")]
+    benilla_ui::web_saved::set_reader(local_state::read);
 
     // benilla-assets' loaders go into the live `AssetServer`, so they register after `AssetPlugin`.
     benilla_assets::register_asset_loaders(&mut app);

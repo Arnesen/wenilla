@@ -759,7 +759,11 @@ fn load_saved_variables(lua: &Lua, i: usize) {
     };
     for dir in [account, character].into_iter().flatten() {
         let path = dir.join(format!("{name}.lua"));
-        let bytes = match std::fs::read(&path) {
+        #[cfg(target_arch = "wasm32")]
+        let read = crate::web_saved::read(&path);
+        #[cfg(not(target_arch = "wasm32"))]
+        let read = std::fs::read(&path);
+        let bytes = match read {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // the first-run case
             Err(e) => {

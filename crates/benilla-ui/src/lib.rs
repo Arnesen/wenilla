@@ -25,4 +25,6 @@ pub mod strings;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod toc;
+#[cfg(target_arch = "wasm32")]
+pub mod web_saved;
 pub mod widget;
