@@ -360,6 +360,50 @@ fn the_level_bounds_take_the_low_byte() {
     }
 }
 
+/// The search text is `is-number-or-string` then `tostring`, else "" (`0x4ce9cd`-`0x4ce9e7`), so
+/// a number searches as its text.
+#[test]
+fn the_search_text_takes_a_number_as_its_text() {
+    for (arg, name) in [
+        ("123", "123"),
+        ("2.5", "2.5"),
+        ("'silk'", "silk"),
+        ("{}", ""),
+    ] {
+        let mut h = House::new(0);
+        h.run(&format!("QueryAuctionItems({arg})"));
+        let sent = h.sent();
+        assert!(
+            matches!(&sent[..], [ClientCommand::AuctionListItems { searched_name, .. }] if searched_name == name),
+            "{arg}: {sent:?}"
+        );
+    }
+}
+
+/// `usable` is a number's `_ftol` low byte, anything else 0 (`0x4ceb47`-`0x4ceb6f`, sent as a byte
+/// at `0x4cec32`), so `true` asks for every item; `quality` is any number's `_ftol`, anything else
+/// -1 (`0x4ceb72`-`0x4ceb96`), so a negative is sent as its 32-bit pattern.
+#[test]
+fn usable_and_quality_read_as_numbers() {
+    for (usable_arg, quality_arg, wire) in [
+        ("true", "nil", (0, u32::MAX)),
+        ("1", "'2'", (1, 2)),
+        ("258", "-3", (2, (-3i32) as u32)),
+        ("'1'", "2.9", (1, 2)),
+        ("nil", "'x'", (0, u32::MAX)),
+    ] {
+        let mut h = House::new(0);
+        h.run(&format!(
+            r#"QueryAuctionItems("silk", nil, nil, nil, nil, nil, nil, {usable_arg}, {quality_arg})"#
+        ));
+        let sent = h.sent();
+        assert!(
+            matches!(&sent[..], [ClientCommand::AuctionListItems { usable, quality, .. }] if (*usable, *quality) == wire),
+            "{usable_arg}, {quality_arg}: {sent:?}"
+        );
+    }
+}
+
 /// `StartAuction` sends and then clears the sell slot inside the call (`0x4ce925`, `0x4ce92a`):
 /// `NEW_AUCTION_UPDATE` has fired by the next line, and a second call finds the slot empty.
 #[test]

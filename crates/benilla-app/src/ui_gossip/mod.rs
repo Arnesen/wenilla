@@ -316,18 +316,26 @@ fn feed_gossip(
             return;
         }
         let mut fresh = snapshot(&state);
-        // Expand the greeting's `$N`/`$B`/`$G`/`$<n>w` macros client-side, as the reference does.
-        if let Some(greeting) = fresh.as_mut().map(|m| &mut m.greeting) {
-            let player = crate::npc_text::player_identity(&self_q, &names, unit_names.get());
-            *greeting = crate::npc_text::substitute(
-                greeting,
-                &crate::npc_text::MacroContext {
-                    subject: player.as_ref(),
-                    states: &states,
-                },
-            );
-        }
         let new_message = std::mem::replace(shown_message, state.generation) != state.generation;
+        // The greeting's `$N`/`$B`/`$G`/`$<n>w` macros expand once per message, at its draw: the
+        // reference writes the expanded text to `0xbbb678` there (`0x4e2274`, `0x4e229a`), which
+        // `GetGossipText` returns (`0x4e28c0`) until the next message draws.
+        if let Some(greeting) = fresh.as_mut().map(|m| &mut m.greeting) {
+            match shown.as_ref().filter(|_| !new_message) {
+                Some(drawn) => greeting.clone_from(&drawn.greeting),
+                None => {
+                    let player =
+                        crate::npc_text::player_identity(&self_q, &names, unit_names.get());
+                    *greeting = crate::npc_text::substitute(
+                        greeting,
+                        &crate::npc_text::MacroContext {
+                            subject: player.as_ref(),
+                            states: &states,
+                        },
+                    );
+                }
+            }
+        }
         if fresh != shown {
             script.set_gossip(fresh.clone());
         }
@@ -735,6 +743,41 @@ mod tests {
             ),
             "an in-place repaint: ShowUIPanel on a visible frame is a no-op, no kit"
         );
+    }
+
+    /// The greeting's macros expand once per message, as `0x4e2010` writes the expanded text to
+    /// `0xbbb678` at its draw (`0x4e2274`, `0x4e229a`) and `GetGossipText` returns that buffer
+    /// (`0x4e28c0`): a later change to the player's name leaves it until the next message.
+    #[test]
+    fn the_greeting_expands_once_per_message() {
+        const ME: u64 = 0x10;
+        let (mut app, _rx) = feed_app(|s| s.run(RECORDER).unwrap());
+        app.world_mut().spawn((
+            SelfPlayer,
+            Guid(ME),
+            ObjectStore(benilla_protocol::ObjectFields::default()),
+        ));
+        let named = |app: &mut App, name: &str| {
+            app.world_mut()
+                .resource_mut::<NameCache>()
+                .insert_player(ME, name.into(), None);
+        };
+        named(&mut app, "Ann");
+        let menu = |app: &mut App| {
+            let mut st = state(app);
+            st.remember_record(50, record("Well met, $N."));
+            st.open_menu(GUARD, 50, option("Goodbye"), Vec::new(), 0);
+        };
+        menu(&mut app);
+        assert_eq!(tick(&mut app).1, "Well met, Ann.");
+        named(&mut app, "Bea");
+        assert_eq!(
+            tick(&mut app).1,
+            "Well met, Ann.",
+            "held until the next message"
+        );
+        menu(&mut app);
+        assert_eq!(tick(&mut app).1, "Well met, Bea.");
     }
 
     #[test]

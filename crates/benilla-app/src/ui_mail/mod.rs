@@ -471,7 +471,8 @@ fn resolve_row(
         .then(|| invoice::parse_subject(&entry.subject))
         .flatten();
     // The notice's item comes from the subject: a sold notice names an item it does not carry.
-    // The invoice names it with the roll's suffix (`0x4af430` → `0x5d8b00`).
+    // The invoice names it with the roll's suffix (`0x4af430` → `0x5d8b00`), "" while the cache
+    // lacks it: `0x5d8b00` clears its buffer first (`0x5d8b25`) and the verb never tests it.
     let notice_item_name = auction.and_then(|a| {
         items
             .template(a.entry, 0, ask)
@@ -486,23 +487,27 @@ fn resolve_row(
             .or_else(|| listed.map(|l| l.text.clone()))
             .unwrap_or_else(|| entry.subject.clone()),
     };
-    let auction_invoice = auction
-        .filter(|a| matches!(a.result, auction_mail::WON | auction_mail::SOLD))
-        .and_then(|a| {
-            let seller = a.result == auction_mail::SOLD;
-            let n = invoice::parse_body(raw_body?, seller)?;
-            // An unresolved counterparty fills in when its name lands, as in the reference.
-            let player_name = names.resolve_player(n.player_guid, ask)?.to_string();
-            Some(benilla_ui::script::MailInvoice {
-                seller,
-                item_name: notice_item_name.clone()?,
-                player_name,
-                bid: n.bid,
-                buyout: n.buyout,
-                deposit: n.deposit,
-                consignment: n.consignment,
-            })
-        });
+    // The subject parse keeps its triplet for a won or sold notice alone (`0x4acfc1`-`0x4acfdd`),
+    // and the invoice and `isInvoice` both need its item entry (`0x4af3e8`, `0x4af2eb`).
+    let invoice_notice = auction
+        .filter(|a| a.entry != 0 && matches!(a.result, auction_mail::WON | auction_mail::SOLD));
+    let auction_invoice = invoice_notice.and_then(|a| {
+        let seller = a.result == auction_mail::SOLD;
+        let n = invoice::parse_body(raw_body?, seller);
+        // An unresolved counterparty is the verb's one miss past the body (`0x4af4b7`-
+        // `0x4af4c1`), filled in when its name lands; a guid the body left 0 is null at once,
+        // asked of no one, as every cache's zero key is (`0x55f0a5`-`0x55f0ac`).
+        let player_name = names.resolve_player(n.player_guid, ask)?.to_string();
+        Some(benilla_ui::script::MailInvoice {
+            seller,
+            item_name: notice_item_name.unwrap_or_default(),
+            player_name,
+            bid: n.bid,
+            buyout: n.buyout,
+            deposit: n.deposit,
+            consignment: n.consignment,
+        })
+    });
 
     MailInboxRow {
         mail_id: entry.message_id,
@@ -527,9 +532,8 @@ fn resolve_row(
         body: letter_body(entry, raw_body, templates, macros),
         stationery_texture,
         // Won and sold notices only, not every auction mail: the reference's `isInvoice` reads
-        // what its subject parser persists for those two alone.
-        is_invoice: auction
-            .is_some_and(|a| matches!(a.result, auction_mail::WON | auction_mail::SOLD)),
+        // the item entry its subject parser persists for those two alone.
+        is_invoice: invoice_notice.is_some(),
         invoice: auction_invoice,
         item_id,
         item_random_property_id: item_roll,
@@ -1627,6 +1631,129 @@ mod tests {
             row.invoice.map(|i| i.item_name).as_deref(),
             Some("Linen Cloth of the Bear")
         );
+    }
+
+    /// An invoice whose item the cache does not hold names it "": `0x5d8b00` clears its buffer
+    /// first (`0x5d8b25`) and `0x4af360` never tests it. Only a counterparty name the lookup
+    /// cannot answer (`0x4af4b7`-`0x4af4c1`) is the miss.
+    #[test]
+    fn an_invoice_names_an_uncached_item_as_empty() {
+        let states = crate::world_state::WorldStates::default();
+        let items = Items::default();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut bodies = QueryCache::default();
+        bodies.insert(99, "0000000000000042:500:0".into());
+        let mut e = entry(1, None, 0, 30.0);
+        (e.message_type, e.sender_id) = (mail_message_type::AUCTION, Some(1));
+        (e.subject, e.item_text_id) = ("2589:0:1".into(), 99);
+        let row = |names: &NameCache| {
+            resolve_row(
+                &e,
+                &bodies,
+                None,
+                &items,
+                None,
+                None,
+                None,
+                RowCatalogs::default(),
+                names,
+                Ask::New(&commands),
+                crate::items::RollCatalogs::NONE,
+                &no_macros(&states),
+                &no_strings,
+            )
+        };
+        let mut names = NameCache::default();
+        assert!(row(&names).invoice.is_none(), "the buyer's name is out");
+        names.insert_player(0x42, "Bob".into(), None);
+        let invoice = row(&names).invoice.expect("the invoice, its item out");
+        assert_eq!(
+            (
+                invoice.item_name.as_str(),
+                invoice.player_name.as_str(),
+                invoice.bid
+            ),
+            ("", "Bob", 500)
+        );
+    }
+
+    /// One auction notice's row with `subject` and `body` (text id 99), its item cached and the
+    /// player 0x42 named Bob: the invoice, `isInvoice` and the name queries the read sent.
+    fn invoice_row(
+        subject: &str,
+        body: &str,
+    ) -> (Option<benilla_ui::script::MailInvoice>, bool, usize) {
+        let states = crate::world_state::WorldStates::default();
+        let mut items = Items::default();
+        items.insert_template(2589, Some(crate::items::test_template("Linen Cloth")));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut names = NameCache::default();
+        names.insert_player(0x42, "Bob".into(), None);
+        let mut bodies = QueryCache::default();
+        bodies.insert(99, body.into());
+        let mut e = entry(1, None, 0, 30.0);
+        (e.message_type, e.sender_id) = (mail_message_type::AUCTION, Some(1));
+        (e.subject, e.item_text_id) = (subject.into(), 99);
+        let row = resolve_row(
+            &e,
+            &bodies,
+            None,
+            &items,
+            None,
+            None,
+            None,
+            RowCatalogs::default(),
+            &names,
+            Ask::New(&commands),
+            crate::items::RollCatalogs::NONE,
+            &no_macros(&states),
+            &no_strings,
+        );
+        let asked = rx
+            .try_iter()
+            .filter(|c| matches!(c, ClientCommand::NameQuery { .. }))
+            .count();
+        (row.invoice, row.is_invoice, asked)
+    }
+
+    /// The invoice's item entry `[rec+0x250]` must be set (`0x4af3e8`-`0x4af3ee`), as must
+    /// `GetInboxText`'s `isInvoice` (`0x4af2eb`-`0x4af2f5`): a `0:x:1` subject has neither.
+    #[test]
+    fn an_invoice_needs_its_item_entry() {
+        let (invoice, is_invoice, _) = invoice_row("0:0:1", "42:500:600");
+        assert_eq!((invoice, is_invoice), (None, false));
+        let (invoice, is_invoice, _) = invoice_row("2589:0:1", "42:500:600");
+        assert!(invoice.is_some() && is_invoice);
+    }
+
+    /// The body is `sscanf`ed (`0x73fb5d` at `0x4af471` and `0x4af495`) over outputs zeroed first
+    /// (`0x4af440`-`0x4af44f`), and its count is never tested (`0x4af476 jmp 0x4af49d`): a partial
+    /// body answers the fields it parsed and zeros. A body whose guid does not parse leaves it 0,
+    /// which the name cache answers null at once, asking nothing (`0x55f0a5`-`0x55f0ac`).
+    #[test]
+    fn a_partial_invoice_body_answers_what_it_parsed() {
+        let (invoice, _, _) = invoice_row("2589:0:2", "42:500:x:9:9");
+        let invoice = invoice.expect("a seller invoice from a partial body");
+        assert_eq!(
+            (
+                invoice.player_name.as_str(),
+                invoice.bid,
+                invoice.buyout,
+                invoice.deposit,
+                invoice.consignment
+            ),
+            ("Bob", 500, 0, 0, 0)
+        );
+        let (invoice, _, _) = invoice_row("2589:0:1", "42");
+        assert_eq!(
+            invoice.map(|i| (i.bid, i.buyout)),
+            Some((0, 0)),
+            "the guid alone"
+        );
+        let (invoice, is_invoice, asked) = invoice_row("2589:0:1", "garbage");
+        assert_eq!((invoice, is_invoice, asked), (None, true, 0));
     }
 
     #[test]

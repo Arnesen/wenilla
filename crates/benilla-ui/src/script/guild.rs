@@ -153,8 +153,8 @@ pub struct GuildState {
 }
 
 /// The rank-control popup's staging buffer, kept out of [`GuildState`] so a push mid-edit does not
-/// discard unsaved checkbox clicks.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// discard unsaved checkbox clicks: the staged rank `0x84966c` and its flags `0x849670`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GuildRankEdit {
     /// The 1-based rank `GuildControlSetRank` last loaded, 0 for none.
     pub rank: u32,
@@ -219,15 +219,18 @@ pub enum GuildCall {
 }
 
 /// The roster module's cells a `/reload` keeps: `SetGuildRosterShowOffline`'s integer
-/// (`0xb73124`) and `SetGuildRosterSelection`'s member guid (`0xb73128`). Only `InitGuildRoster`
-/// zeroes them (`0x4d0a25`, `0x4d0a2b`), from `InitializeGame` (`0x48f5ea`), which the login runs
-/// and the reload (`0x495664`, `0x495669`) does not.
+/// (`0xb73124`), `SetGuildRosterSelection`'s member guid (`0xb73128`) and `GuildControlSetRank`'s
+/// staged rank (`0x84966c`). `InitGuildRoster` resets them (`0x4d0a25`, `0x4d0a2b`, `0x4d0a37`),
+/// from `InitializeGame` (`0x48f5ea`), which the login runs and the reload (`0x495664`,
+/// `0x495669`) does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GuildCells {
     /// The integer as stored, every reader testing it against 0.
     pub show_offline: i32,
     /// The selected member's guid, 0 for none.
     pub selection: u64,
+    /// The rank-control popup's staged rank and flags.
+    pub rank_control: GuildRankEdit,
 }
 
 impl super::UiScript {
@@ -694,7 +697,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             for (slot, bit) in staged.iter_mut().zip(RANK_RIGHT_BITS) {
                 *slot = rights & bit != 0;
             }
-            model.guild_control = GuildRankEdit { rank, staged };
+            model.guild_cells.rank_control = GuildRankEdit { rank, staged };
             Ok(())
         })?,
     )?;
@@ -707,7 +710,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GuildControlGetRankFlags",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let rights = live_rights(&model, model.guild_control.rank);
+            let rights = live_rights(&model, model.guild_cells.rank_control.rank);
             Ok(MultiValue::from_vec(
                 RANK_RIGHT_BITS
                     .iter()
@@ -737,7 +740,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // `GetBoolOrDefault` (`0x4d20b7`), default 0.
-            model.guild_control.staged[slot] =
+            model.guild_cells.rank_control.staged[slot] =
                 binding_abi::bool_or_default(enabled.as_ref(), false);
             Ok(())
         })?,
@@ -756,7 +759,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             };
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let edit = model.guild_control.clone();
+            let edit = model.guild_cells.rank_control;
             // The reference's `[0x84966c] >= [0xb73120]`: no rank loaded (its -1, our 0) or one
             // past the rank count.
             if edit.rank >= 1 && (edit.rank as usize) <= model.guild.ranks.len() {
@@ -1048,5 +1051,60 @@ mod tests {
         assert!(member_at(&roster, 0).is_none(), "0 = nothing selected");
         assert!(member_at(&roster, 3).is_none(), "past the end");
         assert!(member_at(&roster, -1).is_none(), "negative");
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    /// The staged rank `0x84966c` and its flags `0x849670` are set by `GuildControlSetRank`
+    /// (`0x4d1fd7` → `0x4d1080`) and reset to -1 only by `InitGuildRoster` (`0x4d0a37`), whose one
+    /// caller is `InitializeGame` (`0x48f5ea`): a `/reload`'s VM, seated with the last one's cells,
+    /// keeps the rank picked and its staged checkboxes.
+    #[test]
+    fn the_staged_rank_rides_the_cells_a_reload_keeps() {
+        let guild = || GuildState {
+            in_guild: true,
+            ranks: vec![
+                GuildRankInfo {
+                    name: "Master".into(),
+                    rights: 0xF_FFFF,
+                },
+                GuildRankInfo {
+                    name: "Officer".into(),
+                    rights: 0x3,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut old = crate::script::UiScript::new().unwrap();
+        old.set_guild(guild());
+        old.run("GuildControlSetRank(2) GuildControlSetRankFlag(1, false)")
+            .unwrap();
+        let cells = old.take_guild_cells();
+
+        let mut new = crate::script::UiScript::new().unwrap();
+        new.keep_calls();
+        new.set_guild(guild());
+        new.seed_guild_cells(cells);
+        assert_eq!(
+            new.eval::<(Option<i64>, Option<i64>, Option<i64>)>(
+                "local a, b, c = GuildControlGetRankFlags() return a, b, c"
+            )
+            .unwrap(),
+            (Some(1), Some(1), None),
+            "rank 2's live rights"
+        );
+        new.run("GuildControlSaveRank('Officer')").unwrap();
+        assert_eq!(
+            new.take_guild_calls(),
+            [GuildCall::SaveRank {
+                rank_index: 1,
+                rights: 0x2,
+                name: "Officer".into(),
+            }],
+            "the staged untick of flag 1 survives"
+        );
     }
 }
