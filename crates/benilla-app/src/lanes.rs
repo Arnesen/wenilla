@@ -3,10 +3,10 @@
 //! handler whole (`0x537aa0`, `0x537ae5`), and a handler's events fire inside it, every listener
 //! before the signal returns (`0x703e50`, `0x703f50`). Here a handler queues what it raises on a
 //! lane, a producer's queue that stamps each item from one clock as it is pushed ([`stamp`]).
-//! Once every feed has pushed what the events' listeners read, as the reference writes a whole
-//! update block before its notify pass (`0x465277`), [`fire_in_order`] fires the lowest stamp
-//! across the lanes, so the events come out in the order their handlers raised them, whichever
-//! lane holds them.
+//! Once every feed has pushed what the events' listeners read, as the update handler writes every
+//! block of its packet before its notify pass (`0x465277`), [`fire_in_order`] fires the lowest
+//! stamp across the lanes, so the events come out in the order their handlers raised them,
+//! whichever lane holds them.
 //!
 //! An item pushed while another fires is stamped under it ([`firing`]) and fires straight after
 //! it, ahead of everything stamped before it, as a signal raised inside a listener runs to its
@@ -174,6 +174,11 @@ impl Lanes {
     }
 }
 
+/// What runs once after each drain, however it ended: a lane's firing that stopped early leaves
+/// state no read outside the drain may see.
+#[derive(Resource, Default)]
+struct DrainEnds(Vec<fn(&mut World)>);
+
 /// The drain's place: after every feed in [`crate::ui_script::UiFeed`] has pushed, and before
 /// the tick ([`crate::ui_script::UiInput`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -190,6 +195,9 @@ pub(crate) trait LaneApp {
         fire: impl IntoSystem<In<Until>, (), M> + 'static,
         begin: Option<fn(&World)>,
     ) -> &mut Self;
+
+    /// Run `end` once after each drain, whether it fired every item or stopped.
+    fn add_drain_end(&mut self, end: fn(&mut World)) -> &mut Self;
 }
 
 impl LaneApp for App {
@@ -242,6 +250,12 @@ impl LaneApp for App {
         });
         self
     }
+
+    fn add_drain_end(&mut self, end: fn(&mut World)) -> &mut Self {
+        self.init_resource::<DrainEnds>();
+        self.world_mut().resource_mut::<DrainEnds>().0.push(end);
+        self
+    }
 }
 
 /// Fire every lane's items in stamp order: each lane's `begin`, then, while any lane's head was
@@ -270,11 +284,14 @@ pub(crate) fn fire_in_order(world: &mut World) {
         else {
             break;
         };
+        // A head at the origin is a view's frame-start push, which raises nothing and commutes
+        // with another view's: it bounds no other lane.
         let bound = heads
             .iter()
             .enumerate()
             .filter(|(j, _)| *j != i)
             .filter_map(|(_, h)| *h)
+            .filter(|h| *h != Stamp::origin())
             .min();
         let lane = &lanes.0[i];
         if let Err(e) = world.run_system_with(lane.fire, Until { bound, fence }) {
@@ -287,6 +304,13 @@ pub(crate) fn fire_in_order(world: &mut World) {
         }
     }
     world.insert_resource(lanes);
+    let ends = world
+        .get_resource::<DrainEnds>()
+        .map(|e| e.0.clone())
+        .unwrap_or_default();
+    for end in ends {
+        end(world);
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +321,8 @@ mod guard_tests;
 mod item_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unit_view_tests;
 
 #[cfg(test)]
 mod unit_tests {
