@@ -125,7 +125,8 @@ pub(crate) struct UnitPress {
 /// Whether the script call being applied passed the protected-action gate's tag 2, which opens
 /// `TryCastSpell` (`0x6e4bc1`, `0x494a50`): the answer the Lua verb got, where the stack that decides
 /// it was still there. A cast the engine starts (a click, a chain, a held press resumed) asks no
-/// gate, so it reads the default, passed; [`crate::script_calls`] sets it per call and resets it.
+/// gate, so it reads the default, passed; [`crate::script_calls`] sets it per call and puts back
+/// what it found, so a call nested at another's signal point leaves the outer call's answer.
 #[derive(Resource)]
 pub(crate) struct ScriptCastPermit(bool);
 
@@ -295,10 +296,12 @@ impl CastLadder<'_, '_> {
         true
     }
 
-    /// Set what the gate's tag 2 allowed the script call about to be applied.
-    pub(crate) fn permit(&mut self, may_cast: bool) {
-        if let Some(permit) = self.permit.as_mut() {
-            permit.0 = may_cast;
+    /// Set what the gate's tag 2 allowed the script call about to be applied; what it was before,
+    /// for the call to put back as it returns.
+    pub(crate) fn permit(&mut self, may_cast: bool) -> bool {
+        match self.permit.as_mut() {
+            Some(permit) => std::mem::replace(&mut permit.0, may_cast),
+            None => true,
         }
     }
 
@@ -1195,16 +1198,20 @@ fn send_spell_cast(
                 // gets there.
                 if !engaged {
                     debug!("ui_action: cast {spell_id} initiates auto-attack at {guid:#x}");
-                    let stop_in_flight = stop_word.of(e);
+                    // The guid is the selection the attempt read, so StartAttack's select
+                    // (`0x5eccaa`) is the setter's dedup, but for an on-self swap (`0x4b4afa`),
+                    // whose select of the player is not made here. The cast it follows was sent
+                    // at that unit, past its own target checks.
                     crate::creature_anim::start_attack_local(
                         e,
                         guid,
                         engaged,
-                        stop_in_flight,
+                        crate::creature_anim::StartTarget::Attackable,
                         crate::creature_anim::StartGate::of(
                             ctx.rel.self_store,
                             ctx.self_control_lost,
                         ),
+                        stop_word,
                         auto_repeat,
                         sheath,
                         stand,

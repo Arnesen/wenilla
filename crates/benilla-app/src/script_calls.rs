@@ -155,9 +155,38 @@ pub(crate) struct ScriptCallHost<'w, 's> {
             crate::ui_action::AttackPress<'w, 's>,
         ),
     >,
+    /// The channel the census counts sends on ([`benilla_ui::script::census`]).
+    #[cfg(test)]
+    census: Option<Res<'w, crate::net::NetCommands>>,
 }
 
 impl ScriptCallHost<'_, '_> {
+    /// Push the views a call left for the script's next line, and for the listeners at a signal
+    /// point inside it.
+    fn commit_views(&mut self, script: &mut UiScript) {
+        let appliers = &mut self.appliers;
+        // The cast state: `SpellStopCasting` (`0x6e6e80`) finds the cast the call sent in flight
+        // (`0x6e5026`), and `IsCurrentAction` (`0x4e53a0`) checks its slot, as stock
+        // `ActionButtonUp` reads straight after `UseAction` (`ActionButton.lua:54-55`).
+        let view = appliers.p2().p1().view();
+        script.set_cast_view(view);
+        // The targeting word: `SpellIsTargeting` (`0x6e6cd0`) reads it, and `SpellTargetUnit`
+        // binds to it.
+        appliers.p1().push_view(script);
+    }
+
+    /// A signal point inside a call (`SignalEvent`, `0x703e50`, runs every listener before the
+    /// verb goes on): the views the call left are pushed, the reports it made since `mark` are
+    /// signalled behind its signals, as its tail would, and all of it runs here, in place
+    /// ([`UiScript::signal_point`]).
+    fn at_point(&mut self, script: &mut UiScript, mark: &mut crate::ui_cast::ReportMark) {
+        let ready = self.appliers.p2().p2().ready_since(script, *mark);
+        crate::ui_cast::fire(script, ready);
+        *mark = self.appliers.p2().p2().mark();
+        self.commit_views(script);
+        script.signal_point(self);
+    }
+
     /// A probe line's text emote, run as `DoEmote` runs it inside its call (`0x5ef560`).
     pub(crate) fn emote(&mut self, text_id: u32, arg: Option<String>) {
         let appliers = &mut self.appliers;
@@ -167,27 +196,34 @@ impl ScriptCallHost<'_, '_> {
 
 impl CallHost for ScriptCallHost<'_, '_> {
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+        #[cfg(test)]
+        if let Some(net) = self.census.as_deref() {
+            let sent = net.0.clone();
+            benilla_ui::script::census::probe(move || sent.len());
+        }
         let appliers = &mut self.appliers;
         // The gate's answer for this call, made where the Lua verb ran: its casts start only if
         // tag 2 passed there. The ladder reads it while this call applies.
-        appliers.p3().ladder.permit(call.may_cast());
+        let outer_permit = appliers.p3().ladder.permit(call.may_cast());
         let selected_before = appliers.p0().selected();
         // The pet's attack latch, which the selection's release can lower (`0x493a18`).
-        let latched_before = appliers.p6().p1().attack_latched();
-        let report_mark = appliers.p2().p2().mark();
+        let mut latched_before = appliers.p6().p1().attack_latched();
+        let mut report_mark = appliers.p2().p2().mark();
         let mut tail: Option<CallTail> = None;
         // The confirm popup an item pick or a Yes raised, signalled with the call's reports.
         let mut popup = None;
+        // What a selecting call owes after its signals (`0x493a18`, `0x4938c8`).
+        let mut owed = crate::target::SelectDebt::default();
         match call {
-            ScriptCall::Select { request, .. } => appliers.p0().select(request),
+            ScriptCall::Select { request, .. } => owed = appliers.p0().select(request),
             ScriptCall::TargetByName { name, exact, .. } => {
-                appliers.p0().target_by_name(&name, exact)
+                owed = appliers.p0().target_by_name(&name, exact);
             }
             ScriptCall::TargetNearest { mode, reverse, .. } => {
-                appliers.p0().target_nearest(mode, reverse);
+                owed = appliers.p0().target_nearest(mode, reverse);
             }
-            ScriptCall::TargetLastTarget { .. } => appliers.p0().target_last_target(),
-            ScriptCall::ClearTarget => appliers.p0().clear_target(),
+            ScriptCall::TargetLastTarget { .. } => owed = appliers.p0().target_last_target(),
+            ScriptCall::ClearTarget => owed = appliers.p0().clear_target(),
             ScriptCall::AttackTarget { may_pick, .. } => attack_in_order!(appliers, may_pick),
             ScriptCall::SpellTargetUnit(token) => appliers.p1().spell_target_unit(&token),
             ScriptCall::SpellStopTargeting => appliers.p1().stop_targeting(),
@@ -289,6 +325,18 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Pet(call) => appliers.p6().p1().apply(script, call),
             ScriptCall::Stable(call) => appliers.p6().p2().apply(call),
         }
+        if let Some(send) = owed.take_send() {
+            // The teardown called a possessed unit off: `PetStopAttack` lowered the latch and
+            // signals `PET_BAR_UPDATE` (`0x4bd6ae`, `0x4bd6b4`) with the selection zeroed
+            // (`0x4939d3`), and its listeners run here, before the store and the send.
+            script.lower_pet_attack();
+            script.fire_event("PET_BAR_UPDATE", vec![]);
+            latched_before = false;
+            script.seat_selection(appliers.p0().seated());
+            self.at_point(script, &mut report_mark);
+            self.appliers.p0().pay_send(send);
+        }
+        let appliers = &mut self.appliers;
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.
         appliers.p1().bind_parked();
@@ -323,14 +371,17 @@ impl CallHost for ScriptCallHost<'_, '_> {
         if let Some(owed) = appliers.p3().ladder.take_unit_attack() {
             pet_in_order!(appliers, begin_attack_from_cast(owed));
         }
-        // Whatever casts next is the engine's own, which asks no gate.
-        appliers.p3().ladder.permit(true);
+        // Whatever casts next is the caller's: the engine's own, which asks no gate, or the call
+        // whose signal point this call applied at.
+        appliers.p3().ladder.permit(outer_permit);
         // The selection the call committed (`SetSelection 0x493540`, inside every selecting
         // verb) is `"target"` for the script's next line, and what `SetSelection` signals it
         // signals here, inside the call and under its input events, in its order: the release's
         // `PET_BAR_UPDATE` when it called a possessed unit off (`0x493a18` → `0x4bd6b4`), the
         // usable refresh (`0x493892`, `0x493a69`), then `PLAYER_TARGET_CHANGED` (`0x49389c`,
-        // `0x493a73`). The unit feed takes the change as heard.
+        // `0x493a73`). The unit feed takes the change as heard. After the teardown's point this
+        // reads what `pay_send` left: the call's own pick, stored over a listener's as `0x4936e2`
+        // stores it, or for a clear the listener's pick, which the reference signals as well.
         let selected_after = appliers.p0().selected();
         if selected_after != selected_before {
             script.seat_selection(appliers.p0().seated());
@@ -344,20 +395,19 @@ impl CallHost for ScriptCallHost<'_, '_> {
             script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
             script.announce_selection(selected_after);
         }
+        if owed.owes_swings() {
+            // `SetSelection` goes on to its re-swing (`0x4938c8`) once `PLAYER_TARGET_CHANGED`'s
+            // listeners have run (`0x49389c`): they run here, so their packets go out ahead of the
+            // swing, and a call they make nests.
+            self.at_point(script, &mut report_mark);
+            self.appliers.p0().pay(owed);
+        }
         // The reports the call made, in its order: a refusal's `UI_ERROR_MESSAGE` and its
         // `SPELLCAST_FAILED` (`ReportCastFailure 0x6e1a00` inside `TryCast 0x6e4b60`), a cancel's
         // event, `CURRENT_SPELL_CAST_CHANGED` at each of the attempt's signals, and the item gate's
         // confirm (`0x495d60`), all signalled below as the call returns, under its input events.
-        let ready = appliers.p2().p2().ready_since(script, report_mark);
-        // The cast state the call left, for the script's next line: `SpellStopCasting`
-        // (`0x6e6e80`) finds the cast it sent in flight (`0x6e5026`), and `IsCurrentAction`
-        // (`0x4e53a0`) checks its slot, as stock `ActionButtonUp` reads straight after `UseAction`
-        // (`ActionButton.lua:54-55`).
-        let view = appliers.p2().p1().view();
-        script.set_cast_view(view);
-        // The word the call left: `SpellIsTargeting` (`0x6e6cd0`) reads it, and `SpellTargetUnit`
-        // binds to it.
-        appliers.p1().push_view(script);
+        let ready = self.appliers.p2().p2().ready_since(script, report_mark);
+        self.commit_views(script);
         if ready.is_empty() && popup.is_none() {
             return tail;
         }
@@ -569,6 +619,10 @@ pub(crate) fn bind_parked_picks(mut cursor: crate::spell::ScriptCursor) {
     cursor.bind_parked();
 }
 
+/// The census list ([`benilla_ui::script::census`]).
+#[cfg(test)]
+pub(crate) mod census;
+
 /// A host that applies each call with `apply`, for a harness that lends its own engine half.
 #[cfg(test)]
 pub(crate) struct FnHost<F>(pub(crate) F);
@@ -596,6 +650,7 @@ mod tests {
     use crossbeam_channel::Receiver;
 
     mod cast_reports;
+    mod census;
     mod selection;
 
     const ME: u64 = 0x10;
@@ -2064,6 +2119,25 @@ mod tests {
             .world()
             .get_resource::<crate::spell::ScriptCastPermit>()
             .is_some());
+    }
+
+    /// A call puts back the cast permit it found as it returns, so a call nested inside another's
+    /// apply, at a signal point, leaves the outer call's answer for the rest of that apply.
+    #[test]
+    fn a_call_puts_back_the_cast_permit_it_found() {
+        let mut f = frame(true);
+        f.app
+            .world_mut()
+            .run_system_once(|mut ladder: crate::spell::CastLadder| {
+                ladder.permit(false);
+            })
+            .expect("the ladder runs as a one-shot system");
+        run(&mut f, "ClearTarget()");
+        assert!(!f
+            .app
+            .world()
+            .resource::<crate::spell::ScriptCastPermit>()
+            .allows());
     }
 
     /// The Attack slot is a cast too (`UseAction` → `TryCast`, `0x6e4c90`), behind the same first
