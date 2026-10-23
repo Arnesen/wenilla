@@ -555,11 +555,11 @@ impl OwedSwing {
 /// `entity` is the guid's object, which the select lights (`0x493701`); with none the guid is
 /// stored all the same (`0x4935c8` → `0x493605`), and neither `IsSelectable` nor the light runs.
 /// For a writer whose signal has no listeners to run first, the re-swing goes out here.
-///
-/// Here the latch (`0x493637`) reduces to `engaged && had_old`: vmangos ends [`Engaged`] when the
-/// victim dies, before a click can land, so for a writer outside the script calls the old target's
-/// own legs are taken to pass. `engaged` is the server's echo, a round trip behind the reference's
-/// local lock.
+/// `old_latches` is [`latches_on`] the selection as it stands. `engaged` is [`Engaged`], which
+/// only the server's `SMSG_ATTACKSTART` echo sets: a round trip behind the reference's lock,
+/// which StartAttack's send sets locally (`[+0xc48]`, `[+0xc50]` = 1, `0x5ecd51` → `0x47bf70`),
+/// so after a swing starts the latch reads it late. The reference clears it at the stop's echo
+/// (`0x624e40`).
 pub(super) fn commit(
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
@@ -569,6 +569,7 @@ pub(super) fn commit(
     engaged: bool,
     self_guid: Option<u64>,
     new_attackable: bool,
+    old_latches: bool,
 ) -> CommitOutcome {
     let (out, owed) = commit_owing(
         selection,
@@ -579,7 +580,7 @@ pub(super) fn commit(
         engaged,
         self_guid,
         new_attackable,
-        true,
+        old_latches,
     );
     owed.pay(selection, seam);
     out
@@ -798,28 +799,26 @@ impl AttackPick<'_, '_> {
         (self.scan.self_store(), self.scan.self_guid())
     }
 
-    /// The guid the swing, the pet's order or the cast goes at, or `None` once the refusal is
-    /// raised. The candidate is the guid the caller passed, else the selection (`0x61306b`):
-    /// `AttackTarget` passes none (`0x489b50` → `0x6131a0(0,0)`), nor does the pet bar
-    /// (`0x4be42b`); TryCast passes the caster on a self-cast press (`0x4e610e`). An empty
-    /// candidate (`0x61307f`) or a unit the actor is friendly toward (`0x6130a3`, dropped at
-    /// `0x6130a8`), the caster included, runs `TargetNearestEnemy` (`0x6130b5`), which commits its
-    /// pick before this returns, so a call after this one reads it. The target is then the
-    /// selection as it stands (`0x6130c1`): a fruitless scan leaves a friendly unit selected for
-    /// the final gate to refuse, and only an empty selection is `ERR_NO_ATTACK_TARGET`
-    /// (`0x6130d9`). `may_pick` is the protected-action gate's tag 4, which opens the cycle
-    /// (`0x493f9b`): refused, the cycle returns having picked nothing and the target is the
-    /// selection as it stands. A unit kept goes to `SelectTarget` (`0x613100`) and the cycle's pick
-    /// does too (`0x4941e6`), so with the targeting cursor up either is bound to the cast and the
-    /// selection stays ([`super::front`]).
-    pub(crate) fn target(
+    /// The validator's target pick up to the selection's re-read (`0x61305d`-`0x6130bc`), what
+    /// its commit owes after its signals ([`Owed`]), for a caller that runs their listeners in
+    /// place, as `SetSelection` does inside the validator, before it [`Self::settle`]s. The
+    /// candidate is the guid the caller passed, else the selection (`0x61306b`): `AttackTarget`
+    /// passes none (`0x489b50` → `0x6131a0(0,0)`), nor does the pet bar (`0x4be42b`); TryCast
+    /// passes the caster on a self-cast press (`0x4e610e`). An empty candidate (`0x61307f`) or a
+    /// unit the actor is friendly toward (`0x6130a3`, dropped at `0x6130a8`), the caster included,
+    /// runs `TargetNearestEnemy` (`0x6130b5`), which commits its pick inside the validator, so a
+    /// call after this one reads it. `may_pick` is the protected-action gate's tag 4, which opens
+    /// the cycle (`0x493f9b`): refused, the cycle returns having picked nothing. A unit kept goes
+    /// to `SelectTarget` (`0x613100`) and the cycle's pick does too (`0x4941e6`), so with the
+    /// targeting cursor up either is bound to the cast and the selection stays
+    /// ([`super::front`]).
+    pub(crate) fn pick(
         &mut self,
         passed: Option<u64>,
         may_pick: bool,
         selection: &mut Selection,
         seam: &mut crate::creature_anim::AttackSeam,
-        errors: &crate::ui_action::UiErrorKeys,
-    ) -> Option<u64> {
+    ) -> Owed {
         let candidate = passed.or(selection.guid);
         if candidate.is_some_and(|g| self.keeps(g)) {
             // `0x613100`: the kept unit is selected again, a no-op unless the cursor is up. Only
@@ -833,7 +832,7 @@ impl AttackPick<'_, '_> {
             }
         } else if may_pick {
             let engaged = self.engaged();
-            let owed = cycle(
+            return cycle(
                 ScanSide::Enemy,
                 false,
                 self.time.elapsed_secs_f64(),
@@ -844,8 +843,20 @@ impl AttackPick<'_, '_> {
                 &mut self.front,
                 engaged,
             );
-            owed.pay(selection, seam);
         }
+        Owed::default()
+    }
+
+    /// The validator from the selection's re-read on (`0x6130c1`-`0x613198`), once the pick's
+    /// listeners ran: the guid the swing, the pet's order or the cast goes at, or `None` once the
+    /// refusal is raised. The target is the selection as it stands then, a listener's pick
+    /// included: a fruitless scan leaves a friendly unit selected for the final gate to refuse,
+    /// and only an empty selection is `ERR_NO_ATTACK_TARGET` (`0x6130d9`).
+    pub(crate) fn settle(
+        &self,
+        selection: &Selection,
+        errors: &crate::ui_action::UiErrorKeys,
+    ) -> Option<u64> {
         let Some(guid) = selection.guid else {
             debug!("attack: nothing to attack (ERR_NO_ATTACK_TARGET)");
             errors.push(crate::ui_action::UiError::key("ERR_NO_ATTACK_TARGET"));
@@ -1045,6 +1056,7 @@ pub(super) fn auto_acquire(
             false,
             Some(my_guid.0),
             false,
+            false,
         );
     }
 }
@@ -1090,6 +1102,7 @@ mod tests {
                         engaged,
                         self_guid,
                         attackable,
+                        true,
                     )
                 },
             )

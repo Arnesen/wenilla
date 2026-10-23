@@ -18,7 +18,8 @@ use crate::net::{ChatKind, ClientCommand, NetCommands, ObjectStore};
 pub(crate) struct ChatSender<'w, 's> {
     commands: Res<'w, NetCommands>,
     chat_log: Res<'w, super::super::feed::ChatLog>,
-    errors: Res<'w, crate::ui_action::UiErrorKeys>,
+    /// Where a refusal shows inside the call (`0x496720`).
+    sink: crate::ui_action::MessageSink<'w>,
     /// The optimistic AFK mirror (`[0xb6e5cc]`) the AFK arm and the clear read and write; a world
     /// with no chat has none.
     mirror: Option<ResMut<'w, AfkMirror>>,
@@ -37,22 +38,51 @@ pub(crate) struct ChatSender<'w, 's> {
     switches: Option<Res<'w, crate::text_filter::TextFilterSwitches>>,
 }
 
+/// [`ChatSender::refuse`] on the sink alone, for a verb that holds the sender's other state.
+fn refuse_in(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, key: &'static str) {
+    let input = script.input_events();
+    if let Some(line) = crate::ui_action::keyed_line(script, key) {
+        crate::ui_action::show_now(script, sink, "chat", line.under(input));
+    }
+}
+
 impl ChatSender<'_, '_> {
-    /// A channel verb inside its call: a join's slot (`0x49ede8`-`0x49edf3`) and every verb's
-    /// packet, the slots mirrored into the VM before the verb returns.
-    pub(crate) fn channel(&mut self, script: &mut UiScript, cmd: ChannelCommand) {
+    /// `DisplayError` (`0x496720`) inside the call, under its input events: a red line's
+    /// `UI_ERROR_MESSAGE`, or a chat line's `CHAT_MSG_SYSTEM`, in place.
+    fn refuse(&mut self, script: &mut UiScript, key: &'static str) {
+        refuse_in(script, &mut self.sink, key);
+    }
+
+    /// A channel verb inside its call: a join's slot (`0x49ede8`-`0x49edf3`), the slots mirrored
+    /// into the VM before the verb returns, and the packet it sends after them
+    /// ([`Self::send_channel`]), with whether it showed a refusal ahead of it.
+    pub(crate) fn channel(
+        &mut self,
+        script: &mut UiScript,
+        cmd: ChannelCommand,
+    ) -> Option<(ClientCommand, bool)> {
         let Some(channels) = self.channels.as_deref_mut() else {
             debug!("chat: no channel slots in this world; {cmd:?} dropped");
-            return;
+            return None;
         };
-        super::channel::apply(
-            cmd,
-            channels,
-            script,
-            &self.commands,
-            &self.chat_log,
-            &self.errors,
-        );
+        let sink = &mut self.sink;
+        let mut refused = false;
+        let packet =
+            super::channel::apply(cmd, channels, script, &self.chat_log, &mut |s, key| {
+                refused = true;
+                refuse_in(s, sink, key);
+            })?;
+        Some((packet, refused))
+    }
+
+    /// A channel verb's packet.
+    pub(crate) fn send_channel(&self, packet: ClientCommand) {
+        let _ = self.commands.0.send(packet);
+    }
+
+    /// A verb's own refusal, `DisplayError` (`0x496720`), shown inside its call.
+    pub(crate) fn display_error(&mut self, script: &mut UiScript, key: &'static str) {
+        self.refuse(script, key);
     }
 
     /// `MSG_RANDOM_ROLL` (`0x48c832`), the binding having checked the range.
@@ -108,7 +138,7 @@ impl ChatSender<'_, '_> {
         match group_gate(kind, script.chat_group()) {
             Ok(promoted) => kind = promoted,
             Err(key) => {
-                self.errors.push(crate::ui_action::UiError::key(key));
+                self.refuse(script, key);
                 return;
             }
         }
@@ -150,8 +180,7 @@ impl ChatSender<'_, '_> {
         // A dead or ghost player's line is refused (`0x49f592`-`0x49f5e4`, `0x605f30`) unless its
         // type is on the allowed chain (`0x49f5a3`-`0x49f5da`).
         if !dead_may_send(kind) && self.player().is_some_and(|s| s.0.is_dead_or_ghost()) {
-            self.errors
-                .push(crate::ui_action::UiError::key("ERR_CHAT_WHILE_DEAD"));
+            self.refuse(script, "ERR_CHAT_WHILE_DEAD");
             return;
         }
         // `AcknowledgeTutorial(0x16)` (`0x49f5fc`), for every type that gets past the dead check,
@@ -366,6 +395,7 @@ pub(crate) fn chat_world(script: UiScript) -> (World, crossbeam_channel::Receive
     let (tx, rx) = crossbeam_channel::unbounded();
     world.insert_resource(NetCommands(tx));
     world.init_resource::<super::super::feed::ChatLog>();
+    world.init_resource::<crate::sound::MessageSounds>();
     world.init_resource::<crate::ui_action::UiErrorKeys>();
     world.init_resource::<AfkMirror>();
     world.init_resource::<crate::net::GuidIndex>();
@@ -390,7 +420,11 @@ pub(crate) fn run_chat(world: &mut World, lua: &str) -> benilla_ui::mlua::Result
             benilla_ui::script::ScriptCall::RandomRoll { min, max } => {
                 sender.random_roll(min, max);
             }
-            benilla_ui::script::ScriptCall::Channel(cmd) => sender.channel(script, cmd),
+            benilla_ui::script::ScriptCall::Channel(cmd) => {
+                if let Some((packet, _)) = sender.channel(script, cmd) {
+                    sender.send_channel(packet);
+                }
+            }
             benilla_ui::script::ScriptCall::Uninvite(name) => sender.uninvite(name),
             benilla_ui::script::ScriptCall::RequestTimePlayed => sender.request_time_played(),
             benilla_ui::script::ScriptCall::AddonMessage(send) => sender.addon_message(send),

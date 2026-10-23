@@ -70,7 +70,7 @@ pub(crate) use relations::{
 // pet bar's; the melee probe's press with nothing selected.
 #[cfg(test)]
 pub(crate) use scan::LastEnemy;
-pub(crate) use scan::{AttackNearestRequest, AttackPick, CreatureTypes};
+pub(crate) use scan::{AttackNearestRequest, AttackPick, CreatureTypes, Owed};
 // The chat layer's by-name asks (`/target`, `/assist`), and the typemask `TargetByName`'s
 // candidate feed shares.
 pub(crate) use by_name::{
@@ -416,10 +416,12 @@ impl Plugin for TargetPlugin {
                     .after(WorldStage::Input),
             )
             // The selection's object, as the objects that streamed in and out applied and the
-            // active player is tagged, before any reader of the frame.
+            // active player is tagged, before any reader of the frame. Its teardown signals with
+            // the host lent, as a feed of the frame's packets.
             .add_systems(
                 Update,
                 track::follow_selection_object
+                    .in_set(crate::ui_script::UiFeed)
                     .after(WorldStage::Net)
                     .before(WorldStage::Input),
             )

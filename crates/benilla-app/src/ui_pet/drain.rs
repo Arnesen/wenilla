@@ -50,12 +50,24 @@ pub(crate) struct PetCast {
     target_guid: u64,
 }
 
+/// An Attack press past the dispatcher's gates, at its validator (`0x4bd40d`): the pick
+/// ([`PetPress::pick_attack`]), whose `SetSelection` signals inside it, then the rest
+/// ([`PetPress::finish_attack`]).
+pub(crate) struct PetAttack {
+    slot: u32,
+    entry: PetActionEntry,
+    passed: Option<u64>,
+    pet_guid: u64,
+}
+
 /// Where a press goes once it has passed the dispatcher's gates (`0x4bd1d0`).
 pub(crate) enum PetStep {
     /// The bar's own packet, [`PetPress::finish_press`].
     Order(PetSend),
     /// The attempt, [`cast_pet_press`].
     Cast(PetCast),
+    /// Attack, at its validator.
+    Attack(PetAttack),
 }
 
 /// The cast arm's hand-off (`0x4bd385`): the attempt with the bar's unit as its caster, at the
@@ -83,11 +95,24 @@ impl PetPress<'_, '_> {
     /// attempt takes needs the ladder, which the call host lends ([`cast_pet_press`]).
     #[cfg(test)]
     pub(crate) fn press_slot(&mut self, slot: u32) {
-        match self.begin_slot(slot) {
+        match self.begin_slot(slot).and_then(|step| self.attack_now(step)) {
             Some(PetStep::Order(send)) => self.finish_press(send),
             Some(PetStep::Cast(_)) => panic!("slot {slot} casts through the attempt"),
-            None => {}
+            Some(PetStep::Attack(_)) | None => {}
         }
+    }
+
+    /// An Attack step's validator and rest run at once, for a press with no listener to run at
+    /// its pick's signals.
+    #[cfg(test)]
+    fn attack_now(&mut self, step: PetStep) -> Option<PetStep> {
+        let PetStep::Attack(attack) = step else {
+            return Some(step);
+        };
+        let owed = self.pick_attack(&attack)?;
+        owed.pay(&mut self.selection, &mut self.seam);
+        self.finish_attack(attack)
+            .map(|(send, _)| PetStep::Order(send))
     }
 
     /// [`Self::press_slot`]'s first half, up to the packet or the attempt. The attack validator
@@ -106,36 +131,95 @@ impl PetPress<'_, '_> {
 
     /// TryCast's attack pick for a press the bar handed the attempt (`0x6e4efb`:
     /// `0x612df0(unit, &guid)`), the validator with that unit as the actor and the press's target
-    /// as its candidate: the guid the cast goes on at, or `None` once refused.
-    pub(crate) fn pick_for_unit_cast(&mut self, press: crate::spell::UnitPress) -> Option<u64> {
+    /// as its candidate, up to the selection's re-read: what its pick's commit owes after its
+    /// signals, or `None` once an actor check refused. [`Self::settle_pick`] gives the guid.
+    pub(crate) fn pick_for_unit_cast(
+        &mut self,
+        press: crate::spell::UnitPress,
+    ) -> Option<crate::target::Owed> {
         let actor = self.pet.store(press.caster);
         if crate::ui_action::attack_actor_refusal(actor, self.pet.self_guid.0, &self.ui_errors) {
             return None;
         }
-        self.pick.target(
-            press.target,
-            true,
-            &mut self.selection,
-            &mut self.seam,
-            &self.ui_errors,
+        Some(
+            self.pick
+                .pick(press.target, true, &mut self.selection, &mut self.seam),
         )
     }
 
+    /// The validator from the selection's re-read on (`0x6130c1`): the guid the attempt or the
+    /// attack goes on at, or `None` once refused.
+    pub(crate) fn settle_pick(&mut self) -> Option<u64> {
+        self.pick.settle(&self.selection, &self.ui_errors)
+    }
+
     /// `StartAttack 0x6131a0` on a unit caster at its cast's target, TryCast's tail
-    /// (`0x6e51de`): the attack validator with the unit as the actor (`0x6131aa`), then, for the
-    /// pet bar's unit (`0x613200`-`0x613212`), the bar's Attack at the guid it settled
-    /// (`0x613217` → `0x4bd630`, word `0x07000002`), through the dispatcher a press takes. Any
-    /// other unit does nothing more.
-    pub(crate) fn begin_attack_from_cast(&mut self, (caster, guid): (u64, u64)) -> Option<PetStep> {
-        let guid = self.pick_for_unit_cast(crate::spell::UnitPress {
-            caster,
-            target: Some(guid),
-        })?;
+    /// (`0x6e51de`), past its validator ([`Self::pick_for_unit_cast`] with the unit as the
+    /// actor, `0x6131aa`): for the pet bar's unit (`0x613200`-`0x613212`), the bar's Attack at the
+    /// guid it settled (`0x613217` → `0x4bd630`, word `0x07000002`), through the dispatcher a
+    /// press takes. Any other unit does nothing more.
+    pub(crate) fn attack_from_cast(&mut self, caster: u64, guid: u64) -> Option<PetStep> {
         if caster != self.bar.spells.pet_guid {
             return None;
         }
         let attack = PET_COMMAND_ATTACK | (u32::from(PET_ACT_COMMAND) << 24);
         self.begin_press(0, PetActionEntry::from(attack), Some(guid))
+    }
+
+    /// Attack's validator with the pet as its actor (`0x4bd40d`), up to the selection's re-read:
+    /// the actor checks, then the pick, what its commit owes; `None` once an actor check refused,
+    /// which jumps past the send (`0x4bd414`).
+    pub(crate) fn pick_attack(&mut self, attack: &PetAttack) -> Option<crate::target::Owed> {
+        let actor = self.pet.store(attack.pet_guid);
+        if crate::ui_action::attack_actor_refusal(actor, self.pet.self_guid.0, &self.ui_errors) {
+            debug!(
+                "ui_pet: slot {} refused by the attack validator — no packet",
+                attack.slot
+            );
+            return None;
+        }
+        Some(
+            self.pick
+                .pick(attack.passed, true, &mut self.selection, &mut self.seam),
+        )
+    }
+
+    /// Attack past its pick's signals: the validator's re-read and final gate (`0x6130c1`), the
+    /// possessed unit's latch (`0x4bd420`-`0x4bd42e`), and the packet at the target it settled,
+    /// with whether the latch was raised. Possession is read past the validator, as `0x4bd420`
+    /// reads it.
+    pub(crate) fn finish_attack(&mut self, attack: PetAttack) -> Option<(PetSend, bool)> {
+        let target = self.settle_pick();
+        let possessing = possessing(
+            attack.pet_guid,
+            self.pet.store(attack.pet_guid),
+            self.pet.player_store(),
+            self.pet.self_guid.0,
+        );
+        if !commit_press(
+            &mut self.bar,
+            self.seam.pet_latch.as_deref_mut(),
+            attack.entry,
+            target.is_none(),
+            possessing,
+        ) {
+            debug!(
+                "ui_pet: slot {} refused by the attack validator — no packet",
+                attack.slot
+            );
+            return None;
+        }
+        let target_guid = target.unwrap_or(0);
+        debug!(
+            "ui_pet: press slot {} (attack) at {target_guid:#x}",
+            attack.slot
+        );
+        let send = PetSend {
+            pet_guid: attack.pet_guid,
+            packed: attack.entry.packed,
+            target_guid,
+        };
+        Some((send, possessing))
     }
 
     /// The second half of a press: its `CMSG_PET_ACTION`.
@@ -160,7 +244,10 @@ impl PetPress<'_, '_> {
     /// number only labels logs.
     #[cfg(test)]
     pub(crate) fn order(&mut self, packed: u32) {
-        if let Some(PetStep::Order(send)) = self.begin_order(packed) {
+        let step = self
+            .begin_order(packed)
+            .and_then(|step| self.attack_now(step));
+        if let Some(PetStep::Order(send)) = step {
             self.finish_press(send);
         }
     }
@@ -184,9 +271,8 @@ impl PetPress<'_, '_> {
             pet,
             spells,
             spell_mods,
-            ui_errors,
-            pick,
             seam,
+            ..
         } = self;
         let Some(pet_store) = pet.usable_pet(bar) else {
             debug!("ui_pet: slot {slot} refused, the pet's actions are not usable — no packet");
@@ -230,9 +316,8 @@ impl PetPress<'_, '_> {
         } else {
             None
         };
-        // Only Attack runs `0x612df0`, the attack validator with the pet as actor, whose target
-        // pick can move the selection; every other press sends its target as is.
-        let mut target_guid = passed.or(selection.guid).unwrap_or(0);
+        // Every press but Attack sends its target as is.
+        let target_guid = passed.or(selection.guid).unwrap_or(0);
         // A spell with `AttributesEx4 & 0x20` (`0x4bd355`), or any spell of the unit the player
         // possesses (`0x4bd35e`-`0x4bd365`), goes to the attempt with that unit as its caster and
         // returns: no packet of the bar's, no GCD of this arm's, nothing latched.
@@ -243,28 +328,17 @@ impl PetPress<'_, '_> {
                 target_guid,
             }));
         }
-        let refused = if is_attack_order(entry) {
-            crate::ui_action::attack_actor_refusal(Some(pet_store), pet.self_guid.0, ui_errors)
-                || match pick.target(passed, true, selection, seam, ui_errors) {
-                    Some(guid) => {
-                        target_guid = guid;
-                        false
-                    }
-                    None => true,
-                }
-        } else {
-            false
-        };
-        if !commit_press(
-            bar,
-            seam.pet_latch.as_deref_mut(),
-            entry,
-            refused,
-            possessing,
-        ) {
-            debug!("ui_pet: slot {slot} refused by the attack validator — no packet");
-            return None;
+        // Only Attack runs `0x612df0`, the attack validator with the pet as actor, whose target
+        // pick can move the selection and signals there.
+        if is_attack_order(entry) {
+            return Some(PetStep::Attack(PetAttack {
+                slot,
+                entry,
+                passed,
+                pet_guid,
+            }));
         }
+        latch_press(bar, seam.pet_latch.as_deref_mut(), entry, possessing);
         if let Some(spell) = spell {
             arm_pet_gcd(bar, entry.action(), spell, spell_mods, Instant::now());
         }
@@ -431,8 +505,8 @@ pub(super) fn commit_press(
 /// (`action <= 1` at `0x4bd3b1`), set bits 8-15 and keep byte 0 and bit 27, which only the server
 /// writes (`0x4bc96f`). Both are the VM's latch mirrored: the verb wrote the word and signalled
 /// `PET_BAR_UPDATE` in place (`0x4bc956`, `0x4bc979`). Attack raises a possessed unit's attack
-/// latch instead (`0x4bd42e`), behind the validator only this side runs, so its signal
-/// (`0x4bd438`) is the feed's.
+/// latch instead (`0x4bd42e`), behind the validator only this side runs; the call host signals it
+/// (`0x4bd438`) before the send.
 pub(super) fn latch_press(
     bar: &mut PetBar,
     latch: Option<&mut PetAttackLatch>,
@@ -449,11 +523,10 @@ pub(super) fn latch_press(
         benilla_protocol::messages::PET_ACT_COMMAND
             if action == PET_COMMAND_ATTACK && possessing =>
         {
-            // `0x4bd42e` signals too; an ordinary pet never gets here.
+            // An ordinary pet never gets here.
             if let Some(latch) = latch {
                 latch.0 = Some(bar.spells.pet_guid);
             }
-            bar.bar_signals = bar.bar_signals.wrapping_add(1);
         }
         benilla_protocol::messages::PET_ACT_REACTION => {
             bar.spells.state = (bar.spells.state & 0xFFFF_FF00) | action;
