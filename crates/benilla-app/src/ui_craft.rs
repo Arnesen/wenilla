@@ -26,8 +26,9 @@ use crate::ui_unit::UnitFeed;
 
 /// The open Craft window, client-local. A nonzero opener `EffectMiscValue[0]` routes here
 /// (`Spell_C::TryCast` `0x6e4b60`) and is the craft type (1 Beast Training, 3 Enchanting) the
-/// client keeps at `0xbdcfb8` for admission and row order. The session end clears it too: a
-/// logout's fresh VM never runs the old one's `OnHide`.
+/// client keeps at `0xbdcfb8` for admission and row order. The opener of the open type, the
+/// world-enter init (`0x4f5ee0`) and the session end clear it too: a logout's fresh VM never runs
+/// the old one's `OnHide`.
 #[derive(Resource, Default)]
 pub(crate) struct CraftOpen {
     pub(crate) line: Option<u32>,
@@ -503,6 +504,7 @@ fn feed_craft(
                         // `spellLevel` at `+0x74` (column 29), not `baseLevel` (column 28).
                         spell_level: d.spell_level,
                         // The group key is the ability row's line (`0x4f61b1`), 0 with none.
+                        group: sla.map_or(0, |a| a.skill_id),
                         skill_line: sla
                             .and_then(|a| skill_lines.catalog.line(a.skill_id))
                             .map(|l| l.name.clone()),
@@ -524,6 +526,12 @@ fn feed_craft(
             })
         })();
 
+        // The type stays open while a frame cannot resolve its book (a worldport's purge of our
+        // own player): only a close or the world-enter init ends it (`0x4f5fe0`, `0x4f5ee0`).
+        let fresh = match fresh {
+            None if open.line.is_some() => memo.state.clone(),
+            f => f,
+        };
         // `CloseCraft` closes the VM's window and signals `CRAFT_CLOSE` in the verb (`0x4f5fef`).
         let closed_in_place = !script.craft_open();
         // The getters' item callbacks, kept by their calls; each record that landed rebuilds
@@ -550,7 +558,9 @@ fn feed_craft(
         match (&memo.state, &fresh) {
             (_, Some(f)) if opened => {
                 debug!("ui_craft: window opens — {} recipe(s)", f.recipes.len());
-                // The open's build signals the update (`0x4f661a`), then the show.
+                // The open's resets and build (`0x4f601c`-`0x4f6036`), whose tail signals the
+                // update (`0x4f661a`), then the show (`0x4f6040`).
+                script.craft_opened();
                 fires.post("CRAFT_UPDATE", vec![]);
                 fires.post("CRAFT_SHOW", vec![]);
             }
@@ -1471,5 +1481,76 @@ mod tests {
             .resource_mut::<Items>()
             .insert_template(DUST, Some(crate::items::test_template("Strange Dust")));
         assert_eq!(heard(&mut app), ["CRAFT_UPDATE", "CRAFT_UPDATE"]);
+    }
+
+    /// The world-enter init `0x4f5ee0` (`0x4909c4`) zeroes the craft type (`[0xbdcfb8]`) and
+    /// signals nothing; `CRAFT_CLOSE` is `0x4f5fe0`'s alone. A worldport's cascade closes the
+    /// window under the interface that survives it with no close, and a reload's closes it under
+    /// the new one, which hears no show.
+    #[test]
+    fn the_world_enter_init_closes_the_window_silently() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<CraftOpen>()
+            .init_resource::<PlayerActions>()
+            .init_resource::<crate::spell::SpellModifiers>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<Items>()
+            .insert_resource(NetCommands(tx))
+            .insert_resource(crate::ui_action::Spells::empty_for_tests())
+            .insert_resource(SkillLines {
+                catalog: benilla_formats::SkillLineCatalog::from_spell_lines([]),
+            })
+            .add_message::<crate::net::WorldEnterCascadeMessage>();
+        app.world_mut()
+            .spawn((ObjectStore(Default::default()), SelfPlayer));
+        let listening = || {
+            let script = UiScript::new().unwrap();
+            script
+                .run(
+                    "HEARD = {} local f = CreateFrame('Frame') f:RegisterEvent('CRAFT_SHOW') \
+                     f:RegisterEvent('CRAFT_UPDATE') f:RegisterEvent('CRAFT_CLOSE') \
+                     f:SetScript('OnEvent', function() table.insert(HEARD, event) end)",
+                )
+                .unwrap();
+            script
+        };
+        app.insert_non_send_resource(listening());
+        app.add_systems(
+            Update,
+            (
+                crate::ui_tradeskill::reset_crafts_on_world_enter,
+                crate::ui_tradeskill::close_craft_on_world_enter,
+                feed_craft,
+            )
+                .chain(),
+        );
+        let heard = |app: &mut App| {
+            app.update();
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
+                .unwrap()
+        };
+        let open = |app: &mut App| {
+            *app.world_mut().resource_mut::<CraftOpen>() = CraftOpen {
+                line: Some(333),
+                craft_type: 3,
+            };
+            heard(app)
+        };
+
+        assert_eq!(open(&mut app), ["CRAFT_UPDATE", "CRAFT_SHOW"]);
+        app.world_mut()
+            .write_message(crate::net::WorldEnterCascadeMessage);
+        assert!(heard(&mut app).is_empty(), "a worldport closes it silently");
+        assert_eq!(app.world().resource::<CraftOpen>().line, None);
+
+        assert_eq!(open(&mut app), ["CRAFT_UPDATE", "CRAFT_SHOW"]);
+        app.insert_non_send_resource(listening());
+        app.world_mut()
+            .write_message(crate::net::WorldEnterCascadeMessage);
+        assert!(heard(&mut app).is_empty(), "a reload shows nothing");
+        assert_eq!(app.world().resource::<CraftOpen>().line, None);
     }
 }
