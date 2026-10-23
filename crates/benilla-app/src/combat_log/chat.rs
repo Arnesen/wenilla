@@ -145,7 +145,8 @@ pub(super) fn attacker_state(
     };
     let fills = Fills {
         spell: String::new(),
-        school: (s.school != 0).then_some(s.school),
+        // A school past the table has no name, and so no line (`school_word`).
+        school: (s.school != 0).then(|| u8::try_from(s.school).unwrap_or(u8::MAX)),
         amount: i64::from(s.damage),
         // Only a landed hit grows a trailer, and only here can it say GLANCING, CRUSHING or BLOCK:
         // of `0x628410`'s call sites, this one passes a real `blocked` and `HitInfo` (`0x629ee7`).
@@ -321,8 +322,10 @@ pub(super) fn spell_outcome_log(
 }
 
 /// `SMSG_SPELLDISPELLOG`: "Your %s is removed." or "%s's %s is removed.", one line per aura. The
-/// chat type is the literal `0x45` `SPELL_BREAK_AURA` (`0x62d480`); the dispeller is classified
-/// only for the range gate. An `AURADISPELSELF` line raises `SPELL_DISPELLED` with the spell's name
+/// chat type is the literal `0x45` `SPELL_BREAK_AURA` (`0x62d480`). The reader hands the writer
+/// the bearer, the packet's first guid, and the dispeller (`0x5e8be4`), which the writer never
+/// reads: it needs the bearer held as a unit (`0x62d4fb`-`0x62d504`) and within its class's range
+/// (`0x62d516`-`0x62d58e`). An `AURADISPELSELF` line raises `SPELL_DISPELLED` with the spell's name
 /// (`0x62d5ce`-`0x62d5e8`).
 pub(super) fn spell_dispel_log(
     s: &SpellDispelLog,
@@ -332,12 +335,15 @@ pub(super) fn spell_dispel_log(
     log: &ChatLog,
 ) {
     let bearer = ctx.classify(s.victim, stores);
-    let caster = ctx.classify(s.caster, stores);
     for &spell_id in &s.spell_ids {
         let Some(spell) = ctx.spell_name(spell_id) else {
             continue;
         };
+        if !ctx.holds_unit(s.victim, stores) {
+            continue;
+        }
         let word = to_me(bearer, LineWord::with("SPELL_DISPELLED", &spell));
+        // The bearer is the line's only endpoint, in the key and the range gate.
         queue_worded(
             log,
             ctx,
@@ -345,7 +351,7 @@ pub(super) fn spell_dispel_log(
             crate::ui_chat::ChatEventKind::SpellBreakAura,
             combat::AURADISPEL,
             (s.victim, bearer),
-            (s.caster, caster),
+            (s.victim, bearer),
             Fills {
                 spell,
                 ..Default::default()

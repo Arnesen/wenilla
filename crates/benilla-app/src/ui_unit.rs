@@ -438,7 +438,7 @@ pub(crate) fn melee_unit_combat(
     let Some((guid, _)) = victim.filter(|(_, store)| crate::ui_chat::combat::is_unit(store)) else {
         return;
     };
-    crate::combat_log::feedback::swing(log, guid, s.victim_state, s.hit_info, s.damage);
+    crate::combat_log::feedback::swing(log, guid, s.victim_state, s.hit_info, s.damage, s.school);
 }
 
 /// `COMBAT_TEXT_UPDATE(messageType, data, extra)` (event `0x21e`, through the five helpers
@@ -1831,6 +1831,7 @@ mod tests {
             hit_info: 0x80,
             victim_state: 1,
             damage: 40,
+            school: 0,
             displayed,
             seq: 0,
         };

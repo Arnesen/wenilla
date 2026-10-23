@@ -429,16 +429,16 @@ fn loot_master_list(candidates: Vec<u64>, loot: &mut LootState) {
     loot.set_master_candidates(candidates);
 }
 
-/// `OnItemPush 0x491a60`'s outermost gate (`0x491b56`/`0x491b61`): only our own push prints or
-/// animates. Another member's push takes the `0x491d9f` arm and prints `LOOT_ITEM` with their
-/// name, which is not built, so a foreign push is dropped. `showInChat` is a later gate
+/// `OnItemPush 0x491a60`'s arm (`0x491b56`/`0x491b61`): only our own push animates and its own
+/// lines; another member's takes the `0x491d9f` arm. `showInChat` is a later gate
 /// (`0x491bf3`/`0x491db1`), carried into [`LootState::push_receive`].
 fn is_our_push(p: &ItemPushResult, self_guid: &SelfGuid) -> bool {
     self_guid.0 == Some(p.player_guid)
 }
 
-/// `SMSG_ITEM_PUSH_RESULT`: queues our own push for its chat line and its bag-bar animation, at
-/// its packet when its record is `held`, else at the record's answer.
+/// `SMSG_ITEM_PUSH_RESULT`: queues our own push for its chat line and its bag-bar animation, and
+/// another member's for its line, at its packet when its record is `held`, else at the record's
+/// answer.
 fn item_push_result(
     p: ItemPushResult,
     self_guid: &SelfGuid,
@@ -451,6 +451,13 @@ fn item_push_result(
         p.item_entry, p.count, p.bag_slot, p.item_slot
     );
     if !is_our_push(&p, self_guid) {
+        let held = held(p.item_entry);
+        // Another member's: no line for an item pushed but not created (`0x491d9f`-`0x491dab`),
+        // or one not for the chat (`0x491db1`).
+        if (p.from_npc && !p.created) || !p.show_in_chat {
+            return;
+        }
+        loot.push_receive_other(&p, held);
         return;
     }
     tutorials.item_received(p.item_entry, p.bag_slot, p.item_slot);
@@ -1851,6 +1858,34 @@ mod tests {
             random_property_id: 0,
             count: 1,
         }
+    }
+
+    /// Another member's push takes `0x491d9f`: no line for an item pushed but not created
+    /// (`0x491d9f`-`0x491dab`), nor with `showInChat` clear (`0x491db1`); any other queues for its
+    /// line.
+    #[test]
+    fn another_members_push_queues_for_its_line() {
+        let me = SelfGuid(Some(ME));
+        let queued = |from_npc: bool, created: bool, show_in_chat: bool| {
+            let mut loot = LootState::default();
+            item_push_result(
+                ItemPushResult {
+                    from_npc,
+                    created,
+                    ..push(THEM, show_in_chat)
+                },
+                &me,
+                &mut loot,
+                &mut crate::tutorial::TutorialState::default(),
+                |_| true,
+            );
+            loot.pending_receive_count()
+        };
+        assert_eq!(queued(false, false, true), 1, "looted");
+        assert_eq!(queued(false, true, true), 1, "created");
+        assert_eq!(queued(true, true, true), 1, "created and pushed");
+        assert_eq!(queued(true, false, true), 0, "pushed, not created");
+        assert_eq!(queued(false, false, false), 0, "not for the chat");
     }
 
     #[test]

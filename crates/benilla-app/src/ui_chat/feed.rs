@@ -21,6 +21,9 @@ use crate::query_cache::Ask;
 /// Frames a line waits on a name, about 2 s at 60 fps, before it gives up.
 const NAME_MAX_TRIES: u16 = 120;
 
+/// The most monster and battleground lines held at once for their `$`-macro subject's name.
+pub(super) const MAX_HELD_SUBJECT_LINES: usize = 64;
+
 /// The text-emote sentence tables, read once off the patch chain.
 #[derive(Resource)]
 pub(crate) struct EmoteTexts(pub(crate) EmoteTextCatalog);
@@ -124,6 +127,12 @@ enum Pending {
 }
 
 impl Pending {
+    /// A monster or battleground line, which waits only on its `$`-macro subject's name and is
+    /// retried only by that name's answer (`0x49ccc0`), never by the frame's age pass.
+    fn held_for_subject(&self) -> bool {
+        matches!(self, Pending::Wire { msg, .. } if MACRO_EXPANDED_TYPES.contains(&msg.chat_type))
+    }
+
     /// The same item `step` tries older: only a lookup's first try asks the server.
     fn waited(mut self, step: u16) -> Self {
         match &mut self {
@@ -164,24 +173,35 @@ impl Pending {
         }
     }
 
-    /// The `$`-macro subject of a monster or battleground line whose expansion needs it: the
-    /// addressee, else the sender, as the battleground lines carry one guid only. A line that
-    /// expands with no subject never waits (`0x49dac2` `jne 0x49db31` past the queue).
+    /// The `$`-macro subject of a monster or battleground line whose expansion needs it
+    /// ([`macro_subject_guid`]). A line that expands with no subject never waits (`0x49dac2`
+    /// `jne 0x49db31` past the queue).
     fn macro_subject(&self) -> Option<u64> {
         match self {
             Pending::Wire { msg, .. }
                 if MACRO_EXPANDED_TYPES.contains(&msg.chat_type)
                     && crate::npc_text::needs_subject(&msg.text) =>
             {
-                Some(if msg.target_guid != 0 {
-                    msg.target_guid
-                } else {
-                    msg.sender_guid
-                })
-                .filter(|&g| g != 0)
+                Some(macro_subject_guid(msg)).filter(|&g| g != 0)
             }
             _ => None,
         }
+    }
+}
+
+/// The guid a macro-expanded line's `$`-tokens expand against: a battleground system line's one
+/// guid (`0x49d961`, read at `0x49d967`), the addressee of any other (`0x49da60`, passed at
+/// `0x49daab`). The speaker's guid a monster say or yell carries first (`0x49d5dc`) never reaches
+/// the expander, so a line with no addressee has no subject.
+fn macro_subject_guid(msg: &ChatMessage) -> u64 {
+    use benilla_protocol::messages::{
+        CHAT_MSG_BG_SYSTEM_ALLIANCE, CHAT_MSG_BG_SYSTEM_HORDE, CHAT_MSG_BG_SYSTEM_NEUTRAL,
+    };
+    match msg.chat_type {
+        CHAT_MSG_BG_SYSTEM_NEUTRAL | CHAT_MSG_BG_SYSTEM_ALLIANCE | CHAT_MSG_BG_SYSTEM_HORDE => {
+            msg.sender_guid
+        }
+        _ => msg.target_guid,
     }
 }
 
@@ -326,8 +346,21 @@ impl ChatLog {
     }
 
     /// Hold a line that waits, out of the merge, behind the lines already waiting.
+    ///
+    /// Deviation: the reference holds every line that waits on its `$`-macro subject's name in
+    /// the name cache's callback list (`0x49daea` → `0x55f080`) until the name answers, with no
+    /// bound; here at most [`MAX_HELD_SUBJECT_LINES`] wait, the oldest dropped past that, as a
+    /// subject no player owns never answers.
     fn hold(&self, item: Pending) {
         let mut q = self.q();
+        if item.held_for_subject() {
+            let held: Vec<usize> = (0..q.held.len())
+                .filter(|&i| q.held[i].1.held_for_subject())
+                .collect();
+            if held.len() >= MAX_HELD_SUBJECT_LINES {
+                q.held.remove(held[0]);
+            }
+        }
         let seq = q.held_count;
         q.held_count += 1;
         q.held.push((seq, item));
@@ -1335,6 +1368,10 @@ fn release(
     let mut next = from;
     while let Some((seq, item)) = log.take_held(next, before) {
         next = seq + 1;
+        if before.is_some() && item.held_for_subject() {
+            log.hold_again(seq, item);
+            continue;
+        }
         let (waits, moved) =
             crate::lanes::firing(at, || fire_one(reads, log, script, set, item, at));
         if let Some(item) = waits {
@@ -1483,17 +1520,12 @@ fn fire_one(
                 }
                 // The base name; `stamp_channel` adds arg4's number and arg7-arg9 below.
                 let channel_base = msg.channel.clone().unwrap_or_default();
-                // `$`-macros expand for the monster, boss and BG system types only, against the
-                // addressee. A failed expansion (`0x49dac2`-`0x49db1e`, `0x49d9c9`) with a zero
-                // subject or a known name drops the line, one with an unknown name holds it for
-                // the name query (`tries`), and only a second failure shows the raw text.
+                // `$`-macros expand for the monster, boss and BG system types only, against
+                // [`macro_subject_guid`]. A failed expansion (`0x49dac2`-`0x49db1e`, `0x49d9c9`)
+                // with a zero subject or a known name drops the line, and one with an unknown name
+                // holds it until the name's answer, whose failure shows the raw text.
                 let expanded = if MACRO_EXPANDED_TYPES.contains(&msg.chat_type) {
-                    // The addressee, else the sender: the BG system lines carry one guid only.
-                    let subject_guid = if msg.target_guid != 0 {
-                        msg.target_guid
-                    } else {
-                        msg.sender_guid
-                    };
+                    let subject_guid = macro_subject_guid(&msg);
                     let subject = crate::npc_text::subject_for_guid(
                         subject_guid,
                         guids,
@@ -1501,6 +1533,7 @@ fn fire_one(
                         names,
                         Ask::at(tries == 0, commands),
                         unit_names.get(),
+                        || script.unknown_object_text(),
                     );
                     let (text, clean) = crate::npc_text::substitute_checked(
                         &msg.text,
@@ -1509,23 +1542,26 @@ fn fire_one(
                             states,
                         },
                     );
+                    // The player-name cache's record, valid (`0x49daea`, `0x49daf1`).
+                    let named = names.resolve_player(subject_guid, Ask::Read).is_some();
                     if clean {
                         Some(text)
-                    } else if subject_guid == 0
-                        || names.resolve_unit(subject_guid, None, Ask::Read).is_some()
-                    {
+                    } else if subject_guid == 0 || (named && tries == 0) {
                         debug!(
                             "chat: dropping unexpandable [{:#04x}] {:?} (subject \
                              {subject_guid:#x})",
                             msg.chat_type, msg.text
                         );
                         return None; // the reference prints no line
-                    } else if tries < NAME_MAX_TRIES {
-                        // `subject_for_guid` sent the name query: hold the raw line until it
-                        // lands.
+                    } else if !named {
+                        // `subject_for_guid` sent the name query: the line waits for the name
+                        // however long it takes, as the name cache's callback list holds it
+                        // (`0x55f080`), and shows nothing before.
                         return Some(Pending::Wire { msg, tries });
                     } else {
-                        None // the second failure: show the raw text
+                        // The name's answer re-expands it, and a failure there shows the raw
+                        // text (`0x49cf70`, `0x49cf82`).
+                        None
                     }
                 } else {
                     None
@@ -1832,10 +1868,11 @@ fn fire_one(
                         None => super::combat::ItemName::Waiting,
                     },
                 );
-                if !ready {
-                    return Some(Pending::Combat(line));
+                match ready {
+                    super::combat::Filled::Waiting => return Some(Pending::Combat(line)),
+                    super::combat::Filled::Dropped => return None,
+                    super::combat::Filled::Ready => write_combat_line(script, windows, &line),
                 }
-                write_combat_line(script, windows, &line);
             }
             Pending::Standing {
                 faction,
