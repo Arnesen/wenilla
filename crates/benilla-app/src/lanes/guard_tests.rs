@@ -353,14 +353,16 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::minimap::blips::drive_blip_tooltip", &["items::Countdowns", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore"]),
     // The four tokens' snapshots read the stores as of the drain's place (`ui_unit::views`); the
-    // XP pair, the rest state, the level edge, the combo points, the bar toggles and the worn
-    // display read the live store, and every snapshot its names, relations, selection and group.
+    // XP pair, the rest state, the combo points, the bar toggles and the worn display read the
+    // live store, and every snapshot its names, relations, selection and group; the world entry's
+    // pet reset reads the bar's guid and the attack latch as the frame left them.
     ("::ui_unit::feed_units", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
         "net::SelfGuid", "net::reputations::Reputations", "target::Selection",
-        "ui_guild::GuildState", "ui_party::GroupState"]),
+        "ui_guild::GuildState", "ui_party::GroupState", "ui_pet::PetAttackLatch",
+        "ui_pet::PetBar"]),
     ("::ui_unit::feed_unit_reach", &["Transform", "names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
-        "ui_party::GroupState", "ui_pet::PetBar"]),
+        "ui_party::GroupState"]),
     // The chain ends' snapshots read their stores as of the drain's place (`ui_unit::views`); their
     // names, relations, raid marks and guild read as the frame left them.
     ("::ui_unit::held::feed_chain_units", &["names::NameCache", "net::GuidIndex",
@@ -442,8 +444,7 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::spell::targeting::feed_targeting_to_vm", &["names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
-        "spell::mods::SpellModifiers", "spell::targeting::SpellTargeting", "ui_party::GroupState",
-        "ui_pet::PetBar"]),
+        "spell::mods::SpellModifiers", "spell::targeting::SpellTargeting", "ui_party::GroupState"]),
     // The engine's selection writers signal in place (`0x493540`), reading the selection, the
     // attack and loot state and the stores as the frame left them.
     ("::target::track::follow_selection_object", &["creature_anim::AttackStopInFlight",
@@ -472,10 +473,10 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_pet::bar::feed_pet_bar", &["net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "ui_pet::PetAttackLatch", "ui_pet::PetBar"]),
     ("::ui_pet::bar::fire_pet_cooldown_events", &["ui_pet::PetBar"]),
-    // The pet's snapshot reads its store as of the drain's place (`ui_unit::views`); the bar's
-    // guid, its name and the `UNIT_PET` edge read as the frame left them.
+    // The pet's snapshot reads its store as of the drain's place (`ui_unit::views`); its name
+    // reads as the frame left it.
     ("::ui_pet::unit::feed_pet_unit", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
-        "net::SelfGuid", "ui_party::GroupState", "ui_pet::PetBar"]),
+        "net::SelfGuid", "ui_party::GroupState"]),
     ("::ui_pet::menu::feed_pet_menu", &["net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "ui_pet::PetBar"]),
     ("::ui_pet_book::feed_pet_book", &["net::GuidIndex", "net::ObjectStore", "ui_pet::PetBar"]),
@@ -1535,16 +1536,19 @@ const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     // The watchers' callbacks: the drunk line's name, the quest log's slots, the skill line's race
     // and class and the bonus bar's form off our live descriptor, and the aura watcher's join of
     // the durations the duration packet writes (`0x4e4390` into `0xbc5f68`), as the frame left them
-    // (#2217); the aura watcher's own store is the one its packet left.
-    ("field notices", &["names::NameCache", "net::ObjectStore", "ui_aura::AuraDurations"]),
+    // (#2217); the aura watcher's own store is the one its packet left. `SetPetGuid`'s trainer
+    // refresh reads the open trainer, and its `PET_UI_CLOSE` the new pet's object and ours, as
+    // the frame left them.
+    ("field notices", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
+        "ui_aura::AuraDurations", "ui_trainer::TrainerOpen"]),
     // The views lane reads the stores and records it rewinds as of each packet; the names, the
-    // relations' stores and reputations, the selection, the guild and the bar's pet as the frame
-    // left them (#2217).
+    // relations' stores and reputations, the selection and the guild as the frame left them
+    // (#2217).
     // The roster too: the members its party and raid tokens and readable guids come from, past
     // the records it rewinds, as the frame left it (#2217).
     ("unit views", &["names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "net::reputations::Reputations", "target::Selection", "ui_guild::GuildState",
-        "ui_party::GroupState", "ui_pet::PetBar"]),
+        "ui_party::GroupState"]),
     ("cast reports", &["items::Countdowns", "items::Items", "net::GuidIndex", "net::ObjectStore",
         "ui_action::cast_lines::CastFailRedisplays"]),
     ("item watchers", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",

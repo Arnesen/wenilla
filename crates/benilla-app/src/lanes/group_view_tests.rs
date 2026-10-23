@@ -346,14 +346,38 @@ fn a_chain_end_reads_its_own_packets_health() {
     assert_eq!(seen, ["UNIT_COMBAT:player:50", "UNIT_COMBAT:player:40"]);
 }
 
-/// `"pet"` reads the bar's pet as each packet left it.
+/// `"pet"` reads our summon as each packet left it.
 #[test]
 fn the_pet_reads_its_own_packets_health() {
     let mut app = party_client();
+    frame(
+        &mut app,
+        crate::lanes::unit_view_tests::wire_packets(vec![vec![
+            created(PET, EntityKind::Unit, &super::unit_view_tests::health(60)),
+            values(ME, &summons(PET)),
+        ]]),
+    );
     app.world_mut()
-        .resource_mut::<crate::ui_pet::PetBar>()
-        .spells
-        .pet_guid = PET;
+        .non_send_resource_mut::<UiScript>()
+        .run(r#"function Look(event, unit) return UnitHealth("pet") end"#)
+        .unwrap();
+    frame(&mut app, vec![]);
+    let seen = frame(
+        &mut app,
+        crate::lanes::unit_view_tests::wire_packets(vec![
+            vec![fall(1)],
+            vec![values(PET, &super::unit_view_tests::health(30))],
+            vec![fall(1)],
+        ]),
+    );
+    assert_eq!(seen, ["UNIT_COMBAT:player:60", "UNIT_COMBAT:player:30"]);
+}
+
+/// `"pet"` resolves off our own descriptor at the call (`0x515a5e`-`0x515a6e`): a listener ahead
+/// of the packet that writes our `UNIT_FIELD_SUMMON` reads no pet, one after it the new pet.
+#[test]
+fn the_pet_is_the_summon_our_descriptor_names_as_each_packet_left_it() {
+    let mut app = party_client();
     frame(
         &mut app,
         crate::lanes::unit_view_tests::wire_packets(vec![vec![created(
@@ -371,11 +395,11 @@ fn the_pet_reads_its_own_packets_health() {
         &mut app,
         crate::lanes::unit_view_tests::wire_packets(vec![
             vec![fall(1)],
-            vec![values(PET, &super::unit_view_tests::health(30))],
+            vec![values(ME, &summons(PET))],
             vec![fall(1)],
         ]),
     );
-    assert_eq!(seen, ["UNIT_COMBAT:player:60", "UNIT_COMBAT:player:30"]);
+    assert_eq!(seen, ["UNIT_COMBAT:player:0", "UNIT_COMBAT:player:60"]);
 }
 
 /// The member a list names offline reads offline to that list's own `PARTY_MEMBERS_CHANGED`: the
@@ -504,4 +528,208 @@ fn a_members_object_signals_at_its_packet() {
         }],
     );
     assert_eq!(heard(&mut app), Vec::<String>::new());
+}
+
+/// The summon in two packets of one frame, as vmangos sends it: `SMSG_PET_SPELLS` first, whose
+/// bar write signals `UNIT_PET("player")` (`0x4bc84f`) while our `UNIT_FIELD_SUMMON` is still 0,
+/// then the update that writes it, whose watch signals `UNIT_PET` again (`0x51bbb0`, event table
+/// slot 2). The stock pet frame's `UnitExists("pet")` (`PetFrame.lua:21`) reads no pet at the
+/// first and the pet at the second.
+#[test]
+fn a_summon_signals_unit_pet_at_the_bar_and_again_at_our_summon_field() {
+    let mut app = party_client();
+    frame(
+        &mut app,
+        crate::lanes::unit_view_tests::wire_packets(vec![vec![created(
+            PET,
+            EntityKind::Unit,
+            &super::unit_view_tests::health(60),
+        )]]),
+    );
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UNIT_PET")
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, event .. ":" .. arg1 .. ":" .. tostring(UnitExists("pet")))
+            end)
+            "#,
+        )
+        .unwrap();
+    let bar = SessionEvent::PetSpells(Box::new(benilla_protocol::messages::PetSpells {
+        pet_guid: PET,
+        ..Default::default()
+    }));
+    let seen = frame(
+        &mut app,
+        crate::lanes::unit_view_tests::wire_packets(vec![
+            vec![bar],
+            vec![values(ME, &summons(PET))],
+        ]),
+    );
+    assert_eq!(seen, ["UNIT_PET:player:nil", "UNIT_PET:player:1"]);
+}
+
+/// A spy on `UNIT_PET`, `PET_BAR_UPDATE`, `TRAINER_CLOSED` and `PET_UI_CLOSE`, each with what `UnitExists("pet")`
+/// answers as it fires.
+fn spy_pet_signals(app: &mut App) {
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UNIT_PET")
+            f:RegisterEvent("PET_BAR_UPDATE")
+            f:RegisterEvent("TRAINER_CLOSED")
+            f:RegisterEvent("PET_UI_CLOSE")
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, event .. ":" .. tostring(UnitExists("pet")))
+            end)
+            "#,
+        )
+        .unwrap();
+}
+
+/// `SMSG_PET_SPELLS` naming `guid`.
+fn bar_for(guid: u64) -> SessionEvent {
+    SessionEvent::PetSpells(Box::new(benilla_protocol::messages::PetSpells {
+        pet_guid: guid,
+        ..Default::default()
+    }))
+}
+
+/// `SetPetGuid` signals in its order at its packet's place (`0x4bdaf0` → `0x4bc7e0`):
+/// `UNIT_PET` on the change (`0x4bc84f`), then `PET_BAR_UPDATE` (`0x4bc90c`), both ahead of the
+/// next packet's summon field and its watch's `UNIT_PET`; a re-send of the same bar is
+/// `PET_BAR_UPDATE` alone.
+#[test]
+fn the_bar_signals_unit_pet_then_its_update_at_the_packet() {
+    let mut app = party_client();
+    frame(
+        &mut app,
+        crate::lanes::unit_view_tests::wire_packets(vec![vec![created(
+            PET,
+            EntityKind::Unit,
+            &super::unit_view_tests::health(60),
+        )]]),
+    );
+    spy_pet_signals(&mut app);
+    let seen = frame(
+        &mut app,
+        crate::lanes::unit_view_tests::wire_packets(vec![
+            vec![bar_for(PET)],
+            vec![values(ME, &summons(PET))],
+        ]),
+    );
+    assert_eq!(seen, ["UNIT_PET:nil", "PET_BAR_UPDATE:nil", "UNIT_PET:1"]);
+    let seen = frame(&mut app, vec![bar_for(PET)]);
+    assert_eq!(seen, ["PET_BAR_UPDATE:1"], "the same pet: no change");
+}
+
+/// A new pet with a pet trainer's list open asks for it again (`0x4bc872`-`0x4bc8b2`):
+/// `TalkToTrainer` closes the window (`0x5df6bb` → `0x4d7440`) and sends `CMSG_TRAINER_LIST` for
+/// it (`0x5df6fc`), between `UNIT_PET` and `PET_BAR_UPDATE`. The close signals `TRAINER_CLOSED`
+/// twice, as the trainer is still the interaction target (`0x4d7474` → `0x493310`, which closes
+/// again with the cell still set, `0x493434`). Another trainer type, or the same pet again,
+/// leaves the window be.
+#[test]
+fn a_new_pet_asks_an_open_pet_trainer_for_its_list_again() {
+    const TRAINER: u64 = 0xF130_0000_0055_0009;
+    for (trainer_type, refreshed) in [(3, true), (0, false)] {
+        let mut app = party_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        crate::ui_trainer::open_trainer(
+            app.world_mut(),
+            TRAINER,
+            trainer_type,
+            Vec::new(),
+            String::new(),
+        );
+        spy_pet_signals(&mut app);
+        let seen = frame(&mut app, vec![bar_for(PET)]);
+        let asked: Vec<u64> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                crate::net::ClientCommand::TrainerList { trainer } => Some(trainer),
+                _ => None,
+            })
+            .collect();
+        let open = app
+            .world()
+            .resource::<crate::ui_trainer::TrainerOpen>()
+            .trainer;
+        if refreshed {
+            assert_eq!(
+                seen,
+                [
+                    "UNIT_PET:nil",
+                    "TRAINER_CLOSED:nil",
+                    "TRAINER_CLOSED:nil",
+                    "PET_BAR_UPDATE:nil"
+                ]
+            );
+            assert_eq!(asked, [TRAINER]);
+            assert_eq!(open, None, "the window closed for the new list");
+            // The same pet again: no change, no refresh.
+            crate::ui_trainer::open_trainer(
+                app.world_mut(),
+                TRAINER,
+                trainer_type,
+                Vec::new(),
+                String::new(),
+            );
+            let seen = frame(&mut app, vec![bar_for(PET)]);
+            assert_eq!(seen, ["PET_BAR_UPDATE:nil"]);
+            assert_eq!(rx.try_iter().count(), 0);
+        } else {
+            assert_eq!(seen, ["UNIT_PET:nil", "PET_BAR_UPDATE:nil"]);
+            assert!(asked.is_empty(), "type {trainer_type}: {asked:?}");
+            assert_eq!(open, Some(TRAINER));
+        }
+    }
+}
+
+/// `SetPetGuid`'s `PET_UI_CLOSE` (`0x4bc8f8`-`0x4bc907`, event 428): on a change to a guid that
+/// resolves as a unit (`0x4bc8e4`) and passes `IsPlayerOrHunterPet` (`0x6116e0`), between
+/// `UNIT_PET` and `PET_BAR_UPDATE`. A creature passes as a pet number's holder that our charm,
+/// else our summon, names while our class is Hunter (`0x611704`-`0x61175a`); a warrior's, or a
+/// unit with no pet number, does not.
+#[test]
+fn a_hunters_new_pet_signals_pet_ui_close_before_the_bar_update() {
+    /// `UNIT_FIELD_BYTES_0`, the class in byte 1, and `UNIT_FIELD_PETNUMBER`.
+    const BYTES_0: u16 = 36;
+    const PETNUMBER: u16 = 139;
+    for (class, pet_number, closes) in [(3, 7, true), (1, 7, false), (3, 0, false)] {
+        let mut app = party_client();
+        frame(
+            &mut app,
+            crate::lanes::unit_view_tests::wire_packets(vec![vec![
+                created(
+                    PET,
+                    EntityKind::Unit,
+                    &[
+                        (OBJECT_TYPE, TYPE_UNIT),
+                        (22, 60),
+                        (28, 60),
+                        (PETNUMBER, pet_number),
+                    ],
+                ),
+                values(ME, &[(BYTES_0, class << 8)]),
+                values(ME, &summons(PET)),
+            ]]),
+        );
+        spy_pet_signals(&mut app);
+        let seen = frame(&mut app, vec![bar_for(PET)]);
+        let mut heard = vec!["UNIT_PET:1"];
+        if closes {
+            heard.push("PET_UI_CLOSE:1");
+        }
+        heard.push("PET_BAR_UPDATE:1");
+        assert_eq!(seen, heard, "class {class}, pet number {pet_number}");
+        let seen = frame(&mut app, vec![bar_for(PET)]);
+        assert_eq!(seen, ["PET_BAR_UPDATE:1"], "the same pet: no change");
+    }
 }

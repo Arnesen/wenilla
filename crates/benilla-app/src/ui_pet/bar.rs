@@ -28,6 +28,52 @@ pub(super) struct PetBarMemory {
     cooldowns: Vec<Option<(i64, u32, bool)>>,
 }
 
+/// [`feed_pet_bar`]'s memory per VM, a resource so the world entry's reset ([`drop_bar`]) records
+/// what it pushed and the feed does not push or signal it again.
+#[derive(Resource, Default)]
+pub(crate) struct PetBarFeed(crate::ui_script::VmMemo<PetBarMemory>);
+
+/// The world entry's `SetPetGuid(0, 0)` (`0x4bc6f0` → `0x4bc7e0` at `0x4bc6fd`): the guid and the
+/// expiry cleared (`0x4bc822`, `0x4bc83d`), the attack latch lowered (`0x4bc8ce`), one more bar
+/// signal (`0x4bc90c`), and the VM given the bar gone, as [`feed_pet_bar`] would push it. Whether
+/// the guid changed, for `UNIT_PET` (`0x4bc84f`); the caller signals both.
+///
+/// The rest stays as the reference leaves it: the slots and the mode word, whose every reader
+/// tests the guid first (`GetPetActionInfo` `0x4bdc9d`, `GetPetActionCooldown` `0x4bdff2`,
+/// `IsPetAttackActive` `0x4be123`, `PickupPetAction` `0x4be249`, `CastPetAction` `0x4be414`, the
+/// tooltip `0x532809`, the drop `0x4bce12`) or passes the bar's gate, which resolves the pet from
+/// it (`0x4bcf70`, `0x4bd034`); the pet book, which `HasPetSpells` counts with no guid
+/// (`0x4b4416`); and the pet's cooldown list.
+pub(crate) fn drop_bar(
+    script: &mut benilla_ui::script::UiScript,
+    bar: &mut PetBar,
+    latch: &mut super::PetAttackLatch,
+    feed: Option<&mut PetBarFeed>,
+) -> bool {
+    let changed = bar.has_bar();
+    let signals = bar.bar_signals.wrapping_add(1);
+    bar.spells.pet_guid = 0;
+    bar.expires = None;
+    bar.bar_signals = signals;
+    // `0x4bc8ce` runs on a change only, and the latch is only ever up under a guid.
+    if changed {
+        latch.0 = None;
+    }
+    script.drop_pet_bar();
+    script.set_pet_state(bar.spells.state);
+    // What the feed's own push of a cleared bar records: no slots, not usable, nothing to lift.
+    let Some(feed) = feed else {
+        return changed;
+    };
+    *feed.0.get(script) = PetBarMemory {
+        pushed: Some((signals, false, false, false)),
+        slots: Vec::new(),
+        state: Some(bar.spells.state),
+        cooldowns: Vec::new(),
+    };
+    changed
+}
+
 /// A command token's `(name, texture)` pair, both global names (`PetActionBarFrame.lua:98-104`):
 /// keys from `GlobalStrings.lua:3029-3032`, textures from `PetActionBarFrame.lua:6-12`.
 pub(super) fn command_token(action: u32) -> Option<(&'static str, &'static str)> {
@@ -179,13 +225,13 @@ pub(super) fn feed_pet_bar(
     spells: Option<Res<Spells>>,
     clock: Res<crate::ui_script::UiClock>,
     pet: PetUnit,
-    mut memory: Local<crate::ui_script::VmMemo<PetBarMemory>>,
+    mut memory: ResMut<PetBarFeed>,
 ) {
     vm.feed(|script, (bar, latch), fires| {
         let Some(script) = script else {
             return;
         };
-        let memory = memory.get(script);
+        let memory = memory.0.get(script);
         // Every read takes the frame's anchor, the instant its starts project from: one frame,
         // one time, however long the frame runs.
         let (anchor, ui_now) = (clock.anchor, clock.ui_now);
@@ -300,7 +346,11 @@ pub(super) fn feed_pet_bar(
                 if key.3 { "" } else { ", possessed" },
             );
             memory.pushed = Some(key);
-            fires.post("PET_BAR_UPDATE", vec![]);
+            // A signal from this side is `SetPetGuid`'s own, fired at its place (the notice lane's
+            // `PetGuidSet`, the world entry's reset); a repaint off any other source is the feed's.
+            if !resignalled {
+                fires.post("PET_BAR_UPDATE", vec![]);
+            }
         }
     })
 }

@@ -38,20 +38,31 @@ pub(crate) struct NoticeFiring<'w, 's> {
     skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     // The aura watcher's cache and the store its packet left.
     auras: crate::ui_aura::PlayerAuraWatch<'w, 's>,
+    // `SetPetGuid`'s trainer refresh reads the open trainer (`0x4bc860`-`0x4bc879`) and runs its
+    // close, which needs the latch, as a world turn after the notice.
+    trainer: Option<Res<'w, crate::ui_trainer::TrainerOpen>>,
+    commands: Commands<'w, 's>,
+    // `SetPetGuid`'s unit lookup of the new guid (`0x4bc8e4`).
+    index: Option<Res<'w, crate::net::GuidIndex>>,
+    stores: Query<'w, 's, &'static crate::net::ObjectStore>,
 }
 
 impl NoticeFiring<'_, '_> {
-    /// One notice's signals.
-    fn fire(&mut self, script: &mut UiScript, notice: FieldNotice) {
+    /// One notice's signals; whether it left a world turn the lane's firing must yield to, so the
+    /// turn runs before the next notice.
+    fn fire(&mut self, script: &mut UiScript, notice: FieldNotice) -> bool {
+        if let FieldNotice::PetGuidSet { changed, guid } = notice {
+            return self.pet_guid_set(script, changed, guid);
+        }
         if notice == FieldNotice::PlayerAuras {
             self.auras.run(script);
-            return;
+            return false;
         }
         if notice == FieldNotice::QuestLog {
             if let Some(store) = self.me.iter().next() {
                 script.quest_log_changed(crate::ui_quest_log::slot_views(&store.0));
             }
-            return;
+            return false;
         }
         if let FieldNotice::Tutorial { id } = notice {
             // `0x4b5390` with no delay, inside the watcher's run.
@@ -59,20 +70,20 @@ impl NoticeFiring<'_, '_> {
             if let Some(published) = published {
                 crate::tutorial::fire_published(script, &self.sink.sounds, published);
             }
-            return;
+            return false;
         }
         if let FieldNotice::Drunk { guid, old, new } = notice {
             drunk(script, &mut self.sink, &self.names, guid, old, new);
-            return;
+            return false;
         }
         if notice == FieldNotice::SkillLines {
             script.rebuild_skills();
-            return;
+            return false;
         }
         if notice == FieldNotice::SkillMax {
             script.rebuild_trade_skill(&mut |t| self.reband(t));
             script.rebuild_skills();
-            return;
+            return false;
         }
         if let FieldNotice::SkillValue {
             skill_id,
@@ -85,7 +96,7 @@ impl NoticeFiring<'_, '_> {
                 self.skill_line(script, skill_id, old, shown);
             }
             script.rebuild_trade_skill(&mut |t| self.reband(t));
-            return;
+            return false;
         }
         if notice == FieldNotice::Shapeshift {
             // `0x5de016` → `0x4b3250`: `0x4e5bf0`'s event, then its own (`0x4b325a`).
@@ -96,13 +107,54 @@ impl NoticeFiring<'_, '_> {
                 crate::ui_action::bonus_bar_offset(self.me.iter().next(), self.spells.as_deref());
             script.set_bonus_bar_offset(offset);
             script.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
-            return;
+            return false;
         }
         fire(script, &mut self.sink, notice);
+        false
     }
 }
 
 impl NoticeFiring<'_, '_> {
+    /// `SetPetGuid`'s signals in its order (`0x4bc847`-`0x4bc911`): on a change, `UNIT_PET`, then,
+    /// with a pet trainer open and our player held, `TalkToTrainer` on it (`0x4bc8b2`), then, when
+    /// the new guid resolves as a unit (`0x4bc8e4`) that `IsPlayerOrHunterPet` passes (`0x4bc8ef`),
+    /// `PET_UI_CLOSE` (`0x4bc907`); then `PET_BAR_UPDATE`. The trainer's close needs the latch, so
+    /// with one to refresh the rest runs as a world turn after this notice.
+    fn pet_guid_set(&mut self, script: &mut UiScript, changed: bool, guid: u64) -> bool {
+        if !changed {
+            script.fire_event("PET_BAR_UPDATE", vec![]);
+            return false;
+        }
+        script.fire_event("UNIT_PET", vec![super::player_token()]);
+        let player = self.me.iter().next();
+        let closes = guid != 0
+            && self
+                .index
+                .as_ref()
+                .and_then(|i| i.0.get(&guid))
+                .and_then(|&e| self.stores.get(e).ok())
+                .is_some_and(|unit| crate::ui_pet::is_player_or_hunter_pet(unit, guid, player));
+        let trainer = crate::ui_trainer::open_pet_trainer(self.trainer.as_deref())
+            .filter(|_| player.is_some());
+        let Some(trainer) = trainer else {
+            if closes {
+                script.fire_event("PET_UI_CLOSE", vec![]);
+            }
+            script.fire_event("PET_BAR_UPDATE", vec![]);
+            return false;
+        };
+        self.commands.queue(move |world: &mut World| {
+            crate::ui_trainer::talk_to_trainer(world, trainer);
+            crate::ui_session::fire(world, |script| {
+                if closes {
+                    script.fire_event("PET_UI_CLOSE", vec![]);
+                }
+                script.fire_event("PET_BAR_UPDATE", vec![]);
+            });
+        });
+        true
+    }
+
     /// The profession list's rebuild by a skill watch, its bands and line rank read again.
     fn reband(&self, t: &mut benilla_ui::script::TradeSkillState) {
         crate::ui_tradeskill::reband(t, self.me.iter().next(), self.skill_lines.as_deref());
@@ -161,7 +213,7 @@ fn peek(world: &World) -> Option<crate::lanes::Stamp> {
 
 /// The notices `until` admits, in stamp order, each one's signals with the host lent; the lane's
 /// firing stops after a notice whose firing stamped anything, so the drain takes what it pushed
-/// next. With no VM there is nobody to hear them, and they are dropped, as below.
+/// next, or left a world turn, which runs as the firing returns. With no VM there is nobody to hear them, and they are dropped, as below.
 fn fire_lane(
     hosted_vm: &mut crate::script_calls::HostedVm,
     lane: &mut NoticeLane,
@@ -174,8 +226,8 @@ fn fire_lane(
             return;
         };
         while let Some((stamp, notice)) = lane.pop(until) {
-            let ((), moved) = crate::lanes::firing(stamp, || firing.fire(script, notice));
-            if moved {
+            let (yielded, moved) = crate::lanes::firing(stamp, || firing.fire(script, notice));
+            if moved || yielded {
                 break;
             }
         }
@@ -190,6 +242,55 @@ fn fire_notices(
     mut firing: NoticeFiring,
 ) {
     fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+}
+
+/// `PLAYER_LEVEL_UP` (`0x5e413e`, event `0xc7`), its nine values pushed as `%d`: the message's
+/// level, health and first power, 1 for a level of at least 10 (`0x5e407c`-`0x5e4081`), and its
+/// five stats, the arguments `ChatFrame.lua`'s level-up block prints.
+fn level_up(script: &mut UiScript, info: &benilla_protocol::messages::LevelUpInfo) {
+    let level = info.level as i32;
+    let int = |v: i32| ScriptValue::Int(i64::from(v));
+    let [str, agi, sta, int_, spi] = info.stats;
+    script.fire_event(
+        "PLAYER_LEVEL_UP",
+        vec![
+            int(level),
+            int(info.health),
+            int(info.powers[0]),
+            int(i32::from(level >= 10)),
+            int(str),
+            int(agi),
+            int(sta),
+            int(int_),
+            int(spi),
+        ],
+    );
+}
+
+/// `SMSG_LEVELUP_INFO`'s arm of the notice handler `0x5e38c0`. Only while the active player is
+/// held (`0x5e4054`-`0x5e4071`): each level tutorial the message's level reaches, in the arm's
+/// order (`0x5e4086`-`0x5e410e`), then `PLAYER_LEVEL_UP` (`0x5e413e`), at the packet's place among
+/// the other lanes. Nothing else signals the event: a level written to the descriptor does not.
+pub(super) fn on_level_up(
+    In(ev): In<benilla_protocol::SessionEvent>,
+    me: Query<(), With<crate::net::SelfPlayer>>,
+    mut lane: ResMut<NoticeLane>,
+) {
+    let benilla_protocol::SessionEvent::LevelUp(info) = ev else {
+        return;
+    };
+    if me.is_empty() {
+        return;
+    }
+    // The arm compares signed (`0x5e4089 jl`).
+    let level = info.level as i32;
+    lane.write_batch(
+        crate::tutorial::LEVEL_TRIGGERS
+            .iter()
+            .filter(|&&(threshold, _)| level >= threshold)
+            .map(|&(_, id)| FieldNotice::Tutorial { id }),
+    );
+    lane.write(FieldNotice::LevelUp(info));
 }
 
 /// Every notice waiting, fired alone, for a test that drives the notices without the chat lane.
@@ -263,7 +364,9 @@ fn drunk(
 /// drain's gate, so a notice is fired or dropped the frame it is written, never left to age.
 pub(super) fn add_notice_lane(app: &mut App) {
     use crate::lanes::LaneApp;
+    use crate::net::handlers::NetHandlerApp;
     app.init_resource::<NoticeLane>()
+        .net_handler(benilla_protocol::SessionEventKind::LevelUp, on_level_up)
         .add_lane("field notices", peek, fire_notices, None)
         .add_systems(
             Update,
@@ -330,6 +433,7 @@ pub(crate) fn fire(
         }
         // `0x5ddffa`.
         FieldNotice::ComboPoints => script.fire_event("PLAYER_COMBO_POINTS", vec![]),
+        FieldNotice::LevelUp(info) => level_up(script, &info),
         // Fired by [`NoticeFiring::fire`], which holds the slots, the banks, the names, the form
         // table, the aura cache and the skill lines.
         FieldNotice::QuestLog
@@ -339,7 +443,8 @@ pub(crate) fn fire(
         | FieldNotice::PlayerAuras
         | FieldNotice::SkillLines
         | FieldNotice::SkillMax
-        | FieldNotice::SkillValue { .. } => {}
+        | FieldNotice::SkillValue { .. }
+        | FieldNotice::PetGuidSet { .. } => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -1376,6 +1481,52 @@ mod tests {
         }
     }
 
+    /// Every world entry, a `/reload`'s included, refreshes the bonus bar after the entering
+    /// event (`0x490979` → `0x4e4f90` → `0x4e4fc0`): the offset set from our form, 0 with none,
+    /// then `UPDATE_BONUS_ACTIONBAR` whether or not the offset moved (`0x4e5018`).
+    #[test]
+    fn every_world_entry_signals_the_bonus_bar_after_entering() {
+        const BYTES_1: u16 = 138;
+        let spy = r#"SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_ENTERING_WORLD")
+            f:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+            f:SetScript("OnEvent", function()
+                if event == "UPDATE_BONUS_ACTIONBAR" then
+                    table.insert(SEEN, event .. " " .. GetBonusBarOffset())
+                else
+                    table.insert(SEEN, event)
+                end
+            end)"#;
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.forms.insert(
+            1,
+            benilla_formats::ShapeshiftForm {
+                bonus_bar: 1,
+                ..Default::default()
+            },
+        );
+        for (form, offset) in [(0u32, 0), (1, 1)] {
+            let (mut app, _) = feed_world(&[(BYTES_1, form << 16)], spy);
+            app.world_mut().insert_resource(crate::ui_action::Spells {
+                forms: spells.forms.clone(),
+                ..crate::ui_action::Spells::empty_for_tests()
+            });
+            app.add_systems(Update, super::super::feed_units);
+            app.update();
+            let heard = [
+                "PLAYER_ENTERING_WORLD".to_string(),
+                format!("UPDATE_BONUS_ACTIONBAR {offset}"),
+            ];
+            assert_eq!(seen(&mut app), heard, "form {form}: the login");
+            let reloaded = UiScript::new().unwrap();
+            reloaded.run(spy).unwrap();
+            app.insert_non_send_resource(reloaded);
+            app.update();
+            assert_eq!(seen(&mut app), heard, "form {form}: the reload");
+        }
+    }
+
     /// `PLAYER_ENTERING_WORLD`'s handler reads the honor block, since the schedule pushes it ahead
     /// of the unit feed that fires the cascade: `HonorFrame_Update(1)` reads the weekly values
     /// only then (`HonorFrame.lua:10-11`).
@@ -1490,6 +1641,77 @@ mod tests {
                 "level {level}: the max-level art"
             );
             assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+        }
+    }
+
+    /// The cascade's pet step (`0x4909c9` → `0x4bc6f0`), after the bonus bar and before the
+    /// reputation rebuild: `SetPetGuid(0, 0)` (`0x4bc6fd`), whose change signals
+    /// `UNIT_PET("player")` (`0x4bc84f`) and which always signals `PET_BAR_UPDATE` (`0x4bc90c`),
+    /// then `CMSG_REQUEST_PET_INFO` (`0x4bc738`) when our charm, else our summon, is set
+    /// (`0x4bc721`-`0x4bc736`). Each handler reads the bar already gone. A `/reload` with a pet up
+    /// takes the change too: the guid outlives the interface.
+    #[test]
+    fn the_world_entry_drops_the_pet_bar_and_asks_for_it_again() {
+        use crate::net::ClientCommand;
+        /// `UNIT_FIELD_SUMMON`.
+        const SUMMON: u16 = 8;
+        let spy = r#"SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+            f:RegisterEvent("UNIT_PET")
+            f:RegisterEvent("PET_BAR_UPDATE")
+            f:RegisterEvent("UPDATE_FACTION")
+            f:SetScript("OnEvent", function()
+                table.insert(SEEN, event .. " " .. tostring(arg1) .. " " .. tostring(PetHasActionBar()))
+            end)"#;
+        for summoned in [true, false] {
+            let pairs: Vec<(u16, u32)> = if summoned {
+                vec![(SUMMON, PET as u32), (SUMMON + 1, (PET >> 32) as u32)]
+            } else {
+                vec![]
+            };
+            let (mut app, _) = feed_world(&pairs, spy);
+            let (tx, rx) = crossbeam_channel::unbounded();
+            app.insert_resource(crate::net::NetCommands(tx));
+            app.init_resource::<crate::ui_pet::PetBar>()
+                .init_resource::<crate::ui_pet::PetAttackLatch>();
+            if summoned {
+                app.world_mut()
+                    .resource_mut::<crate::ui_pet::PetBar>()
+                    .spells
+                    .pet_guid = PET;
+                app.world_mut()
+                    .resource_mut::<crate::ui_pet::PetAttackLatch>()
+                    .0 = Some(PET);
+            }
+            app.add_systems(Update, super::super::feed_units);
+            app.update();
+            let mut heard = vec!["UPDATE_BONUS_ACTIONBAR nil nil"];
+            if summoned {
+                heard.push("UNIT_PET player nil");
+            }
+            heard.extend([
+                "PET_BAR_UPDATE nil nil",
+                "UPDATE_FACTION nil nil",
+                "UPDATE_FACTION nil nil",
+            ]);
+            assert_eq!(seen(&mut app), heard, "summoned {summoned}");
+            assert_eq!(
+                app.world()
+                    .resource::<crate::ui_pet::PetBar>()
+                    .spells
+                    .pet_guid,
+                0
+            );
+            assert_eq!(
+                app.world().resource::<crate::ui_pet::PetAttackLatch>().0,
+                None
+            );
+            let asked = rx
+                .try_iter()
+                .filter(|c| matches!(c, ClientCommand::RequestPetInfo))
+                .count();
+            assert_eq!(asked, usize::from(summoned), "summoned {summoned}");
         }
     }
 }
