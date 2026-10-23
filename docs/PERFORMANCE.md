@@ -18,7 +18,7 @@ These changes address the September 2026 review while preserving the upstream me
 | Browser audio | At most 16 pending SFX loads, speculative prewarming limited to four occupied slots; cancellation; 64 MiB PCM cache with LRU eviction | Existing WASM-owned audio files and gated cache type |
 | Browser diagnostics | Latest 3,600 FPS-journal samples in tab memory, CSV export | WASM sink; native filesystem journal unchanged |
 | Windows diagnostics | Process and calling-thread CPU clocks through Win32 | Windows-only helper |
-| Build experiments | `WEB_PROFILE=ship` opt-in (the default since October 2026, below); wasm-opt errors stop builds | Owned build script |
+| Build experiments | `WEB_PROFILE=ship` opt-in (briefly the default in October 2026; see below); wasm-opt errors stop builds | Owned build script |
 
 ## Upstream updates
 
@@ -35,7 +35,7 @@ Most changes belong to wenilla's own files. The shared client changes use cfg-ga
 - Setup-state caching has a five-second TTL to observe an external CLI reset. Setup completion updates it immediately. Session/account authorization is still queried per request; disabling an account or revoking sessions is not cached.
 - Session rotation accepts the previous token for 60 seconds to let concurrent requests finish. Only the rotation winner emits a replacement cookie. The migration is applied by the existing startup migration path; no production database was touched during development.
 - The browser journal is session-only. Reloading the tab clears it. `/console fpsJournal 1` or `?fps_journal=1` starts recording and shows a download button. `window.__wenilla_fps_journal.download()` also exports CSV. Disabling/re-enabling recording retains existing rows within that tab.
-- `WEB_PROFILE=ship` was opt-in here; the October 2026 round below measured it in the browser and made it the default.
+- `WEB_PROFILE=ship` was opt-in here; the October 2026 round below measured it in the browser. It stays opt-in: as the default it ran the realm image build out of memory.
 
 ## Validation
 
@@ -52,7 +52,7 @@ A second round, aimed at the browser build only, under the same rule: upstream m
 | No tracing spans in the browser | `benilla-world/src/boot/web_spans.rs` (new), hook in `boot.rs` | 5 (cfg'd `mod` + `custom_layer` arm) |
 | Own Web Audio scheduler with an adaptive lead | `benilla-app/src/sound/web_backend.rs`, wasm `web-sys` features | 0 (both fork-only) |
 | `RenderDiagnosticsPlugin` only when the FPS journal is armed | `benilla-app/src/perf/journal.rs` | ~10, cfg'd, beside the file's existing wasm arms |
-| wasm SIMD (`+simd128`), fat LTO (`ship`) by default | `scripts/web-build.sh`, `check.yml` | 0 |
+| wasm SIMD (`+simd128`) | `scripts/web-build.sh`, `check.yml` | 0 |
 | binaryen on Windows (Git Bash/MSYS) | `scripts/web-setup.sh` | 0 |
 
 ### What was measured
@@ -61,7 +61,7 @@ Login screen, headless Chrome 152 on an RTX 4090 (WebGPU), `requestAnimationFram
 
 - **Spans:** `tracing-wasm` (Bevy's wasm log layer) calls `performance.mark` on every span enter and `performance.measure` on every exit. Bevy and the client open INFO spans every frame, so the page wrote ~15,000 User Timing entries a second (500,000 in 33 s) and the browser keeps them for the life of the tab. Vetoing span callsites: mean frame CPU **2.21 → 1.81 ms (−18 %)**; p99 3.7–4.3 → 3.2–3.5 ms. Log events still reach the console and the crash ring.
 - **Render diagnostics:** gating the plugin: **−5 to −6 %** in six paired rounds. `?fps_journal=1` / `?fpsjournal=1` keeps it (and the GPU columns); arming the journal later with `/console fpsJournal 1` gets no GPU columns.
-- **Fat LTO:** ~**−3 %** CPU against the closest comparable `release` build, and the module shrinks **80 → 70 MB** (less to download and compile). Cold build ~18 min vs ~7.5.
+- **Fat LTO:** ~**−3 %** CPU against the closest comparable `release` build, and the module shrinks **80 → 70 MB** (less to download and compile). Cold build ~18 min vs ~7.5. Made the default and reverted: the single fat-LTO link of `wenilla` was SIGKILLed on wenilla-realm's 16 GB `ubuntu-latest` runner, so no image was built. It stays `WEB_PROFILE=ship`, for a builder with more memory.
 - **SIMD:** neutral on the login screen (within noise). On glam 0.30's kernels under V8: transform composition 1.24×, frustum-vs-AABB 1.27×, rig slerp + `Mat4` 0.97×. Kept for in-world transform/visibility work; **its in-world effect is unmeasured**.
 - **talc allocator:** −2 %, within noise, and it adds a second `allocator-api2` to the lockfile (rewriting hashbrown's lines). Not adopted.
 
