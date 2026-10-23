@@ -36,17 +36,25 @@ pub(super) fn id_to_lud(id: u32) -> LightUserData {
     LightUserData(id as usize as *mut c_void)
 }
 
-/// Read the id out of a wrapper table's `T[0]` lightuserdata (`0x701bd0` writes it).
+/// The member prologue's three lines for a bad receiver (`Frame:Show` `0x775750`,
+/// `Texture:IsShown` `0x79b9b0`, the Font methods from `0x79fda0`): no table (`0x847ef8`), a table
+/// with no object at `[0]` (`0x847ec0`), an object that fails the class's type test (`0x847e98`).
+pub(crate) const ERR_NON_TABLE: &str =
+    "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)";
+pub(crate) const ERR_NO_OBJECT: &str = "Attempt to find 'this' in non-framescript object";
+pub(crate) const ERR_WRONG_TYPE: &str = "Wrong object type for member function";
+
+/// Read the id out of a wrapper table's `T[0]` lightuserdata (`0x701bd0` writes it); a table with
+/// none raises the member prologue's line for it ([`ERR_NO_OBJECT`]).
 pub(crate) fn decode_id(this: &Table) -> mlua::Result<u32> {
     match this.raw_get::<Value>(0)? {
         Value::LightUserData(l) => Ok(l.0 as usize as u32),
-        _ => Err(mlua::Error::runtime(
-            "not a benilla frame/region object (missing T[0] identity)",
-        )),
+        _ => Err(mlua::Error::runtime(ERR_NO_OBJECT)),
     }
 }
 
-/// Resolve `self` (a frame wrapper) to its live [`FrameHandle`].
+/// Resolve `self` (a frame wrapper) to its live [`FrameHandle`]; an object that is no frame fails
+/// the Frame type test ([`ERR_WRONG_TYPE`]).
 pub(super) fn frame_handle_of(lua: &Lua, this: &Table) -> mlua::Result<FrameHandle> {
     let id = decode_id(this)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -54,7 +62,209 @@ pub(super) fn frame_handle_of(lua: &Lua, this: &Table) -> mlua::Result<FrameHand
         .id_to_frame
         .get(&id)
         .copied()
-        .ok_or_else(|| mlua::Error::runtime("stale or invalid frame handle"))
+        .ok_or_else(|| mlua::Error::runtime(ERR_WRONG_TYPE))
+}
+
+/// The class a method table's methods test their receiver against, the type id the reference's
+/// prologue hands the object's `IsA` slot (`call [eax+0x10]`, `0x775894`).
+#[derive(Clone, Copy)]
+enum Class {
+    /// Any frame: the `Frame` table (`[0xcf0c10]`).
+    Frame,
+    /// A frame whose kind's method chain reaches this table ([`kind_method_registries`]): a
+    /// `CheckButton` is a `Button` (`0x495ab0` answers each base's id), a `Button` no
+    /// `CheckButton`.
+    FrameKind(&'static str),
+    /// A region of this kind. A region's `IsA` answers its own id and the Region id alone
+    /// (`0x773550`, a FontString's: `[0xcf2ccc]`, `[0xcf0c3c]`), so a FontString fails the
+    /// Texture test (`[0xcf4cdc]`, `0x79b9b0`) and the Font test (`[0xcf4ea8]`, `0x79fda0`).
+    Region(crate::widget::RegionKind),
+    /// Any widget, frame or region: the Region id (`[0xcf0c3c]`).
+    Widget,
+    /// A Font object (`[0xcf4ea8]`).
+    Font,
+}
+
+impl Class {
+    fn admits(self, model: &Model, id: u32) -> bool {
+        match self {
+            Class::Frame => model.id_to_frame.contains_key(&id),
+            Class::FrameKind(table) => model
+                .id_to_frame
+                .get(&id)
+                .and_then(|&h| model.arena.frame(h))
+                .is_some_and(|f| kind_method_registries(Some(f.kind)).contains(&table)),
+            Class::Region(kind) => model
+                .id_to_region
+                .get(&id)
+                .and_then(|&rh| model.arena.region(rh))
+                .is_some_and(|r| r.kind == kind),
+            Class::Widget => {
+                model.id_to_frame.contains_key(&id) || model.id_to_region.contains_key(&id)
+            }
+            Class::Font => model.fonts.of_handle(id).is_some(),
+        }
+    }
+}
+
+/// The methods whose reference opens with no member prologue, so they keep their own order:
+/// `(table, name)`. Every other method of the tables [`guard_receivers`] reaches opens with it,
+/// read at each function the reference's pair tables name (`0x878ec0` and the rest).
+const NO_PROLOGUE: &[(&str, &str)] = &[
+    // No receiver read at all.
+    (super::minimap::REG_MINIMAP_METHODS, "GetZoomLevels"), // 0x4eebe0
+    (super::minimap::REG_MINIMAP_METHODS, "GetZoom"),       // 0x4eec20
+    (super::minimap::REG_MINIMAP_METHODS, "SetZoom"),       // 0x4eec60
+    (super::minimap::REG_MINIMAP_METHODS, "GetPingPosition"), // 0x4eefd0
+    (super::tabard::REG_TABARDMODEL_METHODS, "CanSaveTabardNow"), // 0x503910
+    // An argument is read first, and the prologue runs only after it passes.
+    (super::minimap::REG_MINIMAP_METHODS, "PingLocation"), // 0x4eeca0: 0x4eed0b, 0x4eed1f
+    (super::tooltip::REG_TOOLTIP_METHODS, "SetBuybackItem"), // 0x536300: 0x536322
+    (
+        super::messageframe::REG_SCROLLINGMESSAGEFRAME_METHODS,
+        "SetScrollFromBottom",
+    ), // 0x793070: 0x793078
+];
+
+/// Put the member prologue in front of every host method of every widget method table: a
+/// receiver that is no table (`0x847ef8`), holds no object (`0x847ec0`) or fails the table's
+/// [`Class`] (`0x847e98`) raises its line before the method converts an argument. Left as they
+/// are: the [`NO_PROLOGUE`] methods, and each of the Region table's names
+/// ([`super::REGION_MAP_METHODS`]), one function every widget table shares, which checks its own
+/// receiver ([`super::region_map::install`]). Runs once, after the last table is built.
+pub(super) fn guard_receivers(lua: &Lua) -> mlua::Result<()> {
+    use crate::widget::RegionKind;
+    let mut tables: Vec<(&'static str, Class)> = vec![
+        (REG_FRAME_METHODS, Class::Frame),
+        (super::REG_REGION_METHODS, Class::Widget),
+        (
+            super::REG_TEXTURE_METHODS,
+            Class::Region(RegionKind::Texture),
+        ),
+        (
+            super::REG_FONTSTRING_METHODS,
+            Class::Region(RegionKind::FontString),
+        ),
+        (super::REG_TITLE_METHODS, Class::Region(RegionKind::Title)),
+        (super::font::REG_FONT_METHODS, Class::Font),
+    ];
+    for kind in every_frame_kind() {
+        for &table in kind_method_registries(Some(kind)) {
+            if !tables.iter().any(|(t, _)| *t == table) {
+                tables.push((table, Class::FrameKind(table)));
+            }
+        }
+    }
+    let region: Table = lua.named_registry_value(super::REG_REGION_METHODS)?;
+    let shared: Vec<Value> = super::REGION_MAP_METHODS
+        .iter()
+        .map(|name| region.raw_get::<Value>(*name))
+        .collect::<mlua::Result<_>>()?;
+    for (key, class) in tables {
+        let Value::Table(methods) = lua.named_registry_value::<Value>(key)? else {
+            continue;
+        };
+        let entries: Vec<(Value, Value)> = methods
+            .pairs::<Value, Value>()
+            .collect::<mlua::Result<_>>()?;
+        for (name, method) in entries {
+            if shared.contains(&method) {
+                continue;
+            }
+            if let Value::String(n) = &name {
+                let n = n.to_string_lossy();
+                if NO_PROLOGUE.iter().any(|&(t, m)| t == key && m == n) {
+                    continue;
+                }
+            }
+            let Value::Function(method) = method else {
+                continue;
+            };
+            let guarded = lua.guard_receiver(&method, move |lua, receiver| match receiver {
+                mlua::Receiver::NotTable => Err(mlua::Error::runtime(ERR_NON_TABLE)),
+                mlua::Receiver::NoObject => Err(mlua::Error::runtime(ERR_NO_OBJECT)),
+                mlua::Receiver::Object(p) => {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    if class.admits(&model, p as u32) {
+                        Ok(())
+                    } else {
+                        Err(mlua::Error::runtime(ERR_WRONG_TYPE))
+                    }
+                }
+            })?;
+            if let Some(guarded) = guarded {
+                methods.raw_set(name, guarded)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The member prologue for a [`NO_PROLOGUE`] method that runs it late, after its own argument
+/// checks: `this` must be a table holding a frame of a kind whose method chain reaches `table`.
+pub(crate) fn receiver_in(lua: &Lua, this: &Value, table: &'static str) -> mlua::Result<Table> {
+    let Value::Table(t) = this else {
+        return Err(mlua::Error::runtime(ERR_NON_TABLE));
+    };
+    let id = decode_id(t)?;
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    if Class::FrameKind(table).admits(&model, id) {
+        Ok(t.clone())
+    } else {
+        Err(mlua::Error::runtime(ERR_WRONG_TYPE))
+    }
+}
+
+/// Every frame kind, so [`guard_receivers`] reaches every kind's method tables. The match makes
+/// a new kind a compile error until it is listed here.
+fn every_frame_kind() -> [FrameKind; 20] {
+    let kinds = [
+        FrameKind::Frame,
+        FrameKind::WorldFrame,
+        FrameKind::Button,
+        FrameKind::LootButton,
+        FrameKind::CheckButton,
+        FrameKind::EditBox,
+        FrameKind::StatusBar,
+        FrameKind::Slider,
+        FrameKind::ScrollFrame,
+        FrameKind::Model,
+        FrameKind::PlayerModel,
+        FrameKind::DressUpModel,
+        FrameKind::TabardModel,
+        FrameKind::MessageFrame,
+        FrameKind::ScrollingMessageFrame,
+        FrameKind::ColorSelect,
+        FrameKind::SimpleHtml,
+        FrameKind::MovieFrame,
+        FrameKind::GameTooltip,
+        FrameKind::Minimap,
+    ];
+    for kind in kinds {
+        match kind {
+            FrameKind::Frame
+            | FrameKind::WorldFrame
+            | FrameKind::Button
+            | FrameKind::LootButton
+            | FrameKind::CheckButton
+            | FrameKind::EditBox
+            | FrameKind::StatusBar
+            | FrameKind::Slider
+            | FrameKind::ScrollFrame
+            | FrameKind::Model
+            | FrameKind::PlayerModel
+            | FrameKind::DressUpModel
+            | FrameKind::TabardModel
+            | FrameKind::MessageFrame
+            | FrameKind::ScrollingMessageFrame
+            | FrameKind::ColorSelect
+            | FrameKind::SimpleHtml
+            | FrameKind::MovieFrame
+            | FrameKind::GameTooltip
+            | FrameKind::Minimap => {}
+        }
+    }
+    kinds
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -814,5 +1024,96 @@ mod fullscreen_scale_tests {
             let err = s.run(call).unwrap_err().to_string();
             assert!(err.contains(needle), "{call}: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod receiver_tests {
+    use crate::script::UiScript;
+    use mlua::{MultiValue, Table, Value};
+
+    /// The registry table that holds a reference method table's methods, by its address.
+    fn registry_key(table: &str) -> &'static str {
+        use crate::script as s;
+        match table {
+            "0x878ec0" => s::REG_FRAME_METHODS,
+            "0x87c9b8" => s::REG_REGION_METHODS,
+            "0x87c128" => s::REG_TEXTURE_METHODS,
+            "0x87c1d8" => s::REG_FONTSTRING_METHODS,
+            "0x87c7c8" => s::font::REG_FONT_METHODS,
+            "0x879d00" => s::button::REG_BUTTON_METHODS,
+            "0x87bf74" => s::button::REG_CHECKBUTTON_METHODS,
+            "0x847ce4" => s::loot::REG_LOOTBUTTON_METHODS,
+            "0x87bb68" => s::editbox::REG_EDITBOX_METHODS,
+            "0x87b010" => s::statusbar::REG_STATUSBAR_METHODS,
+            "0x87b260" => s::slider::REG_SLIDER_METHODS,
+            "0x87b3c0" => s::scrollframe::REG_SCROLLFRAME_METHODS,
+            "0x87b5c0" => s::messageframe::REG_SCROLLINGMESSAGEFRAME_METHODS,
+            "0x87b960" => s::messageframe::REG_MESSAGEFRAME_METHODS,
+            "0x87ba80" => s::simplehtml::REG_SIMPLEHTML_METHODS,
+            "0x87abb0" => s::colorselect::REG_COLORSELECT_METHODS,
+            "0x87ab4c" => s::movieframe::REG_MOVIEFRAME_METHODS,
+            "0x878948" => s::modelframe::REG_MODEL_METHODS,
+            "0x84f1fc" => s::modelframe::REG_PLAYERMODEL_METHODS,
+            "0x84f190" => s::dressup::REG_DRESSUPMODEL_METHODS,
+            "0x84ee40" => s::tabard::REG_TABARDMODEL_METHODS,
+            "0x854198" => s::tooltip::REG_TOOLTIP_METHODS,
+            "0x84c538" => s::minimap::REG_MINIMAP_METHODS,
+            other => panic!("no registry table for the reference's method table {other}"),
+        }
+    }
+
+    /// The eight methods whose reference opens with no member prologue, by table and name: the
+    /// Minimap's four getters and setter (`0x4eebe0`, `0x4eec20`, `0x4eec60`, `0x4eefd0`),
+    /// `CanSaveTabardNow` (`0x503910`), and three that read an argument first, `PingLocation`
+    /// (`0x4eeca0`), `SetBuybackItem` (`0x536300`) and `SetScrollFromBottom` (`0x793070`).
+    const NO_PROLOGUE: [(&str, &str); 8] = [
+        ("0x84c538", "GetZoomLevels"),
+        ("0x84c538", "GetZoom"),
+        ("0x84c538", "SetZoom"),
+        ("0x84c538", "GetPingPosition"),
+        ("0x84c538", "PingLocation"),
+        ("0x84ee40", "CanSaveTabardNow"),
+        ("0x854198", "SetBuybackItem"),
+        ("0x87b5c0", "SetScrollFromBottom"),
+    ];
+
+    /// Every widget method of `reference/bindings.tsv` is in its table and, called with no
+    /// receiver, raises the member prologue's first line (`0x847ef8`) before anything else; the
+    /// eight without a prologue raise something else or nothing. A method that is missing, or one
+    /// the receiver check passed over, fails by name.
+    #[test]
+    fn every_reference_widget_method_opens_with_the_prologue() {
+        let s = UiScript::new().unwrap();
+        let lua = s.lua();
+        let tsv = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/bindings.tsv");
+        let text = std::fs::read_to_string(tsv).expect("reference/bindings.tsv");
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.get(4) != Some(&"widget") {
+                continue;
+            }
+            let (name, table) = (f[0], f[3]);
+            let methods: Table = lua.named_registry_value(registry_key(table)).unwrap();
+            let Ok(Value::Function(method)) = methods.raw_get::<Value>(name) else {
+                failures.push(format!("{table} {name}: not in its table"));
+                continue;
+            };
+            checked += 1;
+            let raised = method
+                .call::<MultiValue>(())
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            let prologue = raised.contains(super::ERR_NON_TABLE);
+            let excepted = NO_PROLOGUE.contains(&(table, name));
+            if prologue == excepted {
+                failures.push(format!("{table} {name}: raised {raised:?}"));
+            }
+        }
+        assert!(checked > 450, "only {checked} methods checked");
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

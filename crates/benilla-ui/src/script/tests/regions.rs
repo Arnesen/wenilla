@@ -1026,11 +1026,157 @@ fn set_portrait_to_texture_is_a_global_taking_a_name() {
         "nil",
         "1.12 has no Texture:SetPortraitToTexture — it is a global"
     );
-    // An unknown name does not raise here; the reference raises "Couldn't find texture named"
-    // (`0x48d7db`).
-    s.run(r#"SetPortraitToTexture("NoSuchPortrait", "Interface\\X")"#)
+    // An unknown name raises (`0x48d7db`).
+    assert!(s
+        .run(r#"SetPortraitToTexture("NoSuchPortrait", "Interface\\X")"#)
+        .is_err());
+}
+
+/// `SetPortraitToTexture(target, path)` (`0x48d780`) takes a name, a string or a number looked up
+/// as a global holding a Texture (`0x76c760` at `0x48d7bf`), or a Texture object (`lua_type` 5 at
+/// `0x48d7fa`). Each failure raises its own line (`0x842c98`, `0x842c58`, `0x842c1c`), a target
+/// that is neither naming `(null)`; a path that is no string or number returns with the texture
+/// left alone (`0x48d886`).
+#[test]
+fn set_portrait_to_texture_takes_a_texture_object_and_ignores_a_bad_path() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        PortHost = CreateFrame("Frame", "PortHost")
+        Port = PortHost:CreateTexture("PortHostPortrait", "ARTWORK")
+        PortStr = PortHost:CreateFontString("PortHostText")
+        PortAlias = Port
+        "#,
+    )
+    .unwrap();
+    let texture = |s: &UiScript| {
+        s.eval::<Option<String>>("return Port:GetTexture()")
+            .unwrap()
+    };
+    s.run(r#"SetPortraitToTexture(Port, "Interface\\Icons\\A")"#)
         .unwrap();
-    assert!(s.errors().is_empty());
+    assert_eq!(texture(&s).as_deref(), Some("Interface\\Icons\\A"));
+    for keep in [
+        "SetPortraitToTexture(Port, nil)",
+        "SetPortraitToTexture(Port)",
+        r#"SetPortraitToTexture("PortHostPortrait", {})"#,
+        r#"SetPortraitToTexture("PortHostPortrait", true)"#,
+    ] {
+        s.run(keep).unwrap();
+        assert_eq!(
+            texture(&s).as_deref(),
+            Some("Interface\\Icons\\A"),
+            "{keep}"
+        );
+    }
+    s.run("SetPortraitToTexture(Port, 5)").unwrap();
+    assert_eq!(texture(&s).as_deref(), Some("5"), "a number is its text");
+    // Any global that holds the texture, not only its published name.
+    s.run(r#"SetPortraitToTexture("PortAlias", "Interface\\Icons\\B")"#)
+        .unwrap();
+    assert_eq!(texture(&s).as_deref(), Some("Interface\\Icons\\B"));
+
+    for (call, line) in [
+        (
+            r#"SetPortraitToTexture("NoSuchPortrait", "X")"#,
+            "SetPortraitToTexture(): Couldn't find texture named 'NoSuchPortrait'",
+        ),
+        (
+            r#"SetPortraitToTexture("PortHost", "X")"#,
+            "SetPortraitToTexture(): Couldn't find texture named 'PortHost'",
+        ),
+        (
+            r#"SetPortraitToTexture(nil, "X")"#,
+            "SetPortraitToTexture(): Couldn't find texture named '(null)'",
+        ),
+        (
+            r#"SetPortraitToTexture(true, "X")"#,
+            "SetPortraitToTexture(): Couldn't find texture named '(null)'",
+        ),
+        (
+            r#"SetPortraitToTexture({}, "X")"#,
+            "SetPortraitToTexture(): Couldn't find 'this' in texture object",
+        ),
+        (
+            r#"SetPortraitToTexture(PortHost, "X")"#,
+            "SetPortraitToTexture(): Wrong object type, expected texture",
+        ),
+        (
+            r#"SetPortraitToTexture(PortStr, "X")"#,
+            "SetPortraitToTexture(): Wrong object type, expected texture",
+        ),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(line), "{call}: {err}");
+    }
+    assert_eq!(texture(&s).as_deref(), Some("Interface\\Icons\\B"));
+}
+
+/// A method's receiver resolves through the member prologue's checks (`Frame:Show` `0x775750`,
+/// `Texture:IsShown` `0x79b9b0`, `Button:SetFontString` `0x780ad9`, the Font methods from
+/// `0x79fda0`, the Region methods' `0x7a2030`): a receiver that is no table raises `0x847ef8`'s
+/// line, a table holding no object at `[0]` `0x847ec0`'s, and an object of another class
+/// `0x847e98`'s.
+#[test]
+fn a_bad_method_receiver_raises_the_member_prologues_lines() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        RecvFrame = CreateFrame("Frame", "RecvFrame")
+        RecvButton = CreateFrame("Button", "RecvButton")
+        RecvTex = RecvFrame:CreateTexture("RecvTex")
+        RecvStr = RecvFrame:CreateFontString("RecvStr")
+        RecvFont = CreateFont("RecvFont")
+        "#,
+    )
+    .unwrap();
+    const NON_TABLE: &str =
+        "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)";
+    const NO_OBJECT: &str = "Attempt to find 'this' in non-framescript object";
+    const WRONG: &str = "Wrong object type for member function";
+    for (call, line) in [
+        ("RecvFrame.GetName(nil)", NON_TABLE),
+        ("RecvTex.GetHeight(5)", NON_TABLE),
+        ("RecvFrame.Show()", NON_TABLE),
+        ("RecvFrame.Show(5)", NON_TABLE),
+        ("RecvFrame.Show('RecvFrame')", NON_TABLE),
+        ("RecvTex.IsShown(nil)", NON_TABLE),
+        ("RecvButton.GetText(nil)", NON_TABLE),
+        ("RecvFont.GetName(nil)", NON_TABLE),
+        ("RecvButton.GetText({})", NO_OBJECT),
+        ("RecvTex.IsShown(RecvStr)", WRONG),
+        ("RecvTex.SetTexture(RecvStr, 'X')", WRONG),
+        ("RecvStr.IsShown(RecvTex)", WRONG),
+        ("RecvStr.SetText(RecvTex, 'x')", WRONG),
+        ("RecvButton.GetText(RecvFrame)", WRONG),
+        ("RecvFrame.Show({})", NO_OBJECT),
+        ("RecvTex.IsShown({})", NO_OBJECT),
+        ("RecvFont.GetName({})", NO_OBJECT),
+        ("RecvFrame.GetName({})", NO_OBJECT),
+        ("RecvFrame.Show(RecvTex)", WRONG),
+        ("RecvFrame.Show(RecvFont)", WRONG),
+        ("RecvTex.IsShown(RecvFrame)", WRONG),
+        ("RecvFont.GetName(RecvFrame)", WRONG),
+        ("RecvFont.GetName(RecvStr)", WRONG),
+        ("RecvFrame.GetName(RecvFont)", WRONG),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(line), "{call}: {err}");
+    }
+    // The right receivers still answer, a method taken off one class's table included where the
+    // class admits it: a Button is a Frame, and the Region methods take any widget.
+    assert!(s
+        .eval::<bool>("RecvFrame.Show(RecvButton) return RecvButton:IsShown() == 1")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return RecvFrame.GetName(RecvTex)")
+            .unwrap(),
+        "RecvTex"
+    );
+    assert_eq!(
+        s.eval::<String>("return RecvFont:GetName()").unwrap(),
+        "RecvFont"
+    );
 }
 
 /// `Region:GetWidth`/`GetHeight` (`0x7a1e00`/`0x7a2030`) call the virtual size getters the rect
@@ -1739,4 +1885,143 @@ fn an_engine_vertex_colour_collapses_a_gradient() {
         color.is_some_and(|c| (c[0] - 0.5).abs() < 0.01),
         "{color:?}"
     );
+}
+
+/// Four globals resolve argument 1 with the member prologue against the Texture id `[0xcf4cdc]`
+/// before reading another argument: `SetPortraitTexture` (`0x519f06`-`0x519faa`, the unit after
+/// at `0x519fb4`), `SetBagPortaitTexture` (`0x4fa4f9`, the slot after at `0x4fa585`),
+/// `SetInventoryPortaitTexture` (`0x4c9159`) and `SetTaxiMap` (`0x4dca67`, once its map has
+/// loaded). A FontString fails the test (its `IsA`, `0x773550`, answers the FontString and Region
+/// ids alone).
+#[test]
+fn the_texture_globals_refuse_a_non_texture_first() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        GlobHost = CreateFrame("Frame", "GlobHost")
+        GlobTex = GlobHost:CreateTexture("GlobTex")
+        GlobStr = GlobHost:CreateFontString("GlobStr")
+        "#,
+    )
+    .unwrap();
+    s.set_taxi(Some(TaxiUiState {
+        art: "Interface\\TaxiFrame\\TAXIMAP1".into(),
+        nodes: vec![],
+    }));
+    const NON_TABLE: &str =
+        "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)";
+    const NO_OBJECT: &str = "Attempt to find 'this' in non-framescript object";
+    const WRONG: &str = "Wrong object type for member function";
+    for (call, line) in [
+        ("SetPortraitTexture(GlobStr, 'player')", WRONG),
+        ("SetPortraitTexture(GlobStr, nil)", WRONG),
+        ("SetPortraitTexture(GlobHost, 'player')", WRONG),
+        ("SetPortraitTexture({}, nil)", NO_OBJECT),
+        ("SetPortraitTexture(5, nil)", NON_TABLE),
+        (
+            "SetPortraitTexture(GlobTex, nil)",
+            "Usage: SetPortraitTexture(texture, \"unit\")",
+        ),
+        ("SetBagPortaitTexture(GlobStr, 1)", WRONG),
+        ("SetBagPortaitTexture(GlobStr, 'x')", WRONG),
+        ("SetBagPortaitTexture({}, 'x')", NO_OBJECT),
+        ("SetBagPortaitTexture(nil, 'x')", NON_TABLE),
+        (
+            "SetBagPortaitTexture(GlobTex, 'x')",
+            "Usage: SetBagPortaitTexture(texture, slot)",
+        ),
+        ("SetInventoryPortaitTexture(GlobStr, 'player', 1)", WRONG),
+        ("SetInventoryPortaitTexture(GlobStr, nil, 1)", WRONG),
+        ("SetTaxiMap(GlobStr)", WRONG),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(line), "{call}: {err}");
+    }
+    s.run("SetPortraitTexture(GlobTex, 'player') SetBagPortaitTexture(GlobTex, 0)")
+        .unwrap();
+}
+
+/// `GameTooltip:AddFontStrings(left, right)` (`0x530c40`) reads arguments 2 and 3 in turn: a
+/// non-table raises the usage line (`0x85506c`), a table with no object `0x855034`'s, and an
+/// object that fails the FontString test `[0xcf2ccc]` (`0x530d2f`-`0x530d4d`) `0x854ff8`'s, each
+/// with the tooltip's name or `<unnamed>`.
+#[test]
+fn add_font_strings_takes_only_font_strings() {
+    let s = script();
+    s.run(
+        r#"
+        FsTip = CreateFrame("GameTooltip", "FsTip")
+        FsAnon = CreateFrame("GameTooltip")
+        FsLeft = FsTip:CreateFontString("FsLeft")
+        FsRight = FsTip:CreateFontString("FsRight")
+        FsTex = FsTip:CreateTexture("FsTex")
+        "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        (
+            "FsTip:AddFontStrings(FsTex, FsRight)",
+            "FsTip:AddFontStrings(): Wrong object type, expected fontstring",
+        ),
+        (
+            "FsTip:AddFontStrings(FsLeft, FsTip)",
+            "FsTip:AddFontStrings(): Wrong object type, expected fontstring",
+        ),
+        (
+            "FsTip:AddFontStrings({}, FsRight)",
+            "FsTip:AddFontStrings(): Couldn't find 'this' in fontstring",
+        ),
+        (
+            "FsTip:AddFontStrings(FsLeft, 5)",
+            "Usage: FsTip:AddFontStrings(leftstring, rightstring)",
+        ),
+        (
+            "FsAnon:AddFontStrings(FsTex, FsRight)",
+            "<unnamed>:AddFontStrings(): Wrong object type, expected fontstring",
+        ),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(line), "{call}: {err}");
+    }
+    s.run("FsTip:AddFontStrings(FsLeft, FsRight)").unwrap();
+}
+
+/// `GameTooltip:SetBuybackItem(slot)` (`0x536300`) tests its slot with `lua_isnumber` first
+/// (`0x536322`), raising `Usage: SetBuybackItem(slot)` (`0x855634`), and only then resolves its
+/// receiver with the member prologue (`0x536367`).
+#[test]
+fn set_buyback_item_reads_its_slot_before_its_receiver() {
+    let s = script();
+    s.run(
+        r#"
+        BbTip = CreateFrame("GameTooltip", "BbTip")
+        BbTex = BbTip:CreateTexture("BbTex")
+        "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        ("BbTip:SetBuybackItem('x')", "Usage: SetBuybackItem(slot)"),
+        (
+            "BbTip.SetBuybackItem(nil, 'x')",
+            "Usage: SetBuybackItem(slot)",
+        ),
+        ("BbTip.SetBuybackItem()", "Usage: SetBuybackItem(slot)"),
+        (
+            "BbTip.SetBuybackItem(nil, 1)",
+            "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)",
+        ),
+        (
+            "BbTip.SetBuybackItem({}, 1)",
+            "Attempt to find 'this' in non-framescript object",
+        ),
+        (
+            "BbTip.SetBuybackItem(BbTex, 1)",
+            "Wrong object type for member function",
+        ),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(line), "{call}: {err}");
+    }
+    s.run("BbTip:SetBuybackItem('2') BbTip:SetBuybackItem(1)")
+        .unwrap();
 }

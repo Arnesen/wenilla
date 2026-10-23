@@ -13,7 +13,8 @@ use super::{
 use crate::layout::{Anchor, Anchors, Len};
 use crate::widget::{RegionHandle, RegionKind};
 
-/// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
+/// Resolve `self` (a region wrapper) to its live [`RegionHandle`]; an object that is no region
+/// fails the type test ([`super::object::ERR_WRONG_TYPE`]).
 pub(crate) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHandle> {
     let id = decode_id(this)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -21,7 +22,7 @@ pub(crate) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHa
         .id_to_region
         .get(&id)
         .copied()
-        .ok_or_else(|| mlua::Error::runtime("stale or invalid region handle"))
+        .ok_or_else(|| mlua::Error::runtime(super::object::ERR_WRONG_TYPE))
 }
 
 /// The Texture object a widget's texture setter was handed, as the setters resolve it: a table
@@ -254,21 +255,19 @@ fn region_shown(model: &Model, rh: RegionHandle) -> bool {
 }
 
 /// Argument 1 of a global that takes a Texture as its `this` (`SetLootPortrait` `0x4c2b40`,
-/// `SetInventoryPortaitTexture` `0x4c9150`), with the member prologue's three raises: a non-table
+/// `SetInventoryPortaitTexture` `0x4c9150`, `SetBagPortaitTexture` `0x4fa4f0`,
+/// `SetPortraitTexture` `0x519ef0`, `SetTaxiMap` `0x4dca50`), with the member prologue's three raises: a non-table
 /// (`0x847ef8`), a table with no object at `[0]` (`0x847ec0`), and any object but a Texture, the
 /// `IsA` test against the Texture class token `[0xcf4cdc]` (`0x847e98`).
 pub(super) fn this_texture(lua: &Lua, this: &Value) -> mlua::Result<RegionHandle> {
+    use super::object::{ERR_NON_TABLE, ERR_NO_OBJECT, ERR_WRONG_TYPE};
     let Value::Table(t) = this else {
-        return Err(mlua::Error::runtime(
-            "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)",
-        ));
+        return Err(mlua::Error::runtime(ERR_NON_TABLE));
     };
     if decode_id(t).is_err() {
-        return Err(mlua::Error::runtime(
-            "Attempt to find 'this' in non-framescript object",
-        ));
+        return Err(mlua::Error::runtime(ERR_NO_OBJECT));
     }
-    let wrong = || mlua::Error::runtime("Wrong object type for member function");
+    let wrong = || mlua::Error::runtime(ERR_WRONG_TYPE);
     let rh = region_handle_of(lua, t).map_err(|_| wrong())?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
     if model.arena.region(rh).map(|r| r.kind) != Some(RegionKind::Texture) {
@@ -390,6 +389,42 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `SetPortraitToTexture`'s target (`0x48d780`): a name looked up as a global, which must hold a
+/// Texture (`0x76c760`), else `0x842c98`'s line; or a table, whose `[0]` must hold an object
+/// (`0x842c58`) that is a Texture (`0x842c1c`).
+fn portrait_target(lua: &Lua, target: &Value) -> mlua::Result<RegionHandle> {
+    let is_texture = |model: &Model, id: u32| {
+        model
+            .id_to_region
+            .get(&id)
+            .copied()
+            .filter(|&rh| model.arena.region(rh).map(|r| r.kind) == Some(RegionKind::Texture))
+    };
+    if let Some(name) = super::binding_abi::optional_string(lua, target) {
+        let found = super::object::prefetch_named_target(lua, &name, None);
+        let model = lua.app_data_ref::<Model>().expect("model");
+        return super::object::resolve_named_target(&model, &found)
+            .and_then(|id| is_texture(&model, id))
+            .ok_or_else(|| {
+                mlua::Error::runtime(format!(
+                    "SetPortraitToTexture(): Couldn't find texture named '{name}'"
+                ))
+            });
+    }
+    let Value::Table(t) = target else {
+        return Err(mlua::Error::runtime(
+            "SetPortraitToTexture(): Couldn't find texture named '(null)'",
+        ));
+    };
+    let id = decode_id(t).map_err(|_| {
+        mlua::Error::runtime("SetPortraitToTexture(): Couldn't find 'this' in texture object")
+    })?;
+    let model = lua.app_data_ref::<Model>().expect("model");
+    is_texture(&model, id).ok_or_else(|| {
+        mlua::Error::runtime("SetPortraitToTexture(): Wrong object type, expected texture")
+    })
+}
+
 /// The two portrait globals, which only the in-game state registers (`SetPortraitTexture` in
 /// table `0x850438`, `SetPortraitToTexture` in `0x83de68`).
 pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
@@ -398,16 +433,17 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     // or `SetPortraitToTexture` clears it.
     lua.globals().set(
         "SetPortraitTexture",
-        lua.create_function(|lua, (region, unit): (Table, Value)| {
-            // A non-string unit raises this exact error (`0x519fb4`, `0x8513b8`), which stock
-            // `Blizzard_InspectUI.lua:49` hits on a re-open; a token that resolves to nothing only
-            // blanks the portrait.
+        lua.create_function(|lua, (region, unit): (Value, Value)| {
+            // The texture first, the member prologue against the Texture id (`0x519f06`-
+            // `0x519faa`); then a non-string unit raises this exact error (`0x519fb4`,
+            // `0x8513b8`), which stock `Blizzard_InspectUI.lua:49` hits on a re-open. A token that
+            // resolves to nothing only blanks the portrait.
+            let rh = this_texture(lua, &region)?;
             let unit = crate::script::binding_abi::string_arg(
                 lua,
                 unit,
                 r#"Usage: SetPortraitTexture(texture, "unit")"#,
             )?;
-            let rh = region_handle_of(lua, &region)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model.set_texel(rh, super::texel::TexSet::Own(None));
             let data = model.region_data.entry(rh).or_default();
@@ -421,20 +457,23 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetPortraitToTexture(textureName, path), an engine global: sets the texture, drawn masked
-    // to its inscribed circle, and drops any unit binding. It takes the name, as both stock
-    // callers pass (`ContainerFrame.lua:419`, `MailFrame.lua:174`); whether the reference also
-    // takes a region object is untraced.
+    // SetPortraitToTexture(target, path) (`0x48d780`), an engine global: sets the texture, drawn
+    // masked to its inscribed circle, and drops any unit binding. The target is a name, a string or
+    // a number (`lua_isstring`, `0x48d789`), read as a global that must hold a Texture (`0x76c760`
+    // at `0x48d7bf`), or a table (`lua_type` 5, `0x48d7fa`) holding one; anything else raises the
+    // name line with `lua_tostring`'s null (`0x48d7ce`). A path that is no string or number returns
+    // with the texture left alone (`0x48d886`).
     lua.globals().set(
         "SetPortraitToTexture",
-        lua.create_function(|lua, (name, path): (String, String)| {
+        lua.create_function(|lua, args: MultiValue| {
+            let mut args = args.into_iter();
+            let target = args.next().unwrap_or(Value::Nil);
+            let path = args.next().unwrap_or(Value::Nil);
+            let rh = portrait_target(lua, &target)?;
+            let Some(path) = super::binding_abi::optional_string(lua, &path) else {
+                return Ok(());
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            let Some(id) = model.region_by_name.get(&name).copied() else {
-                return Ok(());
-            };
-            let Some(rh) = model.id_to_region.get(&id).copied() else {
-                return Ok(());
-            };
             model.set_texel(rh, super::texel::TexSet::Portrait(path));
             let data = model.region_data.entry(rh).or_default();
             data.circular = true;

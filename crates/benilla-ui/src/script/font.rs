@@ -35,7 +35,7 @@ use super::{FontMask, FontObject, FontShadow, Model, RegionData};
 /// The shared metatable of every font-object handle.
 const REG_FONT_META: &str = "__benilla_font_meta";
 /// The font-object method table, which is the metatable's `__index`.
-const REG_FONT_METHODS: &str = "__benilla_font_methods";
+pub(super) const REG_FONT_METHODS: &str = "__benilla_font_methods";
 /// font id → handle, so `GameFontNormal == GameFontNormal` and a re-declared `<Font>` keeps identity.
 const REG_FONT_WRAPPERS: &str = "__benilla_font_wrappers";
 
@@ -206,11 +206,15 @@ pub(super) fn id_of_table(model: &Model, t: &Table) -> Option<FontId> {
     }
 }
 
-/// The font `this` is, for a Font method's receiver.
+/// The font `this` is, for a Font method's receiver, with the member prologue's raises: no object
+/// at `[0]`, or one that is no Font (`0x79fda0`..`0x7a0e70`).
 fn id_of(lua: &Lua, this: &Table) -> mlua::Result<FontId> {
+    let id = super::object::decode_id(this)?;
     let model = lua.app_data_ref::<Model>().expect("model");
-    id_of_table(&model, this)
-        .ok_or_else(|| mlua::Error::runtime("not a font object (missing T[0] font identity)"))
+    model
+        .fonts
+        .of_handle(id)
+        .ok_or_else(|| mlua::Error::runtime(super::object::ERR_WRONG_TYPE))
 }
 
 /// Which font verb an argument error names.
