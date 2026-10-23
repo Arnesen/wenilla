@@ -14,7 +14,8 @@ use super::{
 /// What `AutoEquipCursorItem` did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutoEquip {
-    /// Nothing: no item held, a split carry (which stays held), or no item to put on the cursor.
+    /// Nothing: no item held, no item to put on the cursor, or a held item whose object is gone
+    /// (`0x5e15bb`), which stays held.
     None,
     /// An item from an equipment or equipped-bag slot, put back (`0x5e155a`).
     Back,
@@ -26,75 +27,146 @@ pub enum AutoEquip {
     /// lock it held, for the question's answer. The app files the record under this `(bag, slot)`
     /// and `guid`.
     Asked { bag: i64, slot: u32, guid: u64 },
+    /// The held item's record is not cached: the lookup asked it with the callback `0x5e17a0`
+    /// and the call returned (`0x5e160c`), nothing sent and the item still held. The record's
+    /// arrival runs the call again ([`crate::script::UiScript::replay_auto_equip`]).
+    Waits { entry: u32 },
 }
 
 /// The template bonding `AutoEquipCursorItem` and `SwapItem` ask on (`0x5e163b`, `0x5e0e54`):
 /// bind when equipped.
 pub const BIND_WHEN_EQUIPPED: u32 = 2;
 
-/// Whether `AutoEquipCursorItem` would ask about `item` (`0x5e15d6`-`0x5e1655`): the item is not
-/// already bound (`0x5da2c0`), its template is cached with `bonding == 2` and the player can use
-/// it (`0x5ea930`). The cache-hit conjunct fails open, as an item whose source slot no longer
-/// holds it does here. No quality leg.
-fn equip_asks(model: &Model, item: &CursorItem) -> bool {
-    let view = if item.bag == EQUIPMENT_BAG {
-        usize::try_from(item.slot)
-            .ok()
-            .and_then(|slot| model.inv_slot("player", slot))
-            .filter(|v| v.guid == item.guid)
-            .map(|v| (v.bonding, v.already_bound))
+/// What the two equip questions read of the item object they would equip: its entry and whether
+/// it is bound (`0x5da2c0`). Its record, the bonding and whether it is cached, they look up in
+/// the item cache by the entry ([`equip_question`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EquipFacts {
+    pub(super) item_id: u32,
+    pub(super) bound: bool,
+}
+
+impl EquipFacts {
+    /// A bag slot's item.
+    pub(super) fn of_slot(s: &crate::script::ContainerSlot) -> Self {
+        Self {
+            item_id: s.item_id,
+            bound: s.already_bound,
+        }
+    }
+
+    /// A player slot's item.
+    pub(super) fn of_inv(v: &crate::script::InvSlotView) -> Self {
+        Self {
+            item_id: v.item_id,
+            bound: v.already_bound,
+        }
+    }
+}
+
+/// The answer of an equip question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Question {
+    /// No question: the move goes out.
+    Send,
+    /// The bind-on-equip question.
+    Ask,
+    /// The record of `entry` is not cached: the move waits for it.
+    Wait(u32),
+}
+
+/// The question `AutoEquipCursorItem` and `SwapItem` share, in their order: a bound item
+/// (`0x5e15d6`, `0x5e0d75`) or a set `suppress` (`0x5e15e3`, `0x5e0d82`) sends; else the record
+/// lookup in the item cache (`0x5e1603`, `0x5e0db1`) waits on a miss; else the record's bonding
+/// `+0x194` is 2 (`0x5e163b`, `0x5e0e54`) and the player can use the item (`0x5ea930`) to ask.
+/// No quality leg. The cache is the VM's copy of the app's item records (`Model::item_templates`,
+/// seated whole for a new VM and topped up as each record lands), not a bag view's fields.
+pub(super) fn equip_question(model: &Model, item: EquipFacts, suppress: bool) -> Question {
+    if item.bound || suppress {
+        return Question::Send;
+    }
+    let Some(record) = model.item_templates.get(&item.item_id) else {
+        return Question::Wait(item.item_id);
+    };
+    if record.bonding == BIND_WHEN_EQUIPPED
+        && crate::script::item_stats::item_usable_by_id(model, item.item_id)
+    {
+        Question::Ask
     } else {
+        Question::Send
+    }
+}
+
+/// The held item's object as `AutoEquipCursorItem` finds it by guid (`0x5e15b2`): the view of the
+/// slot it came from, else any bag slot or player slot holding that guid.
+fn held_facts(model: &Model, item: &CursorItem) -> Option<EquipFacts> {
+    let from_slot = |bag: i64, slot: u32| {
+        if bag == EQUIPMENT_BAG {
+            usize::try_from(slot)
+                .ok()
+                .and_then(|slot| model.player_slot_object(slot))
+                .filter(|v| v.guid == item.guid)
+                .map(|v| EquipFacts::of_inv(&v))
+        } else {
+            model
+                .containers
+                .get(&bag)
+                .and_then(|c| c.slots.get(&slot))
+                .filter(|s| s.guid == item.guid)
+                .map(EquipFacts::of_slot)
+        }
+    };
+    from_slot(item.bag, item.slot).or_else(|| {
         model
             .containers
-            .get(&item.bag)
-            .and_then(|c| c.slots.get(&item.slot))
-            .filter(|s| s.guid == item.guid)
-            .map(|s| (s.bonding, s.already_bound))
-    };
-    view.is_some_and(|(bonding, bound)| {
-        bonding == BIND_WHEN_EQUIPPED
-            && !bound
-            && crate::script::item_stats::item_usable_by_id(model, item.item_id)
+            .values()
+            .flat_map(|c| c.slots.values())
+            .find(|s| s.guid == item.guid)
+            .map(EquipFacts::of_slot)
     })
 }
 
 /// `AutoEquipCursorItem(suppress)` on the held item: an item from an equipment or equipped-bag
 /// slot, the 0-based slot below 0x17, goes back with `ClearCursor(1,1)` (`0x5e155a`, `0x5e1567`);
-/// any other whole stack, from a bag, the backpack, the bank, a bank bag slot or the keyring, is
-/// asked about when it binds on equip and `suppress` is clear, else sent (`0x5e1575`), the server
-/// picking the slot and swapping the displaced piece back (`ItemHandler.cpp:138-228`); a split
-/// stays held. The send tail clears with `ClearCursor(ebx,1)` (`0x5e1761`): a projectile loads by
-/// entry with `CMSG_SET_AMMO` and stays in its bag, so its arm sets `ebx = 1` (`0x5e1704`,
-/// `0x5e1711`) and the item unlocks; every other arm keeps the lock for the server's answer
-/// (`0x5e1577`). Neither locks anything new.
+/// any other item, from a bag, the backpack, the bank, a bank bag slot or the keyring, is found
+/// by its guid (`0x5e15b2`, none returning with nothing done), then asked about, parked on its
+/// record or sent ([`equip_question`]), the server picking the slot and swapping the displaced
+/// piece back (`ItemHandler.cpp:138-228`). A split carry is no exception: the call never reads
+/// the split count `0xb4b40c`. The send tail clears with `ClearCursor(ebx,1)` (`0x5e1761`): a
+/// projectile loads by entry with `CMSG_SET_AMMO` and stays in its bag, so its arm sets
+/// `ebx = 1` (`0x5e1704`, `0x5e1711`) and the item unlocks; every other arm keeps the lock for
+/// the server's answer (`0x5e1577`). Neither locks anything new.
 pub(crate) fn auto_equip_held(model: &mut Model, suppress: bool) -> AutoEquip {
-    match &model.cursor {
-        Some(CursorPayload::Item(item)) if item.bag == EQUIPMENT_BAG && item.slot <= 23 => {
-            clear_cursor(model);
-            AutoEquip::Back
-        }
-        Some(CursorPayload::Item(item)) if item.count.is_none() => {
-            let (bag, slot, guid) = (item.bag, item.slot, item.guid);
-            if !suppress && equip_asks(model, item) {
-                return AutoEquip::Asked { bag, slot, guid };
-            }
-            let how = if item.item_class == Some(ITEM_CLASS_PROJECTILE) {
-                Clear::BOTH
-            } else {
-                Clear::KEEP_LOCK
-            };
-            clear(model, how);
-            AutoEquip::Sent { bag, slot, guid }
-        }
-        _ => AutoEquip::None,
+    let item = match &model.cursor {
+        Some(CursorPayload::Item(item)) => item.clone(),
+        _ => return AutoEquip::None,
+    };
+    if item.bag == EQUIPMENT_BAG && item.slot <= 23 {
+        clear_cursor(model);
+        return AutoEquip::Back;
     }
+    let Some(facts) = held_facts(model, &item) else {
+        return AutoEquip::None;
+    };
+    let (bag, slot, guid) = (item.bag, item.slot, item.guid);
+    match equip_question(model, facts, suppress) {
+        Question::Ask => return AutoEquip::Asked { bag, slot, guid },
+        Question::Wait(entry) => return AutoEquip::Waits { entry },
+        Question::Send => {}
+    }
+    let how = if item.item_class == Some(ITEM_CLASS_PROJECTILE) {
+        Clear::BOTH
+    } else {
+        Clear::KEEP_LOCK
+    };
+    clear(model, how);
+    AutoEquip::Sent { bag, slot, guid }
 }
 
-/// `AutoEquipCursorItem()` (`0x48a040` into `0x5e1480`), a click or drop on the doll's model
-/// (`PaperDollFrame.lua:31-35`), filing the send or the question for the host
-/// ([`ItemCall::AutoEquip`], [`ItemCall::EquipAsk`]). Returns whether to repaint.
-pub(crate) fn auto_equip_cursor_item(model: &mut Model) -> bool {
-    match auto_equip_held(model, false) {
+/// File what [`auto_equip_held`] did for the host ([`ItemCall::AutoEquip`],
+/// [`ItemCall::EquipAsk`], [`ItemCall::AutoEquipWait`]). Returns whether to repaint.
+pub(super) fn file_auto_equip(model: &mut Model, step: AutoEquip) -> bool {
+    match step {
         AutoEquip::Sent { bag, slot, .. } => {
             model.item_calls.push(ItemCall::AutoEquip { bag, slot });
             true
@@ -105,9 +177,21 @@ pub(crate) fn auto_equip_cursor_item(model: &mut Model) -> bool {
                 .push(ItemCall::EquipAsk { bag, slot, guid });
             false
         }
+        AutoEquip::Waits { entry } => {
+            model.item_calls.push(ItemCall::AutoEquipWait { entry });
+            false
+        }
         AutoEquip::Back => true,
         AutoEquip::None => false,
     }
+}
+
+/// `AutoEquipCursorItem()` (`0x48a040` into `0x5e1480`), a click or drop on the doll's model
+/// (`PaperDollFrame.lua:31-35`), filing the send, the question or the wait for the host
+/// ([`file_auto_equip`]). Returns whether to repaint.
+pub(crate) fn auto_equip_cursor_item(model: &mut Model) -> bool {
+    let step = auto_equip_held(model, false);
+    file_auto_equip(model, step)
 }
 
 /// `SetCursorItem`'s control gate (`0x494b8d`): without control of the character
@@ -141,6 +225,23 @@ pub(crate) fn auto_equip_from(lua: &Lua, item: CursorItem, suppress: bool) -> Au
 }
 
 impl crate::script::UiScript {
+    /// The callback `0x5e17a0` for the found record of `entry`, which a parked
+    /// `AutoEquipCursorItem` asked (a refusal does nothing, `0x5e17c3`): with the cursor still
+    /// holding an item of that entry (`0x5e1800`-`0x5e1806`), `AutoEquipCursorItem(0)` runs again
+    /// on it (`0x5e182b`), its send, question or wait applied through the host.
+    pub fn replay_auto_equip(&mut self, entry: u32) -> mlua::Result<()> {
+        verb(&self.lua, |model| {
+            let holds = matches!(
+                &model.cursor,
+                Some(CursorPayload::Item(item)) if item.item_id == entry
+            );
+            if holds {
+                auto_equip_cursor_item(model);
+            }
+        });
+        crate::script::item_calls::submit_item_calls(&self.lua)
+    }
+
     /// `0x5e1840` on the item at Lua `(bag, slot)`: the bind-confirm accept re-issues it with
     /// `suppress` set (`0x5e1c23`). Nothing happens for an empty or unresolved slot (`0x5e18da`).
     pub fn auto_equip_slot(&mut self, bag: i64, slot: u32, suppress: bool) -> AutoEquip {
@@ -198,6 +299,8 @@ mod tests {
                             item_id: 100 + slot,
                             count: 1,
                             item_class: Some(class),
+                            // The record cached.
+                            quality: Some(1),
                             equip_slots: vec![1],
                             ..Default::default()
                         },
@@ -226,6 +329,7 @@ mod tests {
     fn the_pick_drops_the_held_item_and_the_send_clears_the_cursor() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
+        s.seat_item_records();
         s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.item_locked(0x11));
 
@@ -248,6 +352,7 @@ mod tests {
     fn a_projectile_signals_the_unlock_of_its_clear() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(bag(&[(1, 0x11, 6)])));
+        s.seat_item_records();
         s.run(
             "SIGNALS = 0 local f = CreateFrame('Frame') f:RegisterEvent('ITEM_LOCK_CHANGED') \
              f:SetScript('OnEvent', function() SIGNALS = SIGNALS + 1 end)",
@@ -262,6 +367,23 @@ mod tests {
             }
         );
         assert_eq!(s.eval::<i64>("return SIGNALS").unwrap(), 1);
+    }
+
+    /// `AutoEquipCursorItem` never reads the split count `0xb4b40c` (`0x5e1480`-`0x5e1790`): a
+    /// held split stack of arrows equips like any whole one, sent and cleared with the unlock
+    /// (`0x5e1711`, `0x5e1763`).
+    #[test]
+    fn a_held_split_stack_equips_like_any_other() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        let mut arrows = bag(&[(1, 0x11, 6)]);
+        arrows.slots.get_mut(&1).unwrap().count = 200;
+        s.set_container(0, Some(arrows));
+        s.seat_item_records();
+        s.run("SplitContainerItem(0, 1, 50) AutoEquipCursorItem()")
+            .unwrap();
+        assert!(s.cursor_item().is_none(), "the split left the cursor");
+        assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
     }
 
     /// A worn item goes back (`0x5e155a`), nothing sent.
@@ -302,6 +424,7 @@ mod tests {
                     bonding,
                     already_bound: bound,
                     item_class: Some(4),
+                    quality: Some(2),
                     equip_slots: vec![1],
                     use_fork: crate::script::UseFork::Equip,
                     ..Default::default()
@@ -318,12 +441,74 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
         s.set_container(0, Some(boe_bag(2, false)));
+        s.seat_item_records();
         s.run("PickupContainerItem(0, 1) AutoEquipCursorItem()")
             .unwrap();
 
         assert_eq!(s.cursor_item().map(|i| i.guid), Some(0x11), "still held");
         assert!(s.item_locked(0x11), "and locked");
         assert!(s.take_container_autoequips().is_empty(), "nothing is sent");
+        assert_eq!(s.take_container_equip_asks(), vec![(0, 1, 0x11)]);
+    }
+
+    /// The held item's record is not cached: `AutoEquipCursorItem` asks it with the callback
+    /// `0x5e17a0` and returns (`0x5e160c`), nothing sent and the item still held.
+    #[test]
+    fn an_uncached_item_waits_for_its_record_held() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        let mut pending = boe_bag(0, false);
+        pending.slots.get_mut(&1).unwrap().quality = None;
+        s.set_container(0, Some(pending));
+        s.run("PickupContainerItem(0, 1) AutoEquipCursorItem()")
+            .unwrap();
+        assert_eq!(s.cursor_item().map(|i| i.guid), Some(0x11), "still held");
+        assert!(s.take_container_autoequips().is_empty(), "nothing is sent");
+    }
+
+    /// The record's callback (`0x5e17a0`) runs `AutoEquipCursorItem(0)` again while the cursor
+    /// holds an item of that entry (`0x5e1800`-`0x5e182b`): another entry, or a cursor emptied
+    /// meanwhile, does nothing; the held item sends once the view holds its record.
+    #[test]
+    fn the_records_arrival_runs_the_auto_equip_again() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        let mut pending = boe_bag(0, false);
+        pending.slots.get_mut(&1).unwrap().quality = None;
+        s.set_container(0, Some(pending));
+        s.run("PickupContainerItem(0, 1) AutoEquipCursorItem()")
+            .unwrap();
+        s.set_container(0, Some(boe_bag(0, false)));
+        s.seat_item_records();
+        s.replay_auto_equip(870).unwrap();
+        assert!(s.cursor_item().is_some(), "another entry");
+        s.replay_auto_equip(871).unwrap();
+        assert!(s.cursor_item().is_none(), "sent");
+        assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
+        s.replay_auto_equip(871).unwrap();
+        assert!(s.take_container_autoequips().is_empty(), "nothing held");
+    }
+
+    /// `AutoEquipCursorItem` looks the record up in the item cache (`0x5e1603`) and reads its
+    /// bonding there (`0x5e163b`), whatever the bag view carries: no record cached waits, a
+    /// cached bind-on-equip record asks.
+    #[test]
+    fn the_auto_equip_question_reads_the_record_cache() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_container(0, Some(boe_bag(0, false)));
+        s.run("PickupContainerItem(0, 1) AutoEquipCursorItem()")
+            .unwrap();
+        assert!(s.cursor_item().is_some(), "no record cached: it waits");
+        assert!(s.take_container_autoequips().is_empty());
+        s.set_item_template(
+            871,
+            crate::script::ItemTemplateView {
+                bonding: 2,
+                ..Default::default()
+            },
+        );
+        s.run("AutoEquipCursorItem()").unwrap();
         assert_eq!(s.take_container_equip_asks(), vec![(0, 1, 0x11)]);
     }
 
@@ -341,6 +526,7 @@ mod tests {
             let mut s = UiScript::new().unwrap();
             s.keep_calls();
             s.set_container(0, Some(boe_bag(bonding, bound)));
+            s.seat_item_records();
             s.run("PickupContainerItem(0, 1) AutoEquipCursorItem()")
                 .unwrap();
             assert_eq!(
@@ -382,6 +568,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
         s.set_container(0, Some(boe_bag(2, false)));
+        s.seat_item_records();
         s.run("UseContainerItem(0, 1)").unwrap();
 
         assert_eq!(s.cursor_item().map(|i| i.guid), Some(0x11));
@@ -401,6 +588,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
         s.set_container(0, Some(boe_bag(0, false)));
+        s.seat_item_records();
         s.run("UseContainerItem(0, 1)").unwrap();
 
         assert!(s.cursor_item().is_none());
@@ -444,6 +632,7 @@ mod tests {
         s.open_trade_window();
         s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
         // Offer the second item, then hold the first.
+        s.seat_item_records();
         s.run("PickupContainerItem(0, 2) ClickTradeButton(1) ClearCursor()")
             .unwrap();
         s.unlock_item(0x12);
@@ -477,6 +666,7 @@ mod tests {
         for held in [false, true] {
             let mut s = UiScript::new().unwrap();
             s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
+            s.seat_item_records();
             s.run(
                 "SEEN = '' local f = CreateFrame('Frame') f:RegisterEvent('CURSOR_UPDATE') \
                  f:SetScript('OnEvent', function() SEEN = SEEN .. (CursorHasItem() and 1 or 0) end)",

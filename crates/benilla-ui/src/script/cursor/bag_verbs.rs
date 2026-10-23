@@ -107,8 +107,9 @@ fn put_item(model: &mut Model, dest: Dest) -> bool {
                 // The doll click on the empty slot: it places or buys what is held, and with
                 // nothing held finds nothing to pick up, so it owes no pickup. A held item takes
                 // the click before an armed item pick (`0x4c769a`), so no gate is reached.
+                // A swap into the empty slot has no occupant to lock.
                 let click = doll_click(model, live, true);
-                debug_assert!(matches!(click, DollClick::Done(_)));
+                debug_assert!(matches!(click, DollClick::Done(_) | DollClick::Swapped(0)));
                 return false;
             };
             Some(occupant)
@@ -165,25 +166,25 @@ fn place_held(model: &mut Model, dest: Dest, held: CursorItem) -> bool {
     if let Dest::Slot(live) = dest {
         let from_bag_slot = held.bag == EQUIPMENT_BAG && (20..=23).contains(&held.slot);
         if from_bag_slot || is_container(&held) {
-            // A swap (`0x5e0c40`). A split stack cannot swap and stays held: the reference splits
-            // only when storing.
-            if held.count.is_none() {
-                model.item_calls.push(ItemCall::Move(ContainerMove {
+            // A swap: `LockItem` on the occupant (`0x4c7d62`, `0x4c7dca`), then `SwapItem`
+            // (`0x4c7d8d`, `0x4c7df5`), whose send clears (`ClearCursor(0,1)`, `0x5e0fe7`) and
+            // whose question leaves the bag held; nothing clears after it. Neither leg reads the
+            // split count, so a split carry swaps its whole stack.
+            let occupant = usize::try_from(live)
+                .ok()
+                .and_then(|slot| model.inv_slot("player", slot))
+                .map_or(0, |s| s.guid);
+            lock_item(model, occupant);
+            super::swap::swap_and_file(
+                model,
+                ContainerMove {
                     src_bag: held.bag,
                     src_slot: held.slot,
                     dst_bag: EQUIPMENT_BAG,
                     dst_slot: live,
                     count: None,
-                }));
-                let occupant = usize::try_from(live)
-                    .ok()
-                    .and_then(|slot| model.inv_slot("player", slot))
-                    .map_or(0, |s| s.guid);
-                // `LockItem` on the occupant (`0x4c7d62`, `0x4c7dca`), then the swap send's
-                // `ClearCursor(0,1)` (`0x5e0fe7`).
-                lock_item(model, occupant);
-                clear(model, Clear::KEEP_LOCK);
-            }
+                },
+            );
             return true;
         }
     }
@@ -360,6 +361,8 @@ mod tests {
             count: 1,
             equip_slots: vec![20, 21, 22, 23],
             guid: 0x8000_0000 | u64::from(item_id),
+            // `INVTYPE_BAG`, the record cached.
+            inventory_type: Some(18),
             ..Default::default()
         }
     }
@@ -375,6 +378,8 @@ mod tests {
                 texture: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
                 equip_slots: vec![20, 21, 22, 23],
                 guid: 0x201,
+                // The record cached.
+                quality: Some(1),
                 ..Default::default()
             },
         );
@@ -386,6 +391,8 @@ mod tests {
                 texture: Some("Interface\\Icons\\INV_Helmet_01".into()),
                 equip_slots: vec![1],
                 guid: 0x202,
+                // The record cached.
+                quality: Some(1),
                 ..Default::default()
             },
         );
@@ -422,6 +429,7 @@ mod tests {
         s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(Default::default());
+        s.seat_item_records();
         s.run("PickupContainerItem(0, 1)").unwrap();
 
         assert!(s.eval::<bool>("return PutItemInBag(64) == nil").unwrap());
@@ -447,6 +455,7 @@ mod tests {
         s.keep_calls();
         s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
+        s.seat_item_records();
         s.run("PickupContainerItem(0, 2)").unwrap();
 
         assert!(s.eval::<bool>("return PutItemInBag(64) == nil").unwrap());
@@ -463,6 +472,7 @@ mod tests {
         s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(one_bank_bag());
+        s.seat_item_records();
         s.run("PickupContainerItem(0, 1)").unwrap();
 
         assert_eq!(s.eval::<i64>("return PutItemInBag(64)").unwrap(), 1);
@@ -513,6 +523,7 @@ mod tests {
         s.set_bank(Some(Default::default()));
         s.set_container(0, Some(backpack()));
         s.set_bank_bag_slots(one_bank_bag());
+        s.seat_item_records();
         let place = |s: &UiScript, pick: &str, put: &str| {
             s.run(pick).unwrap();
             heard::listen(

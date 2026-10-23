@@ -332,6 +332,40 @@ pub struct ItemSetView {
     pub required_skill_name: Option<String>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl super::UiScript {
+    /// A fixture's stand-in for the app's record feed: seat the item cache for the views a test
+    /// pushed, a record for every bag item with a quality and every player-slot item with an
+    /// inventory type, the two marks a fed view carries once its record landed, with the view's
+    /// bonding. A record already seated stays.
+    pub fn seat_item_records(&mut self) {
+        let mut model = self.model_mut();
+        let bags = model
+            .containers
+            .values()
+            .flat_map(|c| c.slots.values())
+            .filter(|s| s.item_id != 0 && s.quality.is_some())
+            .map(|s| (s.item_id, s.bonding));
+        let worn = model
+            .inventory_slots
+            .iter()
+            .chain(model.bank_bag_slots.iter())
+            .flatten()
+            .filter(|v| v.item_id != 0 && v.inventory_type.is_some())
+            .map(|v| (v.item_id, v.bonding));
+        let records: Vec<(u32, u32)> = bags.chain(worn).collect();
+        for (item_id, bonding) in records {
+            model
+                .item_templates
+                .entry(item_id)
+                .or_insert_with(|| ItemTemplateView {
+                    bonding,
+                    ..Default::default()
+                });
+        }
+    }
+}
+
 impl super::UiScript {
     /// Stores or replaces an item's template view, clearing its ask and its read.
     pub fn set_item_template(&mut self, item_id: u32, view: ItemTemplateView) {
@@ -340,6 +374,11 @@ impl super::UiScript {
         model.item_stat_reads.remove(&item_id);
         model.item_templates.insert(item_id, view);
         model.quest_store.item_landed(item_id);
+    }
+
+    /// Removes an item's template view: the app's cache lost the record to a refusal.
+    pub fn drop_item_template(&mut self, item_id: u32) {
+        self.model_mut().item_templates.remove(&item_id);
     }
 
     /// Asks for the templates of `ids` the store lacks, for the trade-skill and craft lists,

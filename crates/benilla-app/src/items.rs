@@ -482,6 +482,8 @@ pub(crate) struct Items {
     templates: QueryCache<u32, ItemInfo>,
     /// Landed since the last [`Self::take_fresh`]; pushed to the UI unprompted.
     fresh: Vec<u32>,
+    /// Records a refusal removed since the last [`Self::take_dropped`], which the UI's copy drops.
+    dropped: Vec<u32>,
     /// The reference's `PlayerPendingItemExpiration` list (`0x5ebd40`, at `CGPlayer_C + 0x1cc8`):
     /// `(guid, slot, seconds)` enchant updates for an item not yet held. `0x5ebde0` applies them
     /// when the item is set up (`0x5d8440`), counting seconds from then; they live as long as the
@@ -492,6 +494,9 @@ pub(crate) struct Items {
     /// dedupe for the dedupe flag 0, `dbcache/callbacks#callback-order`). A getter registers one
     /// from a lookup, so the list is locked like the in-flight asks and registering takes `&self`.
     callbacks: std::sync::Mutex<Vec<(u32, RecordCallback)>>,
+    /// The callbacks an answer ran that need the VM, `(entry, callback, found)` in the order
+    /// they ran: the equip replays ([`crate::ui_bind_confirm::replay_equip_records`]).
+    vm_callbacks: std::sync::Mutex<Vec<(u32, RecordCallback, bool)>>,
 }
 
 /// A callback an item record's lookup registered, which the record's answer runs.
@@ -510,6 +515,10 @@ pub(crate) enum RecordCallback {
     Trade,
     /// An ammo-slot getter call (`0x4c83bc`, `0x4c89cf` with `0x4c84f0`), one per call.
     Ammo,
+    /// A swap parked on its record (`0x5e0db1` with `0x5e1020`).
+    Swap,
+    /// An auto-equip waiting on its record (`0x5e1603` with `0x5e17a0`).
+    AutoEquip,
 }
 
 impl Items {
@@ -538,6 +547,18 @@ impl Items {
             !hit
         });
         taken
+    }
+
+    /// Run `callback` for the record of `entry`, answered (`found`) or refused, with the VM.
+    pub(crate) fn run_with_vm(&self, entry: u32, callback: RecordCallback, found: bool) {
+        self.vm_callbacks
+            .lock_recover()
+            .push((entry, callback, found));
+    }
+
+    /// The callbacks [`Self::run_with_vm`] queued, in order, spent.
+    pub(crate) fn take_vm_callbacks(&self) -> Vec<(u32, RecordCallback, bool)> {
+        std::mem::take(&mut *self.vm_callbacks.lock_recover())
     }
 
     /// An entry change asked for the record of `entry` with the callback `0x5d96b0`.
@@ -636,7 +657,10 @@ impl Items {
             // A refusal moves the generation too: "still asking" to "unknown" is a display
             // transition for the cast-fail redisplay.
             None => {
-                self.templates.refuse(entry);
+                if self.templates.refuse(entry) == crate::query_cache::Refused::Record {
+                    self.fresh.retain(|&id| id != entry);
+                    self.dropped.push(entry);
+                }
             }
         }
     }
@@ -657,17 +681,27 @@ impl Items {
         std::mem::take(&mut self.fresh)
     }
 
+    /// Drain the entries whose record a refusal removed since the last drain.
+    pub(crate) fn take_dropped(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.dropped)
+    }
+
     /// World enter: release the ask-once latch and keep what the cache learned. An ask is marked
     /// pending before the send, and a send made while no writer is held is dropped silently.
     pub(crate) fn clear_pending(&mut self) {
         self.templates.clear_pending();
     }
 
-    /// Disconnect: drop the in-flight asks and the queued enchant times, keep the templates. The
-    /// item objects and their countdowns go with the index's sweep.
+    /// Disconnect: drop the in-flight asks, the callbacks waiting on them or on the VM, and the
+    /// queued enchant times, keep the templates. The item objects and their countdowns go with
+    /// the index's sweep.
     pub(crate) fn clear_session(&mut self) {
         self.pending_enchant_times.clear();
         self.callbacks
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.vm_callbacks
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .clear();

@@ -308,11 +308,23 @@ impl super::Model {
         id <= 0 || self.bag(id).is_some()
     }
 
-    /// The slot a container binding finds at `(bag, slot)`, through [`Self::bag`].
+    /// Whether container `id` is the vault while no banker is open: its slots are the player
+    /// list's 39 to 62, which `GetItemInSlot` (`0x6228a0`) answers empty then (`0x6228ad`-
+    /// `0x6228cf`, the banker guid `[0xbdd038]`; the list's bank flag `+0x10` is set at the
+    /// player's construction, `0x5dd44d`). The vault itself still resolves and keeps its size.
+    pub(crate) fn vault_shut(&self, id: i64) -> bool {
+        id == super::char_stats::BANK_CONTAINER && self.bank.is_none()
+    }
+
+    /// The slot a container binding finds at `(bag, slot)`, through [`Self::bag`] and
+    /// `GetItemInSlot`'s bank gate ([`Self::vault_shut`]).
     // Deviation: the backpack is bounded by its own 16 slots, where `0x4f990f` bounds bag 0 by
     // the player list's count (0x71), a reference bug that lets the backpack index read other
     // containers.
     pub(crate) fn bag_slot(&self, bag: i64, slot: u32) -> Option<&ContainerSlot> {
+        if self.vault_shut(bag) {
+            return None;
+        }
         self.bag(bag)?.slots.get(&slot)
     }
 }
@@ -512,10 +524,9 @@ fn use_cleared(
     may_cast: bool,
     call: &mut Option<super::ScriptCall>,
 ) -> Option<CursorItem> {
+    // The slot through `GetItemInSlot` (`0x4fa1a6`): a shut vault's reads empty.
     let s = model
-        .containers
-        .get(&bag)
-        .and_then(|c| c.slots.get(&slot))
+        .bag_slot(bag, slot)
         .filter(|s| s.item_id != 0 && !cursor::item_locked(model, s.guid))?;
     let (guid, fork, item_id, use_spell) = (s.guid, s.use_fork, s.item_id, s.use_spell);
     let equip = (fork == UseFork::Equip).then(|| s.cursor_item(bag, slot));
@@ -590,6 +601,11 @@ fn use_equip_arm(
             cursor::lock_item(model, guid);
         }
     });
+    // A record still in flight parks the equip on it (`0x5e160c`), which the use's own fork
+    // test reads cached, so only a view behind the cache reaches this.
+    if let cursor::equip::AutoEquip::Waits { entry } = step {
+        super::item_calls::submit(lua, super::ItemCall::AutoEquipWait { entry })?;
+    }
     // An item the verb refused (in the trade window) sends nothing, but still locks (`0x4fa418`).
     if matches!(
         step,
@@ -631,7 +647,7 @@ fn arm_gift_wrap(model: &mut super::Model, bag: i64, slot: u32) {
 /// - a click on the held item's own slot cancels;
 /// - a whole stack placed anywhere else queues the move and clears the cursor; a swap lands the
 ///   displaced item in the source slot, never on the cursor (no `SetCursorItem`, `0x5e0c40`);
-/// - a split carry places onto an empty or same-item slot, and stays held over another item;
+/// - a split carry places onto any slot, the item it holds unread;
 /// - a vendor row buys into the slot, and an item off the bar is cleared.
 ///
 /// Returns what the binding owes past this segment: the item a pickup puts on the cursor
@@ -737,27 +753,34 @@ fn pickup_container_item(
                 .cloned()
                 .filter(|d| d.item_id != 0);
             match (held.count, dest) {
-                // A split carry cannot swap with a different item: it stays held.
-                (Some(_), Some(d)) if d.item_id != held.item_id => {}
-                // A split places and clears (`0x5e1210`, then `ClearCursor(0,1)` at `0x4f9e4f`):
-                // the grid hide and `CURSOR_UPDATE`, and no lock event.
+                // A split places and clears whatever the slot holds (`0x4f9e1c` → `0x5e1210`,
+                // then `ClearCursor(0,1)` at `0x4f9e4f`): the grid hide and `CURSOR_UPDATE`, and
+                // no lock event.
                 (Some(n), _) => {
-                    queue_move(model, &held, bag, slot, Some(n));
+                    queue_split(model, &held, bag, slot, n);
                     cursor::clear(model, cursor::Clear::KEEP_LOCK);
                 }
-                // A whole stack locks the destination's item first (`0x4f9e85`; an empty slot's
-                // zero guid signals nothing, `0x4953ed`), then the swap send clears
-                // (`ClearCursor(0,1)` at `0x5e0fe7`: the grid hide, `CURSOR_UPDATE`) and the
-                // binding clears again (`0x4f9eb8`), a second `CURSOR_UPDATE` on the empty cursor.
-                // The source keeps its lock in both: the clears pass no unlock.
                 // A locked occupant refuses the whole stack, the payload kept (`0x4f9e76`); the
                 // split arm above never reads it.
                 (None, Some(d)) if cursor::item_locked(model, d.guid) => {}
+                // A whole stack locks the destination's item first (`0x4f9e85`; an empty slot's
+                // zero guid signals nothing, `0x4953ed`), then goes through `SwapItem`
+                // (`0x4f9eac`), whose send clears (`ClearCursor(0,1)` at `0x5e0fe7`) and whose
+                // question leaves the item held; the binding clears after it either way
+                // (`0x4f9eb8`), past the call.
                 (None, dest) => {
-                    queue_move(model, &held, bag, slot, None);
                     cursor::lock_item(model, dest.map_or(0, |d| d.guid));
-                    cursor::clear(model, cursor::Clear::KEEP_LOCK);
-                    cursor::clear(model, cursor::Clear::KEEP_LOCK);
+                    cursor::swap::swap_and_file(
+                        model,
+                        ContainerMove {
+                            src_bag: held.bag,
+                            src_slot: held.slot,
+                            dst_bag: bag,
+                            dst_slot: slot,
+                            count: None,
+                        },
+                    );
+                    return ContainerClick::Swapped;
                 }
             }
             ContainerClick::Done
@@ -794,26 +817,24 @@ fn pickup_container_item(
 enum ContainerClick {
     /// Done inside the segment.
     Done,
+    /// A whole stack went through `SwapItem`; the binding's own `ClearCursor(0,1)` follows the
+    /// call (`0x4f9eb8`), so its `CURSOR_UPDATE` comes after any bind question the swap raised,
+    /// whose dialog that signal hides (`UIParent.lua:357-361`).
+    Swapped,
     /// The item a pickup puts on the cursor.
     PickUp(CursorItem),
     /// The armed item-targeting spell's pick (`0x4f9c54`), a call for the host.
     Pick(cursor::ItemPick),
 }
 
-/// Queue one move, the shared tail of every clearing branch above.
-fn queue_move(
-    model: &mut super::Model,
-    held: &CursorItem,
-    dst_bag: i64,
-    dst_slot: u32,
-    count: Option<u32>,
-) {
+/// Queue a split's placement (`0x5e1210`), which asks no question.
+fn queue_split(model: &mut super::Model, held: &CursorItem, dst_bag: i64, dst_slot: u32, n: u32) {
     model.item_calls.push(ItemCall::Move(ContainerMove {
         src_bag: held.bag,
         src_slot: held.slot,
         dst_bag,
         dst_slot,
-        count,
+        count: Some(n),
     }));
 }
 
@@ -1121,13 +1142,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // An armed item-targeting spell binds the item through `BindSpellTargetObject`, behind
             // the gate's tag 2.
             let may_cast = protected::gate(lua, Tag::CAST);
-            // An unresolved bag ends the verb before anything is read (`0x4f9bb6`).
-            if !lua
-                .app_data_ref::<Model>()
-                .expect("model app_data")
-                .bag_resolves(bag)
+            // An unresolved bag ends the verb before anything is read (`0x4f9bb6`), and so does
+            // a vault slot with no banker open (`0x4f9bc6`-`0x4f9bf0`), a held item included.
             {
-                return Ok(());
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                if !model.bag_resolves(bag) || model.vault_shut(bag) {
+                    return Ok(());
+                }
             }
             let click = super::tick::verb(lua, |model| {
                 pickup_container_item(model, bag, slot, may_cast)
@@ -1135,6 +1156,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             super::item_calls::submit_item_calls(lua)?;
             match click {
                 ContainerClick::Done => {}
+                ContainerClick::Swapped => super::tick::verb(lua, |model| {
+                    cursor::clear(model, cursor::Clear::KEEP_LOCK);
+                }),
                 ContainerClick::PickUp(item) => cursor::pick_up_item(lua, item),
                 ContainerClick::Pick(pick) => {
                     super::calls::submit(lua, super::ScriptCall::PickItem(pick))?
@@ -1423,7 +1447,8 @@ mod tests {
     /// open: each resolves the bag through `0x4f93e0`, which tests the banker guid `[0xbdd038]`
     /// (`0x4f93e9`-`0x4f93f9`): `GetContainerNumSlots` (`0x4f960b`), the slot resolver behind
     /// the item verbs (`0x4f98d1`), `GetBagName` (`0x4fa720`) and `SetBagPortaitTexture`
-    /// (`0x4fa5d8`). The bank's own slots, container -1, are not gated.
+    /// (`0x4fa5d8`). The vault, container -1, keeps its size; its slots are gated one level
+    /// down ([`the_vault_reads_empty_until_the_bank_opens`]).
     #[test]
     fn a_bank_bag_is_no_bag_until_the_bank_opens() {
         use crate::script::{BankBagSlots, BankState, InvSlotView};
@@ -1485,6 +1510,53 @@ mod tests {
         assert!(portrait.is_some(), "the portrait is the bag's icon");
         s.run("PickupContainerItem(5, 1)").unwrap();
         assert!(s.cursor_item().is_some_and(|i| i.bag == 5 && i.slot == 1));
+    }
+
+    /// The vault's slots, container -1, are the player list's 39 to 62, which `GetItemInSlot`
+    /// (`0x6228a0`) answers empty while no banker is open (`0x6228ad`-`0x6228cf`, the list's
+    /// bank flag set at the player's construction, `0x5dd44d`). So every container verb reads an
+    /// empty vault slot then: the getters (`0x4f96d7`, `0x4f9974`), `SplitContainerItem`
+    /// (`0x4fa01e`), `UseContainerItem` past its clear (`0x4fa1a6`) and
+    /// `ShowContainerSellCursor` (`0x4fa4b6`); `PickupContainerItem` returns before it reads
+    /// the cursor (`0x4f9bc6`-`0x4f9bf0`), so a held item is not placed there either.
+    #[test]
+    fn the_vault_reads_empty_until_the_bank_opens() {
+        use crate::script::BankState;
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_container(-1, Some(backpack()));
+        let mut pack = backpack();
+        pack.slots.get_mut(&1).unwrap().guid = 0x20a;
+        s.set_container(0, Some(pack));
+        let read = |s: &UiScript| {
+            s.eval::<(Option<String>, Option<String>)>(
+                "return (GetContainerItemInfo(-1, 1)), GetContainerItemLink(-1, 1)",
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&s), (None, None), "the bank is closed");
+        s.run("PickupContainerItem(-1, 1)").unwrap();
+        assert!(s.cursor_payload().is_none(), "nothing to pick up");
+        s.run("SplitContainerItem(-1, 1, 2)").unwrap();
+        assert!(s.cursor_payload().is_none(), "nothing to split");
+        s.run("UseContainerItem(-1, 1)").unwrap();
+        assert!(s.take_container_uses().is_empty(), "nothing to use");
+        s.run("ShowContainerSellCursor(-1, 1)").unwrap();
+        assert_eq!(s.model_ref().ui_cursor, None, "nothing to sell");
+        s.run("PickupContainerItem(0, 1) PickupContainerItem(-1, 2)")
+            .unwrap();
+        assert_eq!(s.cursor_item().map(|i| i.guid), Some(0x20a), "still held");
+        assert!(s.take_container_moves().is_empty(), "nothing placed");
+        s.run("ClearCursor()").unwrap();
+
+        s.set_bank(Some(BankState::default()));
+        let (texture, link) = read(&s);
+        assert!(texture.is_some() && link.is_some());
+        s.run("UseContainerItem(-1, 1)").unwrap();
+        assert_eq!(s.take_container_uses(), vec![(-1, 1)]);
+        s.unlock_item(0x10a);
+        s.run("PickupContainerItem(-1, 1)").unwrap();
+        assert!(s.cursor_item().is_some_and(|i| i.bag == -1 && i.slot == 1));
     }
 
     #[test]
@@ -1865,10 +1937,10 @@ mod tests {
         assert!(s.take_container_uses().is_empty(), "drained");
     }
 
-    /// The arm is `0x4fa0e0`'s, in its order, and its lock is taken in the call: a bank item
-    /// withdraws whether or not a banker is open (the bank flag, `0x4f98b3`), then an open banker
-    /// deposits ahead of an open vendor's sale; an item with no lock-taking fork (a plain use)
-    /// leaves it unlocked.
+    /// The arm is `0x4fa0e0`'s, in its order, and its lock is taken in the call: a vault item
+    /// withdraws (the bank flag, `0x4f98b3`), read only while a banker is open (`0x6228a0`), then
+    /// an open banker deposits ahead of an open vendor's sale; an item with no lock-taking fork (a
+    /// plain use) leaves it unlocked.
     #[test]
     fn use_container_item_takes_its_arm_and_the_arms_lock_in_the_call() {
         let mut s = UiScript::new().unwrap();
@@ -1888,11 +1960,6 @@ mod tests {
         assert_eq!(
             arm(&mut s, 0),
             (super::UseArm::Item(super::UseFork::Plain), false)
-        );
-        assert_eq!(
-            arm(&mut s, -1),
-            (super::UseArm::Withdraw, true),
-            "no banker open"
         );
         s.set_merchant(Some(super::super::MerchantState::default()));
         assert_eq!(arm(&mut s, 0), (super::UseArm::Sell, true));
@@ -1917,6 +1984,8 @@ mod tests {
                     item_id: 871,
                     count: 1,
                     item_class: Some(0),
+                    // Cached, as the equip fork reads the record.
+                    quality: Some(1),
                     use_fork: fork,
                     equip_slots: vec![1],
                     ..Default::default()
@@ -2415,11 +2484,23 @@ mod tests {
         );
         s.unlock_item(0x10a);
         s.run("SplitContainerItem(0, 1, 3)").unwrap();
+        // Onto a different item the split still goes and the cursor clears (`0x4f9e1c` →
+        // `0x5e1210`, `0x4f9e4f`).
         s.run("PickupContainerItem(0, 9)").unwrap();
-        let held = s.cursor_item().expect("kept — can't swap a partial stack");
-        assert_eq!(held.count, Some(3));
-        assert!(s.take_container_moves().is_empty());
+        assert!(s.cursor_item().is_none(), "sent and cleared");
+        assert_eq!(
+            s.take_container_moves(),
+            vec![ContainerMove {
+                src_bag: 0,
+                src_slot: 1,
+                dst_bag: 0,
+                dst_slot: 9,
+                count: Some(3),
+            }]
+        );
 
+        s.unlock_item(0x10a);
+        s.run("SplitContainerItem(0, 1, 3)").unwrap();
         s.run("PickupContainerItem(0, 7)").unwrap();
         assert!(s.cursor_item().is_none());
         assert_eq!(
@@ -2893,6 +2974,7 @@ mod tests {
         );
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(forked_bag(super::UseFork::Equip)));
+        s.seat_item_records();
         let equipped =
             crate::script::host::test_support::applied_in_call(&mut s, "UseContainerItem(0, 1)");
         let equip_arm = super::UseArm::Item(super::UseFork::Equip);

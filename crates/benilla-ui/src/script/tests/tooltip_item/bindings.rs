@@ -771,6 +771,19 @@ fn item_bindings_return_the_pushed_repair_cost() {
     costs.bags.insert((0, 1), 567);
     costs.bags.insert((-1, 3), 89);
     s.set_repair_costs(costs);
+    // The vault's slots read empty with no banker open (`0x53314e`, `0x5347ae` into `0x6228a0`).
+    s.run(
+        r#"
+        local tt = CreateFrame("GameTooltip", "TT0", nil, "TestTooltipTemplate")
+        tt:SetOwner(UIParent or CreateFrame("Frame"), "ANCHOR_NONE")
+        local _, _, vault = tt:SetInventoryItem("player", 42)
+        assert(vault == 0, "no banker: vault slot 3 by live id 42 costs nothing: " .. tostring(vault))
+        local _, vault_bag = tt:SetBagItem(-1, 3)
+        assert(vault_bag == nil, "no banker: vault slot 3 as a bag: " .. tostring(vault_bag))
+    "#,
+    )
+    .unwrap();
+    s.set_bank(Some(crate::script::BankState::default()));
     s.run(
         r#"
         local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0)
@@ -865,6 +878,8 @@ fn locked_is_drawn_for_a_locked_object_and_sets_the_builder_flag() {
 #[test]
 fn bank_vault_items_keep_their_flags_and_expiry() {
     let mut s = script();
+    // The bank bands read through `GetItemInSlot`, open only at a banker.
+    s.set_bank(Some(crate::script::BankState::default()));
     s.set_screen_size(800.0, 600.0);
     s.run("ITEM_DURATION_HOURS = '[DURATION %d h]' LOCKED = '[LOCKED]'")
         .unwrap();

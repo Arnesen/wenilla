@@ -20,7 +20,7 @@ pub(crate) struct EnchantConfirmItem(Option<u64>);
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ClickedItem {
     /// Template Class, SubClass and InventoryType (`0x5d9f30`, `0x5d9f90`, `0x5d9ff0`, through the
-    /// item cache `0x55ba30`).
+    /// item cache `0x55ba30`), each 0 while the record is not cached.
     pub(crate) class: u32,
     pub(crate) subclass: u32,
     pub(crate) inventory_type: u32,
@@ -30,7 +30,8 @@ pub(crate) struct ClickedItem {
     /// `ITEM_FIELD_ENCHANTMENT` PERM (0) and TEMP (1); `None` for empty, a negative id, or an id
     /// with no `SpellItemEnchantment` row.
     pub(crate) existing_enchant: [Option<u32>; 2],
-    /// The record's flags (`0x5da2a0`, through the item's `+0x110` vtable at `0x495e05`).
+    /// The record's flags (`0x5da2a0`, through the item's `+0x110` vtable at `0x495e05`), 0 while
+    /// the record is not cached.
     pub(crate) record_flags: u32,
 }
 
@@ -315,34 +316,22 @@ fn gate_item(
         debug!("ui_action: item pick — no record for spell {spell_id}; nothing done");
         return None;
     };
-    // The record's type fields and flags, only read (`0x495f76`); an uncached record binds
-    // ungated and the server judges.
-    let clicked = fields
+    // The record's type fields and flags, only read: with no record cached each getter answers 0
+    // (`0x5da2b3`, `0x5d9f84`, `0x5d9fe5`, `0x5da045`), so the gates below run on zeros.
+    let record = fields
         .object_entry()
-        .and_then(|entry| ladder.items.template(entry, item_guid, Ask::Read))
-        .map(|t| {
-            let flags = t.flags;
-            ClickedItem {
-                class: t.class,
-                subclass: t.subclass,
-                inventory_type: t.inventory_type,
-                record_flags: flags,
-                // `0x5da2c0`, the same predicate as the tooltip's Soulbound line.
-                already_bound: crate::items::already_bound(fields, flags, enchants),
-                existing_enchant: [0u8, 1]
-                    .map(|slot| crate::items::live_enchant(fields, slot, enchants)),
-            }
-        });
-    let Some(item) = clicked else {
-        debug!("ui_action: item pick — cast {spell_id} at item {item_guid:#x} (ungated)");
-        if may_cast {
-            ladder.commit_targeted(
-                spell_id,
-                commit,
-                crate::spell::cast_send::TargetedBind::Item(item_guid),
-            );
-        }
-        return None;
+        .and_then(|entry| ladder.items.template(entry, item_guid, Ask::Read));
+    let (class, subclass, inventory_type, record_flags) = record.map_or((0, 0, 0, 0), |t| {
+        (t.class, t.subclass, t.inventory_type, t.flags)
+    });
+    let item = ClickedItem {
+        class,
+        subclass,
+        inventory_type,
+        record_flags,
+        // `0x5da2c0`, the same predicate as the tooltip's Soulbound line.
+        already_bound: crate::items::already_bound(fields, record_flags, enchants),
+        existing_enchant: [0u8, 1].map(|slot| crate::items::live_enchant(fields, slot, enchants)),
     };
     // `EffectMiscValue` is signed; the reference rejects a negative one before the row lookup.
     let new = u32::try_from(def.effect_misc_value[0])
@@ -409,9 +398,9 @@ mod tests {
     const ENTRY: u32 = 777;
     const SPELL: u32 = 5555;
 
-    /// A world with one carried item (`template` gives it a cached template, so the pick takes
-    /// the verdict arm; without it the ungated one), a VM whose bag shows it, and a spell with a
-    /// record awaiting an item.
+    /// A world with one carried item (`template` gives it a cached template; without it every
+    /// record getter answers 0), a VM whose bag shows it, and a spell with a record awaiting an
+    /// item.
     fn item_targeting(template: bool) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
         item_targeting_with(template, true)
     }
@@ -503,7 +492,7 @@ mod tests {
 
     /// The bind that ends `ValidateSpellItemTarget` is `BindSpellTargetObject`, which asks the
     /// gate's tag 2 first (`0x6e5b9e`): a click a macro made outside an input event binds nothing
-    /// and leaves the cursor up, on the ungated arm (an unresolved template) and the verdict's.
+    /// and leaves the cursor up, with the item's record cached or not.
     #[test]
     fn a_refused_item_pick_binds_nothing_and_keeps_the_cursor() {
         for template in [false, true] {
@@ -653,6 +642,39 @@ mod tests {
             (0, true),
             "the parked item left the bags under the popup"
         );
+    }
+
+    /// An item whose record is not cached reads 0 from every record getter (`0x5da2b3`,
+    /// `0x5d9f84`, `0x5d9fe5`, `0x5da045`), so an enchant's equip gate runs on class and subclass
+    /// 0 and refuses a weapon enchant (`0x495e22` → `0x496068`, reason `0x0a`): nothing binds and
+    /// the cursor drops. A spell with no gate binds the same item.
+    #[test]
+    fn an_enchant_on_an_uncached_item_gates_on_zeroed_class_fields() {
+        for gated in [true, false] {
+            let (mut app, rx) = item_targeting(false);
+            app.world_mut().insert_resource(crate::ui_action::Spells {
+                catalog: benilla_formats::SpellCatalog::from_displays(
+                    [(
+                        SPELL,
+                        benilla_formats::SpellDisplay {
+                            effects: [benilla_formats::SPELL_EFFECT_ENCHANT_ITEM, 0, 0],
+                            // A weapon enchant: class 2, any subclass but 0.
+                            equipped_item_class: if gated { 2 } else { -1 },
+                            equipped_item_subclass_mask: if gated { !1 } else { 0 },
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                ),
+                ..crate::ui_action::Spells::empty_for_tests()
+            });
+            let expected = if gated { (0, false) } else { (1, false) };
+            assert_eq!(
+                pick(&mut app, &rx, "PickupContainerItem(0, 1)"),
+                expected,
+                "gated {gated}"
+            );
+        }
     }
 
     /// For an enchant effect `0x495d60` reads the item record's flags (`0x495df7`-`0x495e05`) and

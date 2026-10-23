@@ -55,7 +55,7 @@ pub(super) const BANK_SLOTS: u8 = 24;
 pub(super) const BANK_SLOT_FIRST: u8 = 39;
 /// The first bank-bag slot (vmangos `BANK_SLOT_BAG_START`); as with an equipped bag, a bank bag's
 /// slot number is its wire bag byte.
-pub(super) const BANK_BAG_SLOT_FIRST: u8 = 63;
+pub(crate) const BANK_BAG_SLOT_FIRST: u8 = 63;
 /// Bank bag count (live-API bag ids [`BANK_BAG_ID_FIRST`]..=10).
 pub(super) const BANK_BAGS: u8 = 6;
 /// `BANK_CONTAINER` (`BankFrame.lua:1`).
@@ -1065,6 +1065,10 @@ impl Plugin for UiItemsPlugin {
                         .in_set(crate::ui_unit::WorldEnterSeats)
                         .before(crate::ui_cast::feed_cast_reports),
                     feed_item_sets.in_set(UnitFeed),
+                    // The equip callbacks an item record's answer ran, drained with the Lua's
+                    // asks, after the bag feed (and the doll's, ahead of it) has pushed what the
+                    // answer changed.
+                    crate::ui_bind_confirm::replay_equip_records.in_set(crate::ui_script::UiDrain),
                     ask_item_build_lookups.in_set(UnitFeed),
                     // The roll table, pushed whole once per VM, before the first hover.
                     feed_random_properties.in_set(UnitFeed),

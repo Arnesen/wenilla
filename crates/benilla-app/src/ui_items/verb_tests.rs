@@ -66,6 +66,8 @@ fn slot(guid: u64, item_id: u32, count: u32) -> ContainerSlot {
         count,
         texture: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
         link: Some(format!("|cffffffff|Hitem:{item_id}:0:0:0|h[Thing]|h|r")),
+        // The record cached.
+        quality: Some(1),
         ..Default::default()
     }
 }
@@ -230,6 +232,23 @@ impl Bags {
             ..Default::default()
         });
         script.set_inventory_slots(doll);
+        // The record feed's copies of the templates above, which the equip questions read.
+        for (entry, bonding) in [
+            (LINEN, 0),
+            (HELM, 0),
+            (PAPER, 0),
+            (BOE, 2),
+            (BOU, 3),
+            (BAG_ENTRY, 0),
+        ] {
+            script.set_item_template(
+                entry,
+                benilla_ui::script::ItemTemplateView {
+                    bonding,
+                    ..Default::default()
+                },
+            );
+        }
         world.insert_non_send_resource(script);
         Self { app, rx }
     }
@@ -449,6 +468,98 @@ fn the_bind_answers_act_inside_their_calls() {
         "the cancel unlocked the item before the next line"
     );
     assert_eq!(h.sent(), Vec::<String>::new(), "a cancel sends nothing");
+}
+
+/// The bind question fires inside the swap's call (`0x5e0ee4`). The doll click's `SwapItem`
+/// leaves past its clear (`0x5e0eec` → `0x5e0f63`), so the event's handler reads the helm still
+/// held and no `CURSOR_UPDATE` follows; `PickupContainerItem`'s own `ClearCursor(0,1)` follows its
+/// swap (`0x4f9eb8`), so a worn helm dropped on the bind-on-equip helm hears `CURSOR_UPDATE` after
+/// the question, which the stock dialog takes as its cancel (`UIParent.lua:357-361`).
+#[test]
+fn the_bind_question_fires_inside_the_swap_ahead_of_the_bag_clicks_clear() {
+    let listen = r#"SEEN = {} local f = CreateFrame("Frame")
+        f:RegisterEvent("EQUIP_BIND_CONFIRM") f:RegisterEvent("CURSOR_UPDATE")
+        f:SetScript("OnEvent", function()
+            table.insert(SEEN, event .. (CursorHasItem() and 1 or 0)) end)"#;
+    let mut h = Bags::new();
+    h.run(listen);
+    let seen: String = h.eval(
+        "PickupContainerItem(0, 7) SEEN = {} PickupInventoryItem(1) return table.concat(SEEN, ' ')",
+    );
+    assert_eq!(seen, "EQUIP_BIND_CONFIRM1", "the doll click");
+    assert_eq!(h.sent(), Vec::<String>::new(), "nothing sent");
+
+    let mut h = Bags::new();
+    h.run(listen);
+    let seen: String = h.eval(
+        "PickupInventoryItem(1) SEEN = {} PickupContainerItem(0, 7) return table.concat(SEEN, ' ')",
+    );
+    assert_eq!(seen, "EQUIP_BIND_CONFIRM1 CURSOR_UPDATE0", "the bag click");
+    assert_eq!(h.sent(), Vec::<String>::new(), "nothing sent");
+}
+
+/// `PickupContainerItem` asks inside `SwapItem`, then clears with its own `ClearCursor(0,1)`
+/// past the call (`0x4f9eb8`). Through the stock FrameXML the clear's `CURSOR_UPDATE` hides
+/// `EQUIP_BIND` (`UIParent.lua:357-361`), whose `OnHide` calls `CancelPendingEquip` into
+/// `0x5e1be0`: the record is freed, both ends unlock (`0x5e1ca5`, `0x5e1d04`), nothing is sent and
+/// the cursor ends empty.
+#[test]
+fn the_bag_clicks_clear_cancels_its_bind_question_and_unlocks_both_ends() {
+    benilla_formats::wow_data_or_skip!();
+    let mut h = Bags::new();
+    h.script().set_screen_size(1024.0, 768.0);
+    for file in [
+        "Interface\\FrameXML\\GlobalStrings.lua",
+        "Interface\\FrameXML\\Fonts.xml",
+        "Interface\\FrameXML\\BasicControls.xml",
+        "Interface\\FrameXML\\LocaleProperties.lua",
+        "Interface\\FrameXML\\UIParent.xml",
+        "Interface\\FrameXML\\MoneyFrame.lua",
+        "Interface\\FrameXML\\MoneyFrame.xml",
+        "Interface\\FrameXML\\StaticPopup.xml",
+    ] {
+        crate::ui_script::load_ui_for_test(&h.script(), file);
+    }
+    let shown = "return StaticPopup_FindVisible(\"EQUIP_BIND\") ~= nil";
+    h.run(
+        r#"ASKED = 0 local f = CreateFrame("Frame") f:RegisterEvent("EQUIP_BIND_CONFIRM")
+        f:SetScript("OnEvent", function() ASKED = ASKED + 1 end)"#,
+    );
+    h.run("PickupInventoryItem(1)");
+    assert!(h.script().item_locked(W), "the pickup's lock");
+    let _ = h.sent();
+    h.run("PickupContainerItem(0, 7)");
+    assert_eq!(h.eval::<i64>("return ASKED"), 1, "asked inside the swap");
+    assert!(!h.eval::<bool>(shown), "the clear's CURSOR_UPDATE hid it");
+    assert_eq!(h.sent(), Vec::<String>::new(), "nothing sent");
+    {
+        let script = h.script();
+        assert!(script.cursor_item().is_none(), "the binding's clear");
+        assert!(!script.item_locked(W), "the worn helm unlocked");
+        assert!(!script.item_locked(E), "the bag's helm unlocked");
+    }
+    assert_eq!(
+        h.app
+            .world()
+            .resource::<crate::ui_bind_confirm::PendingEquips>()
+            .live(),
+        0,
+        "the record freed"
+    );
+}
+
+/// `CGItem::Use` signals `USE_BIND_CONFIRM` in place, inside the use (`0x5d9217`-`0x5d9222`,
+/// `SignalEvent(0x122)`), and returns: the chunk's next line has heard it.
+#[test]
+fn the_bind_on_use_question_fires_inside_the_use() {
+    let mut h = Bags::new();
+    h.run(
+        r#"HEARD = 0 local f = CreateFrame("Frame") f:RegisterEvent("USE_BIND_CONFIRM")
+        f:SetScript("OnEvent", function() HEARD = HEARD + 1 end)"#,
+    );
+    let heard: i64 = h.eval("UseContainerItem(0, 8) return HEARD");
+    assert_eq!(heard, 1);
+    assert_eq!(h.sent(), Vec::<String>::new(), "the use is parked");
 }
 
 /// `ConfirmBindOnUse` re-issues the parked use inside its call (`0x48d770` → `0x5d92c1`).

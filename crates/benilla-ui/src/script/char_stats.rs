@@ -536,7 +536,7 @@ const BANK_INV_SLOTS: std::ops::RangeInclusive<usize> = 40..=63;
 const BANK_BAG_INV_SLOTS: std::ops::RangeInclusive<usize> = 64..=69;
 
 /// The vault's container id; must match `ui_items::BANK_CONTAINER` in the app.
-const BANK_CONTAINER: i64 = -1;
+pub(super) const BANK_CONTAINER: i64 = -1;
 
 /// The keyring's live-API ids: `KeyRingButtonIDToInvSlotID` adds `0x51` to a 1-based button id
 /// (`0x4c818b`), and the slot reader takes 0-based 81..=112 (`0x4c8567`).
@@ -586,8 +586,23 @@ impl Model {
         }
     }
 
-    /// The active player's item at live-API id `slot`.
+    /// The active player's item at live-API id `slot`. The bank bands are the player list's
+    /// slots 39 to 68, which `GetItemInSlot` (`0x6228a0`) answers empty while no banker is open
+    /// (`0x6228ad`-`0x6228cf`, the banker guid `[0xbdd038]`), and every getter here reads through
+    /// it (`0x4c8449`, `0x4c8cd3`, `SetInventoryItem` at `0x53314e`).
     fn own_inv_slot(&self, slot: usize) -> Option<InvSlotView> {
+        let bank_band = BANK_INV_SLOTS.contains(&slot) || BANK_BAG_INV_SLOTS.contains(&slot);
+        if bank_band && self.bank.is_none() {
+            return None;
+        }
+        self.player_slot_object(slot)
+    }
+
+    /// The item object at the active player's live-API id `slot`, with no bank gate: what the
+    /// client finds by the held item's guid (the object manager, not `GetItemInSlot`), so an item
+    /// held from a bank slot is still found after the banker closes. For the readers that stand in
+    /// for that guid lookup; a slot getter reads [`Self::inv_slot`].
+    pub(crate) fn player_slot_object(&self, slot: usize) -> Option<InvSlotView> {
         if let Some(view) = self.bank_inv_slot(slot) {
             return Some(view);
         }
@@ -2076,6 +2091,8 @@ mod tests {
     #[test]
     fn get_inventory_item_count_forks_on_the_container_bit_and_the_slot() {
         let mut s = seated();
+        // The bank bands read through `GetItemInSlot`, open only at a banker.
+        s.set_bank(Some(crate::script::BankState::default()));
         let bag = |contents: Option<u32>| {
             Some(InvSlotView {
                 item_id: 4496,
@@ -2609,6 +2626,8 @@ mod tests {
     fn a_container_slot_seen_as_an_inventory_slot_keeps_its_field_duration() {
         use crate::script::container::{ContainerSlot, ContainerState};
         let mut s = seated();
+        // The bank bands read through `GetItemInSlot`, open only at a banker.
+        s.set_bank(Some(crate::script::BankState::default()));
         for (bag, live_id) in [(super::BANK_CONTAINER, 40), (super::KEYRING_CONTAINER, 82)] {
             let mut state = ContainerState {
                 num_slots: 24,
