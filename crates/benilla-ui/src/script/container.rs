@@ -560,7 +560,8 @@ fn use_cleared(
         if let Some(key) =
             super::use_gates::item_use_refusal(model, fork, item_id, use_spell, known)
         {
-            model.push_ui_error(key);
+            // Shown inside the verb, as the gate's `DisplayError` (`0x496720`) is.
+            *call = Some(super::ScriptCall::DisplayError(key));
             return None;
         }
     }
@@ -595,7 +596,7 @@ fn use_equip_arm(
 ) -> mlua::Result<()> {
     let guid = item.guid;
     let projectile = item.item_class == Some(cursor::ITEM_CLASS_PROJECTILE);
-    let step = cursor::equip::auto_equip_from(lua, item, false);
+    let step = cursor::equip::auto_equip_from(lua, item, false)?;
     super::tick::verb(lua, |model| {
         if !projectile {
             cursor::lock_item(model, guid);
@@ -2982,5 +2983,35 @@ mod tests {
             matches!(equipped.as_slice(), [ScriptCall::UseContainerItem(u)] if u.arm == equip_arm),
             "{equipped:?}"
         );
+    }
+
+    /// The use dispatcher's gate refusal shows inside `UseContainerItem` (`0x5d8eaa` →
+    /// `0x496720`), and so does the equip arm's refusal of an item in the trade window
+    /// (`0x5e18a5`): the chunk's next line reads each.
+    #[test]
+    fn a_use_refusal_shows_inside_its_call() {
+        use crate::script::ui_errors::shown::seen_in_call;
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(forked_bag(super::UseFork::Open)));
+        s.set_player_control(false);
+        let (seen, host) = seen_in_call(&mut s, "UseContainerItem(0, 1)");
+        assert_eq!(seen, "ERR_CLIENT_LOCKED_OUT");
+        assert!(host.calls.is_empty(), "nothing else is asked");
+        assert!(s.take_ui_errors().is_empty(), "nothing waits for the feed");
+
+        let mut s = UiScript::new().unwrap();
+        s.set_player_control(true);
+        s.open_trade_window();
+        s.set_container(0, Some(crate::script::cursor::two_item_bag()));
+        s.keep_calls();
+        s.run("PickupContainerItem(0, 2) ClickTradeButton(1) ClearCursor()")
+            .unwrap();
+        s.unlock_item(118);
+        let mut equip = crate::script::cursor::two_item_bag();
+        equip.slots.get_mut(&2).unwrap().use_fork = super::UseFork::Equip;
+        s.set_container(0, Some(equip));
+        let (seen, _) = seen_in_call(&mut s, "UseContainerItem(0, 2)");
+        assert_eq!(seen, "ERR_EQUIP_TRADE_ITEM");
+        assert!(s.take_ui_errors().is_empty(), "nothing waits for the feed");
     }
 }

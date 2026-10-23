@@ -5,7 +5,6 @@
 
 use bevy::prelude::*;
 
-use crate::creature_anim::Engaged;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_script::InspectMode;
 use benilla_assets::AssetSet;
@@ -56,6 +55,9 @@ pub(crate) use cursor_mode::{
 /// `GO_FLAG_LOCKED`, the bit the lock chain and the GameObject tooltip's "Locked" line read.
 pub(crate) use lock::GO_FLAG_LOCKED;
 // This frame's combat-flash verdict, for the ring's material and the nameplate colour gate.
+pub(crate) use died::drop_parked_deaths;
+#[cfg(test)]
+pub(crate) use died::Deaths;
 pub(crate) use flash::CombatFlash;
 // The discount `0x612b80` the repair cost and the taxi fare take off their DBC prices.
 pub(crate) use price_discount::vendor_price_discount;
@@ -85,7 +87,10 @@ pub(crate) use ring::{ring_variant, PlayerPath, SelectorInput};
 pub(crate) use ring::{selection_variant, Factions, RingVariant};
 
 pub use click::Interact;
-pub(crate) use click::{clear_selection_on_world_teardown, deselect_on_ui_shutdown, DeselectGuid};
+pub(crate) use click::{
+    clear_selection_on_world_teardown, deselect_on_ui_shutdown, signal_ui_shutdown_deselect,
+    DeselectGuid,
+};
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server.
 /// The selection is the guid `[0xb4e2d8]`: `SetSelection 0x493540` stores it whether or not the
@@ -301,6 +306,7 @@ pub(crate) struct TargetPlugin;
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
+        died::register(app);
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
             .init_resource::<AssistAttack>()
@@ -401,15 +407,8 @@ impl Plugin for TargetPlugin {
                     // run their bodies' `TargetNearestEnemy` and `AttackTarget` as script calls.
                     crate::ui_action::attack_nearest_probe,
                     flash::drive_flash,
-                    // The last-enemy stamp before the death handler's deselect, so a hostile that
-                    // dies selected is still remembered (the reference's `TargetLastEnemy` has no
-                    // liveness gate); the ring after both, off the frame's final selection.
-                    (
-                        scan::remember_last_enemy,
-                        died::on_unit_died,
-                        ring::update_ring,
-                    )
-                        .chain(),
+                    // The last-enemy stamp, then the ring off the frame's final selection.
+                    (scan::remember_last_enemy, ring::update_ring).chain(),
                 )
                     .chain()
                     .in_set(TargetUpdate)

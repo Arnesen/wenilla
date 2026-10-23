@@ -38,11 +38,9 @@ pub(super) fn world_right_click_payload(
 /// A right-click begun on a nameplate, replayed for [`act_on_interact`]: the plate's click slot
 /// (`0x7cb910`) goes to `0x4949f0` and so to `InteractWithObjectByClick` (`0x492820`), not
 /// through the world click router (`0x481f60`), whose charmed return and payload legs it skips.
-/// It carries what the click's `SelectTarget` (`0x492870`) did, which ran at the click.
+/// The click's `SelectTarget` (`0x492870`) ran at the click.
 #[derive(Message, Clone, Copy)]
-pub(super) struct PlateRightClick {
-    pub(super) selected: scan::CommitOutcome,
-}
+pub(super) struct PlateRightClick;
 
 /// A plate click is a click on its unit (the click slot `0x7cb910`). The left button carries the
 /// plate's unit, as a scripted `plate:Click()` (pfUI, `nameplates.lua:1228`) has no cursor; the
@@ -83,14 +81,14 @@ pub(super) fn select_on_plate_click(
             // Attack-classified only when the press was on this unit: a scripted click has no
             // cursor.
             let attack = c.press.attack() && c.press.hovered.target == Some(entity);
-            c.commit(entity, guid, store.as_ref(), attack).1
+            c.commit(entity, guid, store.as_ref(), attack)
         };
         vm.engine_select(select, |mut c, owed| {
             owed.pay(&mut c.selection, &mut c.seam);
         });
     }
     for entity in right {
-        let (selected, select) = {
+        let select = {
             let mut c = vm.own();
             // The press pick must name it: a scripted click has no cursor to interact by.
             if c.press.hovered.target != Some(entity) {
@@ -102,11 +100,10 @@ pub(super) fn select_on_plate_click(
             let guid = guid.0;
             let store = store.cloned();
             if c.front.takes(entity, guid, c.seam.slots.targeting()) {
-                (scan::CommitOutcome::default(), None)
+                None
             } else {
                 let attack = c.press.attack();
-                let (out, select) = c.commit(entity, guid, store.as_ref(), attack);
-                (out, Some(select))
+                Some(c.commit(entity, guid, store.as_ref(), attack))
             }
         };
         if let Some(select) = select {
@@ -114,7 +111,7 @@ pub(super) fn select_on_plate_click(
                 owed.pay(&mut c.selection, &mut c.seam);
             });
         }
-        right_clicks.write(PlateRightClick { selected });
+        right_clicks.write(PlateRightClick);
     }
 }
 
@@ -125,7 +122,7 @@ pub(super) struct PlateSelect<'w, 's> {
     selection: ResMut<'w, Selection>,
     seam: crate::creature_anim::AttackSeam<'w, 's>,
     front: super::front::SelectFront<'w, 's>,
-    self_q: Query<'w, 's, (&'static Guid, Has<Engaged>), With<SelfPlayer>>,
+    self_q: Query<'w, 's, &'static Guid, With<SelfPlayer>>,
     greeting: MessageWriter<'w, crate::sound::NpcGreetingRequest>,
     units: Query<'w, 's, (&'static Guid, Option<&'static ObjectStore>)>,
     relations: super::RelationWorld<'w, 's>,
@@ -139,26 +136,21 @@ impl PlateSelect<'_, '_> {
         guid: u64,
         store: Option<&ObjectStore>,
         attack: bool,
-    ) -> (scan::CommitOutcome, crate::script_calls::EngineSelect) {
-        let (self_guid, engaged) = self
-            .self_q
-            .single()
-            .map(|(g, e)| (Some(g.0), e))
-            .unwrap_or((None, false));
+    ) -> crate::script_calls::EngineSelect {
+        let self_guid = self.self_q.single().ok().map(|g| g.0);
         let before = Standing::of(&self.selection, &self.seam);
         let old_latches = scan::latches_on(&self.relations, self.selection.guid);
-        let (out, owed) = scan::commit_owing(
+        let (_, owed) = scan::commit_owing(
             &mut self.selection,
             &mut self.seam,
             Some(entity),
             guid,
             store,
-            engaged,
             self_guid,
             attack,
             old_latches,
         );
-        (out, before.owing(owed))
+        before.owing(owed)
     }
 }
 
@@ -191,7 +183,7 @@ pub(super) struct ClickSelect<'w, 's> {
     press: Res<'w, PressPick>,
     selection: ResMut<'w, Selection>,
     seam: crate::creature_anim::AttackSeam<'w, 's>,
-    self_q: Query<'w, 's, (&'static Guid, Has<Engaged>), With<SelfPlayer>>,
+    self_q: Query<'w, 's, &'static Guid, With<SelfPlayer>>,
     payload_held: Res<'w, crate::ui_script::CursorPayloadHeld>,
     greeting: MessageWriter<'w, crate::sound::NpcGreetingRequest>,
     click_cfg: Res<'w, ClickConfig>,
@@ -200,25 +192,38 @@ pub(super) struct ClickSelect<'w, 's> {
     relations: super::RelationWorld<'w, 's>,
 }
 
-/// An engine writer's selection about to commit, as it stands: the guid and the pet's attack
-/// latch, for the signals of what the commit owes ([`crate::script_calls::EngineSelect`]).
-pub(super) struct Standing(Option<u64>, bool);
+/// An engine writer's selection about to commit, as it stands: the guid, the pet's attack latch
+/// and the clock, for the signals of what the commit owes, and the reports its teardown makes
+/// ([`crate::script_calls::EngineSelect`]).
+pub(super) struct Standing(Option<u64>, bool, crate::lanes::Mark);
 
 impl Standing {
     pub(super) fn of(selection: &Selection, seam: &crate::creature_anim::AttackSeam) -> Self {
         Self(
             selection.guid,
             seam.pet_latch.as_deref().is_some_and(|l| l.up()),
+            crate::lanes::mark(),
         )
     }
 
     /// The commit's signals, owing `owed` after them.
     pub(super) fn owing(self, owed: scan::Owed) -> crate::script_calls::EngineSelect {
+        self.owing_debt(owed.into())
+    }
+
+    /// The commit's signals, owing `owed` after them.
+    pub(super) fn owing_debt(self, owed: super::SelectDebt) -> crate::script_calls::EngineSelect {
         crate::script_calls::EngineSelect {
             before: self.0,
             latched: self.1,
+            mark: self.2,
             owed,
         }
+    }
+
+    /// The same, its reports counted from `mark`, where the writer's step began.
+    fn since(self, mark: crate::lanes::Mark) -> Self {
+        Self(self.0, self.1, mark)
     }
 }
 
@@ -261,11 +266,7 @@ fn click_select(c: &mut ClickSelect) -> Option<crate::script_calls::EngineSelect
             c.seam.slots.core(&c.seam.net).reports.changed();
         }
     }
-    let (self_guid, engaged) = c
-        .self_q
-        .single()
-        .map(|(g, e)| (Some(g.0), e))
-        .unwrap_or((None, false));
+    let self_guid = c.self_q.single().ok().map(|g| g.0);
     let before = Standing::of(&c.selection, &c.seam);
     let owed = match (hovered.target, hovered.guid) {
         (Some(entity), Some(guid)) => {
@@ -281,7 +282,6 @@ fn click_select(c: &mut ClickSelect) -> Option<crate::script_calls::EngineSelect
                 Some(entity),
                 guid,
                 c.stores.get(entity).ok(),
-                engaged,
                 self_guid,
                 c.press.attack(),
                 old_latches,
@@ -302,7 +302,7 @@ fn click_select(c: &mut ClickSelect) -> Option<crate::script_calls::EngineSelect
                 return None;
             }
             scan::Owed {
-                send: deselect_owing(&mut c.selection, &mut c.seam, engaged),
+                send: deselect_owing(&mut c.selection, &mut c.seam),
                 swing: None,
             }
         }
@@ -377,7 +377,7 @@ pub(crate) struct Dispatch<'w, 's> {
     /// The returns ahead of the select both attack-or-click entries make (`SelectTarget`,
     /// [`super::front`]).
     front: super::front::SelectFront<'w, 's>,
-    self_player: Query<'w, 's, (Entity, &'static Guid, Has<Engaged>), With<SelfPlayer>>,
+    self_player: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,
     // Through `creature_anim::gesture`, the chat path's entry, as the reference's dispatcher does.
     gestures: ResMut<'w, crate::creature_anim::GestureQueue>,
     go_inputs: GoLockInputs<'w, 's>,
@@ -404,8 +404,11 @@ pub(crate) struct Dispatch<'w, 's> {
     loot_cfg: Res<'w, crate::ui_loot::LootConfig>,
     /// Our player as the active mover (`0xc4da98`), which the loot legs' store asks.
     mover: Query<'w, 's, (), (With<SelfPlayer>, With<crate::net::ActiveMover>)>,
-    /// The re-swing latch's legs on the outgoing selection (`0x49365f`-`0x4936a3`).
+    /// The re-swing latch's legs on the outgoing selection (`0x49365f`-`0x4936a3`), and the
+    /// alive branch's `CanInteract` (`0x60c165`).
     relations: super::RelationWorld<'w, 's>,
+    /// The greeter `0x60c270`, which a live unit's click that neither interacts nor swings calls.
+    greeting: MessageWriter<'w, crate::sound::NpcGreetingRequest>,
 }
 
 /// What a leg does once its `SetAutoLoot` has applied, the sweep it may run included: the loot or
@@ -429,11 +432,129 @@ enum Owed {
         in_reach: bool,
         walk: bool,
     },
+    /// The rest of StartAttack past its stand-up (`0x5ecca0` on): its own select (`0x5eccaa`),
+    /// whose signals run their listeners before its swing ([`attack_select`]); `attackable` is the
+    /// press's Attack classification, the re-swing's gate.
+    Attack {
+        entity: Entity,
+        guid: u64,
+        attackable: bool,
+    },
+}
+
+/// Pay what [`interact`] owed past its turn, on a [`crate::script_calls::VmWith`] whose set, bound
+/// by `$p`, `$parts` splits into the dispatchers and the selection: StartAttack's own select
+/// signalled in place before its swing ([`attack_select`]), or a leg's loot or use as a turn of
+/// its own. `$mark` is the clock where the click's step began.
+macro_rules! pay_owed {
+    ($vm:ident, $owed:expr, $mark:expr, |$p:pat_param| $parts:expr) => {
+        match $owed {
+            Some(Owed::Attack {
+                entity,
+                guid,
+                attackable,
+            }) => {
+                let select = {
+                    let $p = $vm.own();
+                    let (dispatch, selection) = $parts;
+                    attack_select(dispatch, selection, entity, guid, attackable, $mark)
+                };
+                $vm.engine_select(select, |$p, owed| {
+                    let (dispatch, selection) = $parts;
+                    owed.pay(selection, &mut dispatch.seam);
+                });
+            }
+            Some(owed) => $vm.turn(|_, $p| {
+                let (dispatch, _) = $parts;
+                owed.run(dispatch)
+            }),
+            None => {}
+        }
+    };
+}
+
+/// StartAttack's own select (`0x5eccaa`), past its gates and its stand-up and before its swing
+/// (`0x5eccfd`), owing the swing past its signals: the click's commit, with its stop and re-swing
+/// mid-combat. A unit already selected is the setter's dedup, and a cursor's bind has emptied the
+/// word by now, so a plate's unit is selected here; a bind in its place selects nothing. A commit
+/// that stopped and re-swung left `[+0xc54]` set, so the swing goes out a second time
+/// (`0x5eccda`).
+fn attack_select(
+    dispatch: &mut Dispatch,
+    selection: &mut ResMut<Selection>,
+    entity: Entity,
+    guid: u64,
+    attackable: bool,
+    mark: crate::lanes::Mark,
+) -> crate::script_calls::EngineSelect {
+    let before = Standing::of(selection, &dispatch.seam).since(mark);
+    let tail = |owed: scan::Owed| before.owing_debt(super::SelectDebt::from(owed).then_tail(guid));
+    if dispatch
+        .front
+        .takes(entity, guid, dispatch.seam.slots.targeting())
+    {
+        return tail(scan::Owed::default());
+    }
+    let me = dispatch.me().map(|(_, g)| g);
+    let target = dispatch.stores.get(entity).ok().map(|(s, _)| s);
+    let old_latches = scan::latches_on(&dispatch.relations, selection.guid);
+    let (_, owed) = scan::commit_owing(
+        selection,
+        &mut dispatch.seam,
+        Some(entity),
+        guid,
+        target,
+        me,
+        attackable,
+        old_latches,
+    );
+    tail(owed)
+}
+
+/// The INTERACT leg's select (`0x492870` → `SetSelection 0x493540`) on the press pick's unit,
+/// ahead of the object's dispatcher (`0x492881`): a GameObject and a corpse are not selectable
+/// (their slot `+0x58`, the base `0x469fe0`, answers 0), and a standing cursor binds the unit in
+/// its place. Deref'd only where it commits, so a click that selects nothing leaves the change
+/// tick alone.
+fn interact_select(
+    dispatch: &mut Dispatch,
+    selection: &mut ResMut<Selection>,
+    press: &PressPick,
+) -> Option<crate::script_calls::EngineSelect> {
+    if go_is_nearest(&press.hovered, &press.object) || press.hovered.corpse.is_some() {
+        return None;
+    }
+    let (Some(entity), Some(guid)) = (press.hovered.target, press.hovered.guid) else {
+        return None;
+    };
+    if dispatch
+        .front
+        .takes(entity, guid, dispatch.seam.slots.targeting())
+    {
+        return None;
+    }
+    let me = dispatch.me().map(|(_, g)| g);
+    let before = Standing::of(selection, &dispatch.seam);
+    let target = dispatch.stores.get(entity).ok().map(|(s, _)| s);
+    let old_latches = scan::latches_on(&dispatch.relations, selection.guid);
+    let (_, owed) = scan::commit_owing(
+        selection,
+        &mut dispatch.seam,
+        Some(entity),
+        guid,
+        target,
+        me,
+        press.attack(),
+        old_latches,
+    );
+    Some(before.owing(owed))
 }
 
 impl Owed {
     fn run(self, dispatch: &mut Dispatch) {
         match self {
+            // The callers pay it with its select ([`pay_owed`]); with none, the swing alone.
+            Owed::Attack { guid, .. } => dispatch.seam.start_tail(guid),
             Owed::LootCorpse { entity, guid, walk } => {
                 let can_loot = dispatch.can_loot_corpse(entity);
                 dispatch.loot_corpse(entity, guid, can_loot, walk);
@@ -465,16 +586,20 @@ impl Dispatch<'_, '_> {
         !self.mover.is_empty()
     }
 
-    fn me(&self) -> Option<(Entity, u64, bool)> {
-        self.self_player
-            .single()
-            .ok()
-            .map(|(e, g, engaged)| (e, g.0, engaged))
+    fn me(&self) -> Option<(Entity, u64)> {
+        self.self_player.single().ok().map(|(e, g)| (e, g.0))
     }
 
     fn self_store(&self) -> Option<&ObjectStore> {
         let (me, ..) = self.me()?;
         self.stores.get(me).ok().map(|(s, _)| s)
+    }
+
+    /// `PlayGreetingSound` (`0x60c270`) on the clicked unit; its gate is the player's
+    /// ([`crate::sound::NpcGreetingRequest`]).
+    fn greet(&mut self, entity: Entity) {
+        self.greeting
+            .write(crate::sound::NpcGreetingRequest { npc: entity });
     }
 
     /// Any `0x20ff` bit in our last streamed movement word: a direction, turn, pitch or fall.
@@ -966,7 +1091,7 @@ impl Dispatch<'_, '_> {
         }
         // Talk on every taken arm, silent ones too (each arm of `0x5f0130` ends `call
         // 0x60bb30(0)`); the anim's WeaponFlags `0x10` stows a drawn weapon for good.
-        if let Some((_, my_guid, _)) = me {
+        if let Some((_, my_guid)) = me {
             self.gestures
                 .push(my_guid, crate::creature_anim::Gesture::Talk);
         }
@@ -989,7 +1114,21 @@ pub(super) fn act_on_right_click(
     if clicks.read().last().is_none() || vm.own().0.seam.player_is_charmed() {
         return;
     }
-    let owed = vm.turn(|script, (mut dispatch, mut selection)| {
+    let mark = crate::lanes::mark();
+    // The INTERACT leg's select signals inside the click, before the dispatcher
+    // ([`crate::script_calls::ScriptCallHost::engine_select`]).
+    if press.over_object() {
+        let select = {
+            let (mut dispatch, mut selection) = vm.own();
+            interact_select(&mut dispatch, &mut selection, &press)
+        };
+        if let Some(select) = select {
+            vm.engine_select(select, |(mut dispatch, mut selection), owed| {
+                owed.pay(&mut selection, &mut dispatch.seam);
+            });
+        }
+    }
+    let owed = vm.turn(|script, (mut dispatch, _)| {
         // The router's other legs: the world hit walks there (`0x5e0378`), and nothing walks along
         // the ray when the cursor is empty (`0x492d50`).
         if !press.over_object() {
@@ -1006,33 +1145,12 @@ pub(super) fn act_on_right_click(
             }
             return None;
         }
-        interact(&mut dispatch, script, &press, Select::First(&mut selection))
+        interact(&mut dispatch, script, &press)
     });
-    if let Some(owed) = owed {
-        vm.turn(|_, (mut dispatch, _)| owed.run(&mut dispatch));
-    }
-}
-
-/// Where [`interact`] selects its unit, if it does: the world click's entry (`0x492820`) selects
-/// first, whatever leg follows; a nameplate's click made that select already, at the click
-/// ([`select_on_plate_click`]), and the dispatcher runs after the cast it bound; a crate's
-/// [`Interact`] runs the dispatcher alone. The attack leg selects again through StartAttack
-/// (`0x5ecb70`, `SetSelection` at `0x5eccaa`), which finds the unit selected or, after a bind
-/// emptied the cursor's word, selects it.
-enum Select<'a, 'w> {
-    First(&'a mut ResMut<'w, Selection>),
-    Done(&'a mut ResMut<'w, Selection>, scan::CommitOutcome),
-    OnAttack(&'a mut ResMut<'w, Selection>),
-}
-
-impl<'a, 'w> Select<'a, 'w> {
-    fn selection(&mut self) -> &mut ResMut<'w, Selection> {
-        match self {
-            Select::First(selection) | Select::Done(selection, _) | Select::OnAttack(selection) => {
-                selection
-            }
-        }
-    }
+    pay_owed!(vm, owed, mark, |(mut dispatch, mut selection)| (
+        &mut dispatch,
+        &mut selection
+    ));
 }
 
 /// Act on a pick by the cursor's classification of it: a GameObject, a corpse, an attack, loot,
@@ -1046,7 +1164,6 @@ fn interact(
     dispatch: &mut Dispatch,
     script: Option<&mut benilla_ui::script::UiScript>,
     press: &PressPick,
-    mut select: Select,
 ) -> Option<Owed> {
     let (hovered, hovered_object, cursor) = (&press.hovered, &press.object, &press.cursor);
     let walk = dispatch.auto.can_auto_interact();
@@ -1209,37 +1326,6 @@ fn interact(
             ),
         );
     }
-    let me = dispatch.me();
-    let relations = &dispatch.relations;
-    // A mid-combat click on a vendor or corpse switches and stops, never swings (`0x5ecb70`); the
-    // sword, not the fork, as the re-swing also needs the player's own legs.
-    // Deref'd only where it commits: a leg that does not select leaves the change tick alone.
-    let commit = |seam: &mut crate::creature_anim::AttackSeam,
-                  front: &mut super::front::SelectFront,
-                  selection: &mut ResMut<Selection>| {
-        // Both selects are `SelectTarget`'s (`0x492870`, `0x5eccaa`): charmed, or a standing
-        // cursor's bind in its place.
-        if front.takes(entity, guid, seam.slots.targeting()) {
-            return scan::CommitOutcome::default();
-        }
-        let old_latches = scan::latches_on(relations, selection.guid);
-        scan::commit(
-            selection,
-            seam,
-            Some(entity),
-            guid,
-            target,
-            me.is_some_and(|(_, _, e)| e),
-            me.map(|(_, g, _)| g),
-            press.attack(),
-            old_latches,
-        )
-    };
-    let mut outcome = match &mut select {
-        Select::First(selection) => commit(&mut dispatch.seam, &mut dispatch.front, selection),
-        Select::Done(_, done) => *done,
-        Select::OnAttack(_) => scan::CommitOutcome::default(),
-    };
     match unit_branch(attack, dead_fork, leg) {
         UnitBranch::Attack => {
             // `0x60c22b`, past the dead and mounted gates (`0x60c1a1`, `0x60c1bc`) and before
@@ -1264,29 +1350,22 @@ fn interact(
             // TryCast), which this path never reaches. The arm's own returns are the dead and
             // mounted player (`0x60c1a1`, `0x60c1bc`), and StartAttack's the pacified flag and a
             // clear `[0xb4b3e4]` (`0x5ecbaa`, `0x5ecbc0`).
-            let gate = dispatch.seam.start_gate();
-            if refused || gate.refuses() {
-                // refused: the selection stands, no swing, nothing said
-            } else {
-                // StartAttack's own select (`0x5eccaa`), past its gates and before the swing
-                // (`0x5eccfd`): the click's commit, with its stop and re-swing mid-combat. A
-                // unit already selected is its dedupe, and a cursor's bind has emptied the word
-                // by now, so a plate's unit is selected here, ahead of the swing.
-                let second = commit(&mut dispatch.seam, &mut dispatch.front, select.selection());
-                outcome = scan::CommitOutcome {
-                    changed: outcome.changed || second.changed,
-                    swung: outcome.swung || second.swung,
-                };
+            // The cursor's Attack classification is StartAttack's target test.
+            if refused {
+                // The dead and mounted returns fall to the greeter (`0x60c1a8`, `0x60c1bc` →
+                // `0x60c257` → `0x60c270`), whose own gate stops it for a dead player
+                // (`0x60c31d`); no swing, nothing said.
+                dispatch.greet(entity);
+            } else if dispatch
+                .seam
+                .start_head(crate::creature_anim::StartTarget::Attackable)
+            {
                 debug!("right-click attack: {guid:#x}");
-                // `0x5ecb70`'s body through the seam. A commit that stopped and re-swung left
-                // `[+0xc54]` set, so this swing goes out a second time (`0x5eccda`).
-                let engaged = me.is_some_and(|(_, _, e)| e);
-                dispatch.seam.start(
+                return Some(Owed::Attack {
+                    entity,
                     guid,
-                    engaged || outcome.swung,
-                    // The cursor's Attack classification is StartAttack's target test.
-                    crate::creature_anim::StartTarget::Attackable,
-                );
+                    attackable: press.attack(),
+                });
             }
         }
         UnitBranch::Dead(DeadUnitLeg::Loot) => {
@@ -1330,7 +1409,23 @@ fn interact(
         UnitBranch::Dead(DeadUnitLeg::Nothing) => {
             debug!("right-click unit {guid:#x}: dead fork took no leg — nothing sent");
         }
-        UnitBranch::Service => dispatch.talk(script, entity, guid, walk),
+        // `CanInteract` (`0x60c165`): the NPC-service ladder (`0x60c17c`); else the attack arm,
+        // whose `CanAttack` the cursor refused (`0x60c199`), falls to the greeter (`0x60c257`).
+        UnitBranch::Service => {
+            let interacts = match (dispatch.relations.me(), target) {
+                (Some(me), Some(store)) => dispatch
+                    .relations
+                    .get()
+                    .can_interact(&me, &dispatch.relations.unit_of(guid, store)),
+                _ => false,
+            };
+            if interacts {
+                dispatch.talk(script, entity, guid, walk);
+            } else {
+                debug!("right-click unit {guid:#x}: no interaction and no attack — the greeting");
+                dispatch.greet(entity);
+            }
+        }
     }
     None
 }
@@ -1373,20 +1468,14 @@ pub(super) fn act_on_interact(
     }
     // Each its own dispatch, as the reference calls each slot: a leg's owed loot or use is a turn
     // after its store's.
-    let plates: Vec<scan::CommitOutcome> =
-        plate_clicks.read().map(|click| click.selected).collect();
-    for selected in plates {
-        let owed = vm.turn(|script, (mut set, mut selection)| {
-            interact(
-                &mut set.p1(),
-                script,
-                &press,
-                Select::Done(&mut selection, selected),
-            )
-        });
-        if let Some(owed) = owed {
-            vm.turn(|_, (mut set, _)| owed.run(&mut set.p1()));
-        }
+    let plates = plate_clicks.read().count();
+    for _ in 0..plates {
+        let mark = crate::lanes::mark();
+        let owed = vm.turn(|script, (mut set, _)| interact(&mut set.p1(), script, &press));
+        pay_owed!(vm, owed, mark, |(mut set, mut selection)| (
+            &mut set.p1(),
+            &mut selection
+        ));
     }
     let entities: Vec<Entity> = requests.read().map(|&Interact(entity)| entity).collect();
     for entity in entities {
@@ -1406,19 +1495,16 @@ pub(super) fn act_on_interact(
             }
             EntityKind::DynamicObject | EntityKind::Other => continue,
         }
-        let owed = vm.turn(|script, (mut set, mut selection)| {
+        let mark = crate::lanes::mark();
+        let owed = vm.turn(|script, (mut set, _)| {
             (pick.cursor, pick.attack_fork) =
                 cursor_mode::classify(&set.p0(), &pick.hovered, &pick.object);
-            interact(
-                &mut set.p1(),
-                script,
-                &pick,
-                Select::OnAttack(&mut selection),
-            )
+            interact(&mut set.p1(), script, &pick)
         });
-        if let Some(owed) = owed {
-            vm.turn(|_, (mut set, _)| owed.run(&mut set.p1()));
-        }
+        pay_owed!(vm, owed, mark, |(mut set, mut selection)| (
+            &mut set.p1(),
+            &mut selection
+        ));
     }
 }
 
@@ -1731,7 +1817,8 @@ enum UnitBranch {
     Attack,
     /// The dead fork (`0x60bf75`) and its chosen leg; terminal in every variant.
     Dead(DeadUnitLeg),
-    /// The alive branch (`0x60c162`): `CanInteract`, then the NPC-service packet.
+    /// The alive branch (`0x60c162`) off the attack cursor: `CanInteract`, then the NPC-service
+    /// packet, else the greeting.
     Service,
 }
 
@@ -1897,18 +1984,17 @@ pub(crate) fn clear_target_requests(
     mut vm: crate::script_calls::VmWith<(
         ResMut<'static, Selection>,
         crate::creature_anim::AttackSeam<'static, 'static>,
-        Query<'static, 'static, (), (With<Engaged>, With<SelfPlayer>)>,
         // In the set: the host's loot verbs write it.
         MessageReader<'static, 'static, DeselectGuid>,
     )>,
 ) {
     let select = {
-        let (mut selection, mut seam, engaged, mut guid_asks) = vm.own();
+        let (mut selection, mut seam, mut guid_asks) = vm.own();
         if !guid_asks.read().any(|ask| selection.guid == Some(ask.0)) {
             return;
         }
         let before = Standing::of(&selection, &seam);
-        let send = clear_owing(&mut selection, &mut seam, !engaged.is_empty());
+        let send = clear_owing(&mut selection, &mut seam);
         before.owing(scan::Owed { send, swing: None })
     };
     // The teardown signals inside the deselect ([`crate::script_calls::ScriptCallHost::engine_select`]).
@@ -1918,25 +2004,40 @@ pub(crate) fn clear_target_requests(
 }
 
 /// The UI shutdown's own deselect (`0x490bdf` → `SetSelection(0, 0)`), ahead of its
-/// active-player guard, so every shutdown root and a `/reload` drop the target: `true` when one
-/// was selected.
+/// active-player guard, so every shutdown root and a `/reload` drop the target: what its signals
+/// owe when one was selected, for [`signal_ui_shutdown_deselect`].
 pub(crate) fn deselect_on_ui_shutdown(
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
-    engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
     me: Query<&crate::net::ObjectStore, With<SelfPlayer>>,
-) -> bool {
+) -> Option<crate::script_calls::EngineSelect> {
     // A charmed player's `SetSelection` returns at once (`0x493589`-`0x49359c`).
     if me
         .iter()
         .next()
         .is_some_and(|s| s.0.unit_charmed_by().is_some())
     {
-        return false;
+        return None;
     }
-    let had = selection.guid.is_some();
-    deselect(&mut selection, &mut seam, !engaged.is_empty());
-    had
+    selection.guid?;
+    let before = Standing::of(&selection, &seam);
+    let send = deselect_owing(&mut selection, &mut seam);
+    Some(before.owing(scan::Owed { send, swing: None }))
+}
+
+/// The shutdown deselect's signals, in place: its teardown's reports, `PET_BAR_UPDATE` and
+/// `PLAYER_TARGET_CHANGED` (`0x493a73`), each running its listeners there
+/// ([`crate::script_calls::ScriptCallHost::engine_select`]).
+pub(crate) fn signal_ui_shutdown_deselect(
+    In(select): In<crate::script_calls::EngineSelect>,
+    mut vm: crate::script_calls::VmWith<(
+        ResMut<'static, Selection>,
+        crate::creature_anim::AttackSeam<'static, 'static>,
+    )>,
+) {
+    vm.engine_select(select, |(mut selection, mut seam), owed| {
+        owed.pay(&mut selection, &mut seam);
+    });
 }
 
 /// The UI shutdown's `SetSelection(0, 0)` after the world's teardown, with no object manager:
@@ -1957,24 +2058,13 @@ pub(crate) fn clear_selection_on_world_teardown(mut selection: ResMut<Selection>
 pub(crate) struct DeselectGuid(pub(crate) u64);
 
 /// `SetSelection(0,0)` (`0x493540` → `0x4938f3`): the deselect of Esc, a click off and a target's
-/// death, which stamps the outgoing target into the last-target pair before [`clear`]. A no-op
-/// with nothing selected, the setter's dedup.
-pub(super) fn deselect(
-    selection: &mut Selection,
-    seam: &mut crate::creature_anim::AttackSeam,
-    engaged: bool,
-) {
-    if let Some(send) = deselect_owing(selection, seam, engaged) {
-        send.pay(selection, seam);
-    }
-}
-
-/// [`deselect`], owing its send when the teardown signalled ([`scan::OwedSend`]), for a caller
-/// that runs the signal's listeners in place first.
+/// death, which stamps the outgoing target into the last-target pair before its teardown
+/// ([`clear_owing`]), owing its send when the teardown signalled ([`scan::OwedSend`]), for a caller
+/// that runs the signal's listeners in place first. A no-op with nothing selected, the setter's
+/// dedup.
 pub(super) fn deselect_owing(
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
-    engaged: bool,
 ) -> Option<scan::OwedSend> {
     // Charmed returns before the guid test (`0x49359c`), so a deselect is refused too.
     if seam.player_is_charmed() {
@@ -1983,20 +2073,16 @@ pub(super) fn deselect_owing(
     if selection.guid.is_some() {
         selection.last = selection.guid;
     }
-    clear_owing(selection, seam, engaged)
+    clear_owing(selection, seam)
 }
 
 /// Drop the target and send `CMSG_SET_SELECTION` 0 (a no-op with none, `0x493937`): the teardown
 /// `0x493910` with its send, which a despawn and a dead unit's loot close reach without
 /// `SetSelection`, so the last-target pair is left. A guid with no object is torn down alike. When
-/// `engaged`, melee stops too. Weapons stay drawn.
+/// we are attacking, melee stops too. Weapons stay drawn.
 #[cfg(test)]
-pub(super) fn clear(
-    selection: &mut Selection,
-    seam: &mut crate::creature_anim::AttackSeam,
-    engaged: bool,
-) {
-    if let Some(send) = clear_owing(selection, seam, engaged) {
+pub(super) fn clear(selection: &mut Selection, seam: &mut crate::creature_anim::AttackSeam) {
+    if let Some(send) = clear_owing(selection, seam) {
         send.pay(selection, seam);
     }
 }
@@ -2006,7 +2092,6 @@ pub(super) fn clear(
 pub(super) fn clear_owing(
     selection: &mut Selection,
     seam: &mut crate::creature_anim::AttackSeam,
-    engaged: bool,
 ) -> Option<scan::OwedSend> {
     let old = selection.guid.take()?;
     selection.target = None;
@@ -2015,7 +2100,7 @@ pub(super) fn clear_owing(
     // (`0x493a08 call 0x5ecac0`, which also un-queues an on-next-swing strike), calls a
     // possessed unit off (`0x493a0f`-`0x493a18`), then sends (`0x493a2a`).
     seam.close_loot_on(old);
-    seam.stop(engaged);
+    seam.stop();
     if seam.call_pet_off() {
         return Some(scan::OwedSend::Deselect);
     }
@@ -2588,6 +2673,7 @@ mod tests {
         world.insert_resource(NetCommands(tx));
         world.init_resource::<Messages<WorldRightClick>>();
         world.init_resource::<Messages<PlateRightClick>>();
+        world.init_resource::<Messages<crate::sound::NpcGreetingRequest>>();
         world.init_resource::<PressPick>();
         world.init_resource::<Selection>();
         world.init_resource::<crate::spell::SpellTargeting>();
@@ -3343,7 +3429,9 @@ mod tests {
             .query_filtered::<Entity, With<SelfPlayer>>()
             .single(&world)
             .unwrap();
-        world.entity_mut(me).insert(Engaged(OLD));
+        world
+            .entity_mut(me)
+            .insert(crate::creature_anim::Engaged(OLD));
         interact_with(&mut world, wolf);
         let sent: Vec<&str> = rx
             .try_iter()
@@ -3731,6 +3819,96 @@ mod tests {
                 .any(|c| matches!(c, ClientCommand::AttackSwing { .. })),
             "the mounted gate skips StartAttack too"
         );
+    }
+
+    /// The greetings the clicks asked for since the last look.
+    fn greeted(world: &mut World) -> Vec<Entity> {
+        world
+            .resource_mut::<Messages<crate::sound::NpcGreetingRequest>>()
+            .drain()
+            .map(|r| r.npc)
+            .collect()
+    }
+
+    /// The mounted return of the attack arm (`0x60c1bc`) falls to the greeter (`0x60c257` →
+    /// `0x60c270`), which plays when both sides are at least neutral.
+    #[test]
+    fn a_mounted_attack_click_greets_the_unit() {
+        const F_MOUNT: u16 = benilla_protocol::field::FIELD_UNIT_MOUNTDISPLAYID;
+        let (mut world, _vendor, _rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
+        let me = world
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(me).insert(store(&[
+            (F_HEALTH, 100),
+            (F_MAXHEALTH, 100),
+            (F_MOUNT, 14_337),
+        ]));
+        let wolf = world
+            .spawn((
+                Guid(WOLF),
+                store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+                Transform::from_xyz(0.0, 0.0, -2.0),
+            ))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered: Hovered {
+                target: Some(wolf),
+                guid: Some(WOLF),
+                distance: 2.0,
+                ..Hovered::default()
+            },
+            attack_fork: cursor_mode::AttackFork(true),
+            ..PressPick::default()
+        };
+        greeted(&mut world);
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        assert_eq!(greeted(&mut world), vec![wolf]);
+    }
+
+    /// A live unit `CanInteract` refuses (no NPC flags, `0x606845`) and the cursor does not attack
+    /// takes the attack arm, whose `CanAttack` refusal falls to the greeter (`0x60c199` →
+    /// `0x60c257` → `0x60c270`): the greeting, and no service asked.
+    #[test]
+    fn a_click_on_a_unit_with_no_service_greets_it_and_asks_nothing() {
+        let (mut world, _vendor, rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
+        let guard = world
+            .spawn((
+                Guid(WOLF),
+                store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+                Transform::from_xyz(0.0, 0.0, -2.0),
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(WOLF, guard);
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered: Hovered {
+                target: Some(guard),
+                guid: Some(WOLF),
+                distance: 2.0,
+                ..Hovered::default()
+            },
+            ..PressPick::default()
+        };
+        greeted(&mut world);
+        let _ = rx.try_iter().count();
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        assert_eq!(greeted(&mut world), vec![guard]);
+        let sent: Vec<String> = rx
+            .try_iter()
+            .filter(|c| !matches!(c, ClientCommand::SetSelection { .. }))
+            .map(|c| format!("{c:?}"))
+            .collect();
+        assert!(sent.is_empty(), "{sent:?}");
     }
 
     /// The melee row's 80 yd leash (`0x60e652`) refuses with `ERR_AUTOFOLLOW_TOO_FAR` (`0x61110c`);

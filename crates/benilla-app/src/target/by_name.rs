@@ -427,7 +427,7 @@ impl PlayerLookup<'_, '_> {
     }
 }
 
-/// `/target <name>` and the Lua `TargetByName(name, exactMatch)` through [`scan::commit`], the
+/// `/target <name>` and the Lua `TargetByName(name, exactMatch)` through [`scan::commit_owing`], the
 /// stop, select, re-swing path a click takes. `exact` is the Lua second argument, which `0x489d8e`
 /// reads with default 0 as the resolver's exact-only flag (consumed at `0x493cab`). The pick goes
 /// to `SetSelection` as it is (`0x489daa`), so a party member out of range is selected by guid. A
@@ -611,7 +611,7 @@ const UNHELD_SELECT_SOUND: &str = "igCharacterSelect";
 enum OwedSwing {
     Again(scan::OwedSwing),
     Assist { guid: u64 },
-    Tail { guid: u64, engaged: bool },
+    Tail { guid: u64 },
 }
 
 /// What a selecting verb owes after its signals, for its caller to pay once their listeners ran
@@ -643,6 +643,33 @@ impl SelectDebt {
     pub(crate) fn owes_swings(&self) -> bool {
         !self.swings.is_empty()
     }
+
+    /// The debt of StartAttack's own select (`0x5eccaa`), then the rest of StartAttack at `guid`
+    /// past it (`0x5eccaf` on), after the select's signals and its re-swing.
+    pub(crate) fn then_tail(mut self, guid: u64) -> Self {
+        self.swings.push(OwedSwing::Tail { guid });
+        self
+    }
+
+    /// Pay all of it now, for an engine writer whose signals have no listeners to run first:
+    /// nothing ran since its commit, so a re-swing finds the guid it stored.
+    pub(crate) fn pay(
+        self,
+        selection: &mut Selection,
+        seam: &mut crate::creature_anim::AttackSeam,
+    ) {
+        if let Some(send) = self.send {
+            send.pay(selection, seam);
+        }
+        for swing in self.swings {
+            match swing {
+                OwedSwing::Again(owed) => owed.pay(selection, seam, StartTarget::Unheld),
+                OwedSwing::Tail { guid } => seam.start_tail(guid),
+                // The assist tail is a call's alone ([`SelectCommit::assist`]).
+                OwedSwing::Assist { .. } => {}
+            }
+        }
+    }
 }
 
 /// Where [`SelectCommit`] keeps what its verb owes while [`SelectCommit::owing`] runs.
@@ -652,23 +679,14 @@ pub(super) struct Owing {
     debt: SelectDebt,
 }
 
-/// Everything [`scan::commit`], the one `SetSelection` path, needs.
+/// Everything [`scan::commit_owing`], the one `SetSelection` path, needs.
 #[derive(SystemParam)]
 #[allow(clippy::type_complexity)] // one bundled param, the app's convention for big query sets
 pub(crate) struct SelectCommit<'w, 's> {
     pub(super) selection: ResMut<'w, Selection>,
     pub(crate) seam: crate::creature_anim::AttackSeam<'w, 's>,
-    // Our own body: the guid, the store `can_attack` reads, and whether we are mid-swing.
-    me: Query<
-        'w,
-        's,
-        (
-            &'static Guid,
-            Option<&'static ObjectStore>,
-            Has<crate::creature_anim::Engaged>,
-        ),
-        With<SelfPlayer>,
-    >,
+    // Our own body: the guid and the store `can_attack` reads.
+    me: Query<'w, 's, (&'static Guid, Option<&'static ObjectStore>), With<SelfPlayer>>,
     pub(super) stores: Query<'w, 's, &'static ObjectStore>,
     /// The guid to entity map, `0x489a40`'s `0x468460` lookup.
     index: Res<'w, GuidIndex>,
@@ -776,7 +794,7 @@ impl SelectCommit<'_, '_> {
                     self.start_attack(guid);
                 }
             }
-            OwedSwing::Tail { guid, engaged } => self.seam.start_tail(guid, engaged),
+            OwedSwing::Tail { guid } => self.seam.start_tail(guid),
         }
     }
 
@@ -796,15 +814,14 @@ impl SelectCommit<'_, '_> {
     /// at the same guid and is deduped there. The rest is owed past that select's signals while
     /// [`Self::owing`] runs.
     pub(crate) fn start_attack(&mut self, guid: u64) {
-        let engaged = self.engaged();
         let verdict = self.start_target(guid);
-        if !self.seam.start_head(engaged, verdict) {
+        if !self.seam.start_head(verdict) {
             return;
         }
         if let Some(entity) = self.held_unit(guid) {
             self.commit(entity, guid);
         }
-        self.owe(OwedSwing::Tail { guid, engaged });
+        self.owe(OwedSwing::Tail { guid });
     }
 
     /// `StartAttack`'s target legs (`0x5ecc16`, `0x5ecc2e`) on the held object `entity`, `guid`:
@@ -842,17 +859,9 @@ impl SelectCommit<'_, '_> {
         self.owe(OwedSwing::Assist { guid });
     }
 
-    /// Whether we are mid-swing, which a deselect stops.
-    pub(super) fn engaged(&self) -> bool {
-        self.me.single().is_ok_and(|(_, _, engaged)| engaged)
-    }
-
     /// Deselect (`0x493540(0,0)`), a no-op with nothing selected; see [`super::click::clear`].
     pub(super) fn clear(&mut self) {
-        let engaged = self.engaged();
-        if let Some(send) =
-            super::click::deselect_owing(&mut self.selection, &mut self.seam, engaged)
-        {
+        if let Some(send) = super::click::deselect_owing(&mut self.selection, &mut self.seam) {
             self.owe_send(send);
         }
     }
@@ -923,8 +932,7 @@ impl SelectCommit<'_, '_> {
             None,
             guid,
             None,
-            me.is_some_and(|(_, _, engaged)| engaged),
-            me.map(|(g, _, _)| g.0),
+            me.map(|(g, _)| g.0),
             false,
             old_latches,
         );
@@ -936,7 +944,7 @@ impl SelectCommit<'_, '_> {
         }
     }
 
-    /// Select the held object `entity`, `guid`, through [`scan::commit`], unless `SelectTarget`'s
+    /// Select the held object `entity`, `guid`, through [`scan::commit_owing`], unless `SelectTarget`'s
     /// front returns first ([`super::front`]): with the targeting cursor up the unit is bound to the
     /// cast and the selection stays.
     pub(super) fn commit(&mut self, entity: Entity, guid: u64) {
@@ -953,8 +961,7 @@ impl SelectCommit<'_, '_> {
             Some(entity),
             guid,
             self.stores.get(entity).ok(),
-            me.is_some_and(|(_, _, engaged)| engaged),
-            me.map(|(g, _, _)| g.0),
+            me.map(|(g, _)| g.0),
             attackable,
             old_latches,
         );

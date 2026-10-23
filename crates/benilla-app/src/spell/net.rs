@@ -99,7 +99,8 @@ pub(crate) struct Lifecycle<'w> {
 pub(crate) struct Scene<'w, 's> {
     commands: Commands<'w, 's>,
     casting: Query<'w, 's, &'static Casting>,
-    engaged_self: Query<'w, 's, (), (With<crate::creature_anim::Engaged>, With<SelfPlayer>)>,
+    /// Our own entity, whose attack target the queued edits answer.
+    self_player: Query<'w, 's, Entity, With<SelfPlayer>>,
     stores: Query<'w, 's, &'static mut ObjectStore>,
     items: ResMut<'w, crate::items::Items>,
     loot_latch: ResMut<'w, crate::ui_loot::LootLatch>,
@@ -294,11 +295,18 @@ fn on_spell_start(
 }
 
 /// The GO, then its deferred auto-attack start (`0x6e8402` → `0x6131a0` → `0x5ecb70`): StartAttack
-/// with its own select (`0x5eccaa`), which selects the hit unit whatever is selected.
+/// with its own select (`0x5eccaa`), which selects the hit unit whatever is selected and signals
+/// in place, behind the GO's reports, before the swing
+/// ([`crate::script_calls::ScriptCallHost::engine_start_attack`]).
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 fn on_spell_go(
     In(ev): In<SessionEvent>,
-    mut set: ParamSet<((Lifecycle, Scene), crate::target::SelectCommit)>,
+    mut set: ParamSet<(
+        (Lifecycle, Scene),
+        crate::script_calls::VmWith<crate::target::SelectCommit<'static, 'static>>,
+    )>,
 ) {
+    let mark = crate::lanes::mark();
     if let SessionEvent::SpellGo {
         caster,
         spell_id,
@@ -315,7 +323,10 @@ fn on_spell_go(
     {
         let deferred = {
             let (mut l, mut sc) = set.p0();
-            let engaged = !sc.engaged_self.is_empty();
+            let engaged = sc
+                .self_player
+                .single()
+                .is_ok_and(|me| sc.edits.attacking(me));
             spell_go(
                 caster,
                 spell_id,
@@ -359,7 +370,8 @@ fn on_spell_go(
             )
         };
         if let Some(guid) = deferred {
-            set.p1().start_attack(guid);
+            set.p1()
+                .engine_start_attack(guid, mark, |mut commit| commit.start_attack(guid));
         }
     }
 }

@@ -1463,8 +1463,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
             };
             if let Some(key) = refusal {
-                super::tick::verb(lua, |model| model.push_ui_error(key));
-                return Ok(());
+                return super::calls::display_error(lua, key);
             }
             if cursor::click_attach_slot(lua, |model| &mut model.auction_sell_item) {
                 super::tick::verb(lua, |model| {
@@ -2707,5 +2706,22 @@ mod tests {
             "every read asks"
         );
         assert!(s.take_auction_name_asks().is_empty());
+    }
+
+    /// `ClickAuctionSellItemButton`'s refusal shows inside the verb (`0x496720`): the chunk's next
+    /// line reads it.
+    #[test]
+    fn the_sell_slots_refusal_shows_inside_its_call() {
+        use crate::script::ui_errors::shown::seen_in_call;
+        let mut s = UiScript::new().unwrap();
+        let mut bag = crate::script::cursor::two_item_bag();
+        bag.slots.get_mut(&1).unwrap().already_bound = true;
+        s.set_container(0, Some(bag));
+        let (seen, _) = seen_in_call(
+            &mut s,
+            "PickupContainerItem(0, 1) ClickAuctionSellItemButton()",
+        );
+        assert_eq!(seen, "ERR_AUCTION_BOUND_ITEM");
+        assert!(s.take_ui_errors().is_empty(), "nothing waits for the feed");
     }
 }

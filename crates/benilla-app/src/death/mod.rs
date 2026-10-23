@@ -1,6 +1,8 @@
 //! Death and resurrection: the wire-fed stores, the events into the Lua UI and the intents back
 //! to the wire. Dead is health 0 and ghost is `PLAYER_FLAGS` bit 0x10, read off the self
-//! descriptor each frame; `PLAYER_ALIVE` fires on release and on a pre-release res.
+//! descriptor each frame; `PLAYER_DEAD` signals inside our own death's handler
+//! ([`signal_death_state`]) and at a VM's first sight of the body dead, and `PLAYER_ALIVE` on
+//! release and on a pre-release res.
 //! `PLAYER_UNGHOST` is the ghost state's (`0x5de9c0`), signalled where it runs: the ghost bit's
 //! clear ([`crate::field_watch`]) and an alive arrival (`crate::ui_unit`).
 
@@ -41,10 +43,28 @@ pub(crate) struct ResurrectOffer {
     pub(crate) has_timer: bool,
 }
 
+/// The release timer our own death arms (`0x5e99b0`, `0xb4e340` and its no-timer byte
+/// `0xb4e344`), which `GetReleaseTimeRemaining` reads (`0x4962a0`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum ReleaseTimer {
+    /// No death this session armed it.
+    #[default]
+    Unset,
+    /// Released at this real time: the death's time plus 360000 ms (`0x5e9a30` → `0x496250`).
+    At(f64),
+    /// No timer (`0x496280`): `GetReleaseTimeRemaining` answers -1.
+    Off,
+}
+
+/// The release window `0x5e9a30` arms, 0x57e40 ms.
+const RELEASE_WINDOW_SECS: f64 = 360.0;
+
 /// The death state the descriptor does not carry, filled from the wire and cleared at session
 /// teardown.
 #[derive(Resource, Default)]
 pub(crate) struct DeathNet {
+    /// The release timer our last death this session armed.
+    pub(crate) release: ReleaseTimer,
     /// When the corpse becomes reclaimable: `SMSG_CORPSE_RECLAIM_DELAY` anchored at arrival.
     pub(crate) reclaim_at: Option<f64>,
     /// Bumped per `SMSG_CORPSE_RECLAIM_DELAY`: the 1.12 client's handler re-fires the range
@@ -70,6 +90,16 @@ pub(crate) struct DeathNet {
 }
 
 impl DeathNet {
+    /// Our own death's timer, by `PLAYER_FIELD_BYTES` bit 0x8 as the death finds it (`0x5e9a27`):
+    /// armed at `now` plus the window when set, else off.
+    pub(crate) fn arm_release(&mut self, timer_bit: bool, now: f64) {
+        self.release = if timer_bit {
+            ReleaseTimer::At(now + RELEASE_WINDOW_SECS)
+        } else {
+            ReleaseTimer::Off
+        };
+    }
+
     /// Arm the spirit healer's XP-loss question. The reference raises it on the click with no
     /// packet (`0x5df730`), and vmangos also pushes `SMSG_SPIRIT_HEALER_CONFIRM`; both come here.
     pub(crate) fn ask_spirit_healer(&mut self, npc: u64) {
@@ -84,8 +114,8 @@ impl DeathNet {
 struct DeathFeedState {
     /// World-scoped: the last `(guid, dead, ghost)` the self body showed.
     mirror: Option<(u64, bool, bool)>,
-    /// World-scoped: the death edge, anchoring the release window. The wire carries only the
-    /// timer bit; the 1.12 client arms `now + 360000 ms` at its own death edge (`0x5e9a30`).
+    /// World-scoped: when the body was first seen dead, the release window's anchor while no
+    /// death this session armed the timer ([`ReleaseTimer::Unset`]).
     died_at: Option<f64>,
     /// VM-scoped: the announce latches.
     vm: crate::ui_script::VmMemo<DeathAnnounced>,
@@ -119,9 +149,6 @@ enum CorpseRange {
     InInstance,
 }
 
-/// The forced-release window, vmangos `CORPSE_REPOP_TIME` (`Player.h:71`); never on the wire.
-const RELEASE_WINDOW_SECS: f64 = 360.0;
-
 /// The corpse-range dialog radius, 40 yd inclusive: the 1.12 client compares d² ≤ `[0xb4e2ac]`
 /// (1600.0) against the corpse-query position. The server's reclaim gate,
 /// `CORPSE_RECLAIM_RADIUS` 39 (`Corpse.h:40`), sits 1 yd inside it.
@@ -130,63 +157,66 @@ const CORPSE_RANGE_SQ: f32 = 40.0 * 40.0;
 /// The spirit-healer dialog range: `CheckSpiritHealerDist` compares d² ≤ `[0xc4c28c]` (30.864).
 const SPIRIT_HEALER_RANGE_SQ: f32 = 5.5556 * 5.5556;
 
-/// Derive the death state from the self descriptor, push the snapshot, and fire the death events
-/// on its edges.
-fn feed_death(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    self_q: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
-    self_guid: Res<SelfGuid>,
-    death_net: Res<DeathNet>,
+/// What the death snapshot reads ([`DeathView::snapshot`]): the self body, the death stores and
+/// what `HasSoulstone()` walks.
+#[derive(bevy::ecs::system::SystemParam)]
+struct DeathView<'w, 's> {
+    self_q: Query<'w, 's, (&'static ObjectStore, &'static Transform), With<SelfPlayer>>,
+    self_guid: Res<'w, SelfGuid>,
+    death_net: Res<'w, DeathNet>,
     // Real time: `reclaim_at` is stamped on `Time<Real>` by the net path.
-    time: Res<Time<Real>>,
-    mut feed: ResMut<DeathFeedState>,
-    names: Res<crate::names::NameCache>,
-    net: Res<NetCommands>,
-    objects: Objects,
-    transforms: Query<&Transform>,
-    map: Option<Res<benilla_world::world_map::CurrentMap>>,
-    status: Res<crate::net::NetStatus>,
-    spells: Option<Res<Spells>>,
-    items: Res<crate::items::Items>,
-) {
-    hosted_vm.run(|script| {
-        // A disconnect keeps the self avatar with its frozen descriptor; only a live session's
-        // descriptor may drive the state machine.
-        if !status.connected {
-            return;
-        }
-        let Some(script) = script else {
-            return;
-        };
-        let Some(guid) = self_guid.0 else {
-            return;
-        };
-        let Ok((store, self_t)) = self_q.single() else {
-            return;
-        };
-        let now = time.elapsed_secs_f64();
-        let dead = store.0.unit_is_dead();
-        let ghost = store.0.player_is_ghost();
+    time: Res<'w, Time<Real>>,
+    objects: Objects<'w, 's>,
+    transforms: Query<'w, 's, &'static Transform>,
+    status: Res<'w, crate::net::NetStatus>,
+    spells: Option<Res<'w, Spells>>,
+    items: Res<'w, crate::items::Items>,
+}
 
-        // ── The snapshot, set before the events fire so their handlers read current values ──
-        let release_remaining = if store.0.player_release_timer_running() {
-            feed.died_at
-                .map(|t| ((t + RELEASE_WINDOW_SECS - now).max(0.0)) as f32)
-        } else {
-            None // GetReleaseTimeRemaining() == -1, the no-timer DEATH text
+impl DeathView<'_, '_> {
+    /// The live session's self body: its guid, descriptor and place. A disconnect keeps the self
+    /// avatar with its frozen descriptor; only a live session's may drive the state machine.
+    fn body(&self) -> Option<(u64, &ObjectStore, &Transform)> {
+        if !self.status.connected {
+            return None;
+        }
+        let guid = self.self_guid.0?;
+        let (store, self_t) = self.self_q.single().ok()?;
+        Some((guid, store, self_t))
+    }
+
+    /// The snapshot the death verbs read, pushed before an event fires so its handlers read
+    /// current values. `died_at` anchors the release window while no death armed it.
+    fn snapshot(
+        &self,
+        script: &UiScript,
+        store: &ObjectStore,
+        self_t: &Transform,
+        died_at: Option<f64>,
+    ) -> DeathUiState {
+        let now = self.time.elapsed_secs_f64();
+        let death_net = &self.death_net;
+        let release_remaining = match death_net.release {
+            ReleaseTimer::At(at) => Some((at - now).max(0.0) as f32),
+            ReleaseTimer::Off => None, // GetReleaseTimeRemaining() == -1, the no-timer DEATH text
+            // No death this session armed it (dead at login): the window from the first sight
+            // of the body dead, while the bit is set.
+            ReleaseTimer::Unset if store.0.player_release_timer_running() => {
+                died_at.map(|t| ((t + RELEASE_WINDOW_SECS - now).max(0.0)) as f32)
+            }
+            ReleaseTimer::Unset => None,
         };
         let recovery_delay = death_net
             .reclaim_at
             .map_or(0.0, |at| (at - now).max(0.0) as f32);
         let spirit_healer_in_range = death_net.spirit_healer.is_some_and(|npc| {
-            objects
+            self.objects
                 .entity(npc)
-                .and_then(|e| transforms.get(e).ok())
+                .and_then(|e| self.transforms.get(e).ok())
                 .is_some_and(|t| {
                     t.translation.distance_squared(self_t.translation) <= SPIRIT_HEALER_RANGE_SQ
                 })
         });
-        // Resolved first: the lookup borrows the VM that `set_death` needs mutably.
         let sickness = sickness_duration(store.0.unit_level().unwrap_or(0), &|key: &str| {
             script
                 .lua()
@@ -195,7 +225,7 @@ fn feed_death(
                 .ok()
                 .filter(|t| !t.is_empty())
         });
-        script.set_death(DeathUiState {
+        DeathUiState {
             release_remaining,
             recovery_delay,
             resurrect_sickness: death_net.resurrect.as_ref().is_some_and(|o| o.sickness),
@@ -203,9 +233,42 @@ fn feed_death(
             spirit_healer_in_range,
             sickness_duration: sickness,
             // `HasSoulstone()`; the dead gate is first, so the inventory walk runs only while dead.
-            self_res_label: resolve_self_res(&store.0, &objects, &items, spells.as_deref())
-                .map(|r| r.label().to_owned()),
-        });
+            self_res_label: resolve_self_res(
+                &store.0,
+                &self.objects,
+                &self.items,
+                self.spells.as_deref(),
+            )
+            .map(|r| r.label().to_owned()),
+        }
+    }
+}
+
+/// Derive the death state from the self descriptor, push the snapshot, and fire the death events
+/// on its edges.
+fn feed_death(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    view: DeathView,
+    mut feed: ResMut<DeathFeedState>,
+    names: Res<crate::names::NameCache>,
+    net: Res<NetCommands>,
+    map: Option<Res<benilla_world::world_map::CurrentMap>>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let Some((guid, store, self_t)) = view.body() else {
+            return;
+        };
+        let death_net = &view.death_net;
+        let now = view.time.elapsed_secs_f64();
+        let dead = store.0.unit_is_dead();
+        let ghost = store.0.player_is_ghost();
+
+        // ── The snapshot, set before the events fire so their handlers read current values ──
+        let snapshot = view.snapshot(script, store, self_t, feed.died_at);
+        script.set_death(snapshot);
 
         // ── The world edges: the release window and the corpse asks, which a `/reload` must not
         // repeat.
@@ -253,7 +316,7 @@ fn feed_death(
             &net,
         );
         if let Some(name) =
-            offer_announcement(memo, &death_net, store.0.is_dead_or_ghost(), |offer| {
+            offer_announcement(memo, death_net, store.0.is_dead_or_ghost(), |offer| {
                 // A player caster's name is empty on the wire; hold the popup until the cache
                 // resolves it.
                 if offer.name.is_empty() {
@@ -318,6 +381,44 @@ fn feed_death(
             memo.corpse_range = range;
         }
     })
+}
+
+/// `SignalDeathState 0x495850`, where our own death's `PresentUnitDeath` ends (`0x6251cc`, for
+/// the active player alone, `0x5fa6d0` at `0x6251c2`): with our health 0 or less (`jg` at
+/// `0x495876`) `PLAYER_DEAD` (`0x113`, `0x49587d`), its handlers reading the timer the death armed,
+/// then `ClearCursor(1, 1)` (`0x495889` → `0x495190`); else `PLAYER_ALIVE` (`0x112`, `0x495893`).
+/// The VM's memo takes the state, so the feed signals no edge of it again.
+fn signal_death(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    view: DeathView,
+    mut feed: ResMut<DeathFeedState>,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let Some((guid, store, self_t)) = view.body() else {
+            return;
+        };
+        let snapshot = view.snapshot(script, store, self_t, feed.died_at);
+        script.set_death(snapshot);
+        let memo = feed.vm.get(script);
+        memo.last = Some((guid, store.0.unit_is_dead(), store.0.player_is_ghost()));
+        if store.0.unit_health().unwrap_or(0) as i32 <= 0 {
+            script.fire_event("PLAYER_DEAD", vec![]);
+            script.clear_cursor_payload();
+        } else {
+            script.fire_event("PLAYER_ALIVE", vec![]);
+        }
+    });
+}
+
+/// [`signal_death`] in place, from our own death's handler (`crate::target`'s `died`).
+pub(crate) fn signal_death_state(world: &mut World) {
+    if let Err(e) = world.run_system_cached(signal_death) {
+        // A harness without the death state signals nothing.
+        debug!("death: the death state was not signalled: {e}");
+    }
 }
 
 /// `SPELL_EFFECT_SELF_RESURRECT`, the `Spell.dbc` effect the item leg scans for (`0x5ed650`).
@@ -1197,10 +1298,21 @@ mod tests {
     }
 }
 
+/// Run the death feed once on `world`, for a test of what it pushes.
+#[cfg(test)]
+pub(crate) fn run_feed_death_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(feed_death)
+        .expect("the death feed runs");
+}
+
 /// The body's VM events between the last `(dead, ghost)` seen, if any, and this one.
 fn fire_vm_edges(script: &mut UiScript, prev: Option<(bool, bool)>, dead: bool, ghost: bool) {
     match (prev, dead, ghost) {
-        (Some((false, false)) | None, true, false) => {
+        // A VM's first sight of the body dead: logging in or reloading dead. A death seen alive
+        // signals inside its handler ([`signal_death_state`]).
+        (None, true, false) => {
             script.fire_event("PLAYER_DEAD", vec![]);
         }
         (Some((true, false)), d, g) if g || !d => {

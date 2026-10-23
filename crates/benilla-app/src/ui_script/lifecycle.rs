@@ -814,7 +814,8 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
         // A harness without the target stack has no selection to drop.
         let deselected =
             crate::script_calls::run_cached(world, crate::target::deselect_on_ui_shutdown)
-                .unwrap_or(false);
+                .ok()
+                .flatten();
         // The teardown's own loot close, on a window looting the target (`0x493959`-`0x493974`).
         let loot_closed = looting.is_some()
             && world
@@ -824,14 +825,11 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
         if loot_closed {
             let _ = crate::script_calls::run_cached(world, crate::ui_loot::tell_loot_closed);
         }
-        if deselected {
-            crate::script_calls::with_hosted_vm(world, |script| {
-                if let Some(script) = script {
-                    script.set_unit("target", None);
-                    script.set_unit("targettarget", None);
-                    script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-                }
-            });
+        // Then its signals, in place, after the loot close (`0x493a2a`, `0x493a73`).
+        if let Some(select) = deselected {
+            let _ =
+                world.run_system_cached_with(crate::target::signal_ui_shutdown_deselect, select);
+            crate::creature_anim::apply_unit_edits(world);
         }
     } else {
         let _ = crate::script_calls::run_cached(
@@ -977,6 +975,8 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;
     }
+    // And the signals the frame's deaths parked in it, for the deaths lane.
+    crate::target::drop_parked_deaths(world);
 }
 
 /// A `ReloadUI()` waiting to run: set when [`crate::ui_logout`] drains
@@ -1730,9 +1730,32 @@ mod tests {
         World,
         crossbeam_channel::Receiver<crate::net::ClientCommand>,
     ) {
+        front_world_in(World::new(), seated, charmed)
+    }
+
+    /// [`front_world`] on the whole client's world, headless, whose host the head's deselect
+    /// lends its signals.
+    fn hosted_front_world(
+        seated: bool,
+        charmed: bool,
+    ) -> (
+        World,
+        crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    ) {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        front_world_in(std::mem::take(app.world_mut()), seated, charmed)
+    }
+
+    fn front_world_in(
+        mut world: World,
+        seated: bool,
+        charmed: bool,
+    ) -> (
+        World,
+        crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    ) {
         use benilla_protocol::messages::ObjectFields;
         let (tx, rx) = crossbeam_channel::unbounded();
-        let mut world = World::new();
         world.insert_resource(crate::net::NetCommands(tx));
         world.init_resource::<crate::target::Selection>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
@@ -1787,7 +1810,7 @@ mod tests {
     #[test]
     fn a_reload_drops_the_target_loudly_ends_the_follow_then_sweeps() {
         use crate::net::ClientCommand;
-        let (mut world, rx) = front_world(true, false);
+        let (mut world, rx) = hosted_front_world(true, false);
         assert!(run_shutdown_front(&mut world, ShutdownRoot::Reload));
         assert_eq!(
             front_seen(&world),
@@ -1812,6 +1835,37 @@ mod tests {
         );
         assert_eq!(world.resource::<crate::target::Selection>().guid, None);
         assert_eq!(world.resource::<crate::player::FollowState>().guid, None);
+    }
+
+    /// The `/reload` head's deselect signals in place: its teardown's StopAttack (`0x493a08`)
+    /// cancels a queued strike (`0x5ecb63` → `0x6e6f30`), whose stop reports after the loot close
+    /// (`0x493959`) and ahead of `PLAYER_TARGET_CHANGED` (`0x493a73`).
+    #[test]
+    fn a_reload_reports_its_strike_cancel_before_the_target_change() {
+        let (mut world, _rx) = hosted_front_world(true, false);
+        world.insert_non_send_resource(crate::ui_script::sweep_test::spied_vm(&[
+            "LOOT_CLOSED",
+            "SPELLCAST_STOP",
+            "PLAYER_TARGET_CHANGED",
+        ]));
+        let me = world
+            .query_filtered::<Entity, With<crate::net::SelfPlayer>>()
+            .single(&world)
+            .unwrap();
+        world
+            .entity_mut(me)
+            .insert(crate::creature_anim::Engaged(CORPSE));
+        world
+            .resource_mut::<crate::spell::QueuedMeleeSpell>()
+            .arm(78);
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .fill_record();
+        run_shutdown_front(&mut world, ShutdownRoot::Reload);
+        assert_eq!(
+            front_seen(&world),
+            ["LOOT_CLOSED", "SPELLCAST_STOP", "PLAYER_TARGET_CHANGED"]
+        );
     }
 
     /// A charmed player's `SetSelection` is a no-op (`0x493589`-`0x49359c`): a `/reload` keeps

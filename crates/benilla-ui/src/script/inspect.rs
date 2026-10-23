@@ -151,9 +151,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(_) => None,
             };
             if let Some(key) = refusal {
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .push_ui_error(key);
+                super::calls::display_error(lua, key)?;
             }
             let ok = reach.is_some_and(|r| r.inspectable && in_inspect_range(&r));
             Ok(if ok { Value::Integer(1) } else { Value::Nil })
@@ -394,5 +392,16 @@ mod tests {
         assert!(!answers(&s, r#"CheckInteractDistance("party2", 4)"#));
         assert!(!answers(&s, r#"CheckInteractDistance("", 4)"#));
         assert!(s.take_ui_errors().is_empty());
+    }
+
+    /// `CanInspect`'s refusal shows through `0x496720` before the answer: the chunk's next line
+    /// reads it.
+    #[test]
+    fn can_inspects_refusal_shows_inside_its_call() {
+        use crate::script::ui_errors::shown::seen_in_call;
+        let mut s = UiScript::new().unwrap();
+        let (seen, _) = seen_in_call(&mut s, r#"CanInspect("target")"#);
+        assert_eq!(seen, "ERR_UNIT_NOT_FOUND");
+        assert!(s.take_ui_errors().is_empty(), "nothing waits for the feed");
     }
 }

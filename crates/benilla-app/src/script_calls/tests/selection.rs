@@ -461,13 +461,15 @@ fn a_switch_to_a_friend_while_swinging_stops_again() {
 
 /// StartAttack selects its target (`0x5ecca0`-`0x5eccaa` → `0x493540`) after the stand and before
 /// the swing: the attack a stealth opener defers to its `SMSG_SPELL_GO` (`0x6e8402` → `0x6131a0`
-/// → `0x5ecb70`) selects the GO's first hit, whatever is selected, then swings at it.
+/// → `0x5ecb70`) selects the GO's first hit, whatever is selected, and its `PLAYER_TARGET_CHANGED`
+/// (`0x49389c`) runs its listeners before the swing (`0x5ecd3c`).
 #[test]
 fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
     const BACKSTAB: u32 = 53;
     let mut f = frame(true);
     spawn_mob(&mut f, &[]);
     swinging_at_old(&mut f);
+    on_target_changed(&mut f, "RandomRoll(1, 100)");
     let world = f.app.world_mut();
     let me = world.resource::<GuidIndex>().0[&ME];
     world
@@ -510,7 +512,10 @@ fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
         }],
     );
     assert_eq!(selected(&f), Some(MOB));
-    assert_eq!(attack_wire(&f), ["SetSelection 0x31", "AttackSwing 0x31"]);
+    assert_eq!(
+        attack_wire(&f),
+        ["SetSelection 0x31", "RandomRoll", "AttackSwing 0x31"]
+    );
 }
 
 /// The wire a pick and what follows it send, in order: selections, rolls, Sinister Strike's casts
@@ -863,4 +868,35 @@ fn a_unit_casters_pick_signals_its_target_change_before_the_cast_and_the_order()
             "PetAction 0x31"
         ]
     );
+}
+
+/// A queued on-next-swing strike in the in-flight slot, Heroic Strike's.
+fn queue_strike(f: &mut Frame) {
+    let world = f.app.world_mut();
+    world
+        .resource_mut::<crate::spell::QueuedMeleeSpell>()
+        .arm(78);
+    world
+        .resource_mut::<crate::spell::PendingCast>()
+        .fill_record();
+}
+
+/// A deselect while swinging runs StopAttack in its teardown (`0x493a08`), whose next-swing
+/// cancel (`0x5ecb63` → `0x6e6f30`) reports the strike's stop there, ahead of the release's
+/// `PLAYER_TARGET_CHANGED` (`0x493a73`).
+#[test]
+fn a_teardowns_strike_cancel_reports_before_the_target_change() {
+    let mut f = frame(true);
+    swinging_at_old(&mut f);
+    queue_strike(&mut f);
+    run(
+        &mut f,
+        r#"ORDER = {}
+        local r = CreateFrame("Frame")
+        r:RegisterEvent("SPELLCAST_STOP")
+        r:RegisterEvent("PLAYER_TARGET_CHANGED")
+        r:SetScript("OnEvent", function() table.insert(ORDER, event) end)"#,
+    );
+    run(&mut f, r#"ClearTarget() SEEN = table.concat(ORDER, ",")"#);
+    assert_eq!(seen(&mut f), "SPELLCAST_STOP,PLAYER_TARGET_CHANGED");
 }

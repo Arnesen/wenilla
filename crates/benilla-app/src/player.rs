@@ -97,7 +97,7 @@ pub(crate) use approach::{
     Refused, Subject, RANGE_STOP_FRACTION, TALK_STOP,
 };
 /// `SetStandState` run inside a script call.
-pub(crate) use posture::StandSetter;
+pub(crate) use posture::{stand_up_for_attack, stand_up_refused, StandSetter};
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
@@ -156,12 +156,15 @@ pub(crate) const UNIT_FLAG_TAXI_FLIGHT: u32 = 0x0010_0000;
 
 /// A stand-state request for [`posture`]'s one setter, the client's `SetStandState` (`0x5ed430`:
 /// send `CMSG_STANDSTATECHANGE` and apply locally through `0x6127b0`), made where no call runs it
-/// at once: the attack's stand, the idle sit, the approach's stand. A script call runs the setter
-/// inside the call ([`StandSetter`]). States are `UnitStandStateType`: 0 stand, 1 sit, 3 sleep, 8
-/// kneel.
+/// at once: the idle sit, the approach's stand, and the attack's stand, whose packet goes out in
+/// place ([`stand_up_for_attack`]). A script call runs the setter inside the call
+/// ([`StandSetter`]). States are `UnitStandStateType`: 0 stand, 1 sit, 3 sleep, 8 kneel.
 #[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
 pub(crate) struct StandStateRequest {
     pub(crate) state: u8,
+    /// The packet went out where the request was made, past the gate: the setter owes the local
+    /// apply alone.
+    pub(crate) sent: bool,
 }
 
 /// `SMSG_STANDSTATE_UPDATE` for our body (the eat and drink sit, the stand on damage), applied by
@@ -175,24 +178,38 @@ pub(crate) struct ServerStandState {
 /// The active player, whichever body is driven: what the posture verbs read and act on, as the
 /// stand-state setter `0x5ed430` and the sheathe toggle `0x5eb480` each refuse any unit but the
 /// active player (`0x5ed46c`, `0x5eb4ba`). Its entity, its driver and committed sheath state, its
-/// descriptor, its attack target, its hands, its precast, and whether it is the driven body.
-pub(super) type SelfPosture<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        Option<(
-            &'static crate::creature_anim::AnimDriver,
-            &'static crate::creature_anim::CommittedSheath,
-        )>,
-        Option<&'static crate::net::ObjectStore>,
-        Has<crate::creature_anim::Engaged>,
-        Option<&'static crate::creature_anim::Wielded>,
-        Has<crate::creature_anim::Precast>,
-        Has<Embodied>,
-    ),
-    (With<crate::net::SelfPlayer>, Without<FlyCam>),
->;
+/// descriptor, its hands and whether it is the driven body; its attack target (`[+0xc48]`) and
+/// precast as the queued unit edits leave them, since the controller runs ahead of the VM pass's
+/// end, which applies them.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct SelfPosture<'w, 's> {
+    me: Query<'w, 's, SelfPostureRow, (With<crate::net::SelfPlayer>, Without<FlyCam>)>,
+    edits: Option<Res<'w, crate::creature_anim::UnitEdits>>,
+}
+
+/// What [`SelfPosture`] reads off the active player's own components.
+type SelfPostureRow = (
+    Entity,
+    Option<(
+        &'static crate::creature_anim::AnimDriver,
+        &'static crate::creature_anim::CommittedSheath,
+    )>,
+    Option<&'static crate::net::ObjectStore>,
+    Option<&'static crate::creature_anim::Wielded>,
+    Has<Embodied>,
+);
+
+impl SelfPosture<'_, '_> {
+    /// The active player's row: entity, driver and committed sheath, descriptor, attacking, hands,
+    /// precast and driven.
+    pub(super) fn single(&self) -> Option<posture::SelfPostureItem<'_>> {
+        let (e, anim, store, wielded, embodied) = self.me.single().ok()?;
+        let edits = self.edits.as_deref();
+        let engaged = edits.is_some_and(|edits| edits.attacking(e));
+        let precast = edits.is_some_and(|edits| edits.precast(e).is_some());
+        Some((e, anim, store, engaged, wielded, precast, embodied))
+    }
+}
 
 /// The body we drive: our own avatar, or a possessed creature. Everything reads its pivot, speeds,
 /// scale and descriptor off the entity, so a creature needs nothing special.
@@ -210,7 +227,6 @@ pub(super) type BodyQuery<'w, 's> = Query<
             &'static crate::creature_anim::CommittedSheath,
         )>,
         Option<&'static crate::net::ObjectStore>,
-        Has<crate::creature_anim::Engaged>,
         Option<&'static crate::net::UnitSpeeds>,
         Option<&'static mut BodyTwist>,
         // Both hands and the ranged slot, for the `Z` toggle's cycle (the reference's

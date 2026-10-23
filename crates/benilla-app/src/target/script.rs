@@ -106,7 +106,6 @@ impl ScriptSelect<'_, '_> {
         mode: benilla_ui::script::NearestMode,
         reverse: bool,
     ) -> SelectDebt {
-        let engaged = self.commit.engaged();
         let now = self.time.elapsed_secs_f64();
         let (scan, history) = (&self.scan, &mut self.history);
         self.commit.owing(|commit| {
@@ -119,7 +118,6 @@ impl ScriptSelect<'_, '_> {
                 &mut commit.selection,
                 &mut commit.seam,
                 &mut commit.front,
-                engaged,
             );
             commit.owe_all(owed);
         })
@@ -156,6 +154,12 @@ impl ScriptSelect<'_, '_> {
     #[cfg(test)]
     pub(crate) fn pay_now(&mut self, debt: SelectDebt) {
         self.commit.pay_now(debt);
+    }
+
+    /// StartAttack (`0x5ecb70`) at `guid` from an engine writer, its own select (`0x5eccaa`)
+    /// owing the swing past its signals ([`SelectCommit::start_attack`]).
+    pub(crate) fn start_attack(&mut self, guid: u64) -> SelectDebt {
+        self.commit.owing(|commit| commit.start_attack(guid))
     }
 
     /// `ClearTarget()` (`0x489ff0`): deselect whatever the calls before it left selected.

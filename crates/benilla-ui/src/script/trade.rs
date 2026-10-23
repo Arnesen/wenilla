@@ -227,23 +227,29 @@ impl super::UiScript {
 
     /// `SetTradePartner`'s open leg for a trade we started by dropping coins (`0x4bf5fe`-
     /// `0x4bf61c`): the offer becomes offer plus the held coins through `0x5d4500` when the purse
-    /// covers it, and `ClearCursor(1,0)` drops them with no `PLAYER_MONEY` of its own. The new
-    /// offer, for the app's send; `None` with no coins held or a purse short of the total, which
-    /// leaves the cursor as it is.
+    /// covers it. The new offer, for the app's send, the coins still held for
+    /// [`Self::trade_open_money_clear`]; `None` with no coins held or a purse short of the total,
+    /// which leaves the cursor as it is.
     pub fn trade_open_money(&mut self) -> Option<u32> {
         super::tick::verb(&self.lua, |model| {
             let total = cursor::money::trade_money_total(model)?;
             cursor::money::set_own_offer(model, total);
-            cursor::clear(model, cursor::Clear::NO_MONEY_EVENT);
             Some(total)
         })
     }
 
+    /// The coins' leg past its send: `ClearCursor(1, 0)` (`0x4bf61c`) drops them with no
+    /// `PLAYER_MONEY` of its own.
+    pub fn trade_open_money_clear(&mut self) {
+        super::tick::verb(&self.lua, |model| {
+            cursor::clear(model, cursor::Clear::NO_MONEY_EVENT);
+        });
+    }
+
     /// `SetTradePartner`'s open leg for a trade we started by dropping an item (`0x4bf652`-
-    /// `0x4bf6fa`): a bound item (`0x5da2c0`) goes to slot 7, any other to slot 1; the cursor is
-    /// cleared keeping the lock (`ClearCursor(0,1)`, `0x4bf6ca`) and the slot stored with no
-    /// signal of its own, `TRADE_SHOW` repainting the window. The placement, for the app's send,
-    /// whose answer the leg ignores (`0x4bf6be`).
+    /// `0x4bf6be`): a bound item (`0x5da2c0`) goes to slot 7, any other to slot 1. The placement,
+    /// for the app's send, whose answer the leg ignores (`0x4bf6be`), the item still held for
+    /// [`Self::trade_open_item_store`].
     pub fn trade_open_item(&mut self) -> Option<TradeOpenItem> {
         super::tick::verb(&self.lua, |model| {
             let Some(CursorPayload::Item(item)) = model.cursor.clone() else {
@@ -255,6 +261,27 @@ impl super::UiScript {
                 return None;
             }
             let slot = if held_bound(model, &item) { 6 } else { 0 };
+            Some(TradeOpenItem {
+                slot: slot as u8,
+                guid: item.guid,
+                bag: item.bag,
+                bag_slot: item.slot,
+            })
+        })
+    }
+
+    /// The item's leg past its send (`0x4bf6ca`-`0x4bf6fa`): the cursor cleared keeping the lock
+    /// (`ClearCursor(0, 1)`) and the slot stored with no signal of its own, `TRADE_SHOW`
+    /// repainting the window.
+    pub fn trade_open_item_store(&mut self, held: &TradeOpenItem) {
+        super::tick::verb(&self.lua, |model| {
+            let Some(CursorPayload::Item(item)) = model.cursor.clone() else {
+                return;
+            };
+            if item.guid != held.guid {
+                return;
+            }
+            let slot = usize::from(held.slot);
             let row = trade_slot_item(model, &item);
             cursor::clear(model, cursor::Clear::KEEP_LOCK);
             model.trade_offered[slot] = Some(cursor::CursorItem {
@@ -264,13 +291,7 @@ impl super::UiScript {
             if let Some(trade) = model.trade.as_mut() {
                 trade.player.slots[slot] = Some(row);
             }
-            Some(TradeOpenItem {
-                slot: slot as u8,
-                guid: item.guid,
-                bag: item.bag,
-                bag_slot: item.slot,
-            })
-        })
+        });
     }
 
     /// `0x4bfc50`, which `DropItemOnUnit` runs on our open trade partner (`0x48da50`): the held
@@ -558,8 +579,7 @@ fn click_trade_button(lua: &Lua, id: i32) -> mlua::Result<()> {
             }
         };
         if let Some(key) = refusal {
-            super::tick::verb(lua, |model| model.push_ui_error(key));
-            return Ok(());
+            return super::calls::display_error(lua, key);
         }
     }
     // A slot outside the seven reads as empty (`0x4bffc5`-`0x4c0001`).
@@ -1867,5 +1887,20 @@ mod tests {
         // A non-number raises the binding's usage.
         let err = s.run("ClickTradeButton('x')").unwrap_err().to_string();
         assert!(err.contains("Usage: ClickTradeButton(index)"), "{err}");
+    }
+
+    /// `ClickTradeButton`'s refusal of a held item shows inside the verb (`0x496720`): the chunk's
+    /// next line reads it.
+    #[test]
+    fn a_trade_slots_refusal_shows_inside_its_call() {
+        use crate::script::ui_errors::shown::seen_in_call;
+        let mut s = UiScript::new().unwrap();
+        s.open_trade_window();
+        let mut bag = crate::script::cursor::two_item_bag();
+        bag.slots.get_mut(&1).unwrap().already_bound = true;
+        s.set_container(0, Some(bag));
+        let (seen, _) = seen_in_call(&mut s, "PickupContainerItem(0, 1) ClickTradeButton(1)");
+        assert_eq!(seen, "ERR_TRADE_BOUND_ITEM");
+        assert!(s.take_ui_errors().is_empty(), "nothing waits for the feed");
     }
 }
