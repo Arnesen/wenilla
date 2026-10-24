@@ -1,7 +1,8 @@
 //! The `Unit*` bindings. The app pushes each token's [`UnitState`] every frame through
 //! [`UiScript::set_unit`], and the units a `target` chain ends on by guid through
 //! [`UiScript::set_unit_by_guid`]; the globals read that plain data, which keeps this crate free of
-//! the ECS. Every predicate answers the number `1` or nil, never a Lua boolean.
+//! the ECS, and a held unit's own descriptor fields off its object through the lent host
+//! ([`read_object`]). Every predicate answers the number `1` or nil, never a Lua boolean.
 
 use mlua::Lua;
 
@@ -269,7 +270,16 @@ pub fn unit_is_grey(player_level: u32, unit_level: u32) -> bool {
 /// `UnitReaction` <= 2 here) and grey to it (`0x5f0700`, `0x6125a6`). The tooltip's CIVILIAN line
 /// and `UnitPVPName`'s civilian prefix (`0x609370`) both read it.
 pub fn is_civilian_kill(u: &UnitState, player_level: u32) -> bool {
-    u.civilian && u.pvp && u.reaction != 0 && u.reaction <= 2 && unit_is_grey(player_level, u.level)
+    civilian_kill_of(u, u, player_level)
+}
+
+/// [`is_civilian_kill`] with the PvP flag and the level off `object`.
+fn civilian_kill_of(u: &UnitState, object: &dyn UnitObjectRead, player_level: u32) -> bool {
+    u.civilian
+        && object.pvp()
+        && u.reaction != 0
+        && u.reaction <= 2
+        && unit_is_grey(player_level, object.level())
 }
 
 /// The tooltip's "??" level gate (`0x529fe0`): level 0, or [`level_is_hidden`].
@@ -282,8 +292,13 @@ pub fn level_reads_unknown(u: &UnitState, player_level: u32) -> bool {
 /// `UnitReaction` <= 2 here) at least 10 levels above the player, players among them, since
 /// neither path tests the unit's type; and world-boss rank 3 (`0x51807d`-`0x518087`, `0x52a373`).
 pub fn level_is_hidden(u: &UnitState, player_level: u32) -> bool {
+    level_is_hidden_at(u, u.level, player_level)
+}
+
+/// [`level_is_hidden`] at `level`, the one read off the unit's object.
+fn level_is_hidden_at(u: &UnitState, level: u32, player_level: u32) -> bool {
     let much_higher_hostile =
-        u.reaction != 0 && u.reaction <= 2 && u.level >= player_level.saturating_add(10);
+        u.reaction != 0 && u.reaction <= 2 && level >= player_level.saturating_add(10);
     u.rank == 3 || much_higher_hostile
 }
 
@@ -571,7 +586,7 @@ pub(crate) fn check_unit_token(token: &Option<String>) -> mlua::Result<()> {
 }
 
 /// Map a token's snapshot through `f` under a short model borrow, or answer `default` for an
-/// absent unit, after the token check.
+/// absent unit, after the token check: a getter that reads nothing of the object ([`with_object`]).
 fn with_unit<T>(
     lua: &Lua,
     token: &Option<String>,
@@ -586,6 +601,49 @@ fn with_unit<T>(
     })
 }
 
+/// [`read_object`] on `token`, or `default` for an absent unit, after the token check.
+fn with_object<T>(
+    lua: &Lua,
+    token: &Option<String>,
+    default: T,
+    f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> T,
+) -> mlua::Result<T> {
+    check_unit_token(token)?;
+    Ok(token
+        .as_deref()
+        .and_then(|t| read_object(lua, t, f))
+        .unwrap_or(default))
+}
+
+/// The unit `token` names, mapped through `f` with its snapshot and its object; `None` for no
+/// unit. The token resolves through the snapshots ([`Model::unit`]); `f` then reads each of the
+/// object's own fields it answers off the object the lent host holds, as the reference's getters
+/// read the object they resolved (`UnitHealth`, `0x5174d0`), and anything else off the snapshot.
+/// With no host free to ask (a glue VM, or a call's apply under way), or no object held, the
+/// snapshot answers both.
+pub(crate) fn read_object<T>(
+    lua: &Lua,
+    token: &str,
+    f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> T,
+) -> Option<T> {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let unit = model.unit(token)?;
+    let mut f = Some(f);
+    let mut out = None;
+    if unit.has_object && unit.guid != 0 {
+        super::host::read_host(lua, |h| {
+            h.read_unit_object(unit.guid, &mut |object| {
+                out = f.take().map(|f| f(unit, object));
+            })
+        });
+    }
+    match (out, f) {
+        (Some(out), _) => Some(out),
+        (None, Some(f)) => Some(f(unit, unit)),
+        (None, None) => None,
+    }
+}
+
 /// A unit predicate's body: the number 1 or nil through [`super::binding_abi::flag`], never a Lua
 /// boolean, as the reference pushes only `lua_pushnumber` (`0x6f3810`) or `lua_pushnil`
 /// (`0x6f37f0`). `UnitReaction`, `UnitLevel` and `UnitPowerType` are getters with their own
@@ -598,11 +656,21 @@ fn unit_predicate(
     Ok(super::binding_abi::flag(with_unit(lua, token, false, f)?))
 }
 
+/// [`unit_predicate`] for a predicate on the object's own fields ([`with_object`]).
+fn object_predicate(
+    lua: &Lua,
+    token: &Option<String>,
+    f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> bool,
+) -> mlua::Result<mlua::Value> {
+    Ok(super::binding_abi::flag(with_object(lua, token, false, f)?))
+}
+
 /// The `Unit*` and `GetQuestGreenRange` registrations.
 mod bindings;
 pub mod by_name;
 #[cfg(test)]
 mod chain_tests;
+mod object;
 mod relations;
 mod resolve;
 #[cfg(test)]
@@ -610,6 +678,7 @@ mod selection_tests;
 #[cfg(test)]
 mod tests;
 
+pub use object::{UnitObject, UnitObjectRead};
 pub use relations::UnitRelations;
 pub use resolve::{parse_unit_token, UnitBase, UnitGuids, UnitTokenParse};
 
