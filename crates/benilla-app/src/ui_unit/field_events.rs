@@ -43,6 +43,8 @@ pub(crate) struct NoticeFiring<'w, 's> {
     // `SetPetGuid`'s unit lookup of the new guid (`0x4bc8e4`).
     index: Option<Res<'w, crate::net::GuidIndex>>,
     stores: Query<'w, 's, &'static crate::net::ObjectStore>,
+    // A callback's mark of the portrait list (`0x524e10`).
+    marks: Option<ResMut<'w, crate::portrait::PortraitMarks>>,
 }
 
 impl NoticeFiring<'_, '_> {
@@ -51,6 +53,12 @@ impl NoticeFiring<'_, '_> {
     fn fire(&mut self, script: &mut UiScript, notice: FieldNotice, trainer: Option<u64>) -> bool {
         if let FieldNotice::PetGuidSet { changed, guid } = notice {
             return self.pet_guid_set(script, changed, guid, trainer);
+        }
+        if let FieldNotice::PortraitMark { guid } = notice {
+            if let Some(marks) = self.marks.as_mut() {
+                marks.mark(guid);
+            }
+            return false;
         }
         if notice == FieldNotice::PlayerAuras {
             self.auras.run(script);
@@ -454,6 +462,7 @@ pub(crate) fn fire(
         | FieldNotice::SkillLines
         | FieldNotice::SkillMax
         | FieldNotice::SkillValue { .. }
+        | FieldNotice::PortraitMark { .. }
         | FieldNotice::PetGuidSet { .. } => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
@@ -579,6 +588,8 @@ fn unit_event(id: u16) -> Option<&'static str> {
         159..=161 => "UNIT_ATTACK_POWER",
         162..=164 => "UNIT_RANGED_ATTACK_POWER",
         183 => "UNIT_NAME_UPDATE",
+        184 => "UNIT_PORTRAIT_UPDATE",
+        185 => "UNIT_MODEL_CHANGED",
         186 => "UNIT_INVENTORY_CHANGED",
         187 => "UNIT_CLASSIFICATION_CHANGED",
         345 => "PLAYER_GUILD_UPDATE",
@@ -823,6 +834,56 @@ mod tests {
                 "UNIT_NAME_UPDATE mouseover",
                 "UNIT_MANA pet",
             ]
+        );
+    }
+
+    /// The portrait drain's pair for one unit (`0x524de4`, `0x524df1`): `UNIT_PORTRAIT_UPDATE` for
+    /// every token naming it, then `UNIT_MODEL_CHANGED` for every token, each with the token as
+    /// `arg1` (`0x515e7a`).
+    #[test]
+    fn the_portrait_pair_fires_each_event_for_every_token_in_turn() {
+        let mut app = world(seated());
+        let (portrait, model) = (
+            crate::field_watch::id::UNIT_PORTRAIT_UPDATE,
+            crate::field_watch::id::UNIT_MODEL_CHANGED,
+        );
+        assert_eq!(
+            fired(
+                &mut app,
+                &[
+                    FieldNotice::Signal {
+                        guid: ME,
+                        id: portrait
+                    },
+                    FieldNotice::Signal {
+                        guid: ME,
+                        id: model
+                    },
+                ]
+            ),
+            [
+                "UNIT_PORTRAIT_UPDATE player",
+                "UNIT_PORTRAIT_UPDATE target",
+                "UNIT_MODEL_CHANGED player",
+                "UNIT_MODEL_CHANGED target",
+            ]
+        );
+    }
+
+    /// A mark of the portrait list fires nothing itself: it queues the GUID for the drain.
+    #[test]
+    fn a_portrait_mark_queues_the_guid_and_fires_nothing() {
+        let mut app = world(seated());
+        app.init_resource::<crate::portrait::PortraitMarks>();
+        assert_eq!(
+            fired(&mut app, &[FieldNotice::PortraitMark { guid: PET }]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            app.world()
+                .resource::<crate::portrait::PortraitMarks>()
+                .pending(),
+            [PET]
         );
     }
 

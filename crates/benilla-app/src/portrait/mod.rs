@@ -6,9 +6,10 @@
 //! `TabardModel`) are live booths of their own, one per visible pane ([`panes`]).
 //!
 //! A booth mirrors the unit's live dressed look ([`PortraitPart`]), so a gear change re-bakes;
-//! until the model loads the slot shows a 2D stand-in, where the reference leaves it blank
-//! (`0x519fcc`) and loads a stand-in only for a unit it holds no object for: a player's
-//! (`0x525ba0`) or a group pet record's (`0x525cb0`).
+//! until the model loads the slot is empty, as the reference's bake binds nothing then
+//! (`0x519fcc`, `0x525874`). A 2D stand-in is only for a unit the client holds no object for: a
+//! player's (`0x525ba0`) or a group pet record's (`0x525cb0`). The portrait list and its events
+//! are [`drain`].
 //! Framing is the model's
 //! authored portrait camera, the one `cameraLookup[0]` selects (`0x713540`), through the
 //! diagonal-FOV projection ([`WowPortraitProjection`]); a camera-less model falls back to
@@ -52,6 +53,8 @@ use booth::{
     clear_booth_rig, spawn_booth_effects, spawn_booth_model, spawn_booth_own_emitters,
     BoothBillboardSpec, BoothEffects, BoothInstance, BoothMotion, BoothPart, BoothRider,
 };
+mod drain;
+pub(crate) use drain::PortraitMarks;
 mod dressup;
 pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
@@ -67,6 +70,8 @@ pub(crate) use light::{material_variant, VariantLane};
 use light::{studio_light, BoothLight};
 mod panes;
 pub(crate) use panes::{PaneDisplays, PaneRequest, PaneRequests};
+#[cfg(test)]
+mod loading_tests;
 pub(crate) mod test_bake;
 #[cfg(test)]
 mod unheld_tests;
@@ -236,8 +241,9 @@ pub(crate) struct EffectRig {
 #[derive(Component)]
 pub(crate) struct PortraitStandIn(pub(crate) u32);
 
-/// What a portrait slot shows: the booth's bake, or a 2D stand-in file, for a unit with no object
-/// (`0x525ba0`) and while a unit's model streams in (the reference shows blank then, `0x519fcc`).
+/// What a portrait slot shows: the booth's bake or a cached face, a 2D stand-in file for a unit
+/// with no object (`0x525ba0`, `0x525cb0`), or no image while a held unit's model loads
+/// (`0x525874`) and for a unit with no object and no art (`0x51a095`, `0x51a0ce`).
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum PortraitSource {
     /// The slot's off-screen render target (the model bake).
@@ -245,6 +251,9 @@ pub(crate) enum PortraitSource {
     /// A flat portrait BLP (`Interface\CharacterFrame\TemporaryPortrait-…`), resolved by the UI
     /// extract through the standard sprite path.
     File(String),
+    /// No image: the texture `SetPortraitTexture` emptied (`0x519fcc`), which stores a null image
+    /// (`0x770218`-`0x7702cb`) and so draws nothing (`0x7706e3`).
+    Empty,
 }
 
 /// The GUID-keyed bake cache (`0xc0ce7c`): `SetPortraitTexture` on a player the client does not
@@ -319,18 +328,20 @@ impl DisplayBakes {
     }
 }
 
-/// Leaving the world, by logout or a lost link, empties both bake caches: `CGGameUI::ShutdownGame`
-/// calls `ClearPortraitCaches` (`0x491187` → `0x524b70`).
+/// Leaving the world, by logout or a lost link, empties both bake caches and the pending list:
+/// `CGGameUI::ShutdownGame` calls `ClearPortraitCaches` (`0x491187` → `0x524b70`).
 fn clear_portrait_caches(
     mut logged_out: MessageReader<crate::net::LoggedOutMessage>,
     mut disconnected: MessageReader<crate::net::DisconnectedMessage>,
     mut bakes: ResMut<PortraitBakes>,
     mut displays: ResMut<DisplayBakes>,
+    mut marks: ResMut<PortraitMarks>,
 ) {
     let left = logged_out.read().count() + disconnected.read().count();
     if left > 0 {
         bakes.clear();
         displays.clear();
+        marks.clear();
     }
 }
 
@@ -429,6 +440,8 @@ struct Booth {
     baked_guid: Option<u64>,
     /// The display id a bake of a unit that is no player files its face under in [`DisplayBakes`].
     baked_display: Option<u32>,
+    /// The unit the bake is of, which keeps it while its own body rebuilds.
+    baked_unit: Option<Entity>,
     /// Frames the camera stays active after a content edge; at 0 with nothing pending it sleeps
     /// and the target keeps the last render.
     wake: u32,
@@ -461,6 +474,7 @@ impl Booth {
             baked: None,
             baked_guid: None,
             baked_display: None,
+            baked_unit: None,
             wake: 0,
             live: false,
             pending: Vec::new(),
@@ -661,6 +675,11 @@ pub(crate) struct PartyBooths<'w, 's> {
     displays: ResMut<'w, DisplayBakes>,
     images: ResMut<'w, Assets<Image>>,
     targets: Query<'w, 's, (&'static BoothCam, &'static mut RenderTarget)>,
+    /// The portrait list, which a pending unit's bake returns on (`0x524f96`), and the name
+    /// cache's callbacks a portrait registers (`0x51a100`).
+    marks: ResMut<'w, PortraitMarks>,
+    /// A held player's GUID, the key of its cached face (`0x524fe2`).
+    guids: Query<'w, 's, &'static crate::net::Guid>,
 }
 
 /// Tags a booth camera with its slot token (not the M2 rig, `benilla_assets::PortraitCamera`).
@@ -738,6 +757,8 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut rate: ResMut<PaneRa
 impl Plugin for PortraitPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PortraitImages>()
+            .init_resource::<PortraitMarks>()
+            .init_resource::<crate::field_watch::NoticeLane>()
             .init_resource::<PortraitBakes>()
             .init_resource::<DisplayBakes>()
             .init_resource::<PaneRate>()
@@ -770,6 +791,9 @@ impl Plugin for PortraitPlugin {
                     test_bake::sync_test_portraits,
                     // Before the bakes: a frame that leaves the world files nothing it then keeps.
                     clear_portrait_caches,
+                    // The portrait list's marks and its drain (`0x524cd0`), the world render's:
+                    drain::mark_portraits,
+                    drain::drain_portraits,
                     sync_portraits,
                     // The scene before the character standing in it: they commit as one pair
                     // (`glue_booth::PendingSwap`), and the booth reads the stage off the scene.
@@ -985,8 +1009,8 @@ fn test_mode(cached: &mut Option<bool>) -> bool {
     *cached.get_or_insert_with(|| std::env::var("WOW_PORTRAIT_TEST").is_ok_and(|s| !s.is_empty()))
 }
 
-/// benilla's `UNIT_MODEL_CHANGED` for the producers that are not a change of dress; a character
-/// pane re-takes its copy when it moves ([`SnapKey`]).
+/// A model event that is not a change of dress, for a character pane to re-take its copy on
+/// ([`SnapKey`]).
 ///
 /// - The manual sheath ceremony: `ToggleSheath` passes `bInstant = 0`, and the clip's
 ///   `$SHL`/`$SHR` event marks the unit (`0x611b60` → `0x5ffb10`, mark at `0x5ffbbe`). A snap
@@ -995,17 +1019,25 @@ fn test_mode(cached: &mut Option<bool>) -> bool {
 #[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ModelRevision(pub(crate) u32);
 
-/// Bump [`ModelRevision`] for every unit one of its producers fired on this frame.
+/// Bump [`ModelRevision`] for every unit one of its producers fired on this frame, and mark the
+/// portrait of each the sheath clip's key moved (`0x5ffbbe`, [`drain`]).
 fn bump_model_revision(
     mut commands: Commands,
     mut swaps: MessageReader<crate::creature_anim::SheathSwapMessage>,
     glows: Query<&benilla_world::model_fade::ParentModel, Added<crate::entities::ItemGlowAttached>>,
     revs: Query<&ModelRevision>,
+    guids: Query<&crate::net::Guid>,
+    mut marks: ResMut<PortraitMarks>,
 ) {
     let mut bumped = <bevy::platform::collections::HashSet<Entity>>::default();
     let units = swaps
         .read()
         .map(|m| m.entity)
+        .inspect(|unit| {
+            if let Ok(guid) = guids.get(*unit) {
+                marks.mark(guid.0);
+            }
+        })
         // A glow's root is chained to its wearer, the unit that gained geometry.
         .chain(glows.iter().map(|p| p.0));
     for unit in units {
@@ -1027,8 +1059,8 @@ fn sheath_lane(attach: Option<u16>) -> bool {
 /// What a character pane re-takes its copy on beyond the engine's own build requests. A
 /// `<PlayerModel>` duplicates the unit's `CM2Model` once (`0x5059a0` → `0x707400`, which releases
 /// the source); the engine asks again on `SetUnit`, `RefreshUnit` and each show (`0x505d00`). The
-/// stock windows also `SetUnit` again on `UNIT_MODEL_CHANGED`, which benilla does not fire, so
-/// the booth stands in for it here:
+/// stock windows also `SetUnit` again on `UNIT_MODEL_CHANGED` (`drain`), which reaches a script a
+/// frame after the mark, so the booth re-takes on the same marks itself:
 ///
 /// 1. A change of dress ([`Self::dress`], [`Self::stable`]): `UNIT_MODEL_CHANGED`, fired only at
 ///    `0x524df1`, marked by equipping (`0x5e2810` → `0x5dee30`), a displayId change, a helm or
@@ -1202,7 +1234,7 @@ impl DressedLook<'_, '_> {
 }
 
 /// Each frame, mirror each slot's unit's dressed look into its booth whenever it changes; a unit
-/// whose model has not attached shows a 2D stand-in, where the reference shows blank (`0x519fcc`).
+/// whose model has not attached shows the empty booth (`0x519fcc`, `0x525874`).
 fn sync_portraits(
     mut commands: Commands,
     mut booths: ResMut<Booths>,
@@ -1318,7 +1350,6 @@ fn sync_portraits(
                 let face = take_target(booth, token, &mut party.images, &mut party.targets);
                 party.bakes.store(guid, face);
             }
-            booth.baked_guid = None;
             file_display_bake(
                 booth,
                 token,
@@ -1326,20 +1357,16 @@ fn sync_portraits(
                 &mut party.images,
                 &mut party.targets,
             );
-            // No unit: empty the booth.
-            if booth.baked.is_some() {
-                commands.entity(booth.root).despawn_related::<Children>();
-                booth.baked = None;
-                // Render the emptied stage, so the target holds the backdrop.
-                booth.wake = BOOTH_SETTLE_FRAMES;
-                booth.pending.clear();
-                // The root's rig state needs its own strip.
-                clear_booth_rig(&mut commands, booth.root);
-                booth.rigged = false;
-                booth.parked = false;
+            empty_booth(&mut commands, booth);
+            // A player with no name record asks the cache, whose callback marks the portrait
+            // when the record lands (`0x51a08e` → `0x55f080`, `0x51a100`).
+            if let Some(guid) = occupant.filter(|g| {
+                benilla_protocol::guid::is_player(*g) && party.names.player_traits(*g).is_none()
+            }) {
+                party.marks.ask(guid);
             }
             // No object: the cached bake on a hit, the 2D stand-in on a miss (`0x525ba0`,
-            // `0x525cb0`).
+            // `0x525cb0`), and with neither, no image (`0x51a095`, `0x51a0ce`).
             let src = match unseen {
                 Some(unseen) => {
                     let booths = &booths.0;
@@ -1350,7 +1377,7 @@ fn sync_portraits(
                             .map(|b| b.target.clone())
                     })
                 }
-                None => PortraitSource::Live(booth.target.clone()),
+                None => PortraitSource::Empty,
             };
             if portraits.0.get(token) != Some(&src) {
                 portraits.0.insert(token.to_string(), src);
@@ -1359,10 +1386,38 @@ fn sync_portraits(
         };
         let (parts, riders, billboards, effects) = look.collect(unit);
         if parts.is_empty() {
-            // Not attached yet: a 2D stand-in. The reference blanks the widget (`0x519fcc`) and
-            // re-bakes once the model is ready.
-            let file = temporary_portrait(ent_q.get(unit).ok(), stores_q.get(unit).ok());
-            let src = PortraitSource::File(file);
+            // Not attached yet. The same unit rebuilding its body keeps its last bake: the widget
+            // keeps its texture until the drain's `UNIT_PORTRAIT_UPDATE` binds again, which waits
+            // on the body.
+            let src = if booth.baked_unit == Some(unit) {
+                PortraitSource::Live(booth.target.clone())
+            } else {
+                file_display_bake(
+                    booth,
+                    token,
+                    &mut party.displays,
+                    &mut party.images,
+                    &mut party.targets,
+                );
+                empty_booth(&mut commands, booth);
+                let net = ent_q.get(unit).ok();
+                let guid = party.guids.get(unit).ok().map(|g| g.0);
+                let booths = &booths.0;
+                loading_source(
+                    net.is_some_and(|n| n.kind == benilla_protocol::EntityKind::Player),
+                    guid,
+                    display_key(net, stores_q.get(unit).ok()),
+                    &party.marks,
+                    &party.bakes,
+                    &party.displays,
+                    |d| {
+                        booths
+                            .values()
+                            .find(|b| b.baked_display == Some(d) && b.settled())
+                            .map(|b| b.target.clone())
+                    },
+                )
+            };
             if portraits.0.get(token) != Some(&src) {
                 portraits.0.insert(token.to_string(), src);
             }
@@ -1479,12 +1534,54 @@ fn sync_portraits(
             );
             booth.baked = Some(key);
             booth.baked_guid = occupant;
+            booth.baked_unit = Some(unit);
             booth.baked_display = display_key(ent_q.get(unit).ok(), stores_q.get(unit).ok());
         }
         let live = PortraitSource::Live(booth.target.clone());
         if portraits.0.get(token) != Some(&live) {
             portraits.0.insert(token.to_string(), live);
         }
+    }
+}
+
+/// What `SetPortraitTexture` binds for a held unit whose model is not ready, in the bake's order
+/// (`0x524f60`): nothing for a unit on the portrait list (`0x524f96`); a clean cached face, a
+/// player's by its GUID (`0x524fe2`-`0x525069`) and any other unit's by its display id
+/// (`0x525077`-`0x5250e4`, or one a booth holds now, as the reference files it as it draws); else
+/// nothing, as the readiness gate binds nothing (`0x5250f5`-`0x52515d` → `0x525874`).
+fn loading_source(
+    player: bool,
+    guid: Option<u64>,
+    display: Option<u32>,
+    marks: &PortraitMarks,
+    bakes: &PortraitBakes,
+    displays: &DisplayBakes,
+    baking: impl Fn(u32) -> Option<Handle<Image>>,
+) -> PortraitSource {
+    if guid.is_some_and(|g| marks.holds(g)) {
+        return PortraitSource::Empty;
+    }
+    let face = if player {
+        guid.and_then(|g| bakes.get(g))
+    } else {
+        display.and_then(|d| displays.get(d).or_else(|| baking(d)))
+    };
+    face.map_or(PortraitSource::Empty, PortraitSource::Live)
+}
+
+/// Empty `booth`'s stage and render it once, so its target holds the backdrop.
+fn empty_booth(commands: &mut Commands, booth: &mut Booth) {
+    booth.baked_guid = None;
+    booth.baked_unit = None;
+    if booth.baked.is_some() {
+        commands.entity(booth.root).despawn_related::<Children>();
+        booth.baked = None;
+        booth.wake = BOOTH_SETTLE_FRAMES;
+        booth.pending.clear();
+        // The root's rig state needs its own strip.
+        clear_booth_rig(commands, booth.root);
+        booth.rigged = false;
+        booth.parked = false;
     }
 }
 
@@ -1714,18 +1811,6 @@ fn gate_booth_cameras(
 
 const TEMPORARY_PORTRAIT: &str = "Interface\\CharacterFrame\\TemporaryPortrait";
 
-/// The 2D stand-in for a unit that is not yet renderable: the player file is `0x525ba0`'s.
-fn temporary_portrait(net: Option<&NetEntity>, store: Option<&crate::net::ObjectStore>) -> String {
-    use benilla_protocol::EntityKind;
-    if net.map(|n| n.kind) == Some(EntityKind::Player) {
-        return match store {
-            Some(s) => player_temporary_portrait(s.0.unit_race(), s.0.unit_gender()),
-            None => format!("{TEMPORARY_PORTRAIT}.blp"),
-        };
-    }
-    creature_temporary_portrait()
-}
-
 /// The player stand-in from race and sex bytes, which an out-of-area party member gets from the
 /// name cache. An unknown race gives the plain file, as the reference's `%s-%s` format does.
 fn player_temporary_portrait(race: Option<u8>, sex: Option<u8>) -> String {
@@ -1856,12 +1941,6 @@ fn pet_unseen(roster: &crate::ui_party::GroupState, guid: u64) -> Option<Unseen>
     roster
         .pet_record(guid)
         .map(|r| Unseen::pet(r.pet_model_id.map_or(0, u32::from)))
-}
-
-/// The creature stand-in, benilla's own file: the reference's only creature stand-in is `-Pet`,
-/// for a roster pet with no object (`0x525cb0`), and a live creature not yet loaded shows blank.
-fn creature_temporary_portrait() -> String {
-    format!("{TEMPORARY_PORTRAIT}-Monster.blp")
 }
 
 /// A roster pet with no object and no bake under its display id (`0x525cb0`): the reference's
@@ -2018,7 +2097,7 @@ mod tests {
     }
 
     /// The display-id cache keeps the first face filed under a display (`0x525719`, a bake files
-    /// only on a miss) and empties on leaving the world (`0x524b70`).
+    /// only on a miss) and empties on leaving the world, the pending list with it (`0x524b70`).
     #[test]
     fn the_display_cache_keeps_its_first_face_until_the_world_is_left() {
         use bevy::ecs::system::RunSystemOnce;
@@ -2028,6 +2107,8 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<PortraitBakes>();
         world.init_resource::<DisplayBakes>();
+        world.init_resource::<PortraitMarks>();
+        world.resource_mut::<PortraitMarks>().mark(0x51);
         world.init_resource::<Messages<crate::net::LoggedOutMessage>>();
         world.init_resource::<Messages<crate::net::DisconnectedMessage>>();
         {
@@ -2051,6 +2132,10 @@ mod tests {
             "a logout clears"
         );
         assert_eq!(world.resource::<PortraitBakes>().get(0x51), None);
+        assert!(
+            world.resource::<PortraitMarks>().pending().is_empty(),
+            "and the pending list"
+        );
         world.resource_mut::<DisplayBakes>().fill(903, first);
         world.write_message(crate::net::DisconnectedMessage::new(
             String::new(),

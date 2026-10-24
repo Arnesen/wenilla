@@ -46,6 +46,9 @@ pub(crate) enum FieldNotice {
     /// `0x5de4e0` on `PLAYER_BYTES_2` byte 3: `UPDATE_EXHAUSTION` bare (`0x5de4e8`), then the
     /// rest-state line for the new state.
     RestState { old: u8, new: u8 },
+    /// A callback's `0x524e10(&guid)`: the portrait list's mark ([`crate::portrait::PortraitMarks`]),
+    /// whose drain signals later in the frame. The party record's pet display (`0x5e587f`).
+    PortraitMark { guid: u64 },
     /// `0x5ed990`: `UNIT_ATTACK`, `UNIT_DEFENSE` and `UNIT_RANGED_ATTACK_POWER`, each with
     /// `"player"`, from the skill value watch `0x5de180` (`0x5de214`) or the temporary-bonus watch
     /// `0x5de470` (`0x5de495`).
@@ -181,6 +184,8 @@ pub(crate) mod id {
     pub(crate) const UNIT_DISPLAYPOWER: u16 = 30;
     pub(crate) const UNIT_AURA: u16 = 41;
     pub(crate) const UNIT_NAME_UPDATE: u16 = 183;
+    pub(crate) const UNIT_PORTRAIT_UPDATE: u16 = 184;
+    pub(crate) const UNIT_MODEL_CHANGED: u16 = 185;
     pub(crate) const UNIT_INVENTORY_CHANGED: u16 = 186;
     pub(crate) const PLAYER_MONEY: u16 = 200;
     pub(crate) const PLAYERBANKSLOTS_CHANGED: u16 = 347;
