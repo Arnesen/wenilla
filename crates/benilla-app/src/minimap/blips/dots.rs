@@ -16,7 +16,7 @@ use crate::names::NameCache;
 use crate::net::{GuidIndex, NetEntity, ObjectStore};
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 
-use super::{party_member_pos, BlipCtx, MinimapBlipHover, TrackedCandidates, BLIP_BASIS_PX};
+use super::{group_positions, BlipCtx, MinimapBlipHover, TrackedCandidates, BLIP_BASIS_PX};
 
 /// The quest dot's quad, 8 px (`0xbc82a8`, frozen by the ctor); the per-cell scale table
 /// `{1,1,1,1,1.3}` scales only the party cell 4.
@@ -62,7 +62,7 @@ fn unit_dot_eligible(store: Option<&ObjectStore>, me: Option<u64>) -> bool {
 }
 
 /// Draw a gold dot per quest giver at status 7, culled at the view radius in 3-D distance with
-/// no rim arrow. Runs after the player arrow, so the dots draw on top.
+/// no rim arrow, in the map's own layer, under the arrow children.
 pub(in crate::minimap) fn emit_quest_dots(
     ctx: &BlipCtx,
     statuses: &HashMap<u64, u32>,
@@ -259,20 +259,23 @@ enum DotName {
     Known(String),
 }
 
-/// The party dots, the in-range half of the party placement `0x6dad10`: blue cell 4 at 1.3×,
-/// drawn last with the object dots, above every arrow (`0x4ed7b7`).
+/// The party and pet dots, the in-range half of the party placement `0x6dad10`: blue cell 4 at
+/// 1.3× for each of the five [`group_positions`] records within 0.8 of the radius
+/// (`0x4ed6b0`-`0x4ed7a7`), drawn last in the map's own layer (`0x4ed7b7`), under every arrow
+/// child.
 pub(in crate::minimap) fn emit_party_dots(
     ctx: &BlipCtx,
     group: &crate::ui_party::GroupState,
     guids: &GuidIndex,
     unit_pos: &Query<&GlobalTransform, With<NetEntity>>,
+    pet: Option<u64>,
     icons: &Handle<Image>,
     quads: &mut UiQuads,
 ) {
-    for m in group.party_slots() {
-        let Some((x, y)) = party_member_pos(m, group, guids, unit_pos) else {
-            continue;
-        };
+    for (x, y) in group_positions(group, guids, unit_pos, pet)
+        .into_iter()
+        .flatten()
+    {
         let d = ((x - ctx.wx).powi(2) + (y - ctx.wy).powi(2)).sqrt();
         if d / ctx.radius_yd > super::BLIP_EDGE_RATIO {
             continue; // out of range: the arrow pass drew it
@@ -372,6 +375,89 @@ mod tests {
             !unit_dot_eligible(Some(&with(&[(FIELD_BYTES_1, UNTRACKABLE)])), Some(ME)),
             "and the untrackable bit blanks it outright"
         );
+    }
+
+    /// The dot loop draws all five group records' dots (`0x4ed6b0`-`0x4ed7a7`, stride `0x50` to
+    /// `0x190`), the pet's record (slot 4, `0x6dad8c`) among them: our pet in range draws the
+    /// party's blue dot, and beyond 0.8 of the radius none, where its rim arrow is
+    /// (`0x6daf5c`).
+    #[test]
+    fn the_pet_draws_the_party_dot_in_range() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let unit = |w: [f32; 3]| {
+            (
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                GlobalTransform::from_translation(benilla_assets::coords::wow_to_bevy(w)),
+            )
+        };
+        let near = world.spawn(unit([50.0, 0.0, 0.0])).id();
+        let far = world.spawn(unit([120.0, 0.0, 0.0])).id();
+        let mut guids = GuidIndex::default();
+        guids.0.extend([(0xF140, near), (0xF141, far)]);
+        world.insert_resource(guids);
+        world.init_resource::<crate::ui_party::GroupState>();
+        let dots = |world: &mut World, pet: Option<u64>| {
+            world
+                .run_system_once(
+                    move |q: Query<&GlobalTransform, With<NetEntity>>,
+                          guids: Res<GuidIndex>,
+                          group: Res<crate::ui_party::GroupState>| {
+                        let ctx = BlipCtx {
+                            center: Vec2::ZERO,
+                            side: BLIP_BASIS_PX,
+                            px_per_yd: BLIP_BASIS_PX * 0.5 / 133.0,
+                            radius_yd: 133.0,
+                            z: 0,
+                            alpha: 1.0,
+                            wx: 0.0,
+                            wy: 0.0,
+                            wz: 0.0,
+                            cursor: None,
+                        };
+                        let mut quads = UiQuads::default();
+                        emit_party_dots(
+                            &ctx,
+                            &group,
+                            &guids,
+                            &q,
+                            pet,
+                            &Handle::default(),
+                            &mut quads,
+                        );
+                        quads
+                            .overlays
+                            .iter()
+                            .map(|q| (q.rect.center(), q.uv))
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .unwrap()
+        };
+        let got = dots(&mut world, Some(0xF140));
+        assert_eq!(got.len(), 1, "the pet in range: one dot");
+        assert!(
+            got[0].1 == UvRect::from_tex_coords(PARTY_DOT_CELL),
+            "the party's cell"
+        );
+        assert!(
+            got[0].0.y < 0.0 && got[0].0.x.abs() < 1e-3,
+            "north of us, up: {:?}",
+            got[0].0
+        );
+        assert!(
+            dots(&mut world, Some(0xF141)).is_empty(),
+            "past 0.8 of 133: the arrow's"
+        );
+        assert!(
+            dots(&mut world, Some(0xF142)).is_empty(),
+            "not streamed: nothing"
+        );
+        assert!(dots(&mut world, None).is_empty(), "no pet");
     }
 
     /// Status 6 draws nothing on the 1.12 client despite vmangos's "red dot" comment (`0x4eac31`).

@@ -29,6 +29,8 @@ pub(crate) const REASON_TARGETS_DEAD: u8 = 0x65;
 
 /// The failure the reporter fires no event for: `SPELL_FAILED_SPELL_IN_PROGRESS` (`0x6e2234`).
 const REASON_IN_PROGRESS: u8 = 0x61;
+/// `SPELL_FAILED_NEED_AMMO`.
+const REASON_NEED_AMMO: u8 = 0x2f;
 
 /// The edge a failure signals: `SPELLCAST_INTERRUPTED` (340) for `SPELL_FAILED_INTERRUPTED` and
 /// `_INTERRUPTED_COMBAT`, `SPELLCAST_FAILED` (339) for every other (`0x6e2238`, `0x6e4a24`).
@@ -62,9 +64,19 @@ pub(crate) struct CastCore<'a> {
     pub(crate) ground: &'a mut SpellTargeting,
     pub(crate) reports: &'a mut CastReports,
     pub(crate) net: &'a NetCommands,
+    /// The tutorial bank the reporter and StopAttack trigger into (`0x4b5390`); absent in a
+    /// harness without it.
+    pub(crate) tutorials: Option<&'a crate::tutorial::Tutorials>,
 }
 
 impl CastCore<'_> {
+    /// `TriggerTutorial(id, 0)` (`0x4b5390`) from the reporter's or StopAttack's site.
+    pub(crate) fn trigger_tutorial(&self, id: u32) {
+        if let Some(tutorials) = self.tutorials {
+            tutorials.trigger_now(id);
+        }
+    }
+
     /// What the in-flight slot `0xceca88` holds.
     pub(crate) fn slot(&self) -> Option<Inflight> {
         inflight(self.pending, self.queued_melee, self.ground)
@@ -251,6 +263,11 @@ impl CastCore<'_> {
     /// "Another action is in progress" (`0x6e2234`); anything else fires the failure's edge.
     pub(crate) fn report(&mut self, fail: CastFail, from_server: bool, reaches_tail: bool) {
         let (spell_id, reason) = (fail.spell_id, fail.reason);
+        // The player cleanup's switch, ahead of the line: `NEED_AMMO` triggers Ammunition
+        // (`0x6e1cc3`-`0x6e1cca`).
+        if reason == REASON_NEED_AMMO {
+            self.trigger_tutorial(crate::tutorial::id::AMMUNITION);
+        }
         self.reports.refused(fail);
         if !reaches_tail {
             return;
@@ -274,6 +291,7 @@ pub(crate) struct CastSlots<'w> {
     queued_melee: ResMut<'w, QueuedMeleeSpell>,
     ground: ResMut<'w, SpellTargeting>,
     reports: ResMut<'w, CastReports>,
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
 }
 
 impl CastSlots<'_> {
@@ -285,12 +303,18 @@ impl CastSlots<'_> {
             ground: &mut self.ground,
             reports: &mut self.reports,
             net,
+            tutorials: self.tutorials.as_deref(),
         }
     }
 
     /// The targeting word, which `SelectTarget` tests first (`0x4935ca`).
     pub(crate) fn targeting(&self) -> &SpellTargeting {
         &self.ground
+    }
+
+    /// The tutorial bank, for the attack seams' other sites (`0x4b5390`).
+    pub(crate) fn tutorials(&self) -> Option<&crate::tutorial::Tutorials> {
+        self.tutorials.as_deref()
     }
 }
 
@@ -340,6 +364,7 @@ mod tests {
         queued_melee: QueuedMeleeSpell,
         ground: SpellTargeting,
         reports: CastReports,
+        tutorials: crate::tutorial::Tutorials,
     }
 
     impl Slots {
@@ -350,6 +375,7 @@ mod tests {
                 ground: &mut self.ground,
                 reports: &mut self.reports,
                 net,
+                tutorials: Some(&self.tutorials),
             }
         }
 
@@ -543,5 +569,20 @@ mod tests {
         assert_eq!(s.stream(), ["REFUSED 0x59", "FAILED"]);
         assert!(s.ground.active());
         assert!(cancels(&rx).is_empty());
+    }
+
+    /// The reporter's player cleanup: reason 0x2f `NEED_AMMO` triggers Ammunition (`0x2c`,
+    /// `0x6e1cc3`-`0x6e1cca`), whatever the slot holds; every other reason triggers nothing.
+    #[test]
+    fn a_need_ammo_refusal_triggers_the_ammunition_tutorial() {
+        let (net, _rx) = wire();
+        let mut s = Slots::default();
+        s.tutorials.lock().apply_flags(&[0u8; 32]);
+        s.core(&net)
+            .report(CastFail::local(AUTO_SHOT, 0x59), false, true);
+        assert!(s.tutorials.take_fired().is_empty(), "another reason");
+        s.core(&net)
+            .report(CastFail::local(AUTO_SHOT, 0x2f), true, false);
+        assert_eq!(s.tutorials.take_fired(), [0x2d], "published as 0x2c + 1");
     }
 }

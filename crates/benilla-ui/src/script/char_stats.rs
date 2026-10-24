@@ -388,7 +388,9 @@ impl super::UiScript {
     }
 }
 
-/// The 12 alert statuses off the doll snapshot (`0x4c7ee0`'s recompute), without the event.
+/// The 12 alert statuses off the doll snapshot (`0x4c7ee0`'s recompute), without the event. A
+/// slot it finds broken by durability triggers Broken Items (`0x4c8002`) and one it finds damaged
+/// Damaged Items (`0x4c802e`); the force-red arm (`0x4c7fb0`) and the ammo arm trigger nothing.
 pub(super) fn recompute_inventory_alerts(model: &mut Model) {
     let slots = &model.inventory_slots;
     let alerts: [u8; 12] = std::array::from_fn(|i| {
@@ -398,8 +400,27 @@ pub(super) fn recompute_inventory_alerts(model: &mut Model) {
             alert_status(&slots[ALERT_SLOTS[i]])
         }
     });
+    let forced = |i: usize| {
+        slots[ALERT_SLOTS[i]]
+            .as_ref()
+            .is_some_and(|v| v.flags & 0x10 != 0)
+    };
+    let owed: Vec<u32> = (0..11)
+        .filter_map(|i| match alerts[i] {
+            4 if !forced(i) => Some(TUTORIAL_BROKEN_ITEMS),
+            3 => Some(TUTORIAL_DAMAGED_ITEMS),
+            _ => None,
+        })
+        .collect();
     model.inventory_alerts = alerts;
+    for id in owed {
+        model.tutorial_triggers.push(id);
+    }
 }
+
+/// The two alert tutorials' 0-based numbers.
+const TUTORIAL_DAMAGED_ITEMS: u32 = 0x23;
+const TUTORIAL_BROKEN_ITEMS: u32 = 0x24;
 
 /// The unit a stat getter asks after `GetUnitFromToken` (`0x515940`), the gates' inputs beside
 /// its fields; `None` is no object, whose answer is each function's zeros.
@@ -2648,5 +2669,39 @@ mod tests {
             assert_eq!(view.item_id, 7000, "bag {bag}");
             assert_eq!(view.field_duration, 3_600_000, "bag {bag}");
         }
+    }
+
+    /// The alert recompute triggers Broken Items for a slot broken at durability 0 (`0x4c7fee`-
+    /// `0x4c8002`) and Damaged Items for 1 to 5 points left (`0x4c801b`-`0x4c802e`); a force-red
+    /// slot (`0x10`, `0x4c7fb0`) is broken with no tutorial, and the ammo arm has none.
+    #[test]
+    fn the_alert_recompute_triggers_broken_and_damaged_items() {
+        let mut s = UiScript::new().unwrap();
+        let worn = |durability: (u32, u32), flags: u32| {
+            Some(InvSlotView {
+                item_id: 2361,
+                durability: Some(durability),
+                flags,
+                ..Default::default()
+            })
+        };
+        let mut slots: crate::script::InventorySlots = Default::default();
+        slots[1] = worn((10, 50), 0x10);
+        slots[0] = Some(InvSlotView {
+            item_id: 2512,
+            count: 3,
+            ..Default::default()
+        });
+        s.set_inventory_slots(slots.clone());
+        assert!(
+            s.take_tutorial_triggers().is_empty(),
+            "force-red and low ammo"
+        );
+        slots[3] = worn((4, 50), 0);
+        s.set_inventory_slots(slots.clone());
+        assert_eq!(s.take_tutorial_triggers(), [0x23], "damaged");
+        slots[3] = worn((0, 50), 0);
+        s.set_inventory_slots(slots);
+        assert_eq!(s.take_tutorial_triggers(), [0x24], "broken");
     }
 }

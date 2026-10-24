@@ -19,15 +19,31 @@ pub(super) fn wmo_minimap_stem(wmo_path: &str) -> Option<String> {
     Some(stem.to_string())
 }
 
+/// The interior query window (`0x6d95f8`-`0x6d96ab`): the `c`-wide cell holding the player,
+/// snapped as `round(p·r − 0.5)·c` with `r = 1/c` (half to even), and `[z − c/2, z]` high, in WoW
+/// world axes. x takes `r` as a stored float (`0x6d9629`), y the unrounded register (`0x6d9617`);
+/// each product is stored as a float before the 0.5 comes off.
+fn interior_window(p: [f32; 3], c: f32) -> ([f32; 3], [f32; 3]) {
+    let r = 1.0 / f64::from(c);
+    #[allow(clippy::cast_possible_truncation)] // the reference's float stores
+    let snap = |v: f32, r: f64| {
+        let cell = (f64::from((f64::from(v) * r) as f32) - 0.5).round_ties_even();
+        (cell * f64::from(c)) as f32
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let (x, y) = (snap(p[0], f64::from(r as f32)), snap(p[1], r));
+    let z = p[2] - c * 0.5;
+    ([x, y, z], [x + c, y + c, c * 0.5 + z])
+}
+
 /// Which groups' tiles draw, per absolute group index: the reference's portal flood-fill from the
-/// player's group (`0x6a5020`) inside a player-centred query box.
+/// player's group (`0x6a5020`) inside the query box.
 ///
-/// The box is XY `±2·radius` and Z `[z − 1.5·radius, z + radius]`, mostly below the player, so a
-/// stairwell reaches the storey below but not the whole tower. A group whose bbox misses the box in
-/// XY neither emits nor floods onward (`0x6a51f4`); there is no per-group Z test. A portal is
-/// crossed unless its polygon lies wholly outside one of the box's six planes, the only Z gate.
-/// The reference builds the box in model space; testing in world space with the bboxes and portals
-/// transformed gives the same answers.
+/// The box is [`interior_window`] grown by `c` on every side (`0x6d96b6`-`0x6d96f3`), moved into
+/// the model frame as the AABB of its image (`0x6dc540`), its top z then replaced by the seed
+/// group's ceiling (`0x6a524b`, the group's `+0x28`). A group whose bbox misses the box in XY
+/// neither emits nor floods onward (`0x6a51f4`); there is no per-group Z test. A portal is crossed
+/// unless its polygon lies wholly outside one of the box's six planes, the only Z gate.
 pub(super) fn interior_group_selection(
     model: &WmoModel,
     world_from_local: &Affine3A,
@@ -40,34 +56,31 @@ pub(super) fn interior_group_selection(
     if seed >= n {
         return drawable;
     }
-    let pw = bevy_to_wow(player_pos);
     let c = radius;
-    let box_min = [pw[0] - 2.0 * c, pw[1] - 2.0 * c, pw[2] - 1.5 * c];
-    let box_max = [pw[0] + 2.0 * c, pw[1] + 2.0 * c, pw[2] + c];
+    let (wmin, wmax) = interior_window(bevy_to_wow(player_pos), c);
+    let (wmin, wmax) = (wmin.map(|v| v - c), wmax.map(|v| v + c));
 
-    // A model point to world (WoW axes), the query box's frame.
-    let to_world = |m: [f32; 3]| bevy_to_wow(world_from_local.transform_point3(wow_to_bevy(m)));
-    // A group's model bbox as a world AABB: a superset under a rotated placement, and the draw's
-    // window cull trims the excess.
-    let world_aabb = |bmin: [f32; 3], bmax: [f32; 3]| {
-        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
-        for &x in &[bmin[0], bmax[0]] {
-            for &y in &[bmin[1], bmax[1]] {
-                for &z in &[bmin[2], bmax[2]] {
-                    let w = to_world([x, y, z]);
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(w[k]);
-                        hi[k] = hi[k].max(w[k]);
-                    }
+    // A world point (WoW axes) to the model frame, where the reference floods.
+    let local_from_world = world_from_local.inverse();
+    let to_model = |w: [f32; 3]| bevy_to_wow(local_from_world.transform_point3(wow_to_bevy(w)));
+    let (mut box_min, mut box_max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for x in [wmin[0], wmax[0]] {
+        for y in [wmin[1], wmax[1]] {
+            for z in [wmin[2], wmax[2]] {
+                let m = to_model([x, y, z]);
+                for k in 0..3 {
+                    box_min[k] = box_min[k].min(m[k]);
+                    box_max[k] = box_max[k].max(m[k]);
                 }
             }
         }
-        (lo, hi)
-    };
+    }
+    box_max[2] = model.group_nav[seed].bbox_max[2];
+
     let xy_overlap = |lo: [f32; 3], hi: [f32; 3]| {
         lo[0] <= box_max[0] && hi[0] >= box_min[0] && lo[1] <= box_max[1] && hi[1] >= box_min[1]
     };
-    // 6-plane outcode of a world point against the box, one bit per face it is outside.
+    // 6-plane outcode of a model point against the box, one bit per face it is outside.
     let outcode = |w: [f32; 3]| {
         let mut o = 0u8;
         for k in 0..3 {
@@ -92,10 +105,9 @@ pub(super) fn interior_group_selection(
         if gn.flags & GROUP_EXTERIOR != 0 {
             continue; // an exterior group is not flooded
         }
-        let (lo, hi) = world_aabb(gn.bbox_min, gn.bbox_max);
         // The XY gate blocks emit and recursion both (`0x6a51f4`); a stacked storey shares the XY
         // footprint and passes it.
-        if !xy_overlap(lo, hi) {
+        if !xy_overlap(gn.bbox_min, gn.bbox_max) {
             continue;
         }
         if gn.flags & GROUP_NO_EMIT == 0 {
@@ -118,7 +130,7 @@ pub(super) fn interior_group_selection(
             };
             let mut and = 0xFFu8;
             for v in poly {
-                and &= outcode(to_world(*v));
+                and &= outcode(*v);
                 if and == 0 {
                     break; // outside no single plane: the portal reaches into the box
                 }
@@ -315,6 +327,116 @@ mod tests {
             !drawable[1],
             "a portal below the query box's Z floor is not crossed, so the deep storey never draws"
         );
+    }
+
+    /// A seed group `g0` at the origin, 10 yd square, `[0, seed_top]` high, and a neighbour `g1`
+    /// spanning `x` through a portal: a 1-yd square at (`portal_x`, 0, `portal_z`).
+    fn two_groups(
+        seed_top: f32,
+        g1_x: [f32; 2],
+        portal_x: f32,
+        portal_z: f32,
+    ) -> benilla_assets::WmoModel {
+        use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalInfo, WmoPortalRef};
+        let nav = |bmin: [f32; 3], bmax: [f32; 3], ref_start: u16| WmoGroupNav {
+            flags: 0,
+            bbox_min: bmin,
+            bbox_max: bmax,
+            ref_start,
+            ref_count: 1,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: benilla_formats::NO_GROUP_LIQUID,
+        };
+        let (x, z) = (portal_x, portal_z);
+        WmoModel {
+            portal_vertices: vec![
+                [x, -0.5, z - 0.5],
+                [x, 0.5, z - 0.5],
+                [x, 0.5, z + 0.5],
+                [x, -0.5, z + 0.5],
+            ],
+            portal_infos: vec![WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            }],
+            portal_refs: vec![
+                WmoPortalRef {
+                    portal: 0,
+                    group: 1,
+                    side: 1,
+                },
+                WmoPortalRef {
+                    portal: 0,
+                    group: 0,
+                    side: -1,
+                },
+            ],
+            group_nav: vec![
+                nav([-5.0, -5.0, 0.0], [5.0, 5.0, seed_top], 0),
+                nav([g1_x[0], -5.0, 0.0], [g1_x[1], 5.0, 3.0], 1),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The query window is the snapped cell `round(p·r − 0.5)·c` (`0x6d95f8`-`0x6d96ab`) grown
+    /// by `c` on every side (`0x6d96b6`-`0x6d96f3`): at the origin with `c` 25, x spans
+    /// `[−25, 50]`, so a group 30 yd west misses it and one 40 yd east is inside.
+    #[test]
+    fn the_query_window_is_the_snapped_cell_grown_by_its_width() {
+        use super::interior_group_selection;
+        use bevy::math::{Affine3A, Vec3};
+        let at = |g1_x: [f32; 2], portal_x: f32| {
+            let model = two_groups(3.0, g1_x, portal_x, 1.0);
+            interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0)[1]
+        };
+        assert!(
+            !at([-45.0, -30.0], -4.0),
+            "west of the window's x minimum −25"
+        );
+        assert!(at([-45.0, -24.0], -4.0), "reaching into it");
+        assert!(
+            at([45.0, 52.0], 4.0),
+            "east, inside the window's x maximum 50"
+        );
+        assert!(!at([51.0, 60.0], 4.0), "past it");
+        // At x = 30 the cell is [25, 50], so the window is [0, 75].
+        let model = two_groups(3.0, [-12.0, -1.0], -4.0, 1.0);
+        let west = interior_group_selection(
+            &model,
+            &Affine3A::IDENTITY,
+            benilla_assets::coords::wow_to_bevy([30.0, 0.0, 0.0]),
+            25.0,
+            0,
+        );
+        assert!(
+            !west[1],
+            "the snap moved the window off it, though it lies within 2c"
+        );
+    }
+
+    /// The flood's box top is the seed group's ceiling (`0x6a524b`, its `+0x28`), not the
+    /// player's height plus `c`: in a hall taller than `c` a portal above `z + c` is crossed, and
+    /// under a low ceiling a portal above it is not.
+    #[test]
+    fn the_flood_box_tops_out_at_the_seed_groups_ceiling() {
+        use super::interior_group_selection;
+        use bevy::math::{Affine3A, Vec3};
+        let crossed = |seed_top: f32, portal_z: f32| {
+            let model = two_groups(seed_top, [-5.0, 5.0], 0.0, portal_z);
+            interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0)[1]
+        };
+        assert!(
+            crossed(40.0, 35.0),
+            "a 40-yd hall: the portal at 35 is under its ceiling"
+        );
+        assert!(
+            !crossed(3.0, 11.0),
+            "a 3-yd room: the portal at 11 is above its ceiling"
+        );
+        assert!(crossed(3.0, 2.0), "and one under it is crossed");
     }
 
     #[test]
