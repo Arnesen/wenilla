@@ -182,15 +182,15 @@ pub(crate) fn shared_sinks(world: &World) -> Vec<ComponentId> {
 /// already orders keep that order and its sync point. Panics on a cycle in the declared order,
 /// the pass's ends included.
 pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Vec<String> {
+    let label = label.intern();
+    if !world.resource::<Schedules>().contains(label) {
+        return Vec::new();
+    }
     let host = System::initialize(
         &mut IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {}),
         world,
     );
     let sinks = shared_sinks(world);
-    let label = label.intern();
-    if !world.resource::<Schedules>().contains(label) {
-        return Vec::new();
-    }
     world.schedule_scope(label, |world, schedule| {
         schedule.graph_mut().systems.initialize(world);
         let graph = schedule.graph();
@@ -243,6 +243,9 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
             Always,
             Sink,
         }
+        // A host's access holds the call host's: adding the host's changes nothing. The sum is
+        // made in one buffer, reused for every system, so the host's access is never cloned.
+        let mut with_host = bevy::ecs::query::Access::default();
         let joins: Vec<Joins> = graph
             .systems
             .iter()
@@ -254,11 +257,10 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
                     return Joins::No;
                 }
                 let combined = declared.combined_access();
-                let mut with_host = declared.clone();
-                with_host.extend(host.clone());
-                let hosted = with_host.combined_access() == combined;
-                let meets = in_phase[index[&key]] && !declared.is_compatible(&host);
-                if hosted || meets {
+                with_host.clone_from(combined);
+                with_host.extend(host.combined_access());
+                let hosted = with_host == *combined;
+                if hosted || (in_phase[index[&key]] && !declared.is_compatible(&host)) {
                     Joins::Always
                 } else if sinks.iter().any(|id| combined.has_resource_read(*id)) {
                     Joins::Sink
