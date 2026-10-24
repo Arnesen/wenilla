@@ -164,7 +164,7 @@ impl House {
     }
 
     fn eval<T: benilla_ui::mlua::FromLuaMulti>(&mut self, chunk: &str) -> T {
-        self.script().eval(chunk).unwrap()
+        hosted_eval(self.app.world_mut(), chunk)
     }
 
     fn script(&mut self) -> Mut<'_, UiScript> {
@@ -174,32 +174,17 @@ impl House {
     /// A chunk of Lua with the auction verbs' host lent, then two frames: whatever the chunk
     /// leaves for the drain has reached the getters by the second.
     fn lua(&mut self, chunk: &str) {
-        let world = self.app.world_mut();
-        let mut state =
-            bevy::ecs::system::SystemState::<(NonSendMut<UiScript>, super::AuctionVerbs)>::new(
-                world,
-            );
-        {
-            let (mut script, mut verbs) = state.get_mut(world);
-            script
-                .hosted(&mut AuctionHost(&mut verbs), |s| s.run(chunk))
-                .unwrap();
-        }
-        state.apply(world);
+        hosted_eval::<()>(self.app.world_mut(), chunk);
         self.app.update();
         self.app.update();
     }
 
     fn order(&mut self, list: &str) -> String {
-        self.script()
-            .eval(&format!("return ORDER({list:?})"))
-            .unwrap()
+        self.eval(&format!("return ORDER({list:?})"))
     }
 
     fn sellers(&mut self, list: &str) -> String {
-        self.script()
-            .eval(&format!("return SELLERS({list:?})"))
-            .unwrap()
+        self.eval(&format!("return SELLERS({list:?})"))
     }
 
     /// The packet through its handlers and the house lane alone, with no frame after: what the
@@ -290,11 +275,35 @@ impl benilla_ui::script::CallHost for AuctionHost<'_, '_, '_> {
         script: &mut UiScript,
         call: benilla_ui::script::ScriptCall,
     ) -> Option<benilla_ui::script::CallTail> {
-        if let benilla_ui::script::ScriptCall::Auction(call) = call {
-            self.0.apply(script, call);
+        use benilla_ui::script::{RecordAsk, ScriptCall};
+        match call {
+            ScriptCall::Auction(call) => self.0.apply(script, call),
+            ScriptCall::RecordAsk(RecordAsk::AuctionName { guid, list }) => {
+                self.0.wait_for_name(guid, list);
+            }
+            _ => {}
         }
         None
     }
+
+    fn player_name(&mut self, guid: u64) -> Option<String> {
+        self.0.player_name(guid)
+    }
+}
+
+/// `chunk` on the world's VM with the auction verbs' host lent ([`AuctionHost`]), as a call
+/// inside a frame runs: its getters' name lookups ask and wait inside their calls.
+pub(super) fn hosted_eval<T: benilla_ui::mlua::FromLuaMulti>(world: &mut World, chunk: &str) -> T {
+    let mut state =
+        bevy::ecs::system::SystemState::<(NonSendMut<UiScript>, super::AuctionVerbs)>::new(world);
+    let out = {
+        let (mut script, mut verbs) = state.get_mut(world);
+        script
+            .hosted(&mut AuctionHost(&mut verbs), |s| s.eval::<T>(chunk))
+            .unwrap_or_else(|e| panic!("{chunk}: {e}"))
+    };
+    state.apply(world);
+    out
 }
 
 /// A row of item `item`, sold by [`SELLER`] for 100c with no bid, an hour left.
@@ -453,6 +462,32 @@ fn a_sellers_name_signals_the_list_without_sorting_it() {
         "the name signals the list that asked, once"
     );
     assert_eq!(h.sellers("list"), "Bob,Al", "and does not sort it");
+}
+
+/// A name wait outlives the VM that made it: the list callbacks are engine code (`0x4cf290`,
+/// `0x4cf2b0`, `0x4cf2d0`) that only `0x55f870` cancels, and no auction caller does, so a `/reload`
+/// keeps them and the name's landing signals the list in the new VM.
+#[test]
+fn a_name_wait_outlives_a_reload_and_signals_the_new_vm() {
+    const AL: u64 = 0x61;
+    let mut h = House::new();
+    h.item(1, "Cloth", 10, 1);
+    h.open(AUCTIONEER);
+    let mut al = entry(1, 1);
+    al.owner_guid = AL;
+    h.land(LIST, vec![al]);
+    assert_eq!(h.sellers("list"), "?");
+    h.new_vm();
+    h.app.update();
+    h.script().run("SEEN = {}").unwrap();
+    h.name(AL, "Al");
+    h.app.update();
+    super::net::fire_house_lane(h.app.world_mut());
+    assert_eq!(
+        h.seen(),
+        ["AUCTION_ITEM_LIST_UPDATE=Cloth"],
+        "the new VM hears the list the old one read"
+    );
 }
 
 /// The duration sort compares each row's deadline, the result's tick plus the wire's

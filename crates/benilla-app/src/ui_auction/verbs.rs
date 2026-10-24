@@ -29,9 +29,33 @@ pub(crate) struct AuctionVerbs<'w, 's> {
     items: Res<'w, Items>,
     objects: crate::net::Objects<'w, 's>,
     sink: MessageSink<'w>,
+    /// The name cache `GetAuctionItemInfo` asks, and the house lane its name waits are kept on;
+    /// each absent in a harness without it.
+    names: Option<Res<'w, crate::names::NameCache>>,
+    lane: Option<ResMut<'w, super::net::HouseLane>>,
 }
 
 impl AuctionVerbs<'_, '_> {
+    /// The name cache's record for `guid`, read only, for a harness's host.
+    #[cfg(test)]
+    pub(crate) fn player_name(&self, guid: u64) -> Option<String> {
+        let names = self.names.as_deref()?;
+        names.resolve_player(guid, Ask::Read).map(str::to_string)
+    }
+
+    /// `GetAuctionItemInfo`'s name lookup inside its call
+    /// ([`benilla_ui::script::RecordAsk::AuctionName`]): the cache asks a miss, and the list's
+    /// callback waits on the name, once per name and list (`0x55f080`'s dedupe flag 1). The getter
+    /// makes it only on a miss, having read the cache first ([`Self::player_name`]).
+    pub(crate) fn wait_for_name(&mut self, guid: u64, list: usize) {
+        if let Some(names) = self.names.as_deref() {
+            let _ = names.resolve_player(guid, Ask::Event(&self.commands));
+        }
+        if let Some(lane) = self.lane.as_deref_mut() {
+            lane.wait_for_name(guid, list);
+        }
+    }
+
     /// Apply one auction call.
     pub(crate) fn apply(&mut self, script: &mut UiScript, call: AuctionCall) {
         let Self {
@@ -41,6 +65,7 @@ impl AuctionVerbs<'_, '_> {
             items,
             objects,
             sink,
+            ..
         } = self;
         let Some(auction) = auction.as_deref_mut() else {
             debug!("ui_auction: no auction house in this world; {call:?} dropped");

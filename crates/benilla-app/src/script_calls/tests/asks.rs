@@ -100,6 +100,120 @@ fn a_trade_getter_asks_a_missed_template_inside_its_call() {
     assert_eq!(sent(&rx), ["item 4306 0x88", "roll 1", "item 2592 0x2a"]);
 }
 
+/// A trade slot whose record the cache already holds answers in the getter's call, though the
+/// frame's push had it uncached: the getter reads the cache as it runs (`0x4c017f`, `0x4c0582`),
+/// so it asks nothing and waits on no callback, and the slot never reads empty.
+#[test]
+fn a_trade_getter_answers_a_cached_record_inside_its_call() {
+    let (mut app, rx) = client();
+    let mut target = TradeSideState::default();
+    target.slots[0] = Some(TradeSlotItem {
+        item_id: 4306,
+        count: 3,
+        ..Default::default()
+    });
+    vm(&mut app).open_trade_window(0x88);
+    vm(&mut app).set_trade(Some(TradeState {
+        player: TradeSideState::default(),
+        target,
+    }));
+    seat_player(&mut app);
+    app.world_mut()
+        .resource_mut::<crate::items::Items>()
+        .insert_template(4306, Some(crate::items::test_template("Silk Cloth")));
+    let (name, count, quality): (Option<String>, i64, i64) = eval(
+        &mut app,
+        "local n, _, c, q = GetTradeTargetItemInfo(1) return n, c, q",
+    );
+    // Quality -1 for a record with no equip slot, as the getter gates it.
+    assert_eq!(
+        (name.as_deref(), count, quality),
+        (Some("Silk Cloth"), 3, -1)
+    );
+    let link: Option<String> = eval(&mut app, "return GetTradeTargetItemLink(1)");
+    assert!(
+        link.as_deref().is_some_and(|l| l.contains("[Silk Cloth]")),
+        "{link:?}"
+    );
+    assert!(sent(&rx).is_empty(), "a cached record asks nothing");
+}
+
+/// `GetAuctionItemInfo` on a row whose seller the name cache lacks asks inside its call with the
+/// list's callback (`0x4cf1c8`), so `CMSG_NAME_QUERY` goes out ahead of the chunk's next verb,
+/// and the house lane keeps the list's wait once however often it is read.
+#[test]
+fn an_auction_row_asks_its_missed_seller_inside_its_call() {
+    use benilla_ui::script::{AuctionItemRow, AuctionListState, AuctionState, LIST};
+    let (mut app, rx) = client();
+    let mut state = AuctionState::default();
+    state.lists[LIST] = AuctionListState {
+        rows: vec![AuctionItemRow {
+            item_id: 2589,
+            name: Some("Linen Cloth".into()),
+            quality: Some(1),
+            count: 1,
+            owner_guid: 0x55,
+            ..Default::default()
+        }],
+        total: 1,
+        ..Default::default()
+    };
+    vm(&mut app).set_auction(state);
+    eval::<()>(
+        &mut app,
+        "GetAuctionItemInfo('list', 1) RandomRoll(1, 2) GetAuctionItemInfo('list', 1)",
+    );
+    assert_eq!(sent(&rx), ["name 0x55", "roll 1"]);
+    let lane = app.world().resource::<crate::ui_auction::HouseLane>();
+    assert!(
+        lane.any_named(|g| g == 0x55),
+        "the list waits on the seller"
+    );
+}
+
+/// A seller and an owned row's bidder the name cache already holds answer inside the call, though
+/// the frame's push had them unnamed: the lookup returns the record (`0x4cf167`, `0x4cf1c8`), so
+/// nothing is asked and no list waits on them.
+#[test]
+fn an_auction_row_answers_a_cached_name_inside_its_call() {
+    use benilla_ui::script::{
+        AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionState, OWNER,
+    };
+    let (mut app, rx) = client();
+    let mut state = AuctionState::default();
+    state.lists[OWNER] = AuctionListState {
+        rows: vec![AuctionItemRow {
+            item_id: 2589,
+            name: Some("Linen Cloth".into()),
+            quality: Some(1),
+            count: 1,
+            owner_guid: 0x55,
+            named_bidder: 0x56,
+            high_bidder: AuctionHighBidder::Nil,
+            ..Default::default()
+        }],
+        total: 1,
+        ..Default::default()
+    };
+    vm(&mut app).set_auction(state);
+    {
+        let mut names = app.world_mut().resource_mut::<crate::names::NameCache>();
+        names.insert_player(0x55, "Seller".into(), None);
+        names.insert_player(0x56, "Bidder".into(), None);
+    }
+    let (bidder, owner): (Option<String>, Option<String>) = eval(
+        &mut app,
+        "local _,_,_,_,_,_,_,_,_,_,b,o = GetAuctionItemInfo('owner', 1) return b, o",
+    );
+    assert_eq!(
+        (bidder.as_deref(), owner.as_deref()),
+        (Some("Bidder"), Some("Seller"))
+    );
+    assert!(sent(&rx).is_empty(), "a cached name asks nothing");
+    let lane = app.world().resource::<crate::ui_auction::HouseLane>();
+    assert!(!lane.any_named(|_| true), "and no list waits on it");
+}
+
 /// `GetGuildInfo` on a player whose guild the cache lacks makes the lookup with its callback
 /// inside its call (`0x4c93d2`): `CMSG_GUILD_QUERY` goes out ahead of the chunk's next verb, once
 /// while it is in flight.

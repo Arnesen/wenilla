@@ -182,7 +182,10 @@ impl HouseLane {
             .flatten()
     }
 
-    /// Keep a name's wait for `list`, once per name and list (`0x55f080`'s dedupe flag 1).
+    /// Keep a name's wait for `list`, once per name and list (`0x55f080`'s dedupe flag 1). The
+    /// list callbacks (`0x4cf290`, `0x4cf2b0`, `0x4cf2d0`) are engine code that only the name
+    /// cache's cancel `0x55f870` removes, and no auction caller makes it, so a wait outlives the VM
+    /// whose getter made it and signals the next one.
     pub(super) fn wait_for_name(&mut self, guid: u64, list: usize) {
         if !self.waits.contains(&(guid, list)) {
             self.waits.push((guid, list));
@@ -206,7 +209,7 @@ impl HouseLane {
     }
 
     /// Whether `named` now answers some wait's name.
-    pub(super) fn any_named(&self, named: impl Fn(u64) -> bool) -> bool {
+    pub(crate) fn any_named(&self, named: impl Fn(u64) -> bool) -> bool {
         self.waits.iter().any(|&(g, _)| named(g))
     }
 
@@ -226,10 +229,6 @@ impl HouseLane {
     /// Everything waiting, dropped: the session's end, or a new VM's for the waits.
     pub(super) fn clear(&mut self) {
         self.steps.clear();
-        self.waits.clear();
-    }
-
-    pub(super) fn clear_waits(&mut self) {
         self.waits.clear();
     }
 
