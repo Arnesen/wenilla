@@ -116,6 +116,14 @@ impl Default for TrainerTooltip {
     }
 }
 
+/// A product record a getter's lookup misses: the item, and the taught spell whose id, under
+/// `0xb0000000`, the lookup passes as its owner (`[taught]` at `0x4d9074` and `0x4d9cdf`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProductWait {
+    pub item: u32,
+    pub taught: u32,
+}
+
 /// One service, resolved by the app from the wire `TrainerSpell`; its place in
 /// [`TrainerState::services`] is wire order, not display order.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -130,12 +138,12 @@ pub struct TrainerService {
     pub texture: Option<String>,
     /// The item whose record the icon's product lookup (`0x4d9096`) misses: each
     /// `GetTrainerServiceIcon` call on the row keeps the callback `0x4d9140` on it.
-    pub icon_wait: Option<u32>,
+    pub icon_wait: Option<ProductWait>,
     /// The expanded text; `None` answers nil (`0x4d9d90`).
     pub description: Option<String>,
     /// The item whose record the description's product lookup (`0x4d9d07`) misses: each
     /// `GetTrainerServiceDescription` call on the row keeps the callback `0x4d9db0` on it.
-    pub description_wait: Option<u32>,
+    pub description_wait: Option<ProductWait>,
     /// In copper, already reputation-discounted by the server.
     pub cost: u32,
     /// A primary profession's first rank: the stock window's `cpCost2 > 0`, which asks to confirm.
@@ -284,13 +292,6 @@ impl super::UiScript {
         // The list's push lays the array out anew (`0x4d7807`-`0x4d7b35`); the caller pushes
         // every list, an identical one too.
         model.trainer_rows_fresh = true;
-    }
-
-    /// The item records the icon and description getters' calls missed since the last take, one
-    /// per call: the callbacks `0x4d9140` and `0x4d9db0` the item cache keeps (dedupe flag 0,
-    /// `0x4d9076`, `0x4d9ce7`), each of which runs `0x4d7d40` when its record lands.
-    pub fn take_trainer_item_waits(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().trainer_item_waits)
     }
 
     /// The trainer calls a harness's VM kept ([`Self::keep_calls`]), in call order.
@@ -610,6 +611,19 @@ fn rows(model: &Model) -> (&[Row], usize) {
     (&model.trainer_rows, model.trainer_visible)
 }
 
+/// A getter's product lookup that missed: the item cache asked inside the call, with the
+/// window's callback (`0x4d9140`, `0x4d9db0`, dedupe flag 0 at `0x4d9076` and `0x4d9ce7`).
+fn ask_item(lua: &Lua, wait: ProductWait) -> mlua::Result<()> {
+    super::calls::ask(
+        lua,
+        super::RecordAsk::Item {
+            entry: wait.item,
+            owner: super::calls::spell_owner(wait.taught),
+            callback: super::ItemCallback::Trainer,
+        },
+    )
+}
+
 /// The service at a 1-based row index; `None` for a header. `GameTooltip:SetTrainerService`
 /// resolves its index through this too, never through a raw `services` position.
 pub(super) fn service(model: &Model, index: usize) -> Option<&TrainerService> {
@@ -780,12 +794,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetTrainerServiceIcon(index)` (`0x84a8cc`, `0x4d8f81`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetTrainerServiceIcon(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let (texture, wait) = service(&model, index)
-                .map(|s| (s.texture.clone(), s.icon_wait))
-                .unwrap_or_default();
-            // The miss keeps its callback (`0x4d907e`) and pushes nil (`0x4d90a4`).
-            model.trainer_item_waits.extend(wait);
+            let (texture, wait) = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                service(&model, index)
+                    .map(|s| (s.texture.clone(), s.icon_wait))
+                    .unwrap_or_default()
+            };
+            // The miss asks and keeps its callback inside the call (`0x4d907e`), and pushes nil
+            // (`0x4d90a4`).
+            if let Some(wait) = wait {
+                ask_item(lua, wait)?;
+            }
             opt_str(lua, texture.as_ref())
         })?,
     )?;
@@ -797,12 +816,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `0x4d9b71`).
             let index =
                 binding_abi::index_arg(lua, index, "Usage: GetTrainerServiceDescription(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let (description, wait) = service(&model, index)
-                .map(|s| (s.description.clone(), s.description_wait))
-                .unwrap_or_default();
-            // The miss keeps its callback (`0x4d9cef`).
-            model.trainer_item_waits.extend(wait);
+            let (description, wait) = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                service(&model, index)
+                    .map(|s| (s.description.clone(), s.description_wait))
+                    .unwrap_or_default()
+            };
+            // The miss asks and keeps its callback inside the call (`0x4d9cef`).
+            if let Some(wait) = wait {
+                ask_item(lua, wait)?;
+            }
             opt_str(lua, description.as_ref())
         })?,
     )?;

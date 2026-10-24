@@ -8,11 +8,13 @@ use mlua::{Lua, MultiValue, Value};
 use super::binding_abi::number_arg;
 use super::Model;
 
-/// One teammate: map-normalized position, `(0, 0)` off the displayed map, and name if known.
+/// One teammate: map-normalized position, `(0, 0)` off the displayed map, name if known, and the
+/// guid the getter's lookup keys a miss by (`0x4ac118`).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct BattlefieldPositionView {
     pub uv: (f32, f32),
     pub name: Option<String>,
+    pub guid: u64,
 }
 
 /// The flag carrier: the position and the token the viewer's faction picks, `"HordeFlag"` for an
@@ -35,12 +37,6 @@ impl super::UiScript {
         model.battlefield_positions = players;
         model.battlefield_flag = flag;
         model.battlefield_icon_scale = icon_scale;
-    }
-
-    /// The 0-based rows `GetBattlefieldPosition` read with no name since the last drain, in call
-    /// order: each call's lookup passes a callback (`0x4ac118`), which the app makes.
-    pub fn take_battlefield_position_lookups(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.model_mut().battlefield_position_lookups)
     }
 
     /// The positions request's clear with no active slot (`0x4aa5df`): the teammate count
@@ -77,22 +73,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldPosition",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldPosition(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let i = usize::try_from(index).ok().and_then(|i| i.checked_sub(1));
-            let row = i.and_then(|i| model.battlefield_positions.get(i)).cloned();
-            match (i, row) {
-                (Some(i), Some(r)) => {
-                    // A nameless row is the lookup's ask (callback `0x4ac190`), the app's to make.
-                    if r.name.is_none() {
-                        model.battlefield_position_lookups.push(i);
+            let row = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| model.battlefield_positions.get(i))
+                    .cloned()
+            };
+            match row {
+                Some(r) => {
+                    // A nameless row is the lookup's ask with the callback `0x4ac190`, inside the
+                    // call (`0x4ac118`); a zero guid is no key (`0x55f080`).
+                    if r.name.is_none() && r.guid != 0 {
+                        super::calls::ask(lua, super::RecordAsk::BattlefieldName(r.guid))?;
                     }
-                    drop(model);
                     three(lua, r.uv, r.name.as_deref())
                 }
-                _ => {
-                    drop(model);
-                    three(lua, (0.0, 0.0), None)
-                }
+                None => three(lua, (0.0, 0.0), None),
             }
         })?,
     )?;
@@ -150,6 +148,7 @@ mod tests {
             vec![BattlefieldPositionView {
                 uv: (0.25, 0.5),
                 name: None,
+                ..Default::default()
             }],
             Some(BattlefieldFlagView {
                 uv: (0.375, 0.625),
@@ -178,10 +177,12 @@ mod tests {
                 BattlefieldPositionView {
                     uv: (0.25, 0.5),
                     name: Some("Probe-Realm".into()),
+                    ..Default::default()
                 },
                 BattlefieldPositionView {
                     uv: (0.75, 0.125),
                     name: None,
+                    ..Default::default()
                 },
             ],
             Some(BattlefieldFlagView {

@@ -500,8 +500,9 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::motion::modes::UnitMoveModes", "net::motion::remote::RemoteMotion",
         "net::reputations::Reputations", "spell::mods::SpellModifiers",
         "ui_action::PlayerActions"]),
+    // The ammo getters' hits fire after the push that carries their record, whenever it runs.
     ("::ui_char::feed_char", &["items::Countdowns", "items::Items", "names::NameCache",
-        "net::GuidIndex", "net::ObjectStore"]),
+        "net::GuidIndex", "net::ObjectStore", "ui_char::AmmoRecordHits"]),
     ("::ui_char::feed_skills", &["net::ObjectStore"]),
     ("::ui_reputation::feed_reputation", &["net::ObjectStore", "net::reputations::Reputations"]),
     ("::ui_inspect::feed_inspect", &["items::Items", "names::NameCache", "net::GuidIndex",
@@ -623,14 +624,16 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::SelfGuid", "net::reputations::Reputations", "ui_taxi::TaxiState",
         "ui_taxi::routing::TaxiRouteCache"]),
     ("::ui_taxi::feed_on_taxi", &["net::ObjectStore"]),
+    // The getters' item callbacks, kept inside their calls, are spent as the frame left them.
     ("::ui_tradeskill::feed_trade_skill", &["items::Countdowns", "items::Items", "net::GuidIndex",
         "net::ObjectStore", "spell::cooldowns::Cooldowns", "ui_action::PlayerActions",
-        "ui_tradeskill::TradeSkillOpen"]),
+        "ui_tradeskill::TradeSkillItemWaits", "ui_tradeskill::TradeSkillOpen"]),
     // Beast Training reads the pet off its bar and its family off the creature record as the frame
     // left them (#2217).
     ("::ui_craft::feed_craft", &["items::Countdowns", "items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "spell::mods::SpellModifiers",
-        "ui_action::PlayerActions", "ui_craft::CraftOpen", "ui_pet::PetBar"]),
+        "ui_action::PlayerActions", "ui_craft::CraftItemWaits", "ui_craft::CraftOpen",
+        "ui_pet::PetBar"]),
     ("::ui_loot::feed_loot", &["items::Countdowns", "items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "ui_loot::AutoLootByte", "ui_loot::LootLatch",
         "ui_loot::LootState", "ui_party::GroupState"]),

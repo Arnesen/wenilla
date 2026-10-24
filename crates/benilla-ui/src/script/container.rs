@@ -391,10 +391,15 @@ impl super::UiScript {
         })
     }
 
-    /// Drain the item entries whose record a cooldown query found missing since the last call, each
-    /// asked with the callback `0x6e2f70`.
+    /// The item entries whose record a cooldown query found missing that a harness's VM kept
+    /// ([`Self::keep_calls`]), each asked with the callback `0x6e2f70`.
     pub fn take_cooldown_record_asks(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().cooldown_record_asks)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::RecordAsk(super::RecordAsk::CooldownItem { entry, .. }) => {
+                Some(*entry)
+            }
+            _ => None,
+        })
     }
 
     /// Arm a gift wrap with the paper at `(bag, slot)`, as `0x5edea0` does: the paper locks, the
@@ -854,6 +859,17 @@ fn container_key(
     Ok((slot >= 1).then_some((i64::from(bag), slot as u32)))
 }
 
+/// The item cooldown query's lookup of a record the mirror lacks, inside the call: the callback
+/// `0x6e2f70`, deduped, with the active player as the owner id (`0x6e2eef`-`0x6e2f0d`).
+pub(super) fn ask_cooldown_record(lua: &Lua, entry: u32) -> mlua::Result<()> {
+    let owner = lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .unit_guids
+        .player;
+    super::calls::ask(lua, super::RecordAsk::CooldownItem { entry, owner })
+}
+
 /// Register the container verbs as bare globals, as `reference/lua_globals.tsv` lists them;
 /// `C_Container` is a later client's namespace, and an addon that finds it assumes that client.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -991,21 +1007,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot,
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let slot = key.and_then(|k| model.bag_slot(k.0, k.1));
-            let held = slot.is_some();
-            // The query asks a missing record with the callback `0x6e2f70` (`0x6e2efb`).
-            if let Some(entry) = slot.filter(|s| s.record_pending()).map(|s| s.item_id) {
-                model.cooldown_record_asks.push(entry);
+            let (pending, triple) = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let slot = key.and_then(|k| model.bag_slot(k.0, k.1));
+                let pending = slot.filter(|s| s.record_pending()).map(|s| s.item_id);
+                let triple = match slot {
+                    Some(_) => item_cooldown_triple(
+                        key.and_then(|k| model.container_cooldowns.get(&k).copied()),
+                        now,
+                    ),
+                    None => (0.0, 0.0, 0),
+                };
+                (pending, triple)
+            };
+            // The query asks a missing record with the callback `0x6e2f70` inside the call
+            // (`0x6e2efb`).
+            if let Some(entry) = pending {
+                ask_cooldown_record(lua, entry)?;
             }
-            Ok(if held {
-                item_cooldown_triple(
-                    key.and_then(|k| model.container_cooldowns.get(&k).copied()),
-                    now,
-                )
-            } else {
-                (0.0, 0.0, 0)
-            })
+            Ok(triple)
         })?,
     )?;
 
@@ -3001,7 +3021,7 @@ mod tests {
 
         let mut s = UiScript::new().unwrap();
         s.set_player_control(true);
-        s.open_trade_window();
+        s.open_trade_window(0x7);
         s.set_container(0, Some(crate::script::cursor::two_item_bag()));
         s.keep_calls();
         s.run("PickupContainerItem(0, 2) ClickTradeButton(1) ClearCursor()")

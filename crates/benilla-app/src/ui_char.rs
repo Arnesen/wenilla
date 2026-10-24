@@ -57,6 +57,7 @@ pub(crate) struct UiCharPlugin;
 impl Plugin for UiCharPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharFeedState>()
+            .init_resource::<AmmoRecordHits>()
             .add_systems(
                 Startup,
                 load_skill_tiers.after(benilla_assets::AssetSet::Open),
@@ -673,39 +674,53 @@ fn bank_bag_slots(
     bags
 }
 
+/// The ammo getters' calls that found the record the cache holds and the VM's doll lacked: the
+/// reference's call would have read it, so the feed's next push fires `UNIT_INVENTORY_CHANGED`
+/// after it, once per call, for the frame to read it there.
+#[derive(Resource, Default)]
+pub(crate) struct AmmoRecordHits(u32);
+
+/// The ammo slot getters' lookup with the callback `0x4c84f0` (`0x4c83bc`, `0x4c89cf`), inside
+/// their calls ([`benilla_ui::script::RecordAsk::AmmoItem`]): a miss asks, a refused entry again,
+/// and waits for the answer, whose ready record signals `UNIT_INVENTORY_CHANGED` (`0x4c8509`) at
+/// its packet. A hit registers no callback; it is the doll's push's to show ([`AmmoRecordHits`]).
+pub(crate) fn ask_ammo_record(
+    items: &Items,
+    commands: &NetCommands,
+    hits: &mut AmmoRecordHits,
+    entry: u32,
+    owner: u64,
+) {
+    if items.template(entry, owner, Ask::Event(commands)).is_none() {
+        items.wait_for_ammo_record(entry);
+    } else {
+        hits.0 += 1;
+    }
+}
+
 pub(crate) fn feed_char(
     // `ChrClasses.dbc` field 16, the relic flag `find_equip_slot` reads; absent, no class has one.
     classes: Option<Res<crate::chr_classes::ChrClassTable>>,
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // The VM beside the hits its getters' calls leave.
+    mut vm: crate::script_calls::disjoint::Pair<
+        crate::script_calls::HostedVm<'static, 'static>,
+        ResMut<'static, AmmoRecordHits>,
+    >,
+    mut field_notices: ResMut<crate::field_watch::NoticeLane>,
     mut inv: crate::items::Inventory,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
     enchants: Option<Res<crate::items::Enchants>>,
     props: Option<Res<crate::items::RandomProperties>>,
-    commands: Res<NetCommands>,
     mut feed: ResMut<CharFeedState>,
     names: Res<crate::names::NameCache>,
     // `ItemSubClass.dbc`, for `GetInventoryItemCount`'s container count bit.
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
-    // The ammo getters' record callback, fired with the field events after this push.
-    mut field_notices: ResMut<crate::field_watch::NoticeLane>,
 ) {
-    hosted_vm.run(|script| {
+    vm.p0().run(|script| {
         let Some(script) = script else {
             return;
         };
-        // The ammo slot getters' lookups with the callback `0x4c84f0` (`0x4c83bc`, `0x4c89cf`),
-        // registered after the script's tick: a miss asks and waits for the answer; a record that
-        // landed since the call runs the callback now, `UNIT_INVENTORY_CHANGED` (`0x4c8509`).
-        for entry in script.take_ammo_record_asks() {
-            if items.template(entry, 0, Ask::Event(&commands)).is_some() {
-                field_notices.write(crate::field_watch::FieldNotice::Player {
-                    id: crate::field_watch::id::UNIT_INVENTORY_CHANGED,
-                });
-            } else {
-                items.wait_for_ammo_record(entry);
-            }
-        }
         // Per VM: after a `/reload` both snapshots re-push.
         let (memo, vm_reset) = feed.vm.get_reset(script);
 
@@ -814,7 +829,12 @@ pub(crate) fn feed_char(
             memo.last_inv = Some(inv);
             memo.last_bank_bags = Some(bank_bags);
         }
-    })
+    });
+    // Fired with the field events, after this push ([`AmmoRecordHits`]).
+    let hits = std::mem::take(&mut vm.p1().0);
+    field_notices.write_batch((0..hits).map(|_| crate::field_watch::FieldNotice::Player {
+        id: crate::field_watch::id::UNIT_INVENTORY_CHANGED,
+    }));
 }
 
 /// The 0-based weapon slots `GetWeaponEnchantInfo` (`0x4c9790`) reads (`0x4c97c3`, `0x4c988b`);
@@ -966,6 +986,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<CharFeedState>()
+            .init_resource::<AmmoRecordHits>()
             .init_resource::<Items>()
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::names::NameCache>()
@@ -1214,6 +1235,27 @@ mod tests {
         assert_eq!(name(0xC2).as_deref(), Some("Red Ribboned Gift"));
     }
 
+    /// The ammo asks a harness's VM kept, asked as the host asks them inside the call
+    /// ([`benilla_ui::script::RecordAsk::AmmoItem`]).
+    fn ask_kept_ammo(app: &mut App) {
+        let entries = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .take_ammo_record_asks();
+        app.world_mut()
+            .resource_scope(|world, mut hits: Mut<AmmoRecordHits>| {
+                for entry in entries {
+                    ask_ammo_record(
+                        world.resource::<Items>(),
+                        world.resource::<NetCommands>(),
+                        &mut hits,
+                        entry,
+                        0,
+                    );
+                }
+            });
+    }
+
     /// The ammo view only reads the record: what asks it are the texture and quality getters'
     /// lookups with the callback `0x4c84f0` (`0x4c83ce`, `0x4c8a0a`), so a frame no getter read
     /// the slot in sends nothing.
@@ -1237,65 +1279,94 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         app.world_mut().run_system_once(feed_char).unwrap();
         assert_eq!(asked(&rx), 0, "the view reads");
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.keep_calls();
+        script
             .run(r#"GetInventoryItemQuality("player", 0)"#)
             .unwrap();
-        app.world_mut().run_system_once(feed_char).unwrap();
+        ask_kept_ammo(&mut app);
         assert_eq!(asked(&rx), 1, "the getter asks");
     }
 
     /// The ammo slot getters' record lookups with the callback `0x4c84f0` (`0x4c83bc`,
-    /// `0x4c89cf`): a call that missed waits for the answer; one whose record landed since runs
-    /// its callback at once, `UNIT_INVENTORY_CHANGED` with `"player"` (`0x4c8509`).
+    /// `0x4c89cf`): a call that misses the cache waits for the answer, one callback per call; a
+    /// call that finds the record registers none.
     #[test]
-    fn an_ammo_getters_miss_waits_and_a_record_landed_since_signals_at_once() {
-        use crate::field_watch::{id, FieldNotice};
+    fn an_ammo_getters_miss_waits_and_a_hit_registers_nothing() {
         const ARROW: u32 = 2512;
         /// `PLAYER_AMMO_ID`.
         const AMMO_ID: u16 = 1223;
         let mut app = world_with_bank_bag(None);
         set_self(&mut app, &[(AMMO_ID, ARROW)]);
         app.world_mut().run_system_once(feed_char).unwrap();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .keep_calls();
         let ask = |app: &mut App| {
             app.world_mut()
                 .non_send_resource_mut::<UiScript>()
                 .run(r#"GetInventoryItemQuality("player", 0)"#)
                 .unwrap();
+            ask_kept_ammo(app);
         };
-        let signals = |app: &mut App| -> Vec<FieldNotice> {
-            app.world_mut()
-                .resource_mut::<crate::field_watch::NoticeLane>()
-                .drain()
-                .collect()
-        };
-        ask(&mut app);
-        app.world_mut().run_system_once(feed_char).unwrap();
-        assert!(signals(&mut app).is_empty());
-        assert_eq!(
+        let waiters = |app: &mut App| {
             app.world_mut()
                 .resource_mut::<Items>()
-                .take_ammo_waiters(ARROW),
-            1,
-            "the miss waits for its answer"
-        );
+                .take_ammo_waiters(ARROW)
+        };
         ask(&mut app);
+        ask(&mut app);
+        assert_eq!(waiters(&mut app), 2, "each miss waits for its answer");
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(ARROW, Some(crate::items::test_template("Rough Arrow")));
+        // The view still lacks the name, so the getter looks up, and the cache answers.
+        ask(&mut app);
+        assert_eq!(waiters(&mut app), 0, "a hit registers no callback");
+    }
+
+    /// A getter call that finds the record the host holds and the doll's view lacks, which landed
+    /// after the doll's last push, reaches the frame: the next push fires `UNIT_INVENTORY_CHANGED`
+    /// after it, as the callback `0x4c84f0` would at the landing (`0x4c8509`), so the frame reads
+    /// the record the reference's call would have returned.
+    #[test]
+    fn a_held_record_the_doll_lacks_reaches_the_frame() {
+        use crate::field_watch::{id, FieldNotice, NoticeLane};
+        const ARROW: u32 = 2512;
+        /// `PLAYER_AMMO_ID`.
+        const AMMO_ID: u16 = 1223;
+        let mut app = world_with_bank_bag(None);
+        set_self(&mut app, &[(AMMO_ID, ARROW)]);
         app.world_mut().run_system_once(feed_char).unwrap();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .keep_calls();
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(ARROW, Some(crate::items::test_template("Rough Arrow")));
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(r#"GetInventoryItemQuality("player", 0)"#)
+            .unwrap();
+        ask_kept_ammo(&mut app);
+        app.world_mut().run_system_once(feed_char).unwrap();
+        let fired: Vec<_> = app
+            .world_mut()
+            .resource_mut::<NoticeLane>()
+            .drain()
+            .collect();
         assert_eq!(
-            signals(&mut app),
+            fired,
             [FieldNotice::Player {
                 id: id::UNIT_INVENTORY_CHANGED
             }]
         );
-        assert_eq!(
-            app.world_mut()
-                .resource_mut::<Items>()
-                .take_ammo_waiters(ARROW),
-            0
-        );
+        let named = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .eval::<bool>(r#"return GetInventoryItemQuality("player", 0) ~= nil"#)
+            .unwrap();
+        assert!(named, "the push carries the record");
     }
 
     /// The lock is the VM's, keyed by the guid this feed pushes: a lock moves no snapshot, and

@@ -209,6 +209,16 @@ impl QuestGiver {
         self.item_waits.clear();
     }
 
+    /// `GetQuestItemInfo`'s lookup of a template in flight, inside its call
+    /// ([`benilla_ui::script::ItemCallback::Quest`]): the item cache asks a miss, a refused entry
+    /// again, with the panel's source as the owner id (`[0xbe0810]` at `0x5017d3`, which the panel
+    /// setter writes, `0x500d86`), and the window keeps one callback `0x5018c0` per call
+    /// (`0x5017ce`).
+    pub(crate) fn ask_item_record(&mut self, items: &Items, commands: &NetCommands, entry: u32) {
+        let _ = items.template(entry, self.npc.unwrap_or(0), Ask::Event(commands));
+        self.item_waits.push(entry);
+    }
+
     /// Spend the waits whose item record answered: how many brought a record, each its own
     /// `QUEST_ITEM_UPDATE`; a refusal runs its callback with status 0, which fires nothing
     /// (`0x5018d6`-`0x5018e0`).
@@ -541,18 +551,19 @@ pub(crate) fn feed_quest(
             .collect();
         show_messages(script, &mut sink, "ui_quest", lines);
         let player = crate::npc_text::player_identity(&self_q, &names, unit_names.get());
-        // A panel's publish, or a window this VM has not shown, is the stock frame's getter calls.
+        // A panel's publish, or a window this VM has not shown, is the stock frame's name read.
         let published = giver.panels != giver.panels_asked;
         let ask = Ask::at(last.is_none() || published, &commands);
         giver.panels_asked = giver.panels;
-        let waits = script.take_quest_item_waits();
-        giver.item_waits.extend(waits);
+        // The getter's callbacks, kept inside its calls ([`QuestGiver::ask_item_record`]).
         let item_updates = giver.item_answers(&items);
+        // A reward is asked by `GetQuestItemInfo`'s call alone, inside it (`0x5017de`): the panel
+        // setters look no item up.
         let fresh = snapshot(
             &giver,
             &items,
             icons.as_deref(),
-            ask,
+            Ask::Read,
             &crate::npc_text::MacroContext {
                 subject: player.as_ref(),
                 states: &states,
@@ -696,11 +707,10 @@ mod tests {
         }
     }
 
-    /// `GetQuestItemInfo` looks each reward up with a callback (`0x5017de`) when the stock frame
-    /// calls it, on the panel's event; the frames between ask only what the cache holds nothing
-    /// for. A refused reward is asked by no frame, and again by the next panel the giver publishes.
+    /// A panel asks no reward: the panel setters look no item up, and a reward is asked by
+    /// `GetQuestItemInfo`'s call alone (`0x5017de`), inside it. No panel and no frame asks.
     #[test]
-    fn a_refused_reward_is_asked_at_the_next_panel_never_by_a_frame() {
+    fn a_panel_asks_no_reward() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(NetCommands(tx))
@@ -740,22 +750,13 @@ mod tests {
                 .count()
         };
         publish(&mut app);
-        app.update();
-        assert_eq!(reward_asks(&rx), 1);
-        app.world_mut()
-            .resource_mut::<Items>()
-            .insert_template(3000, None);
-        for _ in 0..600 {
+        for _ in 0..3 {
             app.update();
         }
-        assert_eq!(reward_asks(&rx), 0, "no frame asks the refusal");
+        assert_eq!(reward_asks(&rx), 0, "the panel and its frames");
         publish(&mut app);
         app.update();
-        assert_eq!(reward_asks(&rx), 1, "the next panel does, once");
-        for _ in 0..600 {
-            app.update();
-        }
-        assert_eq!(reward_asks(&rx), 0);
+        assert_eq!(reward_asks(&rx), 0, "the next panel");
     }
 
     #[test]
@@ -1151,10 +1152,11 @@ mod tests {
 
         publish(&mut app, offer(102, "Westbrook Garrison", 903));
         assert_eq!(quest_tick(&mut app, feed), ["QUEST_DETAIL"]);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .run("GetQuestItemInfo('choice', 1) GetQuestItemInfo('choice', 1)")
-            .unwrap();
+        crate::script_calls::with_hosted_vm(app.world_mut(), |vm| {
+            vm.expect("a VM")
+                .run("GetQuestItemInfo('choice', 1) GetQuestItemInfo('choice', 1)")
+        })
+        .unwrap();
         assert!(
             quest_tick(&mut app, feed).is_empty(),
             "the record is still out"

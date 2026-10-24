@@ -285,12 +285,70 @@ pub enum ScriptCall {
 pub enum RecordAsk {
     /// `UnitName` on a unit with no object: the player-name cache by guid (`0x5171eb`).
     PlayerName(u64),
+    /// `GetBattlefieldPosition` on a nameless teammate: the player-name cache by guid, with the
+    /// callback `0x4ac190` and no dedupe (`0x4ac104`-`0x4ac118`), which signals
+    /// `WORLD_MAP_NAME_UPDATE` when the name answers, a refusal too.
+    BattlefieldName(u64),
     /// A trade getter's filled slot whose template the mirror lacks: the item cache, with the
-    /// callback `0x4c0340` that signals `TRADE_UPDATE` (`0x4c017f`, `0x4c0582`).
-    TradeItem(u32),
+    /// callback `0x4c0340` that signals `TRADE_UPDATE` (`0x4c017f`, `0x4c0582`). The owner id is
+    /// the partner (`[0xb71728]`, `0x4c016c`) for theirs, the active player (`0x4c0573`) for ours.
+    TradeItem { entry: u32, owner: u64 },
     /// `GetGuildInfo` on a player whose guild the mirror lacks: the guild cache, with a waiter
     /// of the call's own for the unit (`0x4c93b6`-`0x4c93d2`).
     Guild { guild_id: u32, guid: u64 },
+    /// The ammo slot's texture or quality getter on ammunition whose record the mirror lacks: the
+    /// item cache, with the callback `0x4c84f0` that signals `UNIT_INVENTORY_CHANGED` for a ready
+    /// record (`0x4c83bc`, `0x4c89cf`). The owner id is the unit's, the active player's
+    /// (`0x4c83ad`-`0x4c83c4`).
+    AmmoItem { entry: u32, owner: u64 },
+    /// The item cooldown query `0x6e2ed0` on an item whose record the mirror lacks, from
+    /// `GetContainerItemCooldown` or the bag and inventory tooltips: the item cache, with the
+    /// callback `0x6e2f70`, deduped (`0x6e2ef4`-`0x6e2f0d`). The owner id is the active player
+    /// (`0x6e2eef`).
+    CooldownItem { entry: u32, owner: u64 },
+    /// A getter's item-record lookup on a record its mirror lacks: the item cache, with the
+    /// getter's callback, kept by its owner ([`ItemCallback`]), and the lookup's owner id, the
+    /// query's guid ([`spell_owner`] for the profession and trainer getters, 0 for the quest
+    /// log's; the questgiver's is the panel's source, which the host holds).
+    Item {
+        entry: u32,
+        owner: u64,
+        callback: ItemCallback,
+    },
+    /// The quest log's leaderboard on a creature objective whose name the mirror lacks: the
+    /// creature cache, with the callback `0x4e07d0`, whose wait the VM keeps (`0x4e044c`).
+    QuestCreature(u32),
+    /// `GetSummonConfirmSummoner` with no name: the player-name cache by the latched summoner
+    /// (`0xb4e358`), with the callback `0x48b710`, which does nothing (`0x48b6bf`-`0x48b6e1`).
+    Summoner,
+}
+
+/// The owner id a profession or trainer getter's item lookup passes: `0xb0000000` over a spell id
+/// (`cdq; or edx,0xb0000000`), the row's at a profession (`0x4f75cf`, `0x4fdb8a`-`0x4fdb99`), the
+/// taught spell's at a trainer (`0x4d9074`-`0x4d9087`).
+pub fn spell_owner(spell_id: u32) -> u64 {
+    0xb000_0000_0000_0000 | u64::from(spell_id)
+}
+
+/// Who keeps the callback of a getter's item-record lookup ([`RecordAsk::Item`]); each is
+/// registered once per call, with no dedupe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemCallback {
+    /// `GetTrainerServiceIcon` and `GetTrainerServiceDescription` (`0x4d9140`, `0x4d9db0`), whose
+    /// landing runs the window's pass `0x4d7d40` (`0x4d914a`, `0x4d9dba`).
+    Trainer,
+    /// `GetQuestItemInfo` (`0x5018c0`), whose landing fires `QUEST_ITEM_UPDATE` for a ready record
+    /// (`0x5018fe`-`0x501903`), kept by the questgiver window.
+    Quest,
+    /// `GetCraftReagentInfo` and `GetCraftSpellFocus` (`0x4f7710`), whose landing rebuilds the
+    /// craft list (`0x4f771a`), kept beside the craft window.
+    Craft,
+    /// The trade-skill getters (`0x4fdc30`), whose landing rebuilds the list (`0x4fdc3c`), kept
+    /// beside the trade-skill window.
+    TradeSkill,
+    /// The quest log's leaderboard and reward getters (`0x4e0830`), whose callback the VM keeps
+    /// and signals `QUEST_LOG_UPDATE` with at its flush (`0x4e083a`): the cache only asks.
+    QuestLog,
 }
 
 /// Make `ask` inside the getter's call. A getter never raises for its lookup: with no host lent,
@@ -831,6 +889,26 @@ impl UiScript {
     pub fn take_calls_like(&mut self, call: &ScriptCall) -> usize {
         self.take_calls_where(|kept| (kept == call).then_some(()))
             .len()
+    }
+
+    /// The entries of the item-record lookups with `callback` a harness's VM kept, in call order
+    /// ([`RecordAsk::Item`]).
+    pub fn take_item_asks(&mut self, callback: ItemCallback) -> Vec<u32> {
+        self.take_calls_where(|call| match call {
+            ScriptCall::RecordAsk(RecordAsk::Item {
+                entry, callback: c, ..
+            }) if *c == callback => Some(*entry),
+            _ => None,
+        })
+    }
+
+    /// The record lookups a harness's VM kept, each with its owner id, in call order
+    /// ([`RecordAsk`]).
+    pub fn take_record_asks(&mut self) -> Vec<RecordAsk> {
+        self.take_calls_where(|call| match call {
+            ScriptCall::RecordAsk(ask) => Some(*ask),
+            _ => None,
+        })
     }
 
     /// Take the kept calls `pick` answers for, in call order, leaving the rest kept.

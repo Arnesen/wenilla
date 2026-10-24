@@ -36,6 +36,26 @@ pub(crate) struct CraftOpen {
     pub(crate) craft_type: u32,
 }
 
+/// The item records the craft getters' lookups missed, one per call, each the callback `0x4f7710`
+/// the item cache keeps, which outlives a VM and rebuilds the list when its record lands
+/// (`0x4f771a`); the lookups ask inside their calls ([`ask_item_record`]).
+#[derive(Resource, Default)]
+pub(crate) struct CraftItemWaits(pub(crate) Vec<u32>);
+
+/// A craft getter's lookup of a record in flight, inside its call
+/// ([`benilla_ui::script::ItemCallback::Craft`]): the item cache asks a miss, a refused entry
+/// again, and keeps one callback per call (`0x4f75dd`, `0x4f79f2`).
+pub(crate) fn ask_item_record(
+    items: &Items,
+    commands: &NetCommands,
+    waits: &mut CraftItemWaits,
+    entry: u32,
+    owner: u64,
+) {
+    let _ = items.template(entry, owner, Ask::Event(commands));
+    waits.0.push(entry);
+}
+
 /// `EffectImplicitTargetA`/`B` 5, the pet (`0x4f632a`).
 const TARGET_PET: u32 = 5;
 
@@ -45,6 +65,7 @@ impl Plugin for UiCraftPlugin {
     fn build(&self, app: &mut App) {
         app.net_handler(SessionEventKind::Disconnected, on_session_end);
         app.init_resource::<CraftOpen>()
+            .init_resource::<CraftItemWaits>()
             .add_systems(Update, feed_craft.in_set(UnitFeed));
     }
 }
@@ -229,7 +250,11 @@ fn craft_tooltip(spell_id: u32, d: &benilla_formats::SpellDisplay) -> CraftToolt
 
 /// Builds the craft snapshot, `None` while the window is closed or the catalogs are not loaded.
 fn feed_craft(
-    mut vm: crate::script_calls::VmWith<(PetReads<'static>, Res<'static, CraftOpen>)>,
+    mut vm: crate::script_calls::VmWith<(
+        PetReads<'static>,
+        Res<'static, CraftOpen>,
+        ResMut<'static, CraftItemWaits>,
+    )>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     spell_mods: Res<crate::spell::SpellModifiers>,
@@ -239,17 +264,15 @@ fn feed_craft(
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     objects: Objects,
     items: Res<Items>,
-    commands: Res<NetCommands>,
     mut memo: Local<crate::ui_script::VmMemo<CraftMemo>>,
 ) {
-    vm.feed(|script, (pet_reads, open), fires| {
+    vm.feed(|script, (pet_reads, open, mut waits), fires| {
         let Some(script) = script else {
             return;
         };
         let memo = memo.get(script);
-        // The show stands for the stock frame's getter calls, whose lookups pass the callback
-        // `0x4f7710` (`0x4f75f2`, `0x4f7a0a`); the rebuilds between read.
-        let ask = Ask::at(memo.state.is_none() || open.is_changed(), &commands);
+        // The list only reads the item cache: the build asks nothing (`0x4f60c0`), and a reagent
+        // or a totem is asked by its getter's call, inside it (`0x4f75f2`, `0x4f7a0a`).
         let fresh = (|| -> Option<CraftState> {
             let line = open.line?;
             let craft_type = open.craft_type;
@@ -336,7 +359,7 @@ fn feed_craft(
                         let have = count_of(&store.0, &objects, entry, InventoryScope::DEFAULT);
                         // A reagent's icon is the shared item chain (`0x5d88b0`) through its
                         // display.
-                        let (name, icon) = match items.template(entry, 0, ask) {
+                        let (name, icon) = match items.template(entry, 0, Ask::Read) {
                             Some(t) => (
                                 Some(t.name.clone()),
                                 item_icon(icons.as_deref(), t.display_info_id),
@@ -369,7 +392,7 @@ fn feed_craft(
                     let mut tools_pending = Vec::new();
                     for &t in d.totems.iter().filter(|&&t| t != 0) {
                         let have = count_of(&store.0, &objects, t, InventoryScope::DEFAULT) > 0;
-                        match items.template(t, 0, ask) {
+                        match items.template(t, 0, Ask::Read) {
                             Some(info) => tools.push((info.name.clone(), have)),
                             None => tools_pending.push(t),
                         }
@@ -437,10 +460,10 @@ fn feed_craft(
         };
         // `CloseCraft` closes the VM's window and signals `CRAFT_CLOSE` in the verb (`0x4f5fef`).
         let closed_in_place = !script.craft_open();
-        // The getters' item callbacks, kept by their calls; each record that landed rebuilds
-        // (`0x4f7710` → `0x4f771a`), and a refusal runs it with status 0, which does nothing.
-        memo.item_waits.extend(script.take_craft_item_waits());
-        let arrivals = crate::ui_tradeskill::landed(&mut memo.item_waits, &items);
+        // The getters' item callbacks, kept inside their calls ([`ask_item_record`]); each record
+        // that landed rebuilds (`0x4f7710` → `0x4f771a`), and a refusal runs it with status 0,
+        // which does nothing.
+        let arrivals = crate::ui_tradeskill::landed(&mut waits.0, &items);
         let opened = match (&memo.state, &fresh) {
             (None, Some(_)) => true,
             (Some(l), Some(f)) => l.craft_type != f.craft_type || l.name != f.name,
@@ -449,9 +472,10 @@ fn feed_craft(
         // Every push is silent: the rebuilds signal, and the getters read the state at their call.
         if fresh != memo.state {
             script.set_craft(fresh.clone());
-            // Pre-ask the reagent templates `GetCraftReagentItemLink` reads.
+            // The reagent templates `GetCraftReagentItemLink` reads, off the cache: the link
+            // passes no callback (`0x4f780a`).
             if let Some(f) = &fresh {
-                script.ask_item_templates(
+                script.read_item_templates(
                     f.recipes
                         .iter()
                         .flat_map(|r| r.reagents.iter().map(|re| re.item)),
@@ -489,8 +513,6 @@ fn feed_craft(
 struct CraftMemo {
     /// The state it last pushed.
     state: Option<CraftState>,
-    /// The item records the getters' calls wait on, one per call.
-    item_waits: Vec<u32>,
 }
 
 /// `DoCraft(index)` past its row (`0x4f7d10`): the row's cast through `CastSpellAsActivePlayer`
@@ -534,6 +556,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<CraftOpen>()
+            .init_resource::<CraftItemWaits>()
             .init_resource::<PlayerActions>()
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::net::GuidIndex>()
@@ -645,6 +668,7 @@ mod tests {
         items.insert_template(DUST, Some(crate::items::test_template("Strange Dust")));
         items.insert_template(ROD, Some(crate::items::test_template("Runed Rod")));
         app.init_resource::<CraftOpen>()
+            .init_resource::<CraftItemWaits>()
             .insert_resource(actions)
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::net::GuidIndex>()
@@ -840,6 +864,7 @@ mod tests {
         actions.profession_order.extend(known.iter().copied());
         actions.craft_order.extend(known.iter().copied());
         app.init_resource::<CraftOpen>()
+            .init_resource::<CraftItemWaits>()
             .insert_resource(actions)
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::net::GuidIndex>()
@@ -866,7 +891,9 @@ mod tests {
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(player)),
             SelfPlayer,
         ));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut script = UiScript::new().unwrap();
+        script.keep_calls();
+        app.insert_non_send_resource(script);
         app.add_systems(Update, feed_craft);
         let mut open = app.world_mut().resource_mut::<CraftOpen>();
         open.line = Some(if craft_type == 3 {
@@ -1304,6 +1331,58 @@ mod tests {
     /// resent unchanged included; a learn or an unlearn of a craft spell rebuilds it once per packet
     /// (`0x5e9e12`, `0x5ea240`), whether or not the list moved; a record a getter's call waited on
     /// rebuilds it once per call (`0x4f7710`).
+    /// The window's show looks no item up: the reference's list build asks nothing (`0x4f60c0`),
+    /// and a reagent or a totem is asked by its getter's call alone (`0x4f75f2`, `0x4f7a0a`).
+    /// The reagents the link getters read, which pass no callback (`0x4f780a`), are read off the
+    /// cache, never asked.
+    #[test]
+    fn the_show_asks_no_reagent_or_totem() {
+        const DUST: u32 = 10_940;
+        const ROD: u32 = 6218;
+        let displays = vec![(
+            7418,
+            SpellDisplay {
+                name: "Enchant Bracer - Minor Health".into(),
+                cast_ui: 3,
+                reagents: [
+                    (DUST, 1),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                ],
+                totems: [ROD, 0],
+                ..Default::default()
+            },
+        )];
+        let catalog =
+            benilla_formats::SkillLineCatalog::from_abilities([(7418, ability(ENCHANTING, 1, 70))]);
+        let mut app = craft_feed(displays, &[7418], catalog, 3, &[]);
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<i64>("return GetNumCrafts()")
+                .unwrap(),
+            1,
+            "the window is up"
+        );
+        let rx = app
+            .world()
+            .non_send_resource::<crossbeam_channel::Receiver<crate::net::ClientCommand>>();
+        let asked: Vec<_> = crate::query_cache::queries(rx)
+            .into_iter()
+            .filter(|c| matches!(c, crate::net::ClientCommand::ItemQuery { .. }))
+            .collect();
+        assert!(asked.is_empty(), "{asked:?}");
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        assert!(script.take_item_stat_asks().is_empty(), "no pre-ask");
+    }
+
     #[test]
     fn each_packet_and_each_waited_record_signals_one_update() {
         const DUST: u32 = 10_940;
@@ -1373,10 +1452,25 @@ mod tests {
             vec![SessionEvent::SpellRemoved { spell_id: 7420 }],
         );
         assert!(heard(&mut app).is_empty());
-        app.world()
-            .non_send_resource::<UiScript>()
-            .run("GetCraftReagentInfo(1, 1) GetCraftReagentInfo(1, 1)")
-            .unwrap();
+        let entries = {
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.run("GetCraftReagentInfo(1, 1) GetCraftReagentInfo(1, 1)")
+                .unwrap();
+            s.take_craft_item_waits()
+        };
+        // The host's lookups inside the calls ([`super::ask_item_record`]).
+        app.world_mut()
+            .resource_scope(|world, mut waits: Mut<CraftItemWaits>| {
+                for entry in entries {
+                    super::ask_item_record(
+                        world.resource::<Items>(),
+                        world.resource::<NetCommands>(),
+                        &mut waits,
+                        entry,
+                        0,
+                    );
+                }
+            });
         assert!(heard(&mut app).is_empty());
         app.world_mut()
             .resource_mut::<Items>()
@@ -1393,6 +1487,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<CraftOpen>()
+            .init_resource::<CraftItemWaits>()
             .init_resource::<PlayerActions>()
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::net::GuidIndex>()

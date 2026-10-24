@@ -1746,11 +1746,11 @@ fn the_group_header_keys_resolve_in_the_real_global_strings() {
     }
 }
 
-/// The stock window calls `GetTrainerServiceIcon` at `TRAINER_SHOW` and `TRAINER_UPDATE`, which
-/// looks the product up with a callback (`0x4d9096`); the frames between ask only what the cache
-/// holds nothing for. A refused product is asked by no frame, and again by the trainer's next list.
+/// The list asks no product: the reference's list and its passes look no item up, and a product
+/// is asked by the icon and description getters' calls alone (`0x4d9096`, `0x4d9d07`), inside
+/// them. No list, no pass and no frame asks.
 #[test]
-fn a_refused_product_is_asked_at_the_next_list_never_by_a_frame() {
+fn the_list_asks_no_product() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let mut app = App::new();
     app.add_message::<crate::net::FieldChanged>()
@@ -1788,18 +1788,13 @@ fn a_refused_product_is_asked_at_the_next_list_never_by_a_frame() {
             .count()
     };
     list(&mut app);
-    app.update();
-    assert_eq!(product_asks(&rx), 1);
-    app.world_mut()
-        .resource_mut::<Items>()
-        .insert_template(777, None);
-    for _ in 0..600 {
+    for _ in 0..3 {
         app.update();
     }
-    assert_eq!(product_asks(&rx), 0, "no frame asks the refusal");
+    assert_eq!(product_asks(&rx), 0, "the list and its frames");
     list(&mut app);
     app.update();
-    assert_eq!(product_asks(&rx), 1, "the next list does, once");
+    assert_eq!(product_asks(&rx), 0, "the next list");
 }
 
 /// [`resolve_service`] with the pet's book beside the player's, as `GetTrainerServiceAbilityReq`
@@ -2017,7 +2012,8 @@ fn feed_app(spells: SpellCatalog, lines: SkillLineCatalog) -> App {
         })
         .insert_resource(SkillLines { catalog: lines })
         .add_systems(Update, feed_trainer);
-    let script = UiScript::new().unwrap();
+    let mut script = UiScript::new().unwrap();
+    script.keep_calls();
     script
         .run(
             "SEEN = {} local f = CreateFrame('Frame') f:RegisterEvent('TRAINER_SHOW') \
@@ -2039,6 +2035,28 @@ fn tick(app: &mut App) -> Vec<String> {
     seen
 }
 
+/// Run `chunk`, then make the item lookups its getters kept as the host makes them inside the
+/// call ([`super::ask_item_record`]).
+fn run_getters(app: &mut App, chunk: &str) {
+    let entries = {
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        s.run(chunk).unwrap();
+        s.take_item_asks(benilla_ui::script::ItemCallback::Trainer)
+    };
+    let world = app.world_mut();
+    world.resource_scope(|world, mut open: Mut<TrainerOpen>| {
+        for entry in entries {
+            super::ask_item_record(
+                world.resource::<Items>(),
+                world.resource::<NetCommands>(),
+                &mut open,
+                entry,
+                0,
+            );
+        }
+    });
+}
+
 /// `chunk`'s number.
 fn lua_count(app: &mut App, chunk: &str) -> i64 {
     let s = app.world_mut().non_send_resource_mut::<UiScript>();
@@ -2049,6 +2067,49 @@ fn lua_count(app: &mut App, chunk: &str) -> i64 {
 fn lua_numbers(app: &mut App, chunk: &str) -> Vec<i64> {
     let s = app.world_mut().non_send_resource_mut::<UiScript>();
     s.eval::<Vec<i64>>(chunk).unwrap()
+}
+
+/// The icon and description getters' product lookups pass the taught spell's id under
+/// `0xb0000000` as the owner: the icon takes the record of the learn slot's trigger and reads its
+/// id (`0x4d9050`-`0x4d9074`), the description the taught record's (`0x4d9c98`, `0x4d9cdf`), never
+/// the wire spell's.
+#[test]
+fn the_product_lookups_pass_the_taught_spell_as_their_owner() {
+    use benilla_ui::script::{spell_owner, ItemCallback, RecordAsk};
+    let wire_spell = SpellDisplay {
+        name: "Copper Shortsword".into(),
+        effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+        effect_trigger_spell: [200, 0, 0],
+        ..Default::default()
+    };
+    let taught = SpellDisplay {
+        name: "Copper Shortsword".into(),
+        attributes: SPELL_ATTR_IS_TRADESKILL,
+        effects: [SPELL_EFFECT_CREATE_ITEM, 0, 0],
+        effect_item_type: [777, 0, 0],
+        ..Default::default()
+    };
+    let mut app = feed_app(
+        SpellCatalog::from_displays(HashMap::from([(100, wire_spell), (200, taught)])),
+        benilla_formats::SkillLineCatalog::from_spell_lines([]),
+    );
+    app.world_mut().resource_mut::<TrainerOpen>().open(
+        0x10,
+        TRAINER_TYPE_TRADESKILL,
+        vec![wire(100, trainer_spell_state::GREEN, 1, 1, 0)],
+        String::new(),
+    );
+    tick(&mut app);
+    let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+    // Row 1 is the group's header.
+    s.run("GetTrainerServiceIcon(2) GetTrainerServiceDescription(2)")
+        .unwrap();
+    let ask = RecordAsk::Item {
+        entry: 777,
+        owner: spell_owner(200),
+        callback: ItemCallback::Trainer,
+    };
+    assert_eq!(s.take_record_asks(), [ask, ask]);
 }
 
 /// `TRAINER_SHOW` fires from the list builder alone (`0x4d7b73`), so the open trainer's second
@@ -2141,10 +2202,7 @@ fn an_item_record_a_getter_missed_runs_the_state_pass() {
     open(&mut app);
     assert_eq!(tick(&mut app), ["TRAINER_SHOW"]);
     assert_eq!(costs(&mut app, 6), listed);
-    app.world_mut()
-        .non_send_resource_mut::<UiScript>()
-        .run("for i = 1, 6 do GetTrainerServiceIcon(i) end")
-        .unwrap();
+    run_getters(&mut app, "for i = 1, 6 do GetTrainerServiceIcon(i) end");
     assert!(tick(&mut app).is_empty(), "the record is still out");
     land(&mut app);
     assert_eq!(tick(&mut app), ["TRAINER_UPDATE"]);
@@ -2180,10 +2238,10 @@ fn the_state_pass_runs_once_per_trigger_and_per_callback() {
     assert_eq!(tick(&mut app), ["TRAINER_UPDATE", "TRAINER_UPDATE"]);
     assert!(tick(&mut app).is_empty());
 
-    app.world_mut()
-        .non_send_resource_mut::<UiScript>()
-        .run("for i = 1, 2 do GetTrainerServiceIcon(i) end GetTrainerServiceIcon(2)")
-        .unwrap();
+    run_getters(
+        &mut app,
+        "for i = 1, 2 do GetTrainerServiceIcon(i) end GetTrainerServiceIcon(2)",
+    );
     assert!(tick(&mut app).is_empty(), "the record is still out");
     app.world_mut()
         .resource_mut::<Items>()

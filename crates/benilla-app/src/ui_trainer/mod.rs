@@ -167,6 +167,21 @@ impl TrainerOpen {
     }
 }
 
+/// A trainer getter's product lookup with its callback, inside its call
+/// ([`benilla_ui::script::ItemCallback::Trainer`]): the item cache asks a miss, a refused entry
+/// again, and the window keeps one callback per call (`0x4d907e`, `0x4d9cef`), whose landing is a
+/// trigger of the pass ([`TrainerOpen::item_answers`]).
+pub(crate) fn ask_item_record(
+    items: &Items,
+    commands: &NetCommands,
+    open: &mut TrainerOpen,
+    entry: u32,
+    owner: u64,
+) {
+    let _ = items.template(entry, owner, Ask::Event(commands));
+    open.item_waits.push(entry);
+}
+
 /// `SMSG_TRAINER_BUY_FAILED` codes, queued for the feed to log.
 #[derive(Resource, Default)]
 pub(crate) struct TrainerErrors(pub Vec<u32>);
@@ -534,8 +549,8 @@ pub(crate) fn feed_trainer(
         let Some(skill_lines) = skill_lines.as_deref() else {
             return;
         };
-        // The getters' item callbacks, kept by their calls; a record that answered one is a trigger.
-        open.item_waits.extend(script.take_trainer_item_waits());
+        // The getters' item callbacks, kept inside their calls
+        // ([`benilla_ui::script::ItemCallback::Trainer`]); a record that answered one is a trigger.
         open.item_answers(&items);
         // The per-list reset goes in before the snapshot, so `TRAINER_SHOW` finds it; the stock
         // window re-applies its saved filter only on its own `ADDON_LOADED`.
@@ -579,9 +594,8 @@ pub(crate) fn feed_trainer(
             0
         };
         let forced = passes > 0;
-        // The stock window calls `GetTrainerServiceIcon` and `GetTrainerServiceDescription`, which
-        // look the product up with a callback (`0x4d9096`, `0x4d9d07`), at `TRAINER_SHOW` and
-        // `TRAINER_UPDATE`: a list, a re-derive, or a window this VM has not shown.
+        // The stock window reads `UnitName("npc")` at `TRAINER_SHOW` and `TRAINER_UPDATE`: a list,
+        // a re-derive, or a window this VM has not shown.
         let ask = Ask::at(last.is_none() || listed || forced, &commands);
         if forced {
             let player = reeval::PlayerView {
@@ -759,7 +773,9 @@ pub(crate) fn feed_trainer(
                 },
                 icons.as_deref(),
                 &items,
-                ask,
+                // A product is asked by the icon and description getters' calls alone, inside
+                // them (`0x4d9096`, `0x4d9d07`): the list and its passes look no item up.
+                Ask::Read,
                 &ServiceText {
                     player: &ctx,
                     pet: &pet_ctx,

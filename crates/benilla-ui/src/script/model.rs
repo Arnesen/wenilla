@@ -672,9 +672,6 @@ pub(crate) struct Model {
     pub(crate) battlefield_positions: Vec<super::battlefield_positions::BattlefieldPositionView>,
     pub(crate) battlefield_flag: Option<super::battlefield_positions::BattlefieldFlagView>,
     pub(crate) battlefield_icon_scale: f32,
-    /// The 0-based rows `GetBattlefieldPosition` read with no name: each call's name lookup passes
-    /// the callback `0x4ac190` (`0x4ac118`), which the app makes.
-    pub(crate) battlefield_position_lookups: Vec<usize>,
     /// The meeting stone's queued area (`[0xb72038]`) and status text (`[0xb7203c]`), as pushed.
     pub(crate) meeting_stone_area: u32,
     pub(crate) meeting_stone_status_text: Option<String>,
@@ -703,10 +700,6 @@ pub(crate) struct Model {
     /// by the item's entry (`0x6e2ed0`), so a worn trinket answers as a bagged one does. Kept off
     /// the doll snapshot, which is pushed on change.
     pub(crate) worn_cooldowns: HashMap<usize, (f64, f64, bool)>,
-    /// The entries whose record `GetContainerItemCooldown`, `SetBagItem` or `SetInventoryItem`
-    /// found missing, which their query asks with the callback `0x6e2f70`
-    /// ([`crate::script::UiScript::take_cooldown_record_asks`]).
-    pub(crate) cooldown_record_asks: Vec<u32>,
     /// `HasKey()`: a keys-family item in equipment, bags, bank or keyring; gates the keyring UI.
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
@@ -794,19 +787,11 @@ pub(crate) struct Model {
     pub(crate) trainer_selection: Option<u32>,
     /// The state filter `ds:0xb73a1c`: bit n set shows the services in state n.
     pub(crate) trainer_filter: u32,
-    /// The item records the trainer getters' calls missed, one per call, until the app takes them.
-    pub(crate) trainer_item_waits: Vec<u32>,
-    /// The item records the profession getters' calls missed, one per call, each waiting with the
-    /// callback `0x4fdc30` (`0x4fdb90`, `0x4fdf77`, `0x4ff6cd`, `0x4ffac6`).
-    pub(crate) trade_skill_item_waits: Vec<u32>,
     /// The profession build's pending count (`0xbde048`).
     pub(crate) trade_skill_pending: u32,
     /// The product records the builds missed, one per miss, each waiting with the callback
     /// `0x4fc8e0` (`0x4fcd32`).
     pub(crate) trade_skill_build_waits: Vec<u32>,
-    /// The item records the craft getters' calls missed, one per call, each waiting with the
-    /// callback `0x4f7710` (`0x4f75dd`, `0x4f79f2`).
-    pub(crate) craft_item_waits: Vec<u32>,
     /// Collapsed skill-line ids, kept across a re-push and cleared when the trainer closes.
     pub(crate) trainer_collapsed: HashSet<u32>,
     /// The skill-line filter `ds:0xb73a20`: bit n set shows header group n, every bit on a list.
@@ -934,9 +919,10 @@ pub(crate) struct Model {
     /// getters' tables (`0xb714f4` and its siblings, `0xb716d0`), which a close leaves alone and
     /// the next open clears (`0x4bf549`-`0x4bf5ef`).
     pub(crate) trade: Option<trade::TradeState>,
-    /// The partner cell `[0xb71728]` is set: the window is open. Read by the checks that test the
-    /// cell first (`0x4bfd20`) and by `GetPlayerTradeMoney` (`0x4c0706`).
-    pub(crate) trade_window: bool,
+    /// The partner cell `[0xb71728]`, 0 for none: nonzero, the window is open. Read by the checks
+    /// that test the cell first (`0x4bfd20`), by `GetPlayerTradeMoney` (`0x4c0706`), and as the
+    /// partner slots' lookup owner (`0x4c016c`).
+    pub(crate) trade_partner: u64,
     /// The close core's done flag `[0xb71748]`, which `CloseTrade` tests (`0x4bfdc0`).
     pub(crate) trade_done: bool,
     /// The placements whose send the host has yet to answer, by the id their call carries
@@ -952,8 +938,6 @@ pub(crate) struct Model {
 
     /// The open questgiver panel, and whether `CloseQuest` ran.
     pub(crate) quest: Option<quest::QuestState>,
-    /// The item records `GetQuestItemInfo`'s calls missed, one per call, until the app takes them.
-    pub(crate) quest_item_waits: Vec<u32>,
     /// The levels of the last greeting's two pools (`0xbde690`, `0xbdfe60`), which outlive the
     /// panel until the next list fills them.
     pub(crate) quest_pool_levels: quest::PoolLevels,
@@ -1086,10 +1070,6 @@ pub(crate) struct Model {
 
     /// The paper doll's combat stats, `None` until the first push.
     pub(crate) player_combat_stats: Option<char_stats::UnitCombatStats>,
-    /// The ammunition entry each `GetInventoryItemTexture` or `GetInventoryItemQuality` call on
-    /// the ammo slot looked up and missed, one callback `0x4c84f0` per call (`0x4c83bc`,
-    /// `0x4c89cf`), for the host to register with the item cache.
-    pub(crate) ammo_record_asks: Vec<u32>,
     pub(crate) inventory_slots: char_stats::InventorySlots,
     /// The six bank-bag slots, ids 64..=69, fed from the player descriptor's guids.
     pub(crate) bank_bag_slots: char_stats::BankBagSlots,
@@ -1204,9 +1184,6 @@ pub(crate) struct Model {
     pub(crate) binder_pending: bool,
     /// The summon getters' answers, defaulting to the reference's `""`, `""`, 0 with none pending.
     pub(crate) summon_confirm: super::summon::SummonConfirmUiState,
-    /// `GetSummonConfirmSummoner()` calls that answered no name: each call's lookup passes the
-    /// callback `0x48b710` (`0x48b6e1`), which the app makes.
-    pub(crate) summon_summoner_lookups: u32,
     /// `GetFramerate()`, pushed after each world frame; the empty ring's 1000 until then.
     pub(crate) framerate: f64,
     /// `(shift, ctrl, alt)` for `Is*KeyDown`, pushed before the frame's mouse events.
@@ -1552,7 +1529,6 @@ impl Model {
             battlefield_slots: Default::default(),
             battlefield_instance_expiration_ms: 0,
             battlefield_positions: Vec::new(),
-            battlefield_position_lookups: Vec::new(),
             battlefield_flag: None,
             battlefield_icon_scale: 1.0,
             meeting_stone_area: 0,
@@ -1566,7 +1542,6 @@ impl Model {
             containers: HashMap::new(),
             container_cooldowns: HashMap::new(),
             worn_cooldowns: HashMap::new(),
-            cooldown_record_asks: Vec::new(),
             has_key: false,
             cursor: None,
             cursor_grid: false,
@@ -1599,11 +1574,8 @@ impl Model {
             trainer: None,
             trainer_selection: None,
             trainer_filter: 7,
-            trainer_item_waits: Vec::new(),
-            trade_skill_item_waits: Vec::new(),
             trade_skill_pending: 0,
             trade_skill_build_waits: Vec::new(),
-            craft_item_waits: Vec::new(),
             trainer_collapsed: HashSet::new(),
             trainer_line_filter: u32::MAX,
             trainer_rows: Vec::new(),
@@ -1655,13 +1627,12 @@ impl Model {
             auction_name_asks: Vec::new(),
             auction_sell_item: None,
             trade: None,
-            trade_window: false,
+            trade_partner: 0,
             trade_done: false,
             trade_placing: std::collections::HashMap::new(),
             trade_place_seq: 0,
             trade_offered: Default::default(),
             quest: None,
-            quest_item_waits: Vec::new(),
             quest_pool_levels: Default::default(),
             death: death::DeathUiState::default(),
             quest_log: quest_log::QuestLogState::default(),
@@ -1716,7 +1687,6 @@ impl Model {
             gm_ticket_categories: Vec::new(),
             binder_pending: false,
             summon_confirm: super::summon::SummonConfirmUiState::default(),
-            summon_summoner_lookups: 0,
             framerate: 1000.0,
             modifiers: (false, false, false),
             money: 0,
@@ -1743,7 +1713,6 @@ impl Model {
             .into_iter()
             .collect(),
             player_combat_stats: None,
-            ammo_record_asks: Vec::new(),
             inventory_slots: Default::default(),
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],

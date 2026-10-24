@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 
-use benilla_ui::script::{FollowRequest, RecordAsk, ScriptValue, UiScript};
+use benilla_ui::script::{FollowRequest, ItemCallback, RecordAsk, ScriptValue, UiScript};
 
 use super::ScriptCallHost;
 use crate::target::FollowStart;
@@ -56,12 +56,20 @@ pub(crate) struct RecordAsks<'w> {
     names: Option<Res<'w, crate::names::NameCache>>,
     items: Option<Res<'w, crate::items::Items>>,
     guild: Option<Res<'w, crate::ui_guild::GuildState>>,
+    summon: Option<Res<'w, crate::ui_summon::SummonState>>,
+    battlefield: Option<ResMut<'w, crate::ui_battlefield_positions::BattlefieldPositions>>,
+    ammo_hits: Option<ResMut<'w, crate::ui_char::AmmoRecordHits>>,
+    cooldowns: Option<ResMut<'w, crate::spell::Cooldowns>>,
+    trainer: Option<ResMut<'w, crate::ui_trainer::TrainerOpen>>,
+    quest: Option<ResMut<'w, crate::ui_quest::QuestGiver>>,
+    craft: Option<ResMut<'w, crate::ui_craft::CraftItemWaits>>,
+    trade_skill: Option<ResMut<'w, crate::ui_tradeskill::TradeSkillItemWaits>>,
     net: Res<'w, crate::net::NetCommands>,
 }
 
 impl RecordAsks<'_> {
-    /// `ask` inside its getter.
-    pub(crate) fn apply(&self, ask: RecordAsk) {
+    /// `ask` inside its getter, whose VM a hit the mirror lacked is told.
+    pub(crate) fn apply(&mut self, script: &mut UiScript, ask: RecordAsk) {
         use crate::query_cache::Ask;
         match ask {
             RecordAsk::PlayerName(guid) => {
@@ -69,14 +77,86 @@ impl RecordAsks<'_> {
                     let _ = names.resolve_player(guid, Ask::Event(&self.net));
                 }
             }
-            RecordAsk::TradeItem(entry) => {
+            RecordAsk::BattlefieldName(guid) => {
+                if let (Some(names), Some(state)) =
+                    (self.names.as_deref(), self.battlefield.as_deref_mut())
+                {
+                    state.wait_for_name(names, &self.net, guid);
+                }
+            }
+            RecordAsk::TradeItem { entry, owner } => {
                 if let Some(items) = self.items.as_deref() {
-                    crate::ui_trade::ask_trade_record(items, &self.net, entry);
+                    crate::ui_trade::ask_trade_record(items, &self.net, entry, owner);
                 }
             }
             RecordAsk::Guild { guild_id, guid } => {
                 if let Some(guild) = self.guild.as_deref() {
                     guild.wait_for_info(guild_id, guid, &self.net);
+                }
+            }
+            RecordAsk::AmmoItem { entry, owner } => {
+                if let (Some(items), Some(hits)) =
+                    (self.items.as_deref(), self.ammo_hits.as_deref_mut())
+                {
+                    crate::ui_char::ask_ammo_record(items, &self.net, hits, entry, owner);
+                }
+            }
+            RecordAsk::CooldownItem { entry, owner } => {
+                if let (Some(items), Some(cooldowns)) =
+                    (self.items.as_deref(), self.cooldowns.as_deref_mut())
+                {
+                    cooldowns.ask_item_record(items, &self.net, entry, owner);
+                }
+            }
+            RecordAsk::Item {
+                entry,
+                owner,
+                callback,
+            } => {
+                let Some(items) = self.items.as_deref() else {
+                    return;
+                };
+                match callback {
+                    ItemCallback::Trainer => {
+                        if let Some(trainer) = self.trainer.as_deref_mut() {
+                            crate::ui_trainer::ask_item_record(
+                                items, &self.net, trainer, entry, owner,
+                            );
+                        }
+                    }
+                    ItemCallback::Quest => {
+                        if let Some(quest) = self.quest.as_deref_mut() {
+                            quest.ask_item_record(items, &self.net, entry);
+                        }
+                    }
+                    ItemCallback::Craft => {
+                        if let Some(waits) = self.craft.as_deref_mut() {
+                            crate::ui_craft::ask_item_record(items, &self.net, waits, entry, owner);
+                        }
+                    }
+                    ItemCallback::TradeSkill => {
+                        if let Some(waits) = self.trade_skill.as_deref_mut() {
+                            crate::ui_tradeskill::ask_item_record(
+                                items, &self.net, waits, entry, owner,
+                            );
+                        }
+                    }
+                    // The VM keeps the callback: the cache only asks.
+                    ItemCallback::QuestLog => {
+                        let _ = items.template(entry, owner, Ask::Event(&self.net));
+                    }
+                }
+            }
+            RecordAsk::QuestCreature(entry) => {
+                if let Some(names) = self.names.as_deref() {
+                    crate::ui_quest_log::ask_quest_creature(names, &self.net, script, entry);
+                }
+            }
+            // A zero guid is no key and asks nothing (`0x55f080`).
+            RecordAsk::Summoner => {
+                let summoner = self.summon.as_deref().and_then(|s| s.pending());
+                if let (Some(names), Some(guid)) = (self.names.as_deref(), summoner) {
+                    let _ = names.resolve_player(guid, Ask::Event(&self.net));
                 }
             }
         }
