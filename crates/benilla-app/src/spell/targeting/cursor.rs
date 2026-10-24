@@ -174,6 +174,7 @@ pub(crate) fn drive_targeting_cursor(
             &go_tf,
             &lock_inputs,
             spell_id,
+            commit.item_guid(),
             range,
             me,
         )
@@ -203,7 +204,8 @@ pub(crate) fn drive_targeting_cursor(
     };
 }
 
-/// `0x6e6460`'s GameObject leg past the `& 0x4800` test: the lock predicate `0x5f8260`, then range.
+/// `0x6e6460`'s GameObject leg past the `& 0x4800` test: the lock predicate `0x5f8260`
+/// ([`super::spell_opens_go`]), then range.
 fn object_arm(
     hovered_object: &crate::target::HoveredObject,
     stores: &Query<(
@@ -214,40 +216,17 @@ fn object_arm(
     go_tf: &Query<&Transform>,
     lock_inputs: &crate::target::lock::GoLockInputs,
     spell_id: u32,
+    item: Option<u64>,
     range: Option<RangeCall>,
     me: Option<Vec3>,
 ) -> bool {
     let Some(entity) = hovered_object.target else {
         return false;
     };
-    // `0x5f8260`'s lookups: the template, then its `Lock.dbc` row. A template in flight is grey.
-    let Some(tmpl) = stores
-        .get(entity)
-        .ok()
-        .and_then(|(s, ..)| lock_inputs.templates.of(&s.0))
-    else {
-        return false;
-    };
-    let lock_id = tmpl.lock_id;
-    let Some(locks) = lock_inputs.locks.as_deref() else {
-        return false;
-    };
-    let Some(slots) = locks.0.slots(lock_id).filter(|_| lock_id != 0) else {
-        return false;
-    };
-    let Some(spells) = lock_inputs.spells.as_deref() else {
-        return false;
-    };
-    let Some(spell) = spells.catalog.get(spell_id) else {
-        return false;
-    };
-    let facts = crate::target::lock::go_facts(
-        stores
-            .get(entity)
-            .ok()
-            .map(|(s, anim, _)| (s, crate::go_anim::go_state(anim, s))),
-    );
-    if !crate::target::lock::spell_opens_lock(slots, spell, facts) {
+    let opens = stores.get(entity).ok().is_some_and(|(store, anim, _)| {
+        super::spell_opens_go(spell_id, item, store, anim, lock_inputs)
+    });
+    if !opens {
         return false;
     }
     // The range tail: the caster-to-object distance against the spell's min and max.
@@ -781,7 +760,7 @@ mod tests {
     #[test]
     fn the_object_leg_reads_the_range_talent() {
         use super::super::corpse_fixture as fx;
-        use benilla_formats::{LockCatalog, LockSlot, OpenLock, LOCK_KEY_SKILL};
+        use benilla_formats::{LockCatalog, LockSlot, LOCK_KEY_SKILL};
         use bevy::ecs::system::RunSystemOnce;
         use std::collections::HashMap;
 
@@ -812,10 +791,9 @@ mod tests {
                     targets: 0x4000,
                     spell_family: 3,
                     spell_family_flags: 1 << 7,
-                    open_lock: Some(OpenLock {
-                        effect: 0,
-                        lock_type: 1,
-                    }),
+                    // Effect 0 is `OPEN_LOCK` (33) on LockType 1, as Opening's row has it.
+                    effects: [0x21, 0, 0],
+                    effect_misc_value: [1, 0, 0],
                     ..SpellDisplay::default()
                 },
             )]));

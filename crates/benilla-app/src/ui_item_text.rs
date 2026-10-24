@@ -1,10 +1,11 @@
 //! The item-text reader (`ItemTextFrame.xml`) a bag letter, a book or a readable world object
-//! opens in, locally with no packet as in the reference: every route ends at
-//! `0x4e32e0(guid, flag)`, which looks the guid up as any object and asks it for its text
-//! (`vtbl+0x74`), a mail-made letter's `ITEM_FIELD_ITEM_TEXT_ID` or else a page chain from an
-//! item template's `PageText` or a `GAMEOBJECT_TYPE_TEXT` object's `data[0]`. vmangos has no use
+//! opens in. Every route ends at `0x4e32e0(guid, flag)`, which looks the guid up as any object and
+//! asks it for its text (`vtbl+0x74`), a mail-made letter's `ITEM_FIELD_ITEM_TEXT_ID` or else a
+//! page chain from an item template's `PageText` or a GameObject's pageID column (TEXT `data[0]`,
+//! GOOBER `data[7]`). A bag item or a TEXT object opens locally, with no packet: vmangos has no use
 //! arm for a type-9 object and refuses `CMSG_READ_ITEM` without a template `PageText`, which the
-//! Plain Letter lacks (`ItemHandler.cpp:421`).
+//! Plain Letter lacks (`ItemHandler.cpp:421`). A GOOBER's opens on `SMSG_GAMEOBJECT_PAGETEXT`
+//! (`0x5f88c0`), the server's answer to its use.
 //!
 //! The events follow `ItemTextFrame.lua:10-96`; `ITEM_TEXT_TRANSLATION`, the foreign-language
 //! bar, never fires, as neither source carries the language column.
@@ -307,7 +308,30 @@ mod net {
     use crate::net::NetHandlerApp;
 
     pub(super) fn register(app: &mut App) {
-        app.net_handler(SessionEventKind::PageText, on_page_text);
+        app.net_handler(SessionEventKind::PageText, on_page_text)
+            .net_handler(
+                SessionEventKind::GameObjectPageText,
+                on_gameobject_page_text,
+            );
+    }
+
+    /// `SMSG_GAMEOBJECT_PAGETEXT` (`0x5f88c0`): the guid looked up as a GameObject (mask `0x20`,
+    /// `0x5f88f9`), then the reader's open on it with flag 0 (`0x5f8915` → `0x4e32e0`), the same
+    /// read a TEXT object's right-click makes; nothing for an object not streamed.
+    fn on_gameobject_page_text(
+        In(ev): In<SessionEvent>,
+        objects: crate::net::Objects,
+        mut open: ResMut<super::ItemTextOpen>,
+    ) {
+        let SessionEvent::GameObjectPageText { guid } = ev else {
+            return;
+        };
+        let is_gameobject = objects.object(guid).is_some_and(|f| {
+            f.object_type() == Some(benilla_protocol::messages::ObjectType::GameObject)
+        });
+        if is_gameobject {
+            open.read_pages(guid);
+        }
     }
 
     /// One page per packet; the reader repaints off the cache on the next feed.
@@ -350,7 +374,7 @@ impl Plugin for UiItemTextPlugin {
 
 /// What the read object answers: its name for the title (`ItemTextGetItem` `0x4e38f0`), its
 /// material (`ItemTextGetMaterial` `0x4e39f0`: an item's `PageMaterial`, a GameObject's
-/// `data[2]`) and its first page.
+/// pageMaterial column) and its first page.
 struct Readable {
     title: String,
     /// The `PageTextMaterial.dbc` basename; `None` is the Lua's Parchment default.
@@ -372,7 +396,7 @@ pub(crate) fn object_material(
     let name = |id: u32| materials.and_then(|m| m.0.name(id)).map(str::to_string);
     if benilla_protocol::guid::is_gameobject(guid) {
         let fields = objects.object(guid)?;
-        return go_templates.of(fields)?.quest_material.and_then(name);
+        return name(go_templates.of(fields)?.page_material(fields));
     }
     let entry = objects.object(guid)?.object_entry()?;
     let t = items.template(entry, guid, Ask::Read)?;
@@ -391,11 +415,14 @@ fn readable(
     ask: Ask<'_>,
 ) -> Option<Readable> {
     let name = |id: u32| materials.and_then(|m| m.0.name(id)).map(str::to_string);
-    if let Some(go) = go_templates.of_guid(objects, guid) {
+    if let Some((fields, go)) = objects
+        .object(guid)
+        .and_then(|f| Some((f, go_templates.of_guid(objects, guid)?)))
+    {
         return Some(Readable {
             title: go.name.clone(),
-            material: go.text_page.and_then(|p| name(p.material)),
-            page_head: go.text_page.map_or(0, |p| p.page_id),
+            material: name(go.page_material(fields)),
+            page_head: go.page_id(fields),
         });
     }
     let entry = objects.object(guid)?.object_entry()?;
@@ -652,6 +679,76 @@ mod tests {
         assert_eq!(names_asked(&rx), 1, "the next read asks it, once");
     }
 
+    /// `SMSG_GAMEOBJECT_PAGETEXT` (`0x5f88c0`) resolves the GameObject and opens the reader on it
+    /// (`0x4e32e0(guid, 0)`), whose page is the object's pageID column (`0x5f5900`, a GOOBER's
+    /// `data[7]`) and its material the pageMaterial column (`0x5f5950`, `data[9]`): "The Lay of
+    /// Ameth'Aran", entry 17188, page 358.
+    #[test]
+    fn a_goobers_page_text_opens_the_reader_on_its_page() {
+        const TABLET: u64 = 0xF110_0043_2400_0001;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<ItemTextOpen>()
+            .init_resource::<PageTexts>()
+            .init_resource::<MailOpen>()
+            .init_resource::<Items>()
+            .init_resource::<NameCache>()
+            .init_resource::<GameObjectTemplates>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<crate::world_state::WorldStates>()
+            .add_systems(
+                Update,
+                (
+                    apply_reads,
+                    begin_item_text,
+                    feed_item_text,
+                    drain_item_text,
+                )
+                    .chain(),
+            );
+        net::register(&mut app);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut data = [0i32; 24];
+        data[7] = 358;
+        data[9] = 2;
+        app.world_mut()
+            .resource_mut::<GameObjectTemplates>()
+            .insert(17188, 10, "The Lay of Ameth'Aran".into(), &data);
+        let tablet = app
+            .world_mut()
+            .spawn((
+                crate::net::Guid(TABLET),
+                crate::net::ObjectStore(crate::go_templates::test_typed_fields(17188, 10)),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(TABLET, tablet);
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::GameObjectPageText { guid: TABLET }],
+        );
+        app.update();
+        app.update();
+        let open = app.world().resource::<ItemTextOpen>();
+        let sess = open
+            .pending
+            .as_ref()
+            .expect("the reader opens on the tablet");
+        assert_eq!(sess.object_guid, TABLET);
+        assert!(sess.registered, "its page is data[7]");
+        let asked: Vec<u32> = crate::query_cache::queries(&rx)
+            .iter()
+            .filter_map(|c| match c {
+                ClientCommand::PageTextQuery { page_id, .. } => Some(*page_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [358]);
+    }
+
     #[test]
     fn page_turns_walk_the_chain_both_ways() {
         let chain = |id: u32| match id {
@@ -713,10 +810,10 @@ mod quest_material_tests {
         let items = Items::default();
         let mut objs = crate::ui_items::TestObjects::new();
         // Each source object is streamed; its descriptor, not its guid, names the template.
-        for entry in [100, 102, 777] {
+        for (entry, type_id) in [(100, 2), (102, 10), (777, 3)] {
             objs.spawn_object(
                 go_guid(entry),
-                crate::go_templates::test_fields(entry as u32),
+                crate::go_templates::test_typed_fields(entry as u32, type_id),
             );
         }
         let objects = objs.get();

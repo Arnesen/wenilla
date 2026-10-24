@@ -63,6 +63,10 @@ pub(crate) struct GoAnim {
     /// The requested id currently armed (`[block0+0xf8]`, written by op4 `0x71252f`, read by
     /// `0x712090(model, -1)`), which the already-playing skip compares.
     armed_id: Option<u16>,
+    /// The substate slot 34 was last asked for (`[handler+0x10]`, stored at `0x5f3c19` ahead of
+    /// the arm), as its `AnimationData.dbc` id: the motion or rest pose the state resolved to,
+    /// before the missing-sequence remap and the already-playing skip.
+    substate: Option<u16>,
 }
 
 /// The dispatch `0x5f3cb0` ran on this entity; its first act (`0x5f3cc8 call 0x5f40c0`) releases
@@ -231,6 +235,22 @@ pub(crate) fn go_state(anim: Option<&GoAnim>, store: &ObjectStore) -> u32 {
         .unwrap_or(GO_STATE_ACTIVE)
 }
 
+/// The handler's substate `[handler+0x10]` as its `AnimationData.dbc` id (`0x8607e4`: substate 1
+/// Closed 147, 3 Opened 149): the one last asked for, else the rest pose of the stored state. A
+/// static object's handler rests on its state's pose.
+pub(crate) fn substate_anim(anim: Option<&GoAnim>, store: &ObjectStore) -> Option<u16> {
+    match anim {
+        Some(a) => a
+            .substate
+            .or_else(|| a.shown.or(a.state).and_then(rest_anim)),
+        None => rest_anim(go_state(None, store)),
+    }
+}
+
+/// `AnimationData.dbc` 147 Closed and 149 Opened, the rest poses of substates 1 and 3.
+pub(crate) const ANIM_CLOSED: u16 = 0x93;
+pub(crate) const ANIM_OPENED: u16 = 0x95;
+
 /// The inspector's readout: the armed id (the newest arm, the smallest seek), whether it is a
 /// transient, and its repeat mode; `None` for a static mesh or before any arm.
 pub(crate) fn armed_anim(
@@ -332,9 +352,9 @@ fn remap_missing(anims: &ModelAnimations, id: u16) -> (u16, bool) {
 /// The held rest pose for a wire `GAMEOBJECT_STATE` (`0x5f3c30`).
 fn rest_anim(state: u32) -> Option<u16> {
     match state {
-        0 => Some(0x95), // ACTIVE  → Opened (held open)
-        1 => Some(0x93), // READY   → Closed (held closed)
-        2 => Some(0x97), // ALT     → Destroyed
+        0 => Some(ANIM_OPENED), // ACTIVE  → Opened (held open)
+        1 => Some(ANIM_CLOSED), // READY   → Closed (held closed)
+        2 => Some(0x97),        // ALT     → Destroyed
         _ => None,
     }
 }
@@ -541,6 +561,7 @@ fn drive_go_anim(
                     go.transient = None;
                     break 'state;
                 };
+                go.substate = Some(play.anim_id());
                 // Remap an unowned id, so a lidless model holds a real pose, not bind.
                 let (want, frozen) = remap_missing(anims, play.anim_id());
                 // The already-playing skip (`0x5f39fa: cmp esi,eax; je 0x5f3b32`) holds only on
@@ -600,6 +621,8 @@ fn drive_go_anim(
         if go.one_shot.is_some() {
             let id = go.one_shot.take().expect("checked is_some");
             if anims.owns(id) {
+                // Owned (`0x5f4245`), slot 15 asks slot 34 for the substate (`0x5f4253`).
+                go.substate = Some(id);
                 // Slot 15 arms through the same `0x5f3930`, so it rolls a variation too.
                 let roll = rng.draw();
                 if let Some(clip) = anims.pick_variation(id, roll) {
@@ -1362,6 +1385,34 @@ mod tests {
         assert!(will_hold(&app, go), "the arm holds unchecked");
         app.update();
         assert!(!will_hold(&app, go), "no clip played: the unhold follows");
+    }
+
+    /// Slot 34 stores the substate it is asked for (`0x5f3c19`) ahead of the arm and its
+    /// missing-sequence remap (`0x5f3c21` → `0x5f3930`), so a door whose model lacks Open (148)
+    /// and plays Opened in its place (`0x5f3b40`) is still in substate 2, Open, while it swings;
+    /// once the play ends it rests at 3, Opened.
+    #[test]
+    fn the_substate_is_the_one_asked_for_not_the_clip_the_remap_plays() {
+        let (mut app, go) = model_app(&[(0x93, 0.167, 0), (0x95, 0.100, 0)]);
+        app.update();
+        let store = ObjectStore::default();
+        let substate = |app: &App| substate_anim(app.world().get::<GoAnim>(go), &store);
+        assert_eq!(substate(&app), Some(ANIM_CLOSED), "at rest, closed");
+        app.world_mut()
+            .get_mut::<GoAnim>(go)
+            .unwrap()
+            .set_wire_state(GO_STATE_ACTIVE);
+        app.update();
+        assert_eq!(
+            armed(&app, go).map(|a| a.0),
+            Some(0x95),
+            "the remap plays Opened"
+        );
+        assert_eq!(
+            substate(&app),
+            Some(0x94),
+            "the substate is Open, mid-swing"
+        );
     }
 
     fn will_hold(app: &App, go: Entity) -> bool {

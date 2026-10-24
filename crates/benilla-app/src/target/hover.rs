@@ -415,19 +415,24 @@ pub(super) fn update_hover(
         best = None;
     }
     // Switch on type at the end, as the reference does: the one pick lands in the unit slot or the
-    // corpse slot, and a unit the `IsSelectable` grader refuses in neither.
+    // corpse slot, and a unit the `IsSelectable` grader refuses in neither. While a word stands the
+    // grader forks to its targeting arm (`0x4828f4`) and publishes the pick ungraded
+    // (`0x4829d4`-`0x4829e0`), and the click binds it ahead of its own test (`0x4935ca`-`0x4935d5`).
+    let graded = |entity| {
+        target_state.units.targeting() || selectable_pick(entity, &roots, target_state.self_guid.0)
+    };
     if let Some((t, entity)) = best {
         if let Ok((guid, net)) = units.get(entity) {
             if net.kind == EntityKind::Corpse {
                 hovered.corpse = Some(entity);
                 hovered.corpse_guid = Some(guid.0);
-            } else if selectable_pick(entity, &roots, target_state.self_guid.0) {
+            } else if graded(entity) {
                 hovered.target = Some(entity);
                 hovered.guid = Some(guid.0);
             } else {
                 hovered.refused = true;
             }
-        } else if selectable_pick(entity, &roots, target_state.self_guid.0) {
+        } else if graded(entity) {
             hovered.target = Some(entity);
         } else {
             hovered.refused = true;
@@ -438,9 +443,10 @@ pub(super) fn update_hover(
     *last_pick = best.map(|(_, e)| e);
 }
 
-/// The hover grader's `IsSelectable` test: `0x4828d0` calls vtable slot 21 at `0x482982`
-/// (`0x60be60`, the predicate `SetSelection` runs), and a refusal jumps to `0x482090(0,0)` and
-/// `ResetCursor 0x523d30`, past the publisher `0x492890`: no tooltip, cursor, brighten or click.
+/// The hover grader's `IsSelectable` test, run outside targeting only: `0x4828d0` calls vtable
+/// slot 21 at `0x482982` (`0x60be60`, the predicate `SetSelection` runs), and a refusal jumps to
+/// `0x482090(0,0)` and `ResetCursor 0x523d30`, past the publisher `0x492890`: no tooltip, cursor,
+/// brighten or click.
 ///
 /// It grades the winner and filters no candidate: the pick (`0x480a50`, `0x480d90`, `0x713cb0`,
 /// `0x481190`, `0x480df0`) reads no unit field, so a refused unit in front of a chest still takes
@@ -556,6 +562,8 @@ pub(super) fn update_hovered_object(
     self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     parts: PickParts,
     mut cache: GoPickSet,
+    // The GameObject arm's flag `0x4` and `0x6e62e0` while a word stands (`0x480780`).
+    word: crate::spell::targeting::GoPickChecks,
 ) {
     *cache.frame = cache.frame.wrapping_add(1);
     let added_parts = &cache.added;
@@ -615,6 +623,23 @@ pub(super) fn update_hovered_object(
         return;
     };
     let self_store = self_q.single().ok();
+    // While a word stands, only the objects `0x480780`'s GameObject arm admits are candidates: none
+    // for a word outside `0x4800`, else those whose lock the spell passes.
+    let admitted: bevy::platform::collections::HashSet<Entity>;
+    let pickable: &bevy::platform::collections::HashSet<Entity> = if word.targeting() {
+        admitted = pickable
+            .iter()
+            .copied()
+            .filter(|&part| word.admits(resolve_net(part)))
+            .collect();
+        &admitted
+    } else {
+        pickable
+    };
+    if pickable.is_empty() {
+        *last_pick = None;
+        return;
+    }
 
     // The probe's census, once a second: where the pickable GameObjects are on screen, so a
     // headless miss tells a pick fault from a camera looking elsewhere.
@@ -726,8 +751,9 @@ pub(super) fn update_hovered_object(
     // The mouseover-eligibility gate (vtable `+0x54` at `0x482982`): an ineligible object
     // publishes the null mouseover, so no tooltip, brighten or cursor; the reference reaches
     // `0x492890`, `0x52aa20` and `0x4945e0` only past it. Its null mouseover also hides a unit
-    // behind the object, which our split picks leave hoverable.
-    if let Ok(store) = stores.get(net_entity) {
+    // behind the object, which our split picks leave hoverable. While a word stands the grader
+    // forks before it (`0x4828f4`) and publishes what the pick admitted (`0x4829d4`).
+    if let Some(store) = stores.get(net_entity).ok().filter(|_| !word.targeting()) {
         let tmpl = go_gate.templates.of(&store.0);
         let reaction = crate::target::cursor_mode::go_reaction(
             go_gate.factions.as_deref(),
@@ -1390,6 +1416,27 @@ mod tests {
         }
     }
 
+    /// While a word stands the grader forks to the targeting arm (`0x4828f4`) and publishes the
+    /// pick (`0x4829d4`-`0x4829e0`) without the `IsSelectable` call (`0x482982`), so a
+    /// `UNIT_FLAG_NOT_SELECTABLE` unit the word admits is the hover; outside targeting it is
+    /// refused. A plain unit word (`0x0002`) asks the filter for no relation (`0x481050`).
+    #[test]
+    fn while_targeting_the_hover_skips_the_selectable_grade() {
+        const NOT_SELECTABLE: u32 = 0x0200_0000;
+        let mut world = unit_pick_world();
+        let farmer = unit_at(&mut world, 10, 0.0, unit_store(2, NOT_SELECTABLE, 100));
+        let outside = pick_under(&mut world, None);
+        assert_eq!(
+            outside.target, None,
+            "outside targeting the grader refuses it"
+        );
+        assert!(outside.refused);
+        let aimed = pick_under(&mut world, Some(0x0002));
+        assert_eq!(aimed.target, Some(farmer), "a word takes it ungraded");
+        assert_eq!(aimed.guid, Some(10));
+        assert!(!aimed.refused);
+    }
+
     /// The press latches the hover's pick, so the click reaches what the cursor showed: the unit
     /// behind, not the one in front the word refuses.
     #[test]
@@ -1413,6 +1460,211 @@ mod tests {
             .run_system_cached(latch_press_pick)
             .expect("the press latches");
         assert_eq!(world.resource::<PressPick>().hovered.target, Some(rear));
+    }
+
+    /// A GameObject of `entry` at depth `z` on the cursor's ray, of type 3 (CHEST) with these
+    /// `GAMEOBJECT_FLAGS` (field 9), with one drawn pick box.
+    fn chest_at(world: &mut World, guid: u64, entry: u32, z: f32, flags: u32) -> Entity {
+        use benilla_protocol::field::FIELD_OBJECT_ENTRY;
+        let at = GlobalTransform::from_translation(Vec3::new(0.0, 0.0, z));
+        let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (2, 0x21),
+            (FIELD_OBJECT_ENTRY, entry),
+            (9, flags),
+            (21, 3),
+        ]));
+        let go = world.spawn((Guid(guid), at, store)).id();
+        let mut part = world.spawn((
+            ChildOf(go),
+            benilla_world::interact::GoPickPart,
+            benilla_world::interact::PickBox,
+            Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0)),
+            at,
+            ViewVisibility::HIDDEN,
+        ));
+        use bevy::camera::visibility::SetViewVisibility;
+        part.get_mut::<ViewVisibility>()
+            .expect("just spawned")
+            .set_visible();
+        go
+    }
+
+    /// Opening's lock type is 1; an herb's lock is type 2, which it does not open.
+    const OPENING: u32 = 3365;
+
+    /// The GameObject pick's world: two chests on the ray, entry 7 locked by lock 55 (type 1, which
+    /// [`OPENING`] opens) and entry 8 by lock 56 (type 2), the spells and the templates.
+    fn go_pick_world() -> World {
+        use benilla_formats::{LockCatalog, LockSlot, SpellDisplay, LOCK_KEY_SKILL};
+        let mut world = unit_pick_world();
+        world.init_resource::<HoveredObject>();
+        world.init_resource::<crate::items::Items>();
+        world.init_resource::<crate::net::GuidIndex>();
+        world.init_resource::<crate::spell::targeting::GoPick>();
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.catalog =
+            benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+                OPENING,
+                SpellDisplay {
+                    targets: 0x4000,
+                    // Effect 0 is `OPEN_LOCK` (33) on LockType 1, as Opening's row has it.
+                    effects: [0x21, 0, 0],
+                    effect_misc_value: [1, 0, 0],
+                    ..SpellDisplay::default()
+                },
+            )]));
+        world.insert_resource(spells);
+        let lock = |index| {
+            let mut slots = [LockSlot::default(); benilla_formats::MAX_LOCK_SLOTS];
+            slots[0] = LockSlot {
+                key_type: LOCK_KEY_SKILL,
+                index,
+                skill: 0,
+                action: 5,
+            };
+            slots
+        };
+        world.insert_resource(crate::go_templates::Locks(LockCatalog::from_rows([
+            (55, lock(1)),
+            (56, lock(2)),
+        ])));
+        let mut templates = crate::go_templates::GameObjectTemplates::default();
+        for (entry, lock_id) in [(7, 55), (8, 56)] {
+            let mut data = [0; 24];
+            data[0] = lock_id;
+            templates.insert(entry, 3, "Chest".into(), &data);
+        }
+        world.insert_resource(templates);
+        world
+    }
+
+    /// The GameObject pick over `word`, as a frame runs it: the word published, then the pick.
+    fn go_pick_under(world: &mut World, word: Option<u16>) -> Option<Entity> {
+        let mut targeting = world.resource_mut::<crate::spell::SpellTargeting>();
+        match word {
+            Some(word) => targeting.enter(OPENING, crate::spell::CastCommit::Spell, word),
+            None => targeting.clear(),
+        }
+        world
+            .run_system_cached(crate::spell::targeting::publish_go_pick)
+            .expect("the word publishes");
+        world
+            .run_system_cached(update_hovered_object)
+            .expect("the pick runs");
+        world.resource::<HoveredObject>().target
+    }
+
+    /// `0x481050` sets the GameObject flag `0x4` while targeting only for a word in `0x4800`
+    /// (`0x481101`-`0x48110a`), and `0x480780`'s GameObject arm then admits only an object the
+    /// spell's lock test passes (`0x4807fa`-`0x48080c`, `0x6e62e0`, `0x5f8260`). Outside targeting
+    /// the nearer object wins, whatever it is. The herb chest is 5 yards nearer the camera.
+    #[test]
+    fn while_targeting_the_go_pick_takes_only_what_the_word_can_open() {
+        let mut world = go_pick_world();
+        let herb = chest_at(&mut world, 0xF110_0000_0800_0002, 8, 5.0, 0);
+        let chest = chest_at(&mut world, 0xF110_0000_0700_0001, 7, 0.0, 0);
+        assert_eq!(
+            go_pick_under(&mut world, None),
+            Some(herb),
+            "outside targeting"
+        );
+        assert_eq!(
+            go_pick_under(&mut world, Some(0x4800)),
+            Some(chest),
+            "Opening passes over the lock it cannot open"
+        );
+        for word in [0x0100, 0x0040, 0x0010] {
+            assert_eq!(
+                go_pick_under(&mut world, Some(word)),
+                None,
+                "a word without 0x4800 picks no GameObject ({word:#06x})"
+            );
+        }
+        assert_eq!(go_pick_under(&mut world, None), Some(herb), "and back");
+    }
+
+    /// `0x5f8260`'s `OPEN_LOCK_ITEM` (59) arm (`0x5f831c`-`0x5f837e`): the cast item named by the
+    /// record's guid (`0xceac48`, looked up as an item, `0x5f833a`) opens a lock whose KEY slot
+    /// (type 1) indexes its entry, so a key's cursor admits that lock to the pick and no other.
+    #[test]
+    fn while_targeting_a_key_picks_the_lock_it_fits() {
+        use benilla_formats::{LockCatalog, LockSlot, SpellDisplay, LOCK_KEY_ITEM};
+        use benilla_protocol::field::FIELD_OBJECT_ENTRY;
+        const KEY_SPELL: u32 = 3366;
+        const KEY: u64 = 0x4000_0000_0000_0042;
+        let pick_with_key = |key_entry: u32| {
+            let mut world = go_pick_world();
+            world.resource_mut::<crate::ui_action::Spells>().catalog =
+                benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+                    KEY_SPELL,
+                    SpellDisplay {
+                        effects: [59, 0, 0],
+                        ..SpellDisplay::default()
+                    },
+                )]));
+            let mut slots = [LockSlot::default(); benilla_formats::MAX_LOCK_SLOTS];
+            slots[0] = LockSlot {
+                key_type: LOCK_KEY_ITEM,
+                index: 5000,
+                skill: 0,
+                action: 5,
+            };
+            world.insert_resource(crate::go_templates::Locks(LockCatalog::from_rows([(
+                57, slots,
+            )])));
+            let mut data = [0; 24];
+            data[0] = 57;
+            world
+                .resource_mut::<crate::go_templates::GameObjectTemplates>()
+                .insert(9, 3, "Locked Chest".into(), &data);
+            let chest = chest_at(&mut world, 0xF110_0000_0900_0003, 9, 0.0, 0);
+            let key = world
+                .spawn((
+                    Guid(KEY),
+                    ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                        (2, 0x3),
+                        (FIELD_OBJECT_ENTRY, key_entry),
+                    ])),
+                ))
+                .id();
+            world
+                .resource_mut::<crate::net::GuidIndex>()
+                .0
+                .insert(KEY, key);
+            world.resource_mut::<crate::spell::SpellTargeting>().enter(
+                KEY_SPELL,
+                crate::spell::CastCommit::Item {
+                    bag_index: 0,
+                    slot: 0,
+                    entry: key_entry,
+                    guid: Some(KEY),
+                    spell_index: 0,
+                    on_object: None,
+                },
+                0x4800,
+            );
+            world
+                .run_system_cached(crate::spell::targeting::publish_go_pick)
+                .expect("the word publishes");
+            world
+                .run_system_cached(update_hovered_object)
+                .expect("the pick runs");
+            (world.resource::<HoveredObject>().target, chest)
+        };
+        let (picked, chest) = pick_with_key(5000);
+        assert_eq!(picked, Some(chest), "the key fits");
+        assert_eq!(pick_with_key(5001).0, None, "another key does not");
+    }
+
+    /// While targeting, the grader publishes the pick without the mouseover slot `+0x54`
+    /// (`0x4828f4` → `0x4829d4`), so a chest the word admits is the hover even where its
+    /// `NO_INTERACT` flag keeps it out outside targeting.
+    #[test]
+    fn while_targeting_the_go_pick_skips_the_mouseover_slot() {
+        let mut world = go_pick_world();
+        let chest = chest_at(&mut world, 0xF110_0000_0700_0001, 7, 0.0, 0x10);
+        assert_eq!(go_pick_under(&mut world, None), None, "not eligible");
+        assert_eq!(go_pick_under(&mut world, Some(0x4800)), Some(chest));
     }
 
     /// Naxxramas's "Unholy Axe" is an `InvisibleStalker` body with no vertices holding a real axe,
