@@ -3370,6 +3370,47 @@ mod tests {
         assert_eq!(casts(&f), vec![(RESURRECTION, Some(NEW))]);
     }
 
+    /// The page's `wenilla.fire("SMARTRES")` runs the same body as the key, and the bridge lends
+    /// the host around it as the bindings pass does: the cast arms and binds inside the body. A
+    /// bot that presses its action bar through the bridge casts, rather than only flashing it.
+    #[test]
+    fn a_bridge_fired_commands_body_casts_and_binds_inside_the_call() {
+        let mut f = frame(false);
+        with_factions(&mut f, FRIEND, &[(FLAGS, 0x8)]);
+        with_friendly_party1(&mut f, false);
+        with_book_spell(
+            &mut f,
+            RESURRECTION,
+            "Resurrection",
+            benilla_formats::SpellDisplay {
+                targets: 0x8000,
+                ..Default::default()
+            },
+        );
+        let world = f.app.world_mut();
+        world.non_send_resource_mut::<UiScript>().register_bindings(
+            &benilla_ui::bindings_xml::parse(
+                r#"<Bindings><Binding name="SMARTRES">
+                        CastSpellByName("Resurrection", 0)
+                        ARMED = SpellIsTargeting()
+                        SpellTargetUnit("party1")
+                        if not SpellIsTargeting() then SENT = 1 end
+                    </Binding></Bindings>"#,
+            )
+            .expect("well-formed"),
+        );
+        crate::webbridge::fire_once(world, "SMARTRES");
+        assert_eq!(global(&mut f, "ARMED"), Some(1));
+        assert_eq!(global(&mut f, "SENT"), Some(1));
+        assert_eq!(casts(&f), vec![(RESURRECTION, Some(NEW))]);
+        // The world's edge lets the latch go under the same host.
+        let world = f.app.world_mut();
+        crate::webbridge::leave_world_once(world);
+        assert!(!world
+            .resource::<crate::bindings::BindingsState>()
+            .synth_latched("SMARTRES"));
+    }
+
     /// FuBar_CorkFu casts from its plugin's click: a button's `OnClick` run by the mouse raises the
     /// click event (`0x779275`), and the input pass lends the host around it, so the cast arms
     /// and the next line binds it inside the handler.
