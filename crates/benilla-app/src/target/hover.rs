@@ -18,45 +18,57 @@ use crate::ui_script::PointerOverUi;
 use benilla_world::billboard::BillboardCard;
 use benilla_world::collision::PickOccluder;
 use benilla_world::interact::{
-    ray_mesh_bounds, ray_posed_mesh, CreaturePickPart, GoPickPart, PickParts,
+    ray_mesh_bounds, ray_posed_mesh, CreaturePickPart, DoodadOccluders, GoPickPart, PickParts,
 };
 use benilla_world::view::WorldCamera;
 
 use super::{Hovered, HoveredObject, PickOcclusion};
 
 /// Trace this frame's world hit, the reference's `CWorld::Intersect` leg of the scene trace
-/// (`0x480df0`), through the [`PickOccluder`] set: terrain, the WMO walk-bake faces (about the
-/// `0x84` reject mask) and static doodad hulls. Net entities are the object trace, not occluders,
-/// so a chest never occludes itself. The picks run unbounded and compare against it after.
+/// (`0x480df0`, mask `0x1000114`): the [`PickOccluder`] colliders, terrain and the WMO walk-bake
+/// faces (about the `0x84` reject mask), and the static doodads' drawn opaque batches
+/// ([`DoodadOccluders`]), never their collision hulls. Net entities are the object trace, not
+/// occluders, so a chest never occludes itself. The picks run unbounded and compare against it
+/// after.
 pub(super) fn update_pick_occlusion(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
     spatial: avian3d::prelude::SpatialQuery,
     occluders: Query<(), With<PickOccluder>>,
+    doodads: DoodadOccluders,
     mut occlusion: ResMut<PickOcclusion>,
 ) {
     *occlusion = PickOcclusion::default();
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    // A cursorless window traces from the hover probe's aim, as the picks do, which publish it
+    // after this runs: a resting aim is last frame's point.
+    let Some(cursor) = window.cursor_position().or_else(super::hover_probe::now) else {
         return;
     };
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };
     occlusion.ray = Some(ray.direction);
-    if let Some(hit) = spatial.cast_ray_predicate(
-        ray.origin,
-        ray.direction,
-        f32::MAX,
-        true,
-        // The mask that reaches every `PickOccluder` collider; the marker picks the set within it.
-        &benilla_world::collision::WorldCollision::body_filter(),
-        &|e| occluders.contains(e),
-    ) {
-        occlusion.distance = hit.distance;
-        occlusion.point = Some(ray.origin + *ray.direction * hit.distance);
+    let collider = spatial
+        .cast_ray_predicate(
+            ray.origin,
+            ray.direction,
+            f32::MAX,
+            true,
+            // The mask that reaches every `PickOccluder` collider; the marker picks the set within.
+            &benilla_world::collision::WorldCollision::body_filter(),
+            &|e| occluders.contains(e),
+        )
+        .map(|hit| hit.distance);
+    let nearest = match (collider, doodads.nearest(ray)) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if let Some(distance) = nearest {
+        occlusion.distance = distance;
+        occlusion.point = Some(ray.origin + *ray.direction * distance);
     }
 }
 
@@ -938,6 +950,106 @@ mod tests {
             world.run_system_once(count(true)).unwrap(),
             0,
             "first person: nothing of ours to pick"
+        );
+    }
+
+    /// The world trace tests a static doodad's drawn opaque render mesh, never its collision
+    /// hull (`0x69cdb0` queues it in mode 2 under the mask `0x1000114`; mode 2 of `0x7089c0` tests
+    /// the skinned submeshes of blend 0). The plaque on Stormwind's cathedral fountain: along the
+    /// cursor ray the fountain's hull is at 3.909, nearer than the plaque at 3.943, and its opaque
+    /// mesh at 4.029, behind it; so the trace's hit is the mesh, and the plaque picks. A nearer
+    /// alpha-keyed batch and an undrawn opaque one do not occlude; terrain behind still does.
+    #[test]
+    fn a_doodad_occludes_the_pick_by_its_drawn_opaque_mesh_not_its_hull() {
+        use avian3d::prelude::{Collider, RigidBody};
+        use benilla_formats::{ModelBlend, RenderSubmesh};
+        use benilla_world::model_render::{ModelKind, ModelPart};
+        use bevy::camera::visibility::SetViewVisibility;
+        use bevy::camera::RenderTargetInfo;
+        use bevy::window::WindowResolution;
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>()
+            .init_resource::<benilla_world::collision::ColliderEpoch>()
+            .init_resource::<PickOcclusion>();
+        app.finish();
+        app.cleanup();
+        // The camera ten yards up +Z, looking down it, the cursor at the centre.
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::splat(100),
+            scale_factor: 1.0,
+        });
+        let world = app.world_mut();
+        world.spawn((camera, Transform::from_xyz(0.0, 0.0, 10.0), WorldCamera));
+        let mut window = Window {
+            resolution: WindowResolution::new(100, 100),
+            ..Default::default()
+        };
+        window.set_cursor_position(Some(Vec2::splat(50.0)));
+        world.spawn((window, PrimaryWindow));
+        // The ray starts on the near plane, 0.1 in front of the camera.
+        const EYE: f32 = 9.9;
+        // A slab facing the camera `d` yards along the ray: in WoW axes the plane x = 0, which
+        // bakes into Bevy's z = 0, moved to z = EYE - d.
+        let slab = |blend| {
+            std::sync::Arc::new(RenderSubmesh {
+                positions: vec![[0.0, -5.0, -5.0], [0.0, 5.0, -5.0], [0.0, 0.0, 5.0]],
+                indices: vec![0, 1, 2],
+                blend,
+                ..Default::default()
+            })
+        };
+        let mut batch = |d: f32, blend, drawn: bool| {
+            let mut e = world.spawn((
+                benilla_world::interact::PickMesh(slab(blend)),
+                GlobalTransform::from_translation(Vec3::new(0.0, 0.0, EYE - d)),
+                ViewVisibility::HIDDEN,
+                ModelPart {
+                    kind: ModelKind::Doodad,
+                    blend,
+                },
+            ));
+            // What the spawn marks a static doodad's batch of blend 0 with.
+            if blend == ModelBlend::Opaque {
+                e.insert(benilla_world::interact::PickOccluderPart);
+            }
+            if drawn {
+                e.get_mut::<ViewVisibility>().unwrap().set_visible();
+            }
+        };
+        batch(4.029, ModelBlend::Opaque, true);
+        batch(3.5, ModelBlend::AlphaTest, true);
+        batch(3.0, ModelBlend::Opaque, false);
+        // The fountain's hull, a static body with no occluder mark, as every doodad hull spawns.
+        world.spawn((
+            RigidBody::Static,
+            Collider::cuboid(4.0, 4.0, 0.2),
+            Transform::from_xyz(0.0, 0.0, EYE - 3.909 - 0.1),
+        ));
+        // Terrain behind it all.
+        world.spawn((
+            RigidBody::Static,
+            Collider::cuboid(40.0, 40.0, 0.2),
+            Transform::from_xyz(0.0, 0.0, EYE - 12.0 - 0.1),
+            PickOccluder,
+        ));
+        app.update();
+        app.world_mut()
+            .run_system_once(update_pick_occlusion)
+            .unwrap();
+        let distance = app.world().resource::<PickOcclusion>().distance;
+        assert!(
+            (distance - 4.029).abs() < 1e-3,
+            "the fountain's opaque mesh, behind the plaque at 3.943: {distance}"
         );
     }
 

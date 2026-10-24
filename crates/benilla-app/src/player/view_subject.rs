@@ -6,8 +6,9 @@
 //! the server with `CMSG_FAR_SIGHT`. vmangos defers the set by 400 ms
 //! (`Player::ScheduleCameraUpdate`, `Player.cpp:19136`), so the subject has streamed first, and
 //! sends the clear at once to every client in range (`DirectSendPublicValueUpdate`), so only our
-//! [`SelfPlayer`] store is read; it never sends `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE`. Mind Control
-//! sets the same field (`SpellAuras.cpp:2975`).
+//! [`SelfPlayer`] store is read; it never sends `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE`, which another
+//! server may, and which ends far sight at once ([`on_clear_far_sight`]). Mind Control sets the
+//! same field (`SpellAuras.cpp:2975`).
 
 use std::sync::{Mutex, PoisonError};
 
@@ -194,6 +195,35 @@ pub(super) fn publish_view_subject(
         });
 }
 
+/// `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE` (`0x20d`): the handler's jump table (`0x5e417e`, entry 5)
+/// leads to `0x5e43f8`, which looks up the active player (`0x5e440e`) and runs `EndFarSight` on it
+/// (`0x5ee590` at `0x5e441d`), reading no body. The field still names the object, so the view
+/// stays home until it changes.
+fn on_clear_far_sight(
+    In(ev): In<benilla_protocol::SessionEvent>,
+    far_sight: Res<FarSight>,
+    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    index: Res<GuidIndex>,
+    net: Res<NetCommands>,
+) {
+    let (benilla_protocol::SessionEvent::FarSightCleared, Some(store)) =
+        (ev, self_store.iter().next())
+    else {
+        return;
+    };
+    let held = |guid: u64| index.0.contains_key(&guid);
+    far_sight.end(store.0.player_farsight(), held, &net);
+}
+
+/// The far-sight packet's handler.
+pub(super) fn register(app: &mut App) {
+    use crate::net::NetHandlerApp;
+    app.net_handler(
+        benilla_protocol::SessionEventKind::FarSightCleared,
+        on_clear_far_sight,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,7 +332,7 @@ mod tests {
         app.update();
         assert!(
             app.world().resource::<ViewSubject>().remote.is_none(),
-            "a zeroed field is the ONLY teardown signal there is — no CLEAR_FAR_SIGHT_IMMEDIATE"
+            "a zeroed field is vmangos's teardown signal: it sends no CLEAR_FAR_SIGHT_IMMEDIATE"
         );
         assert_eq!(votes(&rx), [false], "and the release votes 0, once");
     }
@@ -403,5 +433,70 @@ mod tests {
             "and a second cancel looks again"
         );
         assert_eq!(publish(&mut app), Some(totem));
+    }
+
+    /// `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE` (`0x20d`) leads through the handler's jump table
+    /// (`0x5e417e`, entry 5) to `0x5e43f8`, which runs `EndFarSight` (`0x5ee590`) on the active
+    /// player, the body unread: with far sight on, `CMSG_FAR_SIGHT` 0 and the camera back on the
+    /// player at once, though the field still names the object; with it off, nothing.
+    #[test]
+    fn the_clear_far_sight_packet_ends_the_view_at_once() {
+        const EYE: u64 = 0xF130_0000_0000_0043;
+        const FARSIGHT: u16 = 712;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        app.insert_resource(NetCommands(tx));
+        let eye = app
+            .world_mut()
+            .spawn(Transform::from_xyz(50.0, 0.0, 0.0))
+            .id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(EYE, eye);
+        app.world_mut().spawn((
+            SelfPlayer,
+            Transform::default(),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (FARSIGHT, EYE as u32),
+                (FARSIGHT + 1, (EYE >> 32) as u32),
+            ])),
+        ));
+        let votes = |rx: &crossbeam_channel::Receiver<ClientCommand>| -> Vec<bool> {
+            rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::FarSight { engage } => Some(engage),
+                    _ => None,
+                })
+                .collect()
+        };
+        let publish = |app: &mut App| {
+            app.world_mut()
+                .run_system_cached(publish_view_subject)
+                .unwrap();
+            app.world()
+                .resource::<ViewSubject>()
+                .remote
+                .map(|r| r.entity)
+        };
+        let clear = |app: &mut App| {
+            crate::net::handlers::dispatch(
+                app.world_mut(),
+                vec![benilla_protocol::SessionEvent::FarSightCleared],
+            );
+        };
+        assert_eq!(publish(&mut app), Some(eye));
+        assert_eq!(votes(&rx), [true]);
+
+        clear(&mut app);
+        assert_eq!(votes(&rx), [false], "the server is told at once");
+        assert_eq!(publish(&mut app), None, "the camera is back on the player");
+        assert_eq!(
+            publish(&mut app),
+            None,
+            "and stays there while the field still names the object"
+        );
+        clear(&mut app);
+        assert!(votes(&rx).is_empty(), "with far sight off, nothing");
     }
 }

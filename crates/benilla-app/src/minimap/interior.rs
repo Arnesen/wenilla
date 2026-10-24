@@ -1,5 +1,6 @@
 //! The WMO-interior minimap's group selection (the portal flood-fill) and tile-name stem.
 
+use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Vec3};
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
@@ -36,18 +37,78 @@ fn interior_window(p: [f32; 3], c: f32) -> ([f32; 3], [f32; 3]) {
     ([x, y, z], [x + c, y + c, c * 0.5 + z])
 }
 
+/// The interior window as its last rebuild stored it (`0xcea9c4`-`0xcea9d8`), what the rebuild
+/// keyed on, and the groups its flood chose, which draw until the next rebuild.
+pub(super) struct InteriorWindow {
+    /// The WMO instance the player is in (the pair `0xceaa68`/`0xceaa64`).
+    instance: Entity,
+    /// The player's group (`0x86f6a0`).
+    group: usize,
+    /// The zoom radius `c`; a zoom change sets the dirty bit (`SetZoomIndex`, `0x6da915`).
+    radius: f32,
+    min: [f32; 3],
+    max: [f32; 3],
+    drawable: Vec<bool>,
+}
+
+impl InteriorWindow {
+    /// Whether `UpdateMinimap` keeps the window (`0x6d95f0`): no change of instance (`0x6d94ef`)
+    /// or group (`0x6d9523`), no dirty bit, and x and y strictly inside the window's x/y bounds
+    /// (`0x6d952c`-`0x6d9579`). Nothing compares z, so a climb inside one cell and one group keeps
+    /// the window's z range, and the flood's box floor, as stored.
+    fn holds(&self, instance: Entity, group: usize, radius: f32, p: [f32; 3]) -> bool {
+        self.instance == instance
+            && self.group == group
+            && self.radius == radius
+            && p[0] > self.min[0]
+            && p[0] < self.max[0]
+            && p[1] > self.min[1]
+            && p[1] < self.max[1]
+    }
+}
+
+/// The groups the interior minimap draws, per absolute group index: the stored window's flood,
+/// rebuilt from the player's position (`0x6d95f8`-`0x6d96ab`) only when [`InteriorWindow::holds`]
+/// fails.
+pub(super) fn interior_drawable<'a>(
+    stored: &'a mut Option<InteriorWindow>,
+    model: &WmoModel,
+    world_from_local: &Affine3A,
+    instance: Entity,
+    player_pos: Vec3,
+    radius: f32,
+    seed: usize,
+) -> &'a [bool] {
+    let p = bevy_to_wow(player_pos);
+    if !stored
+        .as_ref()
+        .is_some_and(|w| w.holds(instance, seed, radius, p))
+    {
+        let (min, max) = interior_window(p, radius);
+        *stored = Some(InteriorWindow {
+            instance,
+            group: seed,
+            radius,
+            min,
+            max,
+            drawable: interior_group_selection(model, world_from_local, (min, max), radius, seed),
+        });
+    }
+    stored.as_ref().map_or(&[], |w| &w.drawable)
+}
+
 /// Which groups' tiles draw, per absolute group index: the reference's portal flood-fill from the
-/// player's group (`0x6a5020`) inside the query box.
+/// player's group (`0x6a5020`) inside the query box of the stored `window`.
 ///
 /// The box is [`interior_window`] grown by `c` on every side (`0x6d96b6`-`0x6d96f3`), moved into
 /// the model frame as the AABB of its image (`0x6dc540`), its top z then replaced by the seed
 /// group's ceiling (`0x6a524b`, the group's `+0x28`). A group whose bbox misses the box in XY
 /// neither emits nor floods onward (`0x6a51f4`); there is no per-group Z test. A portal is crossed
 /// unless its polygon lies wholly outside one of the box's six planes, the only Z gate.
-pub(super) fn interior_group_selection(
+fn interior_group_selection(
     model: &WmoModel,
     world_from_local: &Affine3A,
-    player_pos: Vec3,
+    window: ([f32; 3], [f32; 3]),
     radius: f32,
     seed: usize,
 ) -> Vec<bool> {
@@ -57,8 +118,7 @@ pub(super) fn interior_group_selection(
         return drawable;
     }
     let c = radius;
-    let (wmin, wmax) = interior_window(bevy_to_wow(player_pos), c);
-    let (wmin, wmax) = (wmin.map(|v| v - c), wmax.map(|v| v + c));
+    let (wmin, wmax) = (window.0.map(|v| v - c), window.1.map(|v| v + c));
 
     // A world point (WoW axes) to the model frame, where the reference floods.
     let local_from_world = world_from_local.inverse();
@@ -145,14 +205,61 @@ pub(super) fn interior_group_selection(
 
 #[cfg(test)]
 mod tests {
+    use benilla_assets::WmoModel;
+    use bevy::math::{Affine3A, Vec3};
+
+    /// The flood of the window a rebuild at `pos` stores, the model at the origin.
+    fn select(model: &WmoModel, pos: Vec3, c: f32, seed: usize) -> Vec<bool> {
+        let window = super::interior_window(benilla_assets::coords::bevy_to_wow(pos), c);
+        super::interior_group_selection(model, &Affine3A::IDENTITY, window, c, seed)
+    }
+
+    /// `UpdateMinimap` rebuilds the window only on a change of instance or group, the dirty bit
+    /// or x/y leaving the window (`0x6d952c`-`0x6d9579`); z is never compared, so climbing in one
+    /// cell and one group floods from the stored box floor `pz − 1.5c`, not the player's.
+    #[test]
+    fn a_climb_in_one_cell_keeps_the_stored_window() {
+        use super::interior_drawable;
+        use benilla_assets::coords::wow_to_bevy;
+        use bevy::ecs::entity::Entity;
+        // A 60-yd tall seed and a neighbour through a portal at z −40, below the box floor
+        // −37.5 of a rebuild at z 0 with `c` 25, above the floor −47.5 of one at z −10.
+        let model = two_groups(60.0, [-5.0, 5.0], 0.0, -40.0);
+        let instance = Entity::from_raw_u32(1).unwrap();
+        let at = |stored: &mut Option<super::InteriorWindow>, p: [f32; 3], c: f32| {
+            interior_drawable(
+                stored,
+                &model,
+                &Affine3A::IDENTITY,
+                instance,
+                wow_to_bevy(p),
+                c,
+                0,
+            )[1]
+        };
+        let mut stored = None;
+        assert!(!at(&mut stored, [1.0, 1.0, 0.0], 25.0), "rebuilt at z 0");
+        assert!(
+            !at(&mut stored, [1.0, 1.0, -10.0], 25.0),
+            "10 yd lower in the same cell: the window's z stays"
+        );
+        assert!(
+            at(&mut stored, [1.0, 1.0, -10.0], 25.5),
+            "a zoom change rebuilds at the current height"
+        );
+        let mut stored = None;
+        at(&mut stored, [1.0, 1.0, 0.0], 25.0);
+        assert!(
+            at(&mut stored, [-1.0, 1.0, -10.0], 25.0),
+            "x leaving the cell rebuilds at the current height"
+        );
+    }
     /// A 4-group building: g0 (the player's) and g1 (a cellar) join by a floor hole and both draw;
     /// g2 sits 1000 yd off in XY, reached but not drawn; g3 overlaps the box but is reachable only
     /// through g2, by a portal inside the box, so only g2's XY gate keeps it out (`0x6a51f4`).
     #[test]
     fn interior_flood_fill_gates_on_xy_and_blocks_recursion_through_a_missed_group() {
-        use super::interior_group_selection;
         use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalInfo, WmoPortalRef};
-        use bevy::math::{Affine3A, Vec3};
 
         let nav = |zmin: f32, zmax: f32, x: f32, ref_start: u16, ref_count: u16| WmoGroupNav {
             flags: 0,
@@ -234,7 +341,7 @@ mod tests {
             convex_volume: Vec::new(),
         };
 
-        let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);
+        let drawable = select(&model, Vec3::ZERO, 25.0, 0);
         assert!(drawable[0], "the player's own group draws");
         assert!(
             drawable[1],
@@ -254,9 +361,7 @@ mod tests {
     /// crossed.
     #[test]
     fn interior_flood_fill_rejects_a_portal_outside_the_query_box_z_extent() {
-        use super::interior_group_selection;
         use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalInfo, WmoPortalRef};
-        use bevy::math::{Affine3A, Vec3};
 
         let nav = |zmin: f32, zmax: f32, ref_start: u16, ref_count: u16| WmoGroupNav {
             flags: 0,
@@ -323,7 +428,7 @@ mod tests {
             convex_volume: Vec::new(),
         };
 
-        let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);
+        let drawable = select(&model, Vec3::ZERO, 25.0, 0);
         assert!(drawable[0]);
         assert!(
             !drawable[1],
@@ -388,11 +493,9 @@ mod tests {
     /// `[−25, 50]`, so a group 30 yd west misses it and one 40 yd east is inside.
     #[test]
     fn the_query_window_is_the_snapped_cell_grown_by_its_width() {
-        use super::interior_group_selection;
-        use bevy::math::{Affine3A, Vec3};
         let at = |g1_x: [f32; 2], portal_x: f32| {
             let model = two_groups(3.0, g1_x, portal_x, 1.0);
-            interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0)[1]
+            select(&model, Vec3::ZERO, 25.0, 0)[1]
         };
         assert!(
             !at([-45.0, -30.0], -4.0),
@@ -406,9 +509,8 @@ mod tests {
         assert!(!at([51.0, 60.0], 4.0), "past it");
         // At x = 30 the cell is [25, 50], so the window is [0, 75].
         let model = two_groups(3.0, [-12.0, -1.0], -4.0, 1.0);
-        let west = interior_group_selection(
+        let west = select(
             &model,
-            &Affine3A::IDENTITY,
             benilla_assets::coords::wow_to_bevy([30.0, 0.0, 0.0]),
             25.0,
             0,
@@ -424,11 +526,9 @@ mod tests {
     /// under a low ceiling a portal above it is not.
     #[test]
     fn the_flood_box_tops_out_at_the_seed_groups_ceiling() {
-        use super::interior_group_selection;
-        use bevy::math::{Affine3A, Vec3};
         let crossed = |seed_top: f32, portal_z: f32| {
             let model = two_groups(seed_top, [-5.0, 5.0], 0.0, portal_z);
-            interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0)[1]
+            select(&model, Vec3::ZERO, 25.0, 0)[1]
         };
         assert!(
             crossed(40.0, 35.0),

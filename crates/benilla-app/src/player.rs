@@ -69,6 +69,9 @@ mod state;
 pub(crate) mod step_probe;
 mod swim;
 mod view_subject;
+/// A far-sight pose, for a test that seats the camera on another object.
+#[cfg(test)]
+pub(crate) use view_subject::RemoteView;
 mod walk;
 mod wire_in;
 pub(crate) use wire_in::regain_control_on_arrival;
@@ -317,6 +320,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight resolves `PLAYER_FARSIGHT` to a pose before `control` seats the camera: a
         // separate system, as `control` holds our `Transform` mutably and cannot read another's.
+        view_subject::register(app);
         app.init_resource::<view_subject::ViewSubject>()
             .init_resource::<view_subject::FarSight>()
             .init_resource::<scoped_view::ScopedView>()
