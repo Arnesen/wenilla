@@ -198,6 +198,10 @@ pub(crate) mod id {
     pub(crate) const PLAYER_UPDATE_RESTING: u16 = 405;
     pub(crate) const PET_UI_UPDATE: u16 = 427;
     pub(crate) const PLAYTIME_CHANGED: u16 = 530;
+    pub(crate) const SPELLS_CHANGED: u16 = 260;
+    pub(crate) const PET_BAR_UPDATE: u16 = 353;
+    pub(crate) const AREA_SPIRIT_HEALER_IN_RANGE: u16 = 527;
+    pub(crate) const AREA_SPIRIT_HEALER_OUT_OF_RANGE: u16 = 528;
 }
 
 /// `CGPlayer_C::RefreshGuildTag` (`0x5e08e0`) on the player `guid`: `TABARD_CANSAVE_CHANGED` bare

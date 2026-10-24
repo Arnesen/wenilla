@@ -604,6 +604,10 @@ fn global_event(id: u16) -> Option<&'static str> {
         id::PET_UI_UPDATE => "PET_UI_UPDATE",
         id::PLAYTIME_CHANGED => "PLAYTIME_CHANGED",
         id::PLAYER_MONEY => "PLAYER_MONEY",
+        id::SPELLS_CHANGED => "SPELLS_CHANGED",
+        id::PET_BAR_UPDATE => "PET_BAR_UPDATE",
+        id::AREA_SPIRIT_HEALER_IN_RANGE => "AREA_SPIRIT_HEALER_IN_RANGE",
+        id::AREA_SPIRIT_HEALER_OUT_OF_RANGE => "AREA_SPIRIT_HEALER_OUT_OF_RANGE",
         _ => return None,
     })
 }
@@ -1749,5 +1753,100 @@ mod tests {
                 .count();
             assert_eq!(asked, usize::from(summoned), "summoned {summoned}");
         }
+    }
+
+    /// `EnterWorldUI`'s action bar refresh (`0x490979` → `0x4e4f90`): the usable refresh
+    /// `0x4e5c00`, whose `ACTIONBAR_UPDATE_USABLE` (`0x4e5c53`) comes after the minimap's set-up
+    /// (`0x49096f`) and before the bonus bar's `UPDATE_BONUS_ACTIONBAR` (`0x4e4f95` → `0x4e4fc0`)
+    /// and the pet reset (`0x4909c9`), inside the cascade. With no pair changed it signals nothing.
+    #[test]
+    fn the_world_entry_signals_the_usable_refresh_inside_the_cascade() {
+        let spy = r#"SEEN = {}
+            local f = CreateFrame("Frame")
+            for _, e in ipairs({"PLAYER_ENTERING_WORLD", "ACTIONBAR_UPDATE_USABLE",
+                    "UPDATE_BONUS_ACTIONBAR", "PET_BAR_UPDATE"}) do
+                f:RegisterEvent(e)
+            end
+            f:SetScript("OnEvent", function()
+                table.insert(SEEN, event .. " " .. tostring(arg1) .. " nil")
+            end)"#;
+        for changed in [true, false] {
+            let (mut app, _) = feed_world(&[], spy);
+            app.insert_resource(crate::ui_action::EnterUsable(changed));
+            app.add_systems(Update, super::super::feed_units);
+            app.update();
+            let mut heard = vec!["PLAYER_ENTERING_WORLD nil nil"];
+            if changed {
+                heard.push("ACTIONBAR_UPDATE_USABLE nil nil");
+            }
+            heard.extend(["UPDATE_BONUS_ACTIONBAR nil nil", "PET_BAR_UPDATE nil nil"]);
+            assert_eq!(seen(&mut app), heard, "changed {changed}");
+            assert!(
+                !app.world().resource::<crate::ui_action::EnterUsable>().0,
+                "the cascade takes it"
+            );
+        }
+    }
+
+    /// The cascade's `SetPetGuid(0, 0)` stores the zero guid (`0x4bc822`, `0x4bc827`) before its
+    /// `UNIT_PET` (`0x4bc84f`), and `HasPetUI` resolves the pet from that guid (`0x4be67e`-
+    /// `0x4be690`): a `/reload` with a pet out hears `UNIT_PET` with `HasPetUI()` nil. The pet's
+    /// happiness field moves at neither the VM's first push nor the bar's return, so neither signals
+    /// `UNIT_HAPPINESS`. The stats feed runs ahead of the unit feed, as the schedule orders them.
+    #[test]
+    fn the_world_entry_pet_reset_signals_unit_pet_with_no_pet_ui() {
+        /// `UNIT_FIELD_BYTES_0` (class in byte 1) and `UNIT_FIELD_PETNUMBER`.
+        const BYTES_0: u16 = 36;
+        const PETNUMBER: u16 = 139;
+        let spy = r#"SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UNIT_PET")
+            f:RegisterEvent("UNIT_HAPPINESS")
+            f:SetScript("OnEvent", function()
+                local ui, hunter = HasPetUI()
+                table.insert(SEEN, event .. " " .. tostring(ui) .. " " .. tostring(hunter))
+            end)"#;
+        let (mut app, me) = feed_world(&[(BYTES_0, 3 << 8)], spy);
+        app.init_resource::<crate::ui_pet::PetBar>()
+            .init_resource::<crate::ui_pet::PetAttackLatch>()
+            .init_resource::<crate::ui_pet_stats::PetStatsFeed>()
+            .init_resource::<crate::net::GuidIndex>()
+            .insert_resource(crate::net::SelfGuid(Some(ME)));
+        let pet = app
+            .world_mut()
+            .spawn((
+                crate::net::Guid(PET),
+                crate::net::ObjectStore(
+                    benilla_protocol::ObjectFields::from_pairs(&[(PETNUMBER, 7)])
+                        .into_created(benilla_protocol::messages::ObjectType::Unit),
+                ),
+            ))
+            .id();
+        {
+            let mut index = app.world_mut().resource_mut::<crate::net::GuidIndex>();
+            index.0.insert(ME, me);
+            index.0.insert(PET, pet);
+        }
+        app.world_mut()
+            .resource_mut::<crate::ui_pet::PetBar>()
+            .spells
+            .pet_guid = PET;
+        app.add_systems(
+            Update,
+            (
+                crate::ui_pet_stats::feed_pet_stats,
+                super::super::feed_units,
+            )
+                .chain(),
+        );
+        app.update();
+        assert_eq!(seen(&mut app), ["UNIT_PET nil nil"], "the reload's entry");
+        // `SMSG_PET_SPELLS` brings the same pet back.
+        app.world_mut()
+            .resource_mut::<crate::ui_pet::PetBar>()
+            .spells
+            .pet_guid = PET;
+        app.update();
+        assert!(seen(&mut app).is_empty(), "the pet's return");
     }
 }

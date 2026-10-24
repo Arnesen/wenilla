@@ -132,12 +132,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::HostHeld,
-        "::ui_item_text::ItemTextOpen",
-        "the reader's reads, which `SMSG_GAMEOBJECT_PAGETEXT` queues (`0x5f88c0` → `0x4e32e0`) and \
-         `begin_item_text` fires `ITEM_TEXT_BEGIN` from; the reader's verbs hold it in the host",
-    ),
-    (
-        Row::HostHeld,
         "::ui_mail::MailOpen",
         "the mailbox's list and results, the send result's equip refusal line among them, which \
          `feed_mail` fires from; the mail verbs, acting in their calls, hold it in the host",
@@ -303,11 +297,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::HostHeld,
-        "::ui_dialog_verbs::AreaSpiritHealer",
-        "the area spirit healer, whose `in_range` the time packet's handler fills and `feed_dialog_verbs` fires `AREA_SPIRIT_HEALER_IN_RANGE` from in system order; `AcceptAreaSpiritHeal`'s scan, acting in its call, holds it in the host",
-    ),
-    (
-        Row::HostHeld,
         "::ui_dialog_verbs::BattlefieldQueue",
         "the battleground queue slots, which `feed_dialog_verbs` and `feed_battlefield_score` fire from; the port, leave and positions verbs, acting in their calls, read them in the host",
     ),
@@ -401,6 +390,9 @@ const HOST_HELD_UNREAD: &[&str] = &[
     "::target::Selection",
     "::ui_action::PlayerActions",
     "::ui_auction::AuctionOpen",
+    // Read, and quiet: `feed_dialog_verbs` pushes the deadline the time packet stores and fires
+    // nothing off it, as the packet's `AREA_SPIRIT_HEALER_IN_RANGE` goes on the notice lane.
+    "::ui_dialog_verbs::AreaSpiritHealer",
     "::ui_loot::AutoLootByte",
     "::ui_loot::LootLatch",
     "::ui_merchant::MerchantOpen",
@@ -541,7 +533,9 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_spellbook::feed_spellbook", &["items::Countdowns", "items::Items", "net::GuidIndex",
         "net::ObjectStore", "spell::cooldowns::Cooldowns", "ui_action::PlayerActions",
         "ui_spellbook::LearnedInTab"]),
-    ("::ui_macro::rebind_macro_spells", &["ui_action::PlayerActions"]),
+    // The pet book's sorts, which each pet spell list counts and the derivation follows
+    // (`0x4bdae0`): the frame's lists derive once, after the last.
+    ("::ui_macro::rebind_macro_spells", &["ui_action::PlayerActions", "ui_pet::PetBar"]),
     ("::ui_macro::load_macros", &["ui_action::PlayerActions"]),
     ("::ui_talent::feed_talents", &["net::ObjectStore", "ui_action::PlayerActions"]),
     ("::ui_talent_wipe::feed_talent_wipe", &["ui_talent_wipe::TalentWipeState"]),
@@ -766,7 +760,7 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 13] {
+fn lane_types() -> [TypeId; 14] {
     [
         TypeId::of::<crate::ui_items::feed::BagView>(),
         // The views lane: what each packet changed in the stores.
@@ -786,12 +780,14 @@ fn lane_types() -> [TypeId; 13] {
         TypeId::of::<crate::ui_tradeskill::ListRebuilds>(),
         // The deaths lane: the signals each death's legs parked, stamped under its health edge.
         TypeId::of::<crate::target::Deaths>(),
+        // The item-text lane: the page-text packets' reads, stamped at their packets.
+        TypeId::of::<crate::ui_item_text::ItemTextLane>(),
     ]
 }
 
 /// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
 /// so another lane's read of the same type shows as the state it is.
-fn lane_queue_owners() -> [(&'static str, TypeId); 13] {
+fn lane_queue_owners() -> [(&'static str, TypeId); 14] {
     [
         ("bag view", TypeId::of::<crate::ui_items::feed::BagView>()),
         ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
@@ -815,6 +811,10 @@ fn lane_queue_owners() -> [(&'static str, TypeId); 13] {
             TypeId::of::<crate::ui_tradeskill::ListRebuilds>(),
         ),
         ("deaths", TypeId::of::<crate::target::Deaths>()),
+        (
+            "item text",
+            TypeId::of::<crate::ui_item_text::ItemTextLane>(),
+        ),
     ]
 }
 
@@ -973,6 +973,7 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "deaths",
             "equip errors",
             "field notices",
+            "item text",
             "item watchers",
             "list rebuilds",
             "loot",
@@ -1655,13 +1656,25 @@ const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("loot", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "ui_loot::AutoLootByte", "ui_loot::LootLatch",
         "ui_loot::LootMoveStart", "ui_party::GroupState"]),
+    // The reader's open reads the object, its records and the text caches as the frame left them,
+    // past the answers still on its lane; its register closes whichever latched window holds the
+    // latch, reading that window's state as the frame left it.
+    ("item text", &["go_templates::GameObjectTemplates", "items::Countdowns", "items::Items",
+        "net::GuidIndex", "net::ObjectStore", "ui_auction::AuctionOpen", "ui_bank::BankOpen",
+        "ui_gossip::GossipState", "ui_item_text::ItemTextOpen", "ui_item_text::PageTexts",
+        "ui_mail::MailOpen", "ui_merchant::MerchantOpen", "ui_petition::GuildRegistrarState",
+        "ui_quest::QuestGiver", "ui_session::latch::InteractLatch", "ui_stable::StableOpen",
+        "ui_tabard::TabardOpen", "ui_taxi::TaxiState", "ui_trade::TradeSession",
+        "ui_trainer::TrainerOpen"]),
     ("chat", &["go_templates::GameObjectTemplates", "items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "net::SelfGuid", "ui_chat::edit::ChannelState",
         "world_state::WorldStates"]),
 ];
 
 /// Every lane firing's read of what a handler writes is listed in [`LANE_READS_FRAME_FINAL`],
-/// found as [`every_view_push_of_what_a_handler_writes_is_listed`] finds a feed's.
+/// found as [`every_view_push_of_what_a_handler_writes_is_listed`] finds a feed's; an exclusive
+/// firing, which shows Bevy no access, by the reads it declares ([`super::LaneReads`]), and every
+/// exclusive firing declares them.
 #[test]
 fn every_lane_reads_of_what_a_handler_writes_is_listed() {
     use bevy::ecs::query::{ComponentAccessKind, FilteredAccess};
@@ -1710,9 +1723,29 @@ fn every_lane_reads_of_what_a_handler_writes_is_listed() {
         .collect();
     let lanes = world.resource::<super::Lanes>();
     let mut found: Vec<(&str, BTreeSet<String>)> = Vec::new();
-    for (lane, access) in lanes.names().into_iter().zip(lanes.accesses()) {
+    let mut undeclared = Vec::new();
+    let firings = lanes
+        .names()
+        .into_iter()
+        .zip(lanes.accesses())
+        .zip(lanes.exclusive_reads());
+    for ((lane, access), (exclusive, declared)) in firings {
+        // An exclusive firing shows Bevy no access: the access its declared reads measure stands
+        // in ([`super::measure`]).
+        match (exclusive, declared) {
+            (true, false) => {
+                undeclared.push(format!("{lane:?} is exclusive and declares no reads"));
+                continue;
+            }
+            (false, true) => undeclared.push(format!(
+                "{lane:?} declares reads, but its firing is not exclusive"
+            )),
+            _ => {}
+        }
         let mut own: Vec<&FilteredAccess> = access.filtered_accesses().iter().collect();
-        for h in &host {
+        // A firing that lends the host shows the host's access beside its own; an exclusive
+        // firing's declared reads are its own alone.
+        for h in host.iter().filter(|_| !exclusive) {
             if let Some(i) = own.iter().position(|o| *o == h) {
                 own.remove(i);
             }
@@ -1736,6 +1769,7 @@ fn every_lane_reads_of_what_a_handler_writes_is_listed() {
         });
         found.push((lane, inputs));
     }
+    assert!(undeclared.is_empty(), "{}", undeclared.join("\n"));
     let wrong: Vec<String> = found
         .iter()
         .filter(|(lane, inputs)| {

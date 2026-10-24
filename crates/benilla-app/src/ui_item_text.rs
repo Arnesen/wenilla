@@ -14,6 +14,9 @@
 //! (`0x4e3364`), but it registers only once the text resolves (`0x4e349a`), right before
 //! `ITEM_TEXT_BEGIN`, so the window it opens over closes first; its release (`0x4e3323`,
 //! `0x4e3357`) re-enters the core while latched, firing `ITEM_TEXT_CLOSED` twice.
+//!
+//! A packet's read, `SMSG_GAMEOBJECT_PAGETEXT`'s, runs on the item-text lane ([`ItemTextLane`]),
+//! so its latch and its `ITEM_TEXT_BEGIN` fire at the packet's place among the other lanes.
 
 use bevy::prelude::*;
 
@@ -86,6 +89,17 @@ pub(crate) struct ReadSession {
     /// The open has looked the object's record up: the open (`0x4e32e0`) runs once, and its
     /// callback re-enters it when the record lands.
     opened: bool,
+    /// The text record the open asked for and waits on (`0x4e3465`, `0x4e347c`), whose answer's
+    /// callback `0x4e3280` opens again (`0x4e32a5`), on the item-text lane at the answer's place.
+    awaiting: Option<TextRecord>,
+}
+
+/// The record a reader's text comes from: a page of the page cache (`0xc0e174`), or a letter's
+/// body of the item-text cache (`0xc0e0c0`), which mail shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextRecord {
+    Page(u32),
+    Body(u32),
 }
 
 #[derive(Default)]
@@ -105,6 +119,9 @@ pub(crate) struct ItemTextOpen {
     /// Reads a click or a bag use asked for, in order; [`apply_reads`] runs each as `0x4e32e0`
     /// with flag 0, with the world in hand for the latch.
     reads: Vec<(u64, ReadSource)>,
+    /// While the item-text lane fires a read, the records whose answers its later packets carry:
+    /// in the cache already, but not yet when the read's packet ran, so the begin waits on them.
+    landing: Vec<TextRecord>,
 }
 
 impl ItemTextOpen {
@@ -143,6 +160,7 @@ impl ItemTextOpen {
             registered: false,
             told: Default::default(),
             opened: false,
+            awaiting: None,
         });
     }
 
@@ -192,6 +210,143 @@ pub(crate) fn close_core(world: &mut World) {
     });
 }
 
+/// One step of the item-text lane.
+#[derive(Clone, Copy, Debug)]
+enum TextStep {
+    /// `SMSG_GAMEOBJECT_PAGETEXT`'s read of a GameObject (`0x5f8915` → `0x4e32e0`).
+    Read(u64),
+    /// A text record's answer (`SMSG_PAGE_TEXT_QUERY_RESPONSE`, `SMSG_ITEM_TEXT_QUERY_RESPONSE`),
+    /// whose callback `0x4e3280` opens the reader again when it waits on that record.
+    Landed(TextRecord),
+}
+
+/// The item-text lane: each step stamped at its packet ([`crate::lanes::stamp`]).
+#[derive(Resource, Default)]
+pub(crate) struct ItemTextLane(std::collections::VecDeque<(crate::lanes::Stamp, TextStep)>);
+
+impl ItemTextLane {
+    /// Queue `step` behind everything stamped before it.
+    fn push(&mut self, step: TextStep) {
+        let stamp = crate::lanes::stamp();
+        let at = self.0.partition_point(|(s, _)| *s < stamp);
+        self.0.insert(at, (stamp, step));
+    }
+}
+
+/// The session's end and the leave-world sweep drop what the lane holds: no later world reads
+/// those objects, and a worldport's sweep closes the reader ahead of the lanes' drain.
+fn drop_item_text_lane(world: &mut World) {
+    if let Some(mut lane) = world.get_resource_mut::<ItemTextLane>() {
+        lane.0.clear();
+    }
+}
+
+/// The leave-world sweep's reader leg (`0x490abc` → `0x4e3240` → `0x4e32e0(0, 0)`): the lane's
+/// reads dropped, then the core.
+fn sweep_item_text(world: &mut World) {
+    drop_item_text_lane(world);
+    close_core(world);
+}
+
+/// What the item-text lane's firing touches beside the call host and its own lane, for the guard
+/// on the lanes' frame-final reads: the begin's access as Bevy measures it, and the latch and its
+/// windows, which the open's release and the begin's register read.
+fn item_text_reads(world: &mut World) -> bevy::ecs::query::FilteredAccessSet {
+    let mut access = crate::lanes::system_access(world, begin_item_text);
+    for t in crate::ui_session::latch_reads(world) {
+        if let Some(id) = world.components().get_resource_id(t) {
+            access.add_unfiltered_resource_read(id);
+        }
+    }
+    access
+}
+
+/// The item-text lane's head.
+fn peek_item_text(world: &World) -> Option<crate::lanes::Stamp> {
+    world
+        .get_resource::<ItemTextLane>()?
+        .0
+        .front()
+        .map(|(s, _)| *s)
+}
+
+/// Each step `until` admits, run as the firing of its stamp. A read is `0x4e32e0(guid, 0)`
+/// ([`read_core`]), then its begin ([`begin_item_text`]), which waits on a record whose answer is
+/// still on the lane; a record's answer that the open waits on is the callback's open again
+/// (`0x4e3280` → `0x4e32e0(guid, 1)`), the begin alone. The begin's latch closes the window it
+/// opens over and its `ITEM_TEXT_BEGIN` fires inside it; a template still in flight leaves the
+/// begin to the feed, as the template's callback re-enters the open. The lane stops after a step
+/// whose firing stamped anything, so what it pushed fires next.
+fn fire_item_text(In(until): In<crate::lanes::Until>, world: &mut World) {
+    loop {
+        let Some((at, step)) = world
+            .resource::<ItemTextLane>()
+            .0
+            .front()
+            .copied()
+            .filter(|(at, _)| until.admits(*at))
+        else {
+            return;
+        };
+        world.resource_mut::<ItemTextLane>().0.pop_front();
+        let ((), moved) = crate::lanes::firing(at, || {
+            match step {
+                TextStep::Read(guid) => {
+                    read_core(
+                        world,
+                        guid,
+                        ReadSource::Pages {
+                            visited: Vec::new(),
+                        },
+                    );
+                    let landing = world
+                        .resource::<ItemTextLane>()
+                        .0
+                        .iter()
+                        .filter_map(|(_, s)| match s {
+                            TextStep::Landed(record) => Some(*record),
+                            TextStep::Read(_) => None,
+                        })
+                        .collect();
+                    world.resource_mut::<ItemTextOpen>().landing = landing;
+                }
+                TextStep::Landed(record) => {
+                    let mut open = world.resource_mut::<ItemTextOpen>();
+                    match open.pending.as_mut() {
+                        Some(sess) if sess.awaiting == Some(record) => sess.awaiting = None,
+                        _ => return,
+                    }
+                }
+            }
+            if let Err(e) = world.run_system_cached(begin_item_text) {
+                debug!("item text: the begin did not run: {e}");
+            }
+            world.resource_mut::<ItemTextOpen>().landing.clear();
+        });
+        if moved {
+            return;
+        }
+    }
+}
+
+/// The lane's reads while no in-game interface is up, which no drain fires, handed to the frame's
+/// reads unfired: nobody hears the begin, and the reader still takes the object.
+fn spill_item_text_lane(mut lane: ResMut<ItemTextLane>, mut open: ResMut<ItemTextOpen>) {
+    for (_, step) in lane.0.drain(..) {
+        match step {
+            TextStep::Read(guid) => {
+                open.read_pages(guid);
+            }
+            // The feed's begin finds the record cached.
+            TextStep::Landed(record) => {
+                if let Some(sess) = open.pending.as_mut().filter(|s| s.awaiting == Some(record)) {
+                    sess.awaiting = None;
+                }
+            }
+        }
+    }
+}
+
 /// The queued reads, each `0x4e32e0(guid, 0)`, run with the world in hand ([`read_core`]).
 fn apply_reads(mut open: ResMut<ItemTextOpen>, mut commands: Commands) {
     for (guid, source) in std::mem::take(&mut open.reads) {
@@ -223,24 +378,30 @@ fn read_core(world: &mut World, guid: u64, source: ReadSource) {
     world.resource_mut::<ItemTextOpen>().open(guid, source);
 }
 
-/// The open's tail once the object's text resolves (`0x4e33b0`-`0x4e349f`): the latch, whose
-/// holder closes first (`0x4e349a`), then `ITEM_TEXT_BEGIN` (`0x4e34a4`) with the title and the
-/// material, as the stock handler takes the text colour from the material
-/// (`ItemTextFrame.lua:18-23`). A page chain with no page bails before both (`0x4e341d`) and is
-/// dropped.
+/// The open's tail once the object's text resolves (`0x4e33b0`-`0x4e349f`): the first page's
+/// record, or a letter's body, looked up with the callback `0x4e3280` (`0x4e3465`, `0x4e347c`),
+/// and only with it at hand (`0x4e3489`, `0x4e348b`) the latch, whose holder closes first
+/// (`0x4e349a`), then `ITEM_TEXT_BEGIN` (`0x4e34a4`) with the title and the material, as the stock
+/// handler takes the text colour from the material (`ItemTextFrame.lua:18-23`). A record not at
+/// hand is waited on: its answer opens again on the item-text lane, and no frame begins it. A page
+/// chain with no page bails before both (`0x4e341d`) and is dropped.
+#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn begin_item_text(
     mut open: ResMut<ItemTextOpen>,
     objects: Objects,
     items: Res<Items>,
     go_templates: Res<GameObjectTemplates>,
     materials: Option<Res<PageMaterials>>,
+    pages: Res<PageTexts>,
+    mail: Res<MailOpen>,
     net: Res<NetCommands>,
     mut commands: Commands,
 ) {
+    let landing = open.landing.clone();
     let Some(sess) = open.pending.as_mut() else {
         return;
     };
-    if sess.registered {
+    if sess.registered || sess.awaiting.is_some() {
         return;
     }
     let object = sess.object_guid;
@@ -259,6 +420,27 @@ fn begin_item_text(
     if is_pages && readable.page_head == 0 {
         debug!("item text: {object:#x} has no page to read — closing");
         open.pending = None;
+        return;
+    }
+    let record = match sess.source {
+        ReadSource::Pages { .. } => TextRecord::Page(readable.page_head),
+        ReadSource::Letter { text_id } => TextRecord::Body(text_id),
+    };
+    let at_hand = !landing.contains(&record)
+        && match record {
+            TextRecord::Page(page_id) => pages.page(page_id, object, ask).is_some(),
+            TextRecord::Body(text_id) => mail
+                .bodies
+                .read(text_id, ask, |commands| {
+                    let _ = commands.0.send(ClientCommand::ItemTextQuery {
+                        text_id,
+                        mail_id: 0,
+                    });
+                })
+                .is_some(),
+        };
+    if !at_hand {
+        sess.awaiting = Some(record);
         return;
     }
     let begun = ItemTextState {
@@ -318,16 +500,26 @@ mod net {
             .net_handler(
                 SessionEventKind::GameObjectPageText,
                 on_gameobject_page_text,
-            );
+            )
+            .net_handler(SessionEventKind::MailItemText, on_item_text);
+    }
+
+    /// `SMSG_ITEM_TEXT_QUERY_RESPONSE`: a letter's body landing, whose callback `0x4e3280` opens
+    /// the reader again when it waits on it; the mail handler caches the body.
+    fn on_item_text(In(ev): In<SessionEvent>, mut lane: ResMut<super::ItemTextLane>) {
+        if let SessionEvent::MailItemText { text_id, .. } = ev {
+            lane.push(super::TextStep::Landed(super::TextRecord::Body(text_id)));
+        }
     }
 
     /// `SMSG_GAMEOBJECT_PAGETEXT` (`0x5f88c0`): the guid looked up as a GameObject (mask `0x20`,
     /// `0x5f88f9`), then the reader's open on it with flag 0 (`0x5f8915` → `0x4e32e0`), the same
-    /// read a TEXT object's right-click makes; nothing for an object not streamed.
+    /// read a TEXT object's right-click makes, on the item-text lane at the packet's place;
+    /// nothing for an object not streamed.
     fn on_gameobject_page_text(
         In(ev): In<SessionEvent>,
         objects: crate::net::Objects,
-        mut open: ResMut<super::ItemTextOpen>,
+        mut lane: ResMut<super::ItemTextLane>,
     ) {
         let SessionEvent::GameObjectPageText { guid } = ev else {
             return;
@@ -336,12 +528,17 @@ mod net {
             f.object_type() == Some(benilla_protocol::messages::ObjectType::GameObject)
         });
         if is_gameobject {
-            open.read_pages(guid);
+            lane.push(super::TextStep::Read(guid));
         }
     }
 
-    /// One page per packet; the reader repaints off the cache on the next feed.
-    fn on_page_text(In(ev): In<SessionEvent>, mut pages: ResMut<PageTexts>) {
+    /// One page per packet; the reader repaints off the cache on the next feed, and a reader that
+    /// waits on the page opens again at its place (`0x4e3280`).
+    fn on_page_text(
+        In(ev): In<SessionEvent>,
+        mut pages: ResMut<PageTexts>,
+        mut lane: ResMut<super::ItemTextLane>,
+    ) {
         if let SessionEvent::PageText {
             page_id,
             text,
@@ -349,6 +546,7 @@ mod net {
         } = ev
         {
             pages.insert(page_id, text, next_page_id);
+            lane.push(super::TextStep::Landed(super::TextRecord::Page(page_id)));
         }
     }
 }
@@ -357,18 +555,29 @@ pub(crate) struct UiItemTextPlugin;
 
 impl Plugin for UiItemTextPlugin {
     fn build(&self, app: &mut App) {
+        use crate::lanes::LaneApp;
         net::register(app);
         crate::query_cache::register::<PageTexts>(app);
         app.init_resource::<ItemTextOpen>()
+            .init_resource::<ItemTextLane>()
             .init_resource::<PageTexts>()
+            .add_exclusive_lane("item text", peek_item_text, fire_item_text, item_text_reads)
             .add_latched_window::<ItemTextOpen>()
-            // `0x490abc` → `0x4e3240` → `0x4e32e0(0, 0)`, the core.
-            .add_sweep_leg(SweepLeg::ItemText, close_core)
+            .add_sweep_leg(SweepLeg::ItemText, sweep_item_text)
+            .add_systems(
+                OnExit(crate::client_state::ClientState::InWorld),
+                drop_item_text_lane.in_set(crate::ui_script::SessionEnd::Clears),
+            )
             .add_systems(
                 Update,
                 // The reads and the begin ahead of the feed, so a read that resolves paints this
                 // frame.
-                (apply_reads, begin_item_text, feed_item_text)
+                (
+                    spill_item_text_lane.run_if(not(crate::ui_script::ingame_ui_up)),
+                    apply_reads,
+                    begin_item_text,
+                    feed_item_text,
+                )
                     .chain()
                     .in_set(UiFeed),
             );
@@ -670,6 +879,10 @@ mod tests {
                 .count()
         };
         app.world_mut()
+            .resource_mut::<MailOpen>()
+            .bodies
+            .insert(77, "Dear you.".into());
+        app.world_mut()
             .resource_mut::<ItemTextOpen>()
             .read_letter(LETTER, 77);
         app.update();
@@ -704,6 +917,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(NetCommands(tx))
             .init_resource::<ItemTextOpen>()
+            .init_resource::<ItemTextLane>()
             .init_resource::<PageTexts>()
             .init_resource::<MailOpen>()
             .init_resource::<Items>()
@@ -738,6 +952,9 @@ mod tests {
             app.world_mut(),
             vec![benilla_protocol::SessionEvent::GameObjectPageText { guid: TABLET }],
         );
+        app.world_mut()
+            .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
+            .expect("the item-text lane fires");
         app.update();
         app.update();
         let open = app.world().resource::<ItemTextOpen>();
@@ -746,7 +963,7 @@ mod tests {
             .as_ref()
             .expect("the reader opens on the tablet");
         assert_eq!(sess.object_guid, TABLET);
-        assert!(sess.registered, "its page is data[7]");
+        assert!(!sess.registered, "the begin waits on its page");
         let asked: Vec<u32> = crate::query_cache::queries(&rx)
             .iter()
             .filter_map(|c| match c {
@@ -754,7 +971,23 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(asked, [358]);
+        assert_eq!(asked, [358], "its page is data[7]");
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::PageText {
+                page_id: 358,
+                text: "Page one.".into(),
+                next_page_id: 0,
+            }],
+        );
+        app.world_mut()
+            .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
+            .expect("the item-text lane fires");
+        let open = app.world().resource::<ItemTextOpen>();
+        assert!(
+            open.pending.as_ref().is_some_and(|s| s.registered),
+            "the page's answer begins it"
+        );
     }
 
     #[test]
