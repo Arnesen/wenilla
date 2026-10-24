@@ -167,6 +167,12 @@ mod light;
 pub use light::{Atmosphere, LightCatalog, Submersion, ZERO_KEY_COLOR, ZERO_KEY_SCALAR};
 mod loading_screen;
 pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
+// The route a transport transfer's loading screen draws.
+mod loading_route;
+pub use loading_route::{
+    load_loading_screen_taxi_splines, LoadingScreenTaxiSpline, LoadingScreenTaxiSplines, Route,
+    RouteQuad, RouteVertex, TaxiLegTable,
+};
 mod liquid;
 pub use liquid::{LiquidKind, LiquidMesh};
 mod maps;
@@ -281,17 +287,17 @@ pub use models::{
     parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_pane_cameras,
     parse_m2_playable_animation_lookup, parse_m2_portrait_camera, parse_m2_render_submeshes,
     parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights,
-    parse_wmo_portals, parse_wmo_root, rotation_2x2, uv_transform, wmo_group_doodad_refs,
-    wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
-    wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim,
-    AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot,
-    CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
-    GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2CameraTracks,
-    M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
-    PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton, SkeletonBone,
-    StringAnchors, TextureStage, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
-    WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
-    DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    parse_wmo_portals, parse_wmo_root, point_in_convex_volume, rotation_2x2, uv_transform,
+    wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
+    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
+    wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
+    BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
+    GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds,
+    M2CameraTracks, M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm,
+    ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
+    SkeletonBone, StringAnchors, TextureStage, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad,
+    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
+    WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{
@@ -352,9 +358,8 @@ pub use zone_map::{load_zone_map, ZONE_MAP_EDGE};
 // Taxi and transport paths, and the transport timetable.
 mod taxi;
 pub use taxi::{load_taxi_path_nodes, TaxiPathNode, TaxiPathNodes};
-mod transport_period;
 mod transports;
-pub use transports::{TransportSample, TransportTimetable};
+pub use transports::{ShipAnim, TransportSample, TransportTimetable};
 // Type-11 elevator and lift keyframe paths.
 mod elevators;
 pub use elevators::{

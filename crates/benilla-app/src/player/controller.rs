@@ -99,6 +99,13 @@ pub(super) fn control(
         TransportQuery,
         Query<&ChildOf>,
         Query<Has<crate::net::SelfPlayer>, With<crate::net::ActiveMover>>,
+        // Our create's transport block and the transport it names, placed or not yet.
+        (
+            Query<&crate::transport::TransportRider, With<Embodied>>,
+            Res<crate::net::GuidIndex>,
+            Query<&Transform, (Without<Embodied>, Without<FlyCam>, Without<Camera>)>,
+            Query<&crate::net::ObjectStore>,
+        ),
     ),
 ) {
     let (world, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
@@ -337,6 +344,7 @@ pub(super) fn control(
         body.single()
             .ok()
             .map(|(_, t, ..)| (t.translation, server_ride::yaw_of(t.rotation))),
+        self_seat(&world_q.4),
     );
     let speed_acks = server_moves.speed_acks;
     if let (true, Ok((e, ..))) = (server_moves.precast_ended, body.single()) {
@@ -346,7 +354,7 @@ pub(super) fn control(
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
 
     // On a transport, recompose the rider from the deck's pose this frame, before input integrates.
-    ride::carry(&mut player, &mut cam, transports);
+    ride::carry(&mut player, &mut cam, transports, &world_q.4 .1);
 
     if player.active && !player.detached {
         // The cast bar's self-cancel, at the command press ([`input::cancels_cast`]) and ahead of
@@ -742,6 +750,7 @@ pub(super) fn control(
         ride::update_attachment(
             &mut player,
             transports,
+            &world_q.4 .1,
             child_of,
             ground,
             grounded,
@@ -900,4 +909,33 @@ pub(super) fn control(
         movement_net::park_mover(&net.0 .0, &mut player);
         camera::fly_free(dt, &keys, typing, &mut rig, &mut cam, &mut cam_t);
     }
+}
+
+/// Our create's transport block, the [`crate::transport::TransportRider`] tail on the body we
+/// steer, and the streamed transport it names, as [`wire_in::apply_server_moves`] seats a login
+/// aboard it.
+#[allow(clippy::type_complexity)]
+fn self_seat(
+    q: &(
+        Query<&crate::transport::TransportRider, With<Embodied>>,
+        Res<crate::net::GuidIndex>,
+        Query<&Transform, (Without<Embodied>, Without<FlyCam>, Without<Camera>)>,
+        Query<&crate::net::ObjectStore>,
+    ),
+) -> Option<wire_in::SelfSeat> {
+    let rider = q.0.single().ok()?;
+    let entity = *q.1 .0.get(&rider.transport_guid)?;
+    // 0x630a80: the lookup `0x468460` with the game object mask 0x20, then the transport bit 0x8
+    // of its flags.
+    let fields = &q.3.get(entity).ok()?.0;
+    if fields.object_type_mask().unwrap_or(0) & 0x20 == 0 || fields.gameobject_flags() & 0x8 == 0 {
+        return None;
+    }
+    Some(wire_in::SelfSeat {
+        entity,
+        guid: rider.transport_guid,
+        local_pos: rider.local_pos,
+        local_orientation: rider.local_orientation,
+        deck: *q.2.get(entity).ok()?,
+    })
 }

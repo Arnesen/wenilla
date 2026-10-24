@@ -2,9 +2,10 @@
 //! only an anchor: the movement block's `UPDATE_FLAG_TRANSPORT` u32, its path-progress ms at
 //! create, re-sent on every re-create.
 //!
-//! - Type 15 (`MO_TRANSPORT`, boats and zeppelins): a timetable from `TaxiPathNode.dbc` and the
-//!   template's `(taxiPathId, moveSpeed, accelRate)` ([`benilla_formats::TransportTimetable`]),
-//!   sampled at `(anchor + elapsed) % period`.
+//! - Type 15 (`MO_TRANSPORT`, boats and zeppelins): the reference's ship path from
+//!   `TaxiPathNode.dbc` and the template's `(taxiPathId, moveSpeed, accelRate)`
+//!   ([`benilla_formats::TransportTimetable`], `0x5f4cc0`), placed at `(anchor + elapsed) % period`
+//!   (`0x5f50a0`).
 //! - Type 11 (`TRANSPORT`, elevators and trams): the `TransportAnimation.dbc` keyframe path keyed
 //!   by template entry, at `spawn + R(spawn_quat)·lerp(keyframes, (anchor + elapsed) % period)`
 //!   ([`benilla_formats::elevator_sample`], the reference's `0x5f6280`; vmangos does the same in
@@ -21,7 +22,7 @@ use avian3d::collider_tree::update_moved_collider_aabbs as republish_moved_colli
 use avian3d::prelude::{Collider, Position, RigidBody, Rotation};
 use benilla_formats::{
     elevator_period_ms, elevator_sample, load_elevator_paths, load_taxi_path_nodes,
-    ElevatorKeyframe, ElevatorPaths, TaxiPathNodes, TransportSample, TransportTimetable,
+    ElevatorKeyframe, ElevatorPaths, ShipAnim, TaxiPathNodes, TransportSample, TransportTimetable,
 };
 use bevy::prelude::*;
 
@@ -37,6 +38,7 @@ pub(crate) struct TransportPlugin;
 impl Plugin for TransportPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Timetables>()
+            .add_message::<TransportLegLeft>()
             // After `AssetSet::Open`, whose Commands insert `WorldAssets`; unordered, this finds
             // none and silently does nothing.
             .add_systems(
@@ -51,10 +53,7 @@ impl Plugin for TransportPlugin {
                 // deck's previous-frame box, above its rider after one long frame. It writes no
                 // tick resource, so a second run is idempotent; it sweeps every collider.
                 (
-                    arm_transports,
-                    reseek_ridden_transport_at_worldport,
-                    tick_transports,
-                    watch_ridden_transport_map,
+                    deck_ticks(),
                     republish_moved_collider_aabbs::<Collider>,
                     compose_riders,
                     ground_deck_riders,
@@ -75,9 +74,29 @@ impl Plugin for TransportPlugin {
     }
 }
 
+/// The systems that arm the transports and pose their decks for this frame, in order.
+fn deck_ticks() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    (
+        arm_transports,
+        attach_transport_volumes,
+        tick_transports,
+        watch_ridden_transport_map,
+    )
+        .chain()
+}
+
+/// A ship we ride left leg `leg` for another on the map we are on: the tick's
+/// `0x407de0(entry, leg)` (`0x5f54c2`), which raises the loading screen with that leg's route.
+#[derive(Message, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TransportLegLeft {
+    /// The ship's `OBJECT_FIELD_ENTRY` (`0x5f54bd`).
+    pub(crate) entry: u32,
+    pub(crate) leg: usize,
+}
+
 /// The create-block anchor: the server's path-progress ms and the local instant it arrived,
 /// inserted on every create that carries `UPDATE_FLAG_TRANSPORT`.
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub(crate) struct TransportAnchor {
     pub(crate) progress_ms: u32,
     pub(crate) at: Instant,
@@ -105,6 +124,77 @@ pub(crate) struct Transport {
     drive: Drive,
     /// Last frame's `moving`, for the dock and depart log lines.
     was_moving: bool,
+    /// The ship's leg as its tick last stored it (`+0x58`).
+    leg: Option<usize>,
+    /// The animation it last played (`+0x54`, −1 until the first): a leg change raises the route
+    /// screen only after one (`0x5f50b9`, `0x5f547a`).
+    anim: Option<ShipAnim>,
+}
+
+impl Transport {
+    fn new(drive: Drive) -> Self {
+        Self {
+            drive,
+            was_moving: false,
+            leg: None,
+            anim: None,
+        }
+    }
+}
+
+/// A transport's answer to "is this point aboard" (handler slot 21, `0x5f55c0` and `0x5f6540`,
+/// through `0x670a70`), for a point in its own frame, WoW axes: a map object (tag 0x8) by its
+/// MCVP planes (`0x6a4990`), a doodad (tag 0x40) by its file's box at `+0xb4`, faces included and
+/// a NaN inside. `0x6173b0` holds a rider aboard while it says yes.
+#[derive(Component, Clone, Debug, PartialEq)]
+pub(crate) enum TransportVolume {
+    Planes(Arc<[[f32; 4]]>),
+    Box([f32; 3], [f32; 3]),
+}
+
+impl TransportVolume {
+    pub(crate) fn contains(&self, p: [f32; 3]) -> bool {
+        match self {
+            Self::Planes(planes) => benilla_formats::point_in_convex_volume(planes, p),
+            // 0x670ae2-0x670cc8: the six planes on the box's faces, `d = −n·corner`, each distance
+            // `((nx·px + nz·pz) + ny·py) + d` failing only above 0.
+            Self::Box(min, max) => {
+                let [px, py, pz] = p.map(f64::from);
+                (0..6).all(|i| {
+                    let mut n = [0.0f64; 3];
+                    n[i / 2] = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    let corner = if i % 2 == 0 { max } else { min };
+                    let d = -(n[0] * f64::from(corner[0])
+                        + n[1] * f64::from(corner[1])
+                        + n[2] * f64::from(corner[2]));
+                    let dist = ((n[0] * px + n[2] * pz) + n[1] * py) + f64::from(d as f32);
+                    dist <= 0.0 || dist.is_nan()
+                })
+            }
+        }
+    }
+}
+
+/// Give each armed transport its [`TransportVolume`] once its model has loaded.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
+fn attach_transport_volumes(
+    mut commands: Commands,
+    gameobjects: Option<Res<crate::entities::GameObjects>>,
+    wmos: Res<Assets<benilla_assets::WmoModel>>,
+    m2s: Res<Assets<benilla_assets::M2Model>>,
+    pending: Query<(Entity, &crate::net::NetEntity), (With<Transport>, Without<TransportVolume>)>,
+) {
+    let Some(gameobjects) = gameobjects else {
+        return;
+    };
+    for (entity, net) in &pending {
+        if let Some(volume) = net
+            .display_id
+            .and_then(|d| gameobjects.transport_volume(d, &wmos, &m2s))
+        {
+            commands.entity(entity).insert(volume);
+        }
+    }
 }
 
 /// The two cycle evaluators; consumers key on [`Transport`], never on the drive.
@@ -149,29 +239,6 @@ impl Transport {
         (progress % u64::from(self.period_ms().max(1))) as u32
     }
 
-    /// Re-anchor the clock to the head of `map_id`'s leg unless the cycle is already on that map;
-    /// returns the sample and the cycle instant it moved to, if it moved (the only sound test, as
-    /// `progress_ms` is uptime-scale until a seek). `None` when no leg is on that map.
-    pub(crate) fn reseek_to_map(
-        &self,
-        anchor: &mut TransportAnchor,
-        map_id: u32,
-    ) -> Option<(TransportSample, Option<u32>)> {
-        let Drive::Taxi(t) = &self.drive else {
-            return None;
-        };
-        let cycle = self.cycle_ms(anchor);
-        // Already there: seeking would rewind to the leg's head and jerk the deck backwards.
-        let here = t.sample(cycle);
-        if here.map == map_id {
-            return Some((here, None));
-        }
-        let target = t.first_cycle_on_map(cycle, map_id)?;
-        anchor.progress_ms = target;
-        anchor.at = Instant::now();
-        Some((t.sample(target), Some(target)))
-    }
-
     /// Whether any leg of the cycle lies on `map_id`, the cross-map worldport's spare predicate. A
     /// lift answers no: the server re-sends the destination's transports on arrival
     /// (`SendInitTransports`), so a lift despawns and streams back like any object.
@@ -190,10 +257,16 @@ impl Transport {
             Drive::Lift(l) => {
                 let (pos, moving) = elevator_sample(&l.frames, l.base_pos, l.quat, cycle_ms);
                 TransportSample {
+                    leg: 0,
                     map: here,
                     pos,
                     heading: l.yaw,
-                    moving,
+                    // A lift has no speed curve: under way reads as cruising.
+                    anim: if moving {
+                        ShipAnim::Cruise
+                    } else {
+                        ShipAnim::Stand
+                    },
                 }
             }
         }
@@ -298,16 +371,13 @@ fn arm_transports(
                 seed.entry, guid.0
             );
             commands.entity(entity).remove::<ElevatorSeed>().insert((
-                Transport {
-                    drive: Drive::Lift(Lift {
-                        frames,
-                        period_ms,
-                        base_pos: seed.base_pos,
-                        quat,
-                        yaw: seed.yaw,
-                    }),
-                    was_moving: false,
-                },
+                Transport::new(Drive::Lift(Lift {
+                    frames,
+                    period_ms,
+                    base_pos: seed.base_pos,
+                    quat,
+                    yaw: seed.yaw,
+                })),
                 // Kinematic for the same reason as the boats below.
                 RigidBody::Kinematic,
             ));
@@ -329,7 +399,6 @@ fn arm_transports(
             .entry(mo.taxi_path_id)
             .or_insert_with(|| {
                 let t = nodes.path(mo.taxi_path_id).and_then(|path| {
-                    // The build pins its period to the reference's own bookkeeping (`0x5f4cc0`).
                     let t = TransportTimetable::build(path, mo.move_speed, mo.accel_rate)?;
                     info!(
                         "transport: path {} timetable built — period {} ms",
@@ -349,58 +418,105 @@ fn arm_transports(
         if let Some(timetable) = timetable {
             // Kinematic, not the GO default of Static: it moves every frame, and avian's static
             // tree is tuned for immobile geometry.
-            commands.entity(entity).insert((
-                Transport {
-                    drive: Drive::Taxi(timetable),
-                    was_moving: false,
-                },
-                RigidBody::Kinematic,
-            ));
+            commands
+                .entity(entity)
+                .insert((Transport::new(Drive::Taxi(timetable)), RigidBody::Kinematic));
         }
     }
 }
 
 /// The per-frame tick, the reference's `(progress + anchor) % period` leg walk (`0x5f50a0`):
-/// sample and write translation and rotation (model scale is baked in by the renderer). An
-/// off-map sample, a boat on the other continent's leg, hides the model; a lift never trips it.
+/// sample and write translation and rotation (model scale is baked in by the renderer). A leg on
+/// another map stores the leg and ends the tick (`0x5f5274`-`0x5f5279`), so a boat on the other
+/// continent's leg keeps its last pose in view; a lift never trips it. A ship we ride changing
+/// legs on our map, after its first animation, raises the route screen ([`TransportLegLeft`]).
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn tick_transports(
     current_map: Option<Res<CurrentMap>>,
+    player: Option<Res<crate::player::Player>>,
+    mut legs_left: MessageWriter<TransportLegLeft>,
     mut transports: Query<(
+        Entity,
         &Guid,
         &mut Transport,
-        &TransportAnchor,
+        Ref<TransportAnchor>,
         &mut Transform,
         &mut Visibility,
         Option<&mut Position>,
         Option<&mut Rotation>,
+        (Has<TransportVolume>, Option<&ObjectStore>),
     )>,
 ) {
     let Some(current_map) = current_map else {
         return;
     };
-    for (guid, mut transport, anchor, mut transform, mut visibility, position, rotation) in
-        &mut transports
+    let riding = player.as_ref().and_then(|p| p.ride_entity());
+    for (
+        entity,
+        guid,
+        mut transport,
+        anchor,
+        mut transform,
+        mut visibility,
+        position,
+        rotation,
+        (loaded, store),
+    ) in &mut transports
     {
-        let cycle = transport.cycle_ms(anchor);
+        // A fresh clock is a new object's: the ship kept across a worldport, re-anchored by its
+        // post-port create, ticks on as the one the reference builds then, with no leg and no
+        // animation yet (`0x401bc0`).
+        if anchor.is_added() {
+            transport.leg = None;
+            transport.anim = None;
+        }
+        let cycle = transport.cycle_ms(&anchor);
         let sample = transport.sample(cycle, current_map.0);
-        if sample.moving != transport.was_moving {
-            transport.was_moving = sample.moving;
+        if sample.moving() != transport.was_moving {
+            transport.was_moving = sample.moving();
             debug!(
                 "transport {:#x}: {} at cycle {cycle} ms (period {}, map {})",
                 guid.0,
-                if sample.moving { "departed" } else { "docked" },
+                if sample.moving() {
+                    "departed"
+                } else {
+                    "docked"
+                },
                 transport.period_ms(),
                 sample.map,
             );
         }
-        // Write on change only: a docked deck samples the same pose every frame.
+        // Anchored creates spawn hidden until their first tick, which shows them on any leg.
+        visibility.set_if_neq(Visibility::Inherited);
         if sample.map != current_map.0 {
-            visibility.set_if_neq(Visibility::Hidden);
+            transport.leg = Some(sample.leg);
             continue;
         }
-        visibility.set_if_neq(Visibility::Inherited);
+        // Write on change only: a docked deck samples the same pose every frame.
         write_deck_pose(&sample, &mut transform, position, rotation);
+        if !matches!(transport.drive, Drive::Taxi(_)) {
+            continue;
+        }
+        // 0x5f50b9: whether no animation had played as the tick began.
+        let first = transport.anim.is_none();
+        // 0x5f52bd-0x5f5301: a loaded model plays the phase's animation when it changes.
+        if loaded {
+            transport.anim = Some(sample.anim);
+        }
+        // 0x5f5461-0x5f54c2: a new leg is stored, and with the camera's unit aboard and an
+        // animation played, the tick calls `0x407de0(entry, old leg)`.
+        let left = transport
+            .leg
+            .replace(sample.leg)
+            .filter(|&l| l != sample.leg);
+        if let Some(leg) = left.filter(|_| riding == Some(entity) && !first) {
+            let entry = store.and_then(|s| s.0.object_entry()).unwrap_or(0);
+            info!(
+                "transport {:#x}: left leg {leg} for {} on map {}",
+                guid.0, sample.leg, sample.map
+            );
+            legs_left.write(TransportLegLeft { entry, leg });
+        }
     }
 }
 
@@ -433,72 +549,6 @@ fn write_deck_pose(
     }
 }
 
-/// Put the ridden transport on the destination map in the worldport frame, so `wire_in` composes
-/// the rider's pose through the destination continent's coordinates rather than off its grid.
-///
-/// The reference keeps nothing across `SMSG_NEW_WORLD`: `0x401bc0` destroys every object
-/// (`0x467700` → `0x467800`), builds a manager on the destination map (`0x464ff0`) and rebuilds
-/// rider and transport from the post-ack creates. We spare the ridden transport instead; the
-/// server's create for it (`Map.cpp:1698-1702`, which is why `SendInitTransports` skips it at
-/// `Map.cpp:1726`) re-anchors it a round trip later, and this fills that window.
-///
-/// It writes the pose itself because `CurrentMap` still names the source map this frame, so
-/// [`tick_transports`] would hide the deck. Order: before it, and before `WorldStage::Input`.
-#[allow(clippy::type_complexity)] // one Bevy system's full input set
-fn reseek_ridden_transport_at_worldport(
-    mut worldports: MessageReader<crate::net::WorldportMessage>,
-    player: Res<crate::player::Player>,
-    mut transports: Query<(
-        &Guid,
-        &Transport,
-        &mut TransportAnchor,
-        &mut Transform,
-        &mut Visibility,
-        Option<&mut Position>,
-        Option<&mut Rotation>,
-    )>,
-) {
-    for w in worldports.read() {
-        // Only a transport transfer while still riding, `wire_in`'s riding predicate.
-        if w.transport_entry.is_none() {
-            continue;
-        }
-        let Some(deck) = player.ride_entity() else {
-            continue;
-        };
-        let Ok((guid, transport, mut anchor, mut transform, mut visibility, position, rotation)) =
-            transports.get_mut(deck)
-        else {
-            continue;
-        };
-        let before = transport.cycle_ms(&anchor);
-        let Some((sample, moved_to)) = transport.reseek_to_map(&mut anchor, w.map_id) else {
-            warn!(
-                "transport {:#x}: rode a transfer to map {} its own path never visits — cannot \
-                 re-anchor; the rider's pose will be composed through a stale one",
-                guid.0, w.map_id
-            );
-            continue;
-        };
-        // When the clock moved, log how far behind the server's our path clock was, measured
-        // forward around the cycle: a crossing is often the cycle wrap (path 241's Kalimdor legs
-        // come first), where a plain `after - before` goes negative.
-        if let Some(after) = moved_to {
-            let period = transport.period_ms().max(1);
-            let behind =
-                (u64::from(after) + u64::from(period) - u64::from(before)) % u64::from(period);
-            info!(
-                "transport {:#x}: re-anchored across the seam to map {} — our path clock was \
-                 {behind} ms behind the server's (cycle {before} → {after} ms of {period} ms). \
-                 Deck now at [{:.1}, {:.1}, {:.1}].",
-                guid.0, w.map_id, sample.pos[0], sample.pos[1], sample.pos[2],
-            );
-        }
-        visibility.set_if_neq(Visibility::Inherited);
-        write_deck_pose(&sample, &mut transform, position, rotation);
-    }
-}
-
 /// Frames the ridden transport's map may disagree with [`CurrentMap`] before it is logged; one
 /// frame of it is normal at every crossing.
 const DISAGREEMENT_GRACE_FRAMES: u32 = 3;
@@ -506,8 +556,9 @@ const DISAGREEMENT_GRACE_FRAMES: u32 = 3;
 /// Tripwire: the transport we ride samples another map. Its frozen off-map pose is what
 /// [`crate::player::wire_in`] composes our body through at a worldport, which lands it off the
 /// destination's grid; it arises when our path clock and the server's disagree about the
-/// crossing. One frame is normal: `CurrentMap` is written by a command insert, a frame after
-/// [`reseek_ridden_transport_at_worldport`], so only a persisting state logs, once per entry.
+/// crossing, until our clock crosses too or the post-port create re-anchors it. One frame is
+/// normal: `CurrentMap` is written by a command insert, a frame after the worldport, so only a
+/// persisting state logs, once per entry.
 fn watch_ridden_transport_map(
     current_map: Option<Res<CurrentMap>>,
     player: Res<crate::player::Player>,
@@ -570,16 +621,18 @@ pub(crate) struct TransportRider {
 /// Compose each observed rider's world pose through its transport's this-frame pose, after
 /// [`tick_transports`], and refresh [`RemoteMotion`]'s WoW pose to match. A rider whose transport
 /// is not streamed keeps its last world pose; the server despawns the pair together.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn compose_riders(
     guid_index: Res<crate::net::GuidIndex>,
     boats: Query<&Transform, (With<Transport>, Without<TransportRider>)>,
+    // The body we steer is the mover's: its create's tail seated it (`player::wire_in`).
     mut riders: Query<
         (
             &TransportRider,
             &mut Transform,
             Option<&mut crate::net::RemoteMotion>,
         ),
-        Without<Transport>,
+        (Without<Transport>, Without<crate::net::Embodied>),
     >,
 ) {
     for (rider, mut transform, motion) in &mut riders {
@@ -664,7 +717,7 @@ fn stamp_ride_frames(
     player: Res<crate::player::Player>,
     guid_index: Res<crate::net::GuidIndex>,
     body: Query<Entity, With<crate::net::Embodied>>,
-    riders: Query<(Entity, &TransportRider)>,
+    riders: Query<(Entity, &TransportRider), Without<crate::net::Embodied>>,
     stamped: Query<(Entity, &RideFrame)>,
 ) {
     let mut want: HashMap<Entity, Entity> = HashMap::new();
@@ -695,100 +748,277 @@ fn stamp_ride_frames(
 }
 
 #[cfg(test)]
+impl Transport {
+    /// A ship sailing two legs of five nodes, the first on `maps.0`, the second on `maps.1`, for
+    /// other modules' tests.
+    pub(crate) fn sailing_for_test(maps: (u32, u32)) -> Self {
+        let node = |id: u32, map_id: u32, x: f32| benilla_formats::TaxiPathNode {
+            id,
+            path_id: 1,
+            node_index: id,
+            map_id,
+            pos: [x, 0.0, 0.0],
+            flags: u32::from(id == 4),
+            delay: 0,
+        };
+        let nodes: Vec<_> = (0..10)
+            .map(|i| node(i, if i < 5 { maps.0 } else { maps.1 }, i as f32 * 100.0))
+            .collect();
+        Self::new(Drive::Taxi(Arc::new(
+            TransportTimetable::build(&nodes, 30, 1).expect("two legs build"),
+        )))
+    }
+
+    /// A lift parked at the origin, for other modules' tests.
+    pub(crate) fn parked_for_test() -> Self {
+        Self::new(Drive::Lift(Lift {
+            frames: Arc::new(vec![
+                ElevatorKeyframe {
+                    time_ms: 0,
+                    pos: [0.0; 3],
+                },
+                ElevatorKeyframe {
+                    time_ms: 1000,
+                    pos: [0.0; 3],
+                },
+            ]),
+            period_ms: 1000,
+            base_pos: [0.0; 3],
+            quat: [0.0, 0.0, 0.0, 1.0],
+            yaw: 0.0,
+        }))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use benilla_formats::ElevatorKeyframe;
 
-    /// The Ratchet–Booty Bay ferry's real timetable (taxi path 241): the builder can truncate a
-    /// short synthetic cycle so the far continent's legs are never reached.
-    fn ferry_241(chain: &mut benilla_formats::Chain) -> Transport {
-        let cat = benilla_formats::load_taxi_path_nodes(chain).expect("TaxiPathNode.dbc");
-        let nodes = cat.path(241).expect("taxi path 241 (Ratchet–Booty Bay)");
-        let tt = TransportTimetable::build(nodes, 30.0, 1.0).expect("path 241 builds");
-        Transport {
-            drive: Drive::Taxi(Arc::new(tt)),
-            was_moving: false,
+    /// `0x670a70`'s doodad box: faces included, a NaN inside; a map object by its planes.
+    #[test]
+    fn a_transport_volume_holds_points_inside_it() {
+        let lift = TransportVolume::Box([-1.0, -2.0, 0.0], [1.0, 2.0, 3.0]);
+        assert!(lift.contains([0.0, 0.0, 1.5]));
+        assert!(lift.contains([1.0, -2.0, 3.0]), "faces count");
+        assert!(!lift.contains([0.0, 0.0, 3.01]));
+        assert!(!lift.contains([-1.5, 0.0, 1.0]));
+        // 0·NaN is NaN on every plane.
+        assert!(lift.contains([f32::NAN, 100.0, 100.0]));
+        let ship = TransportVolume::Planes(vec![[0.0, 0.0, 1.0, -10.0]].into());
+        assert!(ship.contains([500.0, 0.0, 10.0]));
+        assert!(!ship.contains([0.0, 0.0, 10.5]));
+    }
+
+    /// A ship path with no data: two legs of five nodes 100 yd apart along +x, the first on
+    /// `maps.0` from x = 0, the second on `maps.1` from x = 1000, split after a flag 1 node when
+    /// the maps are one.
+    fn two_legs(maps: (u32, u32)) -> TransportTimetable {
+        let node = |id: u32, map_id: u32, x: f32, flags: u32| benilla_formats::TaxiPathNode {
+            id,
+            path_id: 1,
+            node_index: id,
+            map_id,
+            pos: [x, 0.0, 0.0],
+            flags,
+            delay: 0,
+        };
+        let nodes: Vec<_> = (0..5)
+            .map(|i| node(i, maps.0, i as f32 * 100.0, u32::from(i == 4)))
+            .chain((0..5).map(|i| node(5 + i, maps.1, 1000.0 + i as f32 * 100.0, 0)))
+            .collect();
+        TransportTimetable::build(&nodes, 30, 1).expect("two legs build")
+    }
+
+    fn taxi(t: TransportTimetable) -> Transport {
+        Transport::new(Drive::Taxi(Arc::new(t)))
+    }
+
+    /// The deck systems alone, on `map`, with us riding `deck` when it is given.
+    fn deck_app(map: u32) -> App {
+        let mut app = App::new();
+        app.insert_resource(CurrentMap(map))
+            .init_resource::<Timetables>()
+            .init_resource::<GameObjectTemplates>()
+            .init_resource::<Assets<benilla_assets::WmoModel>>()
+            .init_resource::<Assets<benilla_assets::M2Model>>()
+            .init_resource::<crate::player::Player>()
+            .add_message::<crate::net::WorldportMessage>()
+            .add_message::<TransportLegLeft>()
+            .add_systems(Update, deck_ticks());
+        app
+    }
+
+    fn ride(app: &mut App, deck: Entity) {
+        app.insert_resource(crate::player::Player::riding_for_test(
+            deck,
+            0xF120_0000_0000_0001,
+        ));
+    }
+
+    /// The reference keeps no transport across `SMSG_NEW_WORLD` and has nothing that moves a
+    /// clock: only the constructor writes the anchor (`0x5f7080`). A transfer we ride leaves the
+    /// clock where it was, whatever map the worldport names.
+    #[test]
+    fn a_worldport_leaves_the_ridden_transports_clock_alone() {
+        let mut app = deck_app(1);
+        let at = Instant::now();
+        let deck = app
+            .world_mut()
+            .spawn((
+                Guid(0xF120_0000_0000_0001),
+                taxi(two_legs((1, 0))),
+                TransportAnchor {
+                    progress_ms: 1000,
+                    at,
+                },
+                Transform::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        ride(&mut app, deck);
+        app.update();
+        app.world_mut().write_message(crate::net::WorldportMessage {
+            map_id: 0,
+            position: [0.0; 3],
+            orientation: 0.0,
+            needs_ack: true,
+            transport_entry: Some(176495),
+        });
+        app.update();
+        let anchor = app.world().get::<TransportAnchor>(deck).unwrap();
+        assert_eq!((anchor.progress_ms, anchor.at), (1000, at));
+    }
+
+    /// `0x5f5274`: a leg on another map ends the tick, so the ship keeps its last pose and stays
+    /// in view; nothing hides it.
+    #[test]
+    fn a_ship_on_another_maps_leg_stays_where_it_was() {
+        let mut app = deck_app(0);
+        let pose = Transform::from_xyz(1.0, 2.0, 3.0);
+        let deck = app
+            .world_mut()
+            .spawn((
+                Guid(0xF120_0000_0000_0001),
+                taxi(two_legs((1, 0))),
+                TransportAnchor {
+                    progress_ms: 1000,
+                    at: Instant::now(),
+                },
+                pose,
+                Visibility::Hidden,
+            ))
+            .id();
+        app.update();
+        assert_eq!(app.world().get::<Transform>(deck), Some(&pose), "not moved");
+        assert_eq!(
+            app.world().get::<Visibility>(deck),
+            Some(&Visibility::Inherited),
+            "in view"
+        );
+    }
+
+    /// A ship of entry 176495 on two legs of one map, `riding` or not, its model loaded or not,
+    /// ticked twice on leg 0 and then on leg 1: the leg-change calls it made.
+    fn leg_changes(riding: bool, ready: bool) -> Vec<TransportLegLeft> {
+        let mut app = deck_app(0);
+        let timetable = two_legs((0, 0));
+        let leg1 = (0..timetable.period_ms)
+            .step_by(100)
+            .find(|&t| timetable.sample(t).leg == 1)
+            .expect("a second leg");
+        let mut deck = app.world_mut().spawn((
+            Guid(0xF120_0000_0000_0001),
+            taxi(timetable),
+            TransportAnchor {
+                progress_ms: 1000,
+                at: Instant::now(),
+            },
+            Transform::default(),
+            Visibility::Hidden,
+            // `OBJECT_FIELD_ENTRY`, field 3.
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(3, 176495)])),
+        ));
+        if ready {
+            deck.insert(TransportVolume::Box([-1.0; 3], [1.0; 3]));
         }
+        let deck = deck.id();
+        if riding {
+            ride(&mut app, deck);
+        }
+        app.update();
+        app.update();
+        app.world_mut()
+            .get_mut::<TransportAnchor>(deck)
+            .unwrap()
+            .progress_ms = leg1 + 1000;
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<TransportLegLeft>>()
+            .drain()
+            .collect()
     }
 
-    /// Path 241's Kalimdor legs are the first frames of the cycle, so crossing to Kalimdor is the
-    /// cycle wrap, not an interior map change.
+    /// `0x5f5461`-`0x5f54c2`: a leg change on the map we are on, with the camera's unit among
+    /// the passengers and an animation already played (`+0x54` not −1), calls `0x407de0` with
+    /// the ship's entry and the leg it left; anything else only stores the new leg.
     #[test]
-    fn the_seam_reanchor_lands_on_the_new_map_and_leaves_an_agreeing_clock_alone() {
-        let data = benilla_formats::wow_data_or_skip!();
-        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-        let transport = ferry_241(&mut chain);
-        let period = transport.period_ms();
-
-        // Where each continent's legs fall in the built timetable.
-        let on = |map: u32| {
-            (0..period)
-                .step_by(500)
-                .find(|&ms| transport.sample(ms, 0).map == map)
-                .unwrap_or_else(|| panic!("path 241 has an instant on map {map}"))
-        };
-        let (on_azeroth, on_kalimdor) = (on(0), on(1));
-
-        // On Azeroth's leg, told Kalimdor: the stored anchor moves onto Kalimdor.
-        let mut anchor = TransportAnchor {
-            progress_ms: on_azeroth,
-            at: Instant::now(),
-        };
-        let (sample, moved_to) = transport
-            .reseek_to_map(&mut anchor, 1)
-            .expect("path 241 visits Kalimdor");
-        assert_eq!(sample.map, 1, "the re-anchored sample must be on Kalimdor");
-        assert!(
-            moved_to.is_some(),
-            "a clock on Azeroth's leg told it is on Kalimdor must report that it moved"
-        );
+    fn a_ridden_ship_changing_legs_on_our_map_raises_the_route() {
         assert_eq!(
-            transport.sample(anchor.progress_ms, 0).map,
-            1,
-            "the stored anchor must itself sit on Kalimdor, not just the returned sample"
+            leg_changes(true, true),
+            [TransportLegLeft {
+                entry: 176495,
+                leg: 0
+            }]
         );
-
-        // Already on Kalimdor: the clock is left alone.
-        let mut anchor = TransportAnchor {
-            progress_ms: on_kalimdor,
-            at: Instant::now(),
-        };
-        let (sample, moved_to) = transport
-            .reseek_to_map(&mut anchor, 1)
-            .expect("path 241 visits Kalimdor");
-        assert_eq!(sample.map, 1);
-        assert_eq!(
-            anchor.progress_ms, on_kalimdor,
-            "an agreeing clock must not be touched"
-        );
-        assert_eq!(
-            moved_to, None,
-            "a no-op seek must report that it did not move the clock"
-        );
-
-        // A map the path never visits has no answer.
-        let mut anchor = TransportAnchor {
-            progress_ms: on_azeroth,
-            at: Instant::now(),
-        };
-        assert!(transport.reseek_to_map(&mut anchor, 4242).is_none());
-        assert_eq!(
-            anchor.progress_ms, on_azeroth,
-            "a failed seek must not move the clock"
-        );
+        assert_eq!(leg_changes(false, true), [], "not riding");
+        assert_eq!(leg_changes(true, false), [], "no animation played yet");
     }
 
+    /// The ship kept across a worldport waits, unanchored, for its create, and ticks from it as the
+    /// new object the reference builds then (`0x401bc0`), with no leg and no animation: the leg it
+    /// starts on raises nothing.
     #[test]
-    fn a_lift_has_no_seam_to_reanchor() {
-        let lift = Transport {
-            drive: Drive::Lift(parked_lift()),
-            was_moving: false,
-        };
-        let mut anchor = TransportAnchor {
-            progress_ms: 0,
+    fn a_ship_anchored_afresh_starts_its_legs_afresh() {
+        let mut app = deck_app(1);
+        let timetable = two_legs((1, 0));
+        let leg1 = (0..timetable.period_ms)
+            .step_by(100)
+            .find(|&t| timetable.sample(t).leg == 1)
+            .expect("a second leg");
+        let deck = app
+            .world_mut()
+            .spawn((
+                Guid(0xF120_0000_0000_0001),
+                taxi(timetable),
+                TransportAnchor {
+                    progress_ms: 1000,
+                    at: Instant::now(),
+                },
+                Transform::default(),
+                Visibility::Hidden,
+                TransportVolume::Box([-1.0; 3], [1.0; 3]),
+            ))
+            .id();
+        ride(&mut app, deck);
+        app.update();
+        app.update();
+        // The worldport keeps the deck and drops its clock; we land on map 0.
+        app.world_mut().entity_mut(deck).remove::<TransportAnchor>();
+        app.insert_resource(CurrentMap(0));
+        app.update();
+        // Its create, on map 0's leg.
+        app.world_mut().entity_mut(deck).insert(TransportAnchor {
+            progress_ms: leg1 + 1000,
             at: Instant::now(),
-        };
-        assert!(lift.reseek_to_map(&mut anchor, 1).is_none());
+        });
+        app.update();
+        let left: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<TransportLegLeft>>()
+            .drain()
+            .collect();
+        assert_eq!(left, []);
     }
 
     /// A two-frame pause path at `base_pos`.
@@ -829,14 +1059,13 @@ mod tests {
         }
         let mut app = App::new();
         app.insert_resource(CurrentMap(0))
+            .add_message::<crate::net::WorldportMessage>()
+            .add_message::<TransportLegLeft>()
             .init_resource::<Dirty>()
             .add_systems(Update, (tick_transports, spy).chain());
         app.world_mut().spawn((
             Guid(0xF110_0000_0000_0001),
-            Transport {
-                drive: Drive::Lift(parked_lift()),
-                was_moving: false,
-            },
+            Transport::new(Drive::Lift(parked_lift())),
             TransportAnchor {
                 progress_ms: 0,
                 at: Instant::now(),
@@ -856,22 +1085,21 @@ mod tests {
         );
     }
 
-    /// At login lifts arm before `CurrentMap` is written, so the off-map hide must never judge a
+    /// At login lifts arm before `CurrentMap` is written, so the off-map test must never judge a
     /// lift against a map.
     #[test]
     fn a_lift_is_visible_on_whatever_map_the_viewer_is_on() {
         let mut app = App::new();
         // Alterac Valley, a map with no type-11 GameObject: the value must not matter.
         app.insert_resource(CurrentMap(30))
+            .add_message::<crate::net::WorldportMessage>()
+            .add_message::<TransportLegLeft>()
             .add_systems(Update, tick_transports);
         let lift = app
             .world_mut()
             .spawn((
                 Guid(0xF110_0000_0000_0002),
-                Transport {
-                    drive: Drive::Lift(parked_lift()),
-                    was_moving: false,
-                },
+                Transport::new(Drive::Lift(parked_lift())),
                 TransportAnchor {
                     progress_ms: 0,
                     at: Instant::now(),

@@ -306,6 +306,7 @@ fn on_worldport(
     script: Option<NonSend<benilla_ui::script::UiScript>>,
     mut released: ResMut<super::objects::Released>,
     view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>,
+    player: Option<Res<crate::player::Player>>,
 ) {
     if let SessionEvent::Worldport {
         map_id,
@@ -339,6 +340,7 @@ fn on_worldport(
             &mut b.index,
             &mut e.transfer,
             &b.transports,
+            player.as_ref().and_then(|p| p.ride_entity()),
             &mut e.worldports,
         );
         // Loading a new world frees the released objects with the live ones (`0x467700`).
@@ -351,7 +353,8 @@ fn on_transfer(In(ev): In<SessionEvent>, mut e: Edges) {
         SessionEvent::TransferPending {
             map_id,
             transport_entry,
-        } => transfer_pending(map_id, transport_entry, &mut e.transfer),
+            from_map,
+        } => transfer_pending(map_id, transport_entry, from_map, &mut e.transfer),
         SessionEvent::TransferAborted { reason } => transfer_aborted(reason, &mut e.transfer),
         _ => {}
     }
@@ -801,7 +804,12 @@ fn knock_back(
 
 /// `SMSG_TRANSFER_PENDING`: latched for the worldport; its transport block makes `NEW_WORLD`'s
 /// coordinates boat-local.
-fn transfer_pending(map_id: u32, transport_entry: Option<u32>, pending: &mut PendingTransfer) {
+fn transfer_pending(
+    map_id: u32,
+    transport_entry: Option<u32>,
+    from_map: Option<u32>,
+    pending: &mut PendingTransfer,
+) {
     match transport_entry {
         Some(entry) => info!("net: transfer pending → map {map_id} riding transport {entry}"),
         None => info!("net: transfer pending → map {map_id}"),
@@ -809,6 +817,7 @@ fn transfer_pending(map_id: u32, transport_entry: Option<u32>, pending: &mut Pen
     pending.0 = Some(crate::net::PendingTransferInfo {
         map_id,
         transport_entry,
+        from_map,
     });
 }
 
@@ -819,9 +828,10 @@ fn transfer_aborted(reason: u8, pending: &mut PendingTransfer) {
     pending.0 = None;
 }
 
-/// `SMSG_NEW_WORLD`/`SMSG_LOGIN_VERIFY_WORLD`: drops every tracked object, then hands the app
-/// the destination. A transport whose timetable touches the new map is spared, so a ridden boat
-/// sails through the map change and the server's re-create refreshes it in place.
+/// `SMSG_NEW_WORLD`/`SMSG_LOGIN_VERIFY_WORLD`: drops every tracked object, as `0x401bc0` destroys
+/// them, then hands the app the destination. The one exception is the ship a transport transfer
+/// carries us on, when its timetable touches the new map: it sails through the map change, so our
+/// deck-local pose has a deck, and the server's create refreshes it in place.
 fn worldport(
     map_id: u32,
     position: [f32; 3],
@@ -831,12 +841,23 @@ fn worldport(
     index: &mut GuidIndex,
     pending: &mut PendingTransfer,
     transports: &Query<&crate::transport::Transport>,
+    ridden: Option<Entity>,
     worldports: &mut MessageWriter<WorldportMessage>,
 ) {
+    let carried = pending
+        .0
+        .as_ref()
+        .is_some_and(|p| p.transport_entry.is_some());
     index.0.retain(|guid, e| {
-        if transports.get(*e).is_ok_and(|t| t.touches_map(map_id)) {
+        let ours = carried && ridden == Some(*e);
+        if ours && transports.get(*e).is_ok_and(|t| t.touches_map(map_id)) {
             // info, not debug: rare, and the crossing depends on it firing for the ridden boat.
             info!("worldport: sparing transport {guid:#x} (its path touches map {map_id})");
+            // It stands for the new object the post-port create builds, so its clock goes until
+            // that create sets one (`0x5f7080`); the deck holds its pose meanwhile.
+            commands
+                .entity(*e)
+                .remove::<crate::transport::TransportAnchor>();
             return true;
         }
         commands.entity(*e).try_despawn();
@@ -1194,5 +1215,123 @@ mod forced_reaction_tests {
             let reps = app.world().resource::<Reputations>();
             assert!(reps.slots().all(|s| s == (0, 0)), "{end:?} left a slot");
         }
+    }
+}
+
+#[cfg(test)]
+mod worldport_tests {
+    use super::*;
+    use crate::net::handlers::dispatch;
+
+    const RIDDEN: u64 = 0xF120_0000_0000_0001;
+    const IN_VIEW: u64 = 0xF120_0000_0000_0002;
+
+    /// Two ships whose paths touch maps 1 and 0, one of them ridden, and a worldport to map 0,
+    /// announced with a transport or not: which ships outlive it.
+    fn kept_across(riding_transfer: bool) -> (bool, bool) {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let ship = |world: &mut World, guid: u64| {
+            let e = world
+                .spawn((
+                    crate::net::Guid(guid),
+                    crate::transport::Transport::sailing_for_test((1, 0)),
+                ))
+                .id();
+            world.resource_mut::<GuidIndex>().0.insert(guid, e);
+            e
+        };
+        let ridden = ship(world, RIDDEN);
+        let in_view = ship(world, IN_VIEW);
+        world.insert_resource(crate::player::Player::riding_for_test(ridden, RIDDEN));
+        world.resource_mut::<PendingTransfer>().0 = Some(crate::net::PendingTransferInfo {
+            map_id: 0,
+            transport_entry: riding_transfer.then_some(20808),
+            from_map: Some(1),
+        });
+        dispatch(
+            world,
+            vec![SessionEvent::Worldport {
+                map_id: 0,
+                position: [0.0; 3],
+                orientation: 0.0,
+                needs_ack: true,
+            }],
+        );
+        world.flush();
+        let alive = |world: &World, guid: u64, e: Entity| {
+            world.resource::<GuidIndex>().0.contains_key(&guid) && world.get_entity(e).is_ok()
+        };
+        (alive(world, RIDDEN, ridden), alive(world, IN_VIEW, in_view))
+    }
+
+    /// The ship kept across a worldport stands for the new object the reference builds from the
+    /// post-port create (`0x401bc0`), so that create sets its clock (`0x5f7080`) as a new one's.
+    #[test]
+    fn the_ship_kept_across_a_worldport_takes_its_next_create_as_new() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let old = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        let ridden = world
+            .spawn((
+                crate::net::Guid(RIDDEN),
+                crate::transport::Transport::sailing_for_test((1, 0)),
+                crate::transport::TransportAnchor {
+                    progress_ms: 5,
+                    at: old,
+                },
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(RIDDEN, ridden);
+        world.insert_resource(crate::player::Player::riding_for_test(ridden, RIDDEN));
+        world.resource_mut::<PendingTransfer>().0 = Some(crate::net::PendingTransferInfo {
+            map_id: 0,
+            transport_entry: Some(20808),
+            from_map: Some(1),
+        });
+        dispatch(
+            world,
+            vec![SessionEvent::Worldport {
+                map_id: 0,
+                position: [0.0; 3],
+                orientation: 0.0,
+                needs_ack: true,
+            }],
+        );
+        world.flush();
+        let fresh = std::time::Instant::now();
+        let create = SessionEvent::ObjectCreate {
+            guid: RIDDEN,
+            kind: benilla_protocol::EntityKind::GameObject,
+            display_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: Some(benilla_protocol::TransportClock {
+                progress_ms: 777,
+                arrived: Some(fresh),
+            }),
+            transport: None,
+            spline: None,
+            fields: benilla_protocol::ObjectFields::from_pairs(&[(21, 15)])
+                .into_created(benilla_protocol::messages::ObjectType::GameObject),
+        };
+        dispatch(world, crate::net::wire(vec![create]));
+        world.flush();
+        let anchor = world
+            .get::<crate::transport::TransportAnchor>(ridden)
+            .expect("anchored");
+        assert_eq!((anchor.progress_ms, anchor.at), (777, fresh));
+    }
+
+    /// `0x401bc0` destroys every object at `SMSG_NEW_WORLD`; only the ship a transport transfer
+    /// carries us on is kept, until its create arrives. A ship merely in view goes with its
+    /// colliders, as does the ridden one on a transfer that does not ride it (a hearth).
+    #[test]
+    fn a_worldport_keeps_only_the_ship_we_ride_through_it() {
+        assert_eq!(kept_across(true), (true, false));
+        assert_eq!(kept_across(false), (false, false));
     }
 }

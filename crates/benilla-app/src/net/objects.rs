@@ -81,6 +81,8 @@ pub(crate) struct Scene<'w, 's> {
     modes: Query<'w, 's, &'static mut UnitMoveModes>,
     xp_awarded: Query<'w, 's, (), With<crate::ui_chat::combat::watch::XpAwarded>>,
     riders: Query<'w, 's, &'static mut crate::transport::TransportRider>,
+    /// A transport's clock, which only a new object's create sets (`0x5f7080`).
+    anchors: Query<'w, 's, &'static crate::transport::TransportAnchor>,
     speeds: Query<'w, 's, &'static mut UnitSpeeds>,
     field_changes: MessageWriter<'w, FieldChanged>,
     /// The aura watcher's calls ([`super::AuraFieldsChanged`]), one per block.
@@ -486,7 +488,7 @@ pub(super) struct CreateBlock {
     pub(super) scale: f32,
     pub(super) speeds: Option<MoveSpeeds>,
     pub(super) mover: Option<benilla_protocol::MoverState>,
-    pub(super) transport_progress: Option<u32>,
+    pub(super) transport_progress: Option<benilla_protocol::TransportClock>,
     pub(super) transport: Option<benilla_protocol::TransportPose>,
     pub(super) spline: Option<benilla_protocol::CreateSpline>,
 }
@@ -496,10 +498,11 @@ pub(super) enum Landing {
     /// A held object, refreshed in place; the caller writes its store.
     Live(Entity),
     /// A new entity with `store`: an object allocated now, or a released one brought back, which
-    /// keeps `kept_pose` when its type takes no position from the block.
+    /// keeps `kept_pose` when its type takes no position from the block, and its clock.
     New {
         store: ObjectFields,
         kept_pose: Option<Transform>,
+        kept_anchor: Option<crate::transport::TransportAnchor>,
     },
 }
 
@@ -529,17 +532,17 @@ fn object_create(
         display_id,
         scale,
     };
-    // A transport's cycle anchor: the create block's `UPDATE_FLAG_TRANSPORT` u32 and when it
-    // landed; a re-create re-anchors. The reference's per-frame tick (`0x630970`) runs types 15
+    // A transport's cycle anchor: the create block's `UPDATE_FLAG_TRANSPORT` u32 and the instant
+    // its packet arrived (`0x5f7080` subtracts the queue node's stamp); a re-create re-anchors. The reference's per-frame tick (`0x630970`) runs types 15
     // (boats, a path-progress clock) and 11 (lifts, `time-since-create % period`,
     // `GameObject.cpp:246`).
     let go_type = (kind == EntityKind::GameObject).then(|| fields.gameobject_type_id());
     let transport_anchor = matches!(go_type, Some(11 | 15))
         .then_some(transport_progress)
         .flatten()
-        .map(|progress_ms| crate::transport::TransportAnchor {
-            progress_ms,
-            at: std::time::Instant::now(),
+        .map(|clock| crate::transport::TransportAnchor {
+            progress_ms: clock.progress_ms,
+            at: clock.arrived.unwrap_or_else(std::time::Instant::now),
         });
     // The placement, and on a type-11 lift the basis its keyframe offsets rotate through.
     let go_quat = (kind == EntityKind::GameObject)
@@ -603,8 +606,12 @@ fn object_create(
             if let Some(s) = speeds {
                 commands.entity(e).insert(UnitSpeeds(s));
             }
-            if let Some(anchor) = transport_anchor {
-                commands.entity(e).insert(anchor);
+            // `0x466350` constructs nothing, so a held transport keeps its clock; one with none is
+            // the ship kept across a worldport, standing for the new object built there.
+            if !sc.anchors.contains(e) {
+                if let Some(anchor) = transport_anchor {
+                    commands.entity(e).insert(anchor);
+                }
             }
             if let Some(seed) = elevator_seed {
                 commands.entity(e).insert(seed);
@@ -636,9 +643,13 @@ fn object_create(
             }
             e
         }
-        Landing::New { store, kept_pose } => {
+        Landing::New {
+            store,
+            kept_pose,
+            kept_anchor,
+        } => {
             // A transport spawns hidden: its create pose is the spawn point, not where it is in
-            // its cycle; the transport tick unhides it at the first sampled pose.
+            // its cycle; its first tick unhides it, posed unless its leg is on another map.
             let visibility = if transport_anchor.is_some() {
                 Visibility::Hidden
             } else {
@@ -658,7 +669,8 @@ fn object_create(
             if let Some(s) = speeds {
                 entity.insert(UnitSpeeds(s));
             }
-            if let Some(anchor) = transport_anchor {
+            // Reactivation constructs nothing either (`0x464530`): a brought-back clock stands.
+            if let Some(anchor) = kept_anchor.or(transport_anchor) {
                 entity.insert(anchor);
             }
             if let Some(seed) = elevator_seed {
