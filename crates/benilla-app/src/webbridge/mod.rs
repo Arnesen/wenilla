@@ -311,7 +311,8 @@ impl Plugin for WebBridgePlugin {
             )
             .add_systems(
                 Update,
-                apply_synth_input
+                (apply_synth_input, apply_synth_look)
+                    .chain()
                     .in_set(UiInput)
                     .after(BindingSet)
                     .before(WorldStage::Input)
@@ -319,7 +320,7 @@ impl Plugin for WebBridgePlugin {
             )
             .add_systems(Update, publish_frame.in_set(BridgeOut))
             // Both edges of the world. On the way out for the obvious reason; on the way IN
-            // because `apply_synth_input` is the only consumer of `taps`/`look`
+            // because the two seams are the only consumers of `taps`/`look`
             // and it does not run outside the world — so a page driving the character screen
             // would otherwise pile them up and have them all replay in the first in-world frame,
             // Lua bodies and one accumulated `turn_aim` together.
@@ -461,56 +462,65 @@ fn apply_synth_input(
     mut input: ResMut<BridgeInput>,
     capture: Res<UiKeyboardCapture>,
     mut script: Option<NonSendMut<UiScript>>,
-    player: Option<ResMut<Player>>,
     mut memo: ResMut<BridgeMemo>,
     mut out: ResMut<BridgeOutbox>,
+    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
-    let mut vm = script.as_deref_mut();
-    if input.drop_holds {
-        input.drop_holds = false;
-        input.released.clear();
-        binds.synth_release_all(vm.as_deref_mut());
-        out.push(
-            "input",
-            PlainValue::Map(vec![("heldCleared".into(), PlainValue::Bool(true))]),
-        );
-    }
-    for c in std::mem::take(&mut input.released) {
-        binds.synth_release(vm.as_deref_mut(), &c);
-    }
-    for c in std::mem::take(&mut input.tap_prev) {
-        if !input.held.contains(&c) {
+    // The host is lent around every synthetic press and release, as the bindings pass lends it
+    // around a key's: an `ACTIONBUTTON1` fired from the page runs `UseAction` inside the call,
+    // like the key's. Without it the body is refused ("no call host is lent").
+    crate::script_calls::hosted(&mut script, &mut host, |mut vm| {
+        if input.drop_holds {
+            input.drop_holds = false;
+            input.released.clear();
+            binds.synth_release_all(vm.as_deref_mut());
+            out.push(
+                "input",
+                PlainValue::Map(vec![("heldCleared".into(), PlainValue::Bool(true))]),
+            );
+        }
+        for c in std::mem::take(&mut input.released) {
             binds.synth_release(vm.as_deref_mut(), &c);
         }
-    }
-    match vm {
-        Some(_) if capture.typing => {
-            binds.synth_release_all(vm);
-            input.taps.clear();
-        }
-        Some(vm) => {
-            let held: Vec<String> = input.held.iter().cloned().collect();
-            for c in held {
-                if !binds.synth_press(vm, &c, 1.0) {
-                    input.held.remove(&c);
-                    unknown_command(&c, &mut memo, &mut out);
-                }
+        for c in std::mem::take(&mut input.tap_prev) {
+            if !input.held.contains(&c) {
+                binds.synth_release(vm.as_deref_mut(), &c);
             }
-            let mut pressed = Vec::new();
-            for (c, amount) in std::mem::take(&mut input.taps) {
-                if binds.synth_latched(&c) {
-                    continue; // held, or tapped twice this frame
-                }
-                if binds.synth_press(vm, &c, amount) {
-                    pressed.push(c);
-                } else {
-                    unknown_command(&c, &mut memo, &mut out);
-                }
-            }
-            input.tap_prev = pressed;
         }
-        None => input.taps.clear(),
-    }
+        match vm {
+            Some(_) if capture.typing => {
+                binds.synth_release_all(vm);
+                input.taps.clear();
+            }
+            Some(vm) => {
+                let held: Vec<String> = input.held.iter().cloned().collect();
+                for c in held {
+                    if !binds.synth_press(vm, &c, 1.0) {
+                        input.held.remove(&c);
+                        unknown_command(&c, &mut memo, &mut out);
+                    }
+                }
+                let mut pressed = Vec::new();
+                for (c, amount) in std::mem::take(&mut input.taps) {
+                    if binds.synth_latched(&c) {
+                        continue; // held, or tapped twice this frame
+                    }
+                    if binds.synth_press(vm, &c, amount) {
+                        pressed.push(c);
+                    } else {
+                        unknown_command(&c, &mut memo, &mut out);
+                    }
+                }
+                input.tap_prev = pressed;
+            }
+            None => input.taps.clear(),
+        }
+    });
+}
+
+/// The page's look deflection, after the presses: its own system, since the host the presses
+/// borrow reads [`Player`].
+fn apply_synth_look(mut input: ResMut<BridgeInput>, player: Option<ResMut<Player>>) {
     if input.look != 0.0 {
         if let Some(mut player) = player {
             player.turn_aim(input.look);
@@ -524,8 +534,9 @@ fn release_synth_input(
     mut binds: ResMut<BindingsState>,
     mut input: ResMut<BridgeInput>,
     mut script: Option<NonSendMut<UiScript>>,
+    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
-    binds.synth_release_all(script.as_deref_mut());
+    crate::script_calls::hosted(&mut script, &mut host, |vm| binds.synth_release_all(vm));
     input.held.clear();
     input.released.clear();
     input.taps.clear();
@@ -628,6 +639,37 @@ fn publish_frame(
     memo.seq += 1;
     let frame = readout.build(&cfg, memo.seq, zone.as_deref());
     sink::emit_frame(&frame);
+}
+
+/// The control seam once, as the frame runs it, for a test over the whole client: the page fires
+/// `cmd` and the synthetic press runs with the host the world lends.
+#[cfg(test)]
+pub(crate) fn fire_once(world: &mut World, cmd: &str) {
+    use bevy::ecs::system::RunSystemOnce;
+    world.init_resource::<BridgeInput>();
+    world.init_resource::<BridgeMemo>();
+    world.init_resource::<BridgeOutbox>();
+    world
+        .resource_mut::<BridgeInput>()
+        .apply(BridgeCommand::Fire {
+            cmd: cmd.into(),
+            amount: 1.0,
+        });
+    world
+        .run_system_once(apply_synth_input)
+        .expect("the bridge's input applies");
+    world
+        .run_system_once(apply_synth_look)
+        .expect("the bridge's look applies");
+}
+
+/// The world's edge once, as [`release_synth_input`] runs it: every synthetic latch lets go.
+#[cfg(test)]
+pub(crate) fn leave_world_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(release_synth_input)
+        .expect("the bridge's latches release");
 }
 
 #[cfg(test)]
