@@ -315,6 +315,22 @@ struct Params {
     family: u32,
 }
 
+/// A race and class whose spells a `SpellFamilyName` names (vmangos `SharedDefines.h`): mage,
+/// warrior, warlock, priest, druid, rogue, hunter, paladin, shaman; any other is a human warrior.
+fn family_race_class(family: u32) -> (u8, u8) {
+    match family {
+        3 => (1, 8),
+        5 => (1, 9),
+        6 => (1, 5),
+        7 => (4, 11),
+        8 => (1, 4),
+        9 => (3, 3),
+        10 => (1, 2),
+        11 => (2, 7),
+        _ => (1, 1),
+    }
+}
+
 /// The fixed shape of the scenarios.
 struct Layout {
     /// The skill lines any spell belongs to, ascending; bit `i` of [`Inputs::lines`].
@@ -421,9 +437,11 @@ fn mat(layout: &Layout, inputs: Inputs, p: Params) -> Mat {
     if inputs.disarm {
         pairs.push((46, 0x0020_0000));
     }
-    if inputs.gender {
-        pairs.push((36, 1 << 16));
-    }
+    // `UNIT_FIELD_BYTES_0`: a race and the class of the spell's family, which index its skill line
+    // (`0x6de040`), and the gender input.
+    let (race, class) = family_race_class(p.family);
+    let gender = if inputs.gender { 1 << 16 } else { 0 };
+    pairs.push((36, u32::from(race) | u32::from(class) << 8 | gender));
     let form = if inputs.form { p.form } else { 0 };
     if form != 0 {
         pairs.push((138, u32::from(form) << 16));
@@ -536,8 +554,8 @@ const WHOLE: u32 = u32::MAX;
 
 /// The player fields a view's records watch in the scenario `inputs` makes, each with the bits
 /// watched: the ones a poke is covered by. The gender and the form are byte 2 of fields 36 and
-/// 138, the disarm flag bit 21 of 46, the standings' race and class bytes 0 and 1 of 36; every
-/// other record watches its fields whole.
+/// 138, the disarm flag bit 21 of 46, the race and class bytes 0 and 1 of 36 that the standings
+/// and the skill lines are read through; every other record watches its fields whole.
 fn recorded_fields(layout: &Layout, inputs: Inputs, deps: &Deps) -> Vec<(u16, u32)> {
     let mut fields: Vec<(u16, u32)> = UNIT_FIELD_INDICES
         .iter()
@@ -550,6 +568,7 @@ fn recorded_fields(layout: &Layout, inputs: Inputs, deps: &Deps) -> Vec<(u16, u3
         (deps.form, 138, 0x00ff_0000),
         (deps.disarm, 46, 0x0020_0000),
         (deps.reputation, 36, 0x0000_ffff),
+        (!deps.skill_lines.is_empty(), 36, 0x0000_ffff),
         (deps.range_units, 130, WHOLE),
     ] {
         if read {
@@ -576,7 +595,8 @@ fn recorded_fields(layout: &Layout, inputs: Inputs, deps: &Deps) -> Vec<(u16, u3
 fn changes(before: &Mat, now: &Mat, objects: &Objects, items: &Items) -> Changes {
     let seen = |m: &Mat| {
         let range = RangeSeen::of(&m.caster, m.attack_target.as_ref());
-        Seen::of(Some(&m.store), m.home, range, objects, items).with_reputations(&m.reputations)
+        Seen::of(Some(&m.store), m.home, range, None, objects, items)
+            .with_reputations(&m.reputations)
     };
     seen(now)
         .changes_since(&seen(before))
@@ -610,7 +630,7 @@ impl Rig {
         let displays = || ids.iter().filter_map(|&id| spells.catalog.get(id));
         let lines: BTreeSet<u32> = ids
             .iter()
-            .filter_map(|&id| skill_lines.spell_to_line(id))
+            .filter_map(|&id| skill_lines.first_line(id))
             .collect();
         assert!(
             lines.len() <= 128,
@@ -1673,6 +1693,7 @@ fn the_seen_diff_names_each_input_it_saw_move() {
             Some(s),
             None,
             RangeSeen::of(&caster, attack),
+            None,
             &objects,
             &items,
         )
@@ -1749,12 +1770,42 @@ fn the_seen_diff_names_each_input_it_saw_move() {
         Some(&base),
         Some("Ironforge"),
         RangeSeen::default(),
+        None,
         &objects,
         &items,
     );
     assert!(bound.changes_since(&seen(&base)).home);
+    // The ranged-slot item's `RangedModRange`, which only a ranged spell's range cell reads.
+    let holding = |range_mod: Option<f32>| {
+        let caster = RangeUnit {
+            ranged_mod_range: range_mod,
+            ..RangeUnit::still(1.5)
+        };
+        let slot = super::spell_deps::ranged_slot_seen(&caster);
+        Seen::of(
+            Some(&base),
+            None,
+            RangeSeen::default(),
+            slot,
+            &objects,
+            &items,
+        )
+    };
+    let swapped = holding(Some(0.0)).changes_since(&holding(Some(100.0)));
+    assert!(
+        swapped.ranged_slot && !swapped.range_units,
+        "a swap moves the slot alone"
+    );
+    assert!(
+        holding(None)
+            .changes_since(&holding(Some(100.0)))
+            .ranged_slot
+    );
+    assert!(holding(Some(100.0))
+        .changes_since(&holding(Some(100.0)))
+        .is_empty());
     // A player going or coming moves every view, which read nothing of one that was not there.
-    let gone = Seen::of(None, None, RangeSeen::default(), &objects, &items);
+    let gone = Seen::of(None, None, RangeSeen::default(), None, &objects, &items);
     assert_eq!(gone.changes_since(&seen(&base)).worn, EQUIPMENT_MASK);
     assert!(gone.changes_since(&seen(&base)).everything);
     assert!(seen(&base).changes_since(&gone).everything);

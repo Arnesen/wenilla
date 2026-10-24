@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{AuraKey, AuraTooltipView, KeyedArg, TextPart, TooltipText};
 
-use super::spell_deps::{Chance, Changes, Deps, RangeSeen, Reagents, Seen};
+use super::spell_deps::{ranged_slot_seen, Chance, Changes, Deps, RangeSeen, Reagents, Seen};
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::query_cache::Ask;
@@ -64,6 +64,18 @@ pub(super) struct ViewCtx<'a, 'w, 's> {
     pub(super) reputations: Option<&'a crate::net::Reputations>,
 }
 
+impl ViewCtx<'_, '_, '_> {
+    /// What the player's level for a spell reads: its skill lines, and for a weapon spell the
+    /// records and the hands' weapons ([`crate::spell::player_spell_level`]).
+    fn player_skills<'s>(&'s self, spells: &'s Spells) -> crate::spell::PlayerSkills<'s> {
+        crate::spell::PlayerSkills {
+            lines: self.skill_lines,
+            spells: Some(&spells.catalog),
+            items: Some(&*self.items),
+        }
+    }
+}
+
 /// Build one spell's tooltip view, its data resolved here where the catalogs live, and what it
 /// read ([`Deps`]). Every `GlobalStrings.lua` template a cell or a `$` token names is left by key
 /// to the render, which reads `_G` as the builder does at each call (`0x703bf0`), so no string a
@@ -81,11 +93,12 @@ pub(super) fn build_view(
     let form = vctx.form;
     let caster = vctx.caster;
     // `0x6e3130` for this spell: the level the cost's, the per-second cost's and the cast time's
-    // per-level terms read, the player's skill in the spell's line or the pet's level.
+    // per-level terms read, the player's ([`crate::spell::player_spell_level`]) or the pet's.
     let pet_level = |pet| SpellLevel::Known(d.skill_level(crate::spell::pet_skill_value(pet)));
+    let skills = vctx.player_skills(spells);
     let player_level = SpellLevel::Player {
         me: vctx.store,
-        skill_lines: vctx.skill_lines,
+        skills,
     };
     // The cost cell (`0x52e8ad`): the resolved `power_cost`, named by power type (keys at
     // `0x85416c`) and Health for a type outside 0..=4 (`0x52e8fc`: Bloodrage's -2), never a
@@ -96,7 +109,7 @@ pub(super) fn build_view(
     let resolved_cost = match caster {
         ViewCaster::Player => vctx.store.map_or(d.mana_cost as i32, |s| {
             let reads: &mut dyn SpellReads = &mut *deps.borrow_mut();
-            usable::power_cost(d, s, vctx.skill_lines, vctx.spell_mods, reads)
+            usable::power_cost(d, s, skills, vctx.spell_mods, reads)
         }),
         // Deviation: a pet view with no pet unit costs 0, an empty cell, where `0x6e3233`
         // returns -1 and the unsigned divide (`0x52e8dd`) prints it as "429496729 Rage", or
@@ -151,6 +164,12 @@ pub(super) fn build_view(
                 && benilla_formats::min_max_range_reads_units(d, row)
             {
                 deps.borrow_mut().range_units = true;
+            }
+            // The scale reads the player's ranged-slot item whenever a row survives the arms.
+            if matches!(caster, ViewCaster::Player)
+                && benilla_formats::min_max_range_reads_ranged_slot(d, row)
+            {
+                deps.borrow_mut().ranged_slot = true;
             }
             // The call passes a null target (`0x52e9c2`): the auto-attack target is the melee arm's
             // own lookup, and the ranged arm, with no target, pads nothing.
@@ -448,17 +467,14 @@ fn expand(
     unmodified_points: bool,
 ) -> TooltipText {
     let caster = vctx.caster;
+    let skills = vctx.player_skills(spells);
     // The `$`-tokens' level (`0x5075f0` hands the selector to `0x6e3130`, `507645`-`50764a`).
-    let skill = |id| match caster {
+    let level = |t: &benilla_formats::SpellDisplay| match caster {
         ViewCaster::Player => {
-            let line = vctx.skill_lines.and_then(|c| c.spell_to_line(id));
-            if let Some(line) = line {
-                deps.borrow_mut().skill_line(line);
-            }
-            line.map_or(0, |line| crate::spell::skill_line_value(vctx.store, line))
+            crate::spell::player_spell_level(vctx.store, skills, t, &mut *deps.borrow_mut())
         }
         // The pet's level is one of the pet's own inputs.
-        ViewCaster::Pet(pet) => crate::spell::pet_skill_value(pet),
+        ViewCaster::Pet(pet) => t.skill_level(crate::spell::pet_skill_value(pet)),
     };
     // A cross-referenced spell's own family mask decides its modifiers.
     let lookup = |id| {
@@ -476,13 +492,45 @@ fn expand(
         deps.borrow_mut().gender = true;
         vctx.store.and_then(|s| s.0.unit_gender()).unwrap_or(0)
     };
+    // `$c` and `$p` ask the caster the selector names (`0x507de0`, `0x507def`): the player's or
+    // the pet's level and fields; no caster costs −1 (`0x6e3233`) and has level 0 (`0x6e31a4`).
+    let pet_level = |t: &benilla_formats::SpellDisplay, pet| {
+        SpellLevel::Known(t.skill_level(crate::spell::pet_skill_value(pet)))
+    };
+    let power_cost = |t: &benilla_formats::SpellDisplay| match caster {
+        ViewCaster::Player => vctx.store.map_or(-1, |s| {
+            let reads: &mut dyn SpellReads = &mut *deps.borrow_mut();
+            usable::power_cost(t, s, skills, vctx.spell_mods, reads)
+        }),
+        ViewCaster::Pet(pet) => pet.map_or(-1, |p| {
+            usable::power_cost_at(
+                t,
+                p,
+                pet_level(t, Some(p)),
+                vctx.spell_mods,
+                &mut Unrecorded,
+            )
+        }),
+    };
+    let power_per_second = |t: &benilla_formats::SpellDisplay| match caster {
+        ViewCaster::Player => {
+            let level = SpellLevel::Player {
+                me: vctx.store,
+                skills,
+            };
+            usable::per_second_cost(t, level, &mut *deps.borrow_mut())
+        }
+        ViewCaster::Pet(pet) => usable::per_second_cost(t, pet_level(t, pet), &mut Unrecorded),
+    };
     let ctx = benilla_formats::TokenContext {
         durations: &spells.durations,
         radii: &spells.radii,
         ranges: Some(&spells.ranges),
-        skill: &skill,
+        level: &level,
         lookup: &lookup,
         mods: Some(vctx.spell_mods),
+        power_cost: &power_cost,
+        power_per_second: &power_per_second,
         unmodified_points,
         gender: &gender,
         home_area: &home_area,
@@ -811,17 +859,24 @@ pub(super) fn feed_spell_tooltips(
             .and_then(|id| area_names.as_deref()?.0.resolve(id as i32))
             .map(str::to_string);
         let self_store = self_q.single().ok();
-        let caster_unit = range_units.caster();
+        // The ranged-slot scale reads the active player's inventory slot 17 (`0x6e36c1`).
+        let caster_unit = crate::spell::with_ranged_slot(
+            range_units.caster(),
+            self_store.map(|s| &s.0),
+            |g| objects.object(g),
+            Some(&items),
+        );
         let attack_target = range_units.caster_attack_target();
         // What moved since the last frame, which each pushed view is checked against: the bind
         // point (Astral Recall's `$z`), the form, the skills, what the equipped-item search learns
         // of each equipment slot and the disarm flag, the level, cost bases and ranged attack time,
-        // the block, dodge, parry and crit percentages, and the two units the melee range cell
-        // reads.
+        // the block, dodge, parry and crit percentages, the two units the melee range cell reads,
+        // and the ranged-slot item a ranged spell's range scales by.
         let mut seen = Seen::of(
             self_store,
             home_area.as_deref(),
             RangeSeen::of(&caster_unit, attack_target.as_ref()),
+            ranged_slot_seen(&caster_unit),
             &objects,
             &items,
         );

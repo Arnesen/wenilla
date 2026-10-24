@@ -180,6 +180,7 @@ fn profession(
     spell_id: u32,
     d: &benilla_formats::SpellDisplay,
     skill_lines: Option<&crate::ui_spellbook::SkillLines>,
+    (race, class): (u8, u8),
 ) -> Option<benilla_ui::script::Profession> {
     use benilla_ui::script::Profession;
     if d.effects[0] != benilla_formats::SPELL_EFFECT_TRADE_SKILL {
@@ -187,7 +188,7 @@ fn profession(
     }
     match u32::try_from(d.effect_misc_value[0]).unwrap_or(0) {
         0 => skill_lines
-            .and_then(|s| s.catalog.spell_to_line(spell_id))
+            .and_then(|s| s.catalog.spell_to_line(spell_id, race, class))
             .map(Profession::TradeSkill),
         craft => Some(Profession::Craft(craft)),
     }
@@ -201,7 +202,8 @@ struct PetBookLeg<'a> {
     player: Option<&'a ObjectStore>,
     /// The pet's object when the pet gate holds, else `None`.
     pet: Option<&'a ObjectStore>,
-    skill_lines: Option<&'a benilla_formats::SkillLineCatalog>,
+    /// What the player's level for the spell reads, its cost's level term.
+    skills: crate::spell::PlayerSkills<'a>,
     mods: &'a crate::spell::SpellModifiers,
     /// The pet's own history, the list at `0xcecb04`.
     cooldowns: &'a Cooldowns,
@@ -226,7 +228,7 @@ fn pet_book_state(leg: PetBookLeg) -> ActionState {
         let cost = usable::power_cost(
             leg.d,
             player,
-            leg.skill_lines,
+            leg.skills,
             leg.mods,
             &mut crate::spell::Unrecorded,
         );
@@ -319,12 +321,11 @@ pub(crate) struct ActionStates<'w, 's> {
     pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
     actions: Res<'w, PlayerActions>,
     spells: Option<Res<'w, Spells>>,
-    // Macro bindings, spell mods, the range units, the control flag and the skill lines.
+    // Macro bindings, spell mods, the control flag and the skill lines. The range compare reads
+    // the caster and the target through the targeting's context.
     cast_state: (
         Res<'w, crate::ui_macro::MacroBoundSpells>,
         Res<'w, crate::spell::SpellModifiers>,
-        // The caster's and the target's reach and motion, which the range compare reads.
-        crate::spell::RangeUnits<'w, 's>,
         // `[0xb4b3e4]`, which the usable walk reads.
         Option<Res<'w, crate::player::OwnControlLost>>,
         // A profession opener's line (`0x6de040`), which the checked test reads, and the skill
@@ -459,7 +460,7 @@ impl ActionStates<'_, '_> {
         if trace_cd {
             memory.last_cd_trace = Some(now);
         }
-        let control_lost = self.cast_state.3.as_ref().is_some_and(|c| c.0);
+        let control_lost = self.cast_state.2.as_ref().is_some_and(|c| c.0);
         let selection = self.targeting.selection.guid;
         let self_guid = self.targeting.context().self_guid;
 
@@ -562,7 +563,7 @@ impl ActionStates<'_, '_> {
             ..
         } = &mut **memory;
         let memory = vm.get_leaving_reset(script);
-        let (bound, spell_mods, range_units, own_control, skill_lines) = &*cast_state;
+        let (bound, spell_mods, own_control, skill_lines) = &*cast_state;
         let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
         let sub_classes = sub_classes.as_deref().map(|s| &s.0);
         let me = self_q.iter().next();
@@ -571,7 +572,6 @@ impl ActionStates<'_, '_> {
         let stacks = me
             .map(|(s, _)| stack_counts(&s.0, objects))
             .unwrap_or_default();
-        let caster = range_units.caster();
         let selection = &targeting.selection;
         let target = selection
             .guid
@@ -579,7 +579,8 @@ impl ActionStates<'_, '_> {
             .and_then(|e| units.get(e).ok());
         let cast_ctx = targeting.context();
         let range_leg = RangeLeg {
-            caster,
+            // The context's caster carries the ranged-slot item the scale reads.
+            caster: cast_ctx.range.caster,
             mods: spell_mods,
             cast_ctx: &cast_ctx,
             player: me.is_some(),
@@ -621,7 +622,11 @@ impl ActionStates<'_, '_> {
                             spell,
                             player: me.map(|(s, _)| s),
                             pet,
-                            skill_lines: skill_catalog,
+                            skills: crate::spell::PlayerSkills {
+                                lines: skill_catalog,
+                                spells: spells.as_deref().map(|s| &s.catalog),
+                                items: Some(items),
+                            },
                             mods: spell_mods,
                             cooldowns: &bar.cooldowns,
                             now,
@@ -656,7 +661,9 @@ impl ActionStates<'_, '_> {
                     // granted by another spell lights the check but not the icon.
                     st.spell = Some(button.action);
                     st.form = d.shapeshift_form;
-                    st.profession = profession(button.action, d, skill_lines.as_deref());
+                    let race_class = me.map_or((0, 0), |(store, _)| store.race_class());
+                    st.profession =
+                        profession(button.action, d, skill_lines.as_deref(), race_class);
                     // The usable walk (`0x6e3d60`); only its power gate sets `notEnoughMana`.
                     if let (Some((store, _)), Some(sp)) = (me, spells.as_deref()) {
                         let ctx = usable::UsableCtx {

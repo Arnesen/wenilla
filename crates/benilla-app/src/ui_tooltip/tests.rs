@@ -380,9 +380,7 @@ fn battle_shout_description_scales_by_the_skill_level() {
         radii: benilla_formats::load_spell_radii(&mut chain).expect("radii"),
     };
     let skill_lines = benilla_formats::load_skill_line_catalog(&mut chain).expect("skill lines");
-    let line = skill_lines
-        .spell_to_line(6673)
-        .expect("Battle Shout's line");
+    let line = skill_lines.first_line(6673).expect("Battle Shout's line");
     let mut t = TestCtx::new();
     t.skill_lines = Some(skill_lines);
     let mut objs = no_objects();
@@ -391,6 +389,7 @@ fn battle_shout_description_scales_by_the_skill_level() {
     for (level, skill, ap) in [(1, 5, 15), (11, 55, 20), (60, 300, 20), (60, 5, 15)] {
         let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
             (34, level),
+            (36, 1 | 1 << 8), // a human warrior, whose rows index Battle Shout's line
             (FIELD_PLAYER_SKILL_INFO_1_1, line),
             (FIELD_PLAYER_SKILL_INFO_1_1 + 1, skill | 300 << 16),
         ]));
@@ -1051,6 +1050,176 @@ fn range_cell_on_real_data() {
     )
     .expect("Bloodrage view");
     assert_eq!(v.range, None, "the self row resolves max 0");
+}
+
+/// `$c` and `$p` in a description print the cost and the per-second cost the cost cell shows
+/// (`0x507de3` → `0x6e31b0`, `0x507df2` → `0x6e3300`), at the caster's own level: the player's
+/// skill in the line, never the expander's level, and record that read. A pet view with no pet
+/// costs −1 (`0x6e3233`).
+#[test]
+fn the_power_tokens_print_the_cost_cells_numbers() {
+    // The cells fill the install's `GlobalStrings.lua`.
+    let _data = benilla_formats::wow_data_or_skip!();
+    use benilla_formats::SpellDisplay;
+    use benilla_protocol::messages::FIELD_PLAYER_SKILL_INFO_1_1;
+    let mut spells = Spells::empty_for_tests();
+    spells.catalog = benilla_formats::SpellCatalog::from_displays(
+        [(
+            900_030,
+            SpellDisplay {
+                id: 900_030,
+                name: "Scaled".into(),
+                description: Some("Drains $c mana, then $p per second.".into()),
+                mana_cost: 10,
+                mana_cost_per_level: 3,
+                mana_per_second: 1,
+                mana_per_second_per_level: 1,
+                base_level: 5,
+                ..Default::default()
+            },
+        )]
+        .into(),
+    );
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // Skill 75 in line 7: level 15.
+    let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (34, 60),
+        (FIELD_PLAYER_SKILL_INFO_1_1, 7),
+        (FIELD_PLAYER_SKILL_INFO_1_1 + 1, 75 | 300 << 16),
+    ]));
+    let mut t = TestCtx::new();
+    t.skill_lines = Some(benilla_formats::SkillLineCatalog::from_spell_lines([(
+        900_030, 7,
+    )]));
+    let (view, deps) = build_view(
+        900_030,
+        &spells,
+        &mut t.ctx_for(&objects, 0, None, Some(&store)),
+    )
+    .unwrap();
+    // 10 + (15 - 5) × 3 and 1 + (15 - 5).
+    assert_eq!(
+        Shown::of(&view).description,
+        "Drains 40 mana, then 11 per second."
+    );
+    assert_eq!(deps.skill_lines, [7]);
+    let v = spell_tooltip_view(
+        900_030,
+        &spells,
+        &mut t.pet_ctx(&objects, Some(&store), None),
+    )
+    .unwrap();
+    // No pet: no cost to read, and level 0 for the per-second term, 1 + (0 - 5).
+    assert_eq!(v.description, "Drains -1 mana, then -4 per second.");
+}
+
+/// A weapon spell's view scales by the wielded weapon's skill (`0x5ea5d0` in `0x5ea690`) and
+/// records what that read: the hands, which a weapon swap moves, and the weapon's line, not the
+/// spell's own.
+#[test]
+fn a_weapon_spells_view_reads_the_wielded_weapons_skill() {
+    // The cells fill the install's `GlobalStrings.lua`.
+    let _data = benilla_formats::wow_data_or_skip!();
+    use benilla_formats::SpellDisplay;
+    use benilla_protocol::messages::FIELD_PLAYER_SKILL_INFO_1_1 as SKILLS;
+    let mut spells = Spells::empty_for_tests();
+    spells.catalog = benilla_formats::SpellCatalog::from_displays(
+        [
+            (
+                201,
+                SpellDisplay {
+                    id: 201,
+                    attributes: 0x40,
+                    equipped_item_class: 2,
+                    equipped_item_subclass_mask: 1 << 7,
+                    ..Default::default()
+                },
+            ),
+            (
+                900_040,
+                SpellDisplay {
+                    id: 900_040,
+                    name: "Strike".into(),
+                    description: Some("Deals $s1 damage.".into()),
+                    equipped_item_class: 2,
+                    equipped_item_subclass_mask: 1 << 7,
+                    base_level: 1,
+                    effects: [2, 0, 0],
+                    effect_base_points: [9, 0, 0],
+                    effect_base_dice: [1, 0, 0],
+                    effect_die_sides: [1, 0, 0],
+                    effect_real_points_per_level: [1.0, 0.0, 0.0],
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+    );
+    let mut objs = no_objects();
+    let objects = objs.get();
+    // A sword in the main hand, Swords (43) at 300, the spell's own line (26) at 50.
+    let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (258 + 2 + 12 * 15, 1001),
+        (SKILLS, 43),
+        (SKILLS + 1, 300 | 300 << 16),
+        (SKILLS + 3, 26),
+        (SKILLS + 4, 50 | 300 << 16),
+    ]));
+    let mut t = TestCtx::new();
+    t.skill_lines = Some(benilla_formats::SkillLineCatalog::from_spell_lines([
+        (201, 43),
+        (900_040, 26),
+    ]));
+    t.items.insert_template(
+        1001,
+        Some(benilla_protocol::messages::ItemInfo {
+            class: 2,
+            subclass: 7,
+            ..crate::items::test_template("Sword")
+        }),
+    );
+    let (view, deps) = build_view(
+        900_040,
+        &spells,
+        &mut t.ctx_for(&objects, 0, None, Some(&store)),
+    )
+    .unwrap();
+    // 10 + (60 - 1) × 1.
+    assert_eq!(Shown::of(&view).description, "Deals 69 damage.");
+    assert_eq!(deps.skill_lines, [43], "the weapon's line, not the spell's");
+    assert_eq!(deps.worn & 0x38000, 0x38000, "the three hands");
+}
+
+/// The range cell scales a ranged-slot spell's max by the player's ranged-slot item (`0x6e36aa`-
+/// `0x6e373a`) and drops a max of 0 (`0x52e9e2`-`0x52e9f0`): Arcane Shot (3044, `Attributes &
+/// 0x2`, row 114) reads "8-35 yd range" with a bow's 100 and nothing with Egan's Blaster's 0, and
+/// records the read; Fireball (133), without the bit, keeps its 35 and records none.
+#[test]
+fn the_range_cell_scales_a_ranged_spell_by_the_ranged_slot_item() {
+    let Some(spells) = real_spells() else { return };
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let store = empty_player();
+    let holding = |range_mod| benilla_formats::RangeUnit {
+        player: true,
+        ranged_mod_range: Some(range_mod),
+        ..benilla_formats::RangeUnit::still(1.5)
+    };
+    let view = |t: &mut TestCtx, id, range_mod| {
+        let mut ctx = t.ctx_for(&objects, 0, None, Some(&store));
+        ctx.range_caster = holding(range_mod);
+        build_view(id, &spells, &mut ctx).expect("a view")
+    };
+    let (bow, deps) = view(&mut t, 3044, 100.0);
+    assert_eq!(Shown::of(&bow).range.as_deref(), Some("8-35 yd range"));
+    assert!(deps.ranged_slot, "the cell read the ranged slot");
+    let (blaster, _) = view(&mut t, 3044, 0.0);
+    assert_eq!(Shown::of(&blaster).range, None, "a max of 0 has no cell");
+    let (fireball, deps) = view(&mut t, 133, 0.0);
+    assert_eq!(Shown::of(&fireball).range.as_deref(), Some("35 yd range"));
+    assert!(!deps.ranged_slot);
 }
 
 /// The required-item, chance-to-X and reagents lines on the real data.

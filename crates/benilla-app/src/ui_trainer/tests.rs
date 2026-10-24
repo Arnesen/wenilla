@@ -41,15 +41,17 @@ fn with_text<R>(
     let durations = benilla_formats::SpellDurationCatalog::default();
     let radii = benilla_formats::SpellRadiusCatalog::default();
     let lookup = |id: u32| spells.get(id);
-    let skill_of = |_: u32| player_skill;
-    let pet_of = |_: u32| pet_skill;
+    let skill_of = |d: &benilla_formats::SpellDisplay| d.skill_level(player_skill);
+    let pet_of = |d: &benilla_formats::SpellDisplay| d.skill_level(pet_skill);
     let ctx = TokenContext {
         durations: &durations,
         radii: &radii,
         ranges: None,
-        skill: &skill_of,
+        level: &skill_of,
         lookup: &lookup,
         mods: None,
+        power_cost: &|_| -1,
+        power_per_second: &|_| 0,
         unmodified_points: false,
         gender: &|| 0,
         home_area: &|| home,
@@ -57,7 +59,7 @@ fn with_text<R>(
         printf: &crate::ui_script::token_printf,
     };
     let pet_ctx = TokenContext {
-        skill: &pet_of,
+        level: &pet_of,
         ..ctx
     };
     f(&ServiceText {
@@ -84,6 +86,7 @@ fn resolve_service(
             &ReqBooks {
                 player: known,
                 pet: None,
+                race_class: (1, 1),
             },
             None,
             &deps.items,
@@ -119,6 +122,7 @@ fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
             &ReqBooks {
                 player: &BTreeSet::new(),
                 pet: None,
+                race_class: (1, 1),
             },
             None,
             &deps.items,
@@ -952,6 +956,7 @@ fn service_description_on_real_data_reads_astral_recalls_bind_area() {
             &ReqBooks {
                 player: &BTreeSet::new(),
                 pet: None,
+                race_class: (1, 1),
             },
             None,
             &deps.items,
@@ -1867,7 +1872,11 @@ fn resolve_with_pet(
             0,
             spells,
             skill_lines,
-            &ReqBooks { player, pet },
+            &ReqBooks {
+                player,
+                pet,
+                race_class: (1, 1),
+            },
             None,
             &deps.items,
             Ask::New(&deps.commands),

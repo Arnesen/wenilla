@@ -315,12 +315,19 @@ fn on_spell_go(
         misses,
         target,
         go_target,
+        target_mask,
+        source,
         dest,
         ammo_display_id,
         item_caster,
         unit_caster,
     } = ev
     {
+        let points = GoPoints {
+            mask: target_mask,
+            source,
+            dest,
+        };
         let deferred = {
             let (mut l, mut sc) = set.p0();
             let engaged = sc
@@ -335,7 +342,7 @@ fn on_spell_go(
                 misses,
                 target,
                 go_target,
-                dest,
+                points,
                 ammo_display_id,
                 item_caster,
                 unit_caster,
@@ -1139,7 +1146,7 @@ fn spell_go(
     misses: Vec<benilla_protocol::messages::SpellGoMiss>,
     target: Option<u64>,
     go_target: Option<u64>,
-    dest: Option<[f32; 3]>,
+    points: GoPoints,
     ammo_display_id: Option<u32>,
     item_caster: Option<u64>,
     // The packet's second guid as written, the caster slot `0x6e7f8b` looks up as a unit.
@@ -1168,10 +1175,11 @@ fn spell_go(
     attack_ctx: (&crate::creature_anim::UnitEdits, bool, &mut super::CastCore),
     seq: u64,
 ) -> Option<u64> {
+    let GoPoints { mask, source, dest } = points;
     debug!(
         "net: spell go {spell_id} by {caster:#x} ({} hit(s), {} miss(es), flags \
-         {cast_flags:#x}, target {target:?}, go_target {go_target:?}, dest {dest:?}, \
-         ammo {ammo_display_id:?})",
+         {cast_flags:#x}, target {target:?}, go_target {go_target:?}, mask {mask:#x}, \
+         source {source:?}, dest {dest:?}, ammo {ammo_display_id:?})",
         hits.len(),
         misses.len()
     );
@@ -1320,10 +1328,16 @@ fn spell_go(
         .iter()
         .filter_map(|&g| index.0.get(&g).map(|&e| (g, e)))
         .collect();
-    let misses: Vec<(Entity, u8)> = misses
+    let misses: Vec<(Entity, u8, u8)> = misses
         .iter()
-        .filter_map(|m| index.0.get(&m.target).map(|&e| (e, m.info)))
+        .filter_map(|m| {
+            index
+                .0
+                .get(&m.target)
+                .map(|&e| (e, m.info, m.reflect_result))
+        })
         .collect();
+
     // The caster slot is the second guid looked up as a unit (`0x6e7f8b`, mask 8): a game object's
     // cast writes it 0, so it finds none and skips every leg that needs one.
     let unit = index
@@ -1341,7 +1355,9 @@ fn spell_go(
                 spell_id,
                 hits: hits.into_iter().map(|(_, e)| e).collect(),
                 misses,
+                source: None,
                 dest: None,
+                target_mask: mask,
                 ammo_display_id,
                 seq,
             });
@@ -1374,20 +1390,32 @@ fn spell_go(
         item_cast: item_caster.is_some(),
         seq,
     });
-    // A pure dest cast (ground AoE, empty lists) rides the same message: the point is a target.
+    // A pure point cast (ground AoE, empty lists) rides the same message: the point is a target.
+    let source = source.map(benilla_assets::coords::wow_to_bevy);
     let dest = dest.map(benilla_assets::coords::wow_to_bevy);
-    if !hits.is_empty() || !misses.is_empty() || dest.is_some() {
+    if !hits.is_empty() || !misses.is_empty() || source.is_some() || dest.is_some() {
         go_targets.write(SpellGoTargets {
             caster: Some(e),
             spell_id,
             hits: hits.into_iter().map(|(_, e)| e).collect(),
             misses,
+            source,
             dest,
+            target_mask: mask,
             ammo_display_id,
             seq,
         });
     }
     deferred
+}
+
+/// The GO target block's mask and its two points, raw WoW (`0x7e4ed0`): SOURCE_LOCATION (0x20)
+/// and DEST_LOCATION (0x40).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GoPoints {
+    pub(super) mask: u16,
+    pub(super) source: Option<[f32; 3]>,
+    pub(super) dest: Option<[f32; 3]>,
 }
 
 /// `SMSG_SPELL_FAILED_OTHER`: a cast was interrupted; ends the caster's `Casting` as [`spell_go`]
@@ -2317,7 +2345,7 @@ mod tests {
                             vec![],
                             None,
                             None,
-                            None,
+                            GoPoints::default(),
                             None,
                             None,
                             Self::SELF,
@@ -3244,7 +3272,7 @@ mod tests {
                         vec![],
                         None,
                         None,
-                        None,
+                        GoPoints::default(),
                         None,
                         item_caster,
                         caster,
@@ -3442,7 +3470,7 @@ mod tests {
                         vec![],
                         None,
                         None,
-                        None,
+                        GoPoints::default(),
                         None,
                         None,
                         10,
@@ -3822,7 +3850,7 @@ mod tests {
                             // A different guid from `hits[0]`, which the arm must take.
                             Some(99),
                             None,
-                            None,
+                            GoPoints::default(),
                             None,
                             None,
                             caster,

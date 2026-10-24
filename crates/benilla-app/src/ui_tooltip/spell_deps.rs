@@ -125,6 +125,9 @@ pub(super) struct Deps {
     /// The range cell's melee arm read the caster's and the auto-attack target's combat reach and
     /// motion; the ranged arm, given no target, reads neither.
     pub(super) range_units: bool,
+    /// The range cell scaled a ranged-slot spell's max by the player's ranged-slot item
+    /// (`0x6e36aa`-`0x6e373a`).
+    pub(super) ranged_slot: bool,
     /// The chance line read these percentages, a [`Chance`] bit each.
     pub(super) avoidance: u8,
     /// The equipped-item search read these equipment slots, a bit each.
@@ -142,6 +145,7 @@ pub(super) struct Deps {
     /// its text cross-references, for the ones the caster's class family owns.
     pub(super) mod_bits: u64,
     /// The skill lines read, through the view's own spell and each one its text cross-references.
+    /// Each was found through the player's race and class (`0x6de040`), which a read of one reads.
     pub(super) skill_lines: Vec<u32>,
     /// The item entries the tools and reagents lines list, whose carried counts and names the
     /// lines read.
@@ -177,10 +181,12 @@ impl Deps {
             || (changes.gender && self.gender)
             || (changes.form && self.form)
             || (changes.range_units && self.range_units)
+            || (changes.ranged_slot && self.ranged_slot)
             || changes.avoidance & self.avoidance != 0
             || changes.worn & self.worn != 0
             || (changes.disarm && self.disarm)
             || (changes.reputation && self.reputation)
+            || (changes.race_class && !self.skill_lines.is_empty())
             || changes.unit & self.unit != 0
             || changes.mod_bits & self.mod_bits != 0
             || self
@@ -218,6 +224,8 @@ pub(super) struct Changes {
     pub(super) gender: bool,
     pub(super) form: bool,
     pub(super) range_units: bool,
+    /// The ranged-slot item's `RangedModRange` moved.
+    pub(super) ranged_slot: bool,
     /// A [`Chance`] bit each.
     pub(super) avoidance: u8,
     /// The equipment slots whose item moved in a way the search can tell, a bit each.
@@ -225,6 +233,8 @@ pub(super) struct Changes {
     pub(super) disarm: bool,
     /// A reputation standing moved.
     pub(super) reputation: bool,
+    /// The player's race or class moved, which index a spell's skill line (`0x6de040`).
+    pub(super) race_class: bool,
     /// A [`UnitField`] bit each.
     pub(super) unit: u16,
     /// The `SpellFamilyFlags` bits with a changed modifier cell.
@@ -240,10 +250,12 @@ impl Changes {
             && !self.gender
             && !self.form
             && !self.range_units
+            && !self.ranged_slot
             && self.avoidance == 0
             && self.worn == 0
             && !self.disarm
             && !self.reputation
+            && !self.race_class
             && self.unit == 0
             && self.mod_bits == 0
             && self.skill_lines.is_empty()
@@ -296,6 +308,12 @@ impl RangeSeen {
     }
 }
 
+/// The caster's ranged-slot `RangedModRange` as a bit pattern, which the scale of a ranged-slot
+/// spell's max reads ([`benilla_formats::RangeUnit::ranged_mod_range`]).
+pub(super) fn ranged_slot_seen(caster: &RangeUnit) -> Option<u32> {
+    caster.ranged_mod_range.map(f32::to_bits)
+}
+
 /// The player-side inputs one frame saw, which the pushed views were built against.
 #[derive(Clone, PartialEq)]
 pub(super) struct Seen {
@@ -316,6 +334,8 @@ pub(super) struct Seen {
     avoidance: [Option<u32>; 4],
     /// The caster's and its auto-attack target's reach, and whether the moving bonus applies.
     range_units: RangeSeen,
+    /// The caster's ranged-slot item's `RangedModRange` ([`ranged_slot_seen`]).
+    ranged_slot: Option<u32>,
     /// The unit fields the cost, cast and cooldown cells read.
     unit: UnitFields,
     /// The wire standings, slot by slot, and the race and class whose base they ride on, which
@@ -329,6 +349,7 @@ impl Seen {
         player: Option<&ObjectStore>,
         home: Option<&str>,
         range_units: RangeSeen,
+        ranged_slot: Option<u32>,
         objects: &Objects,
         items: &Items,
     ) -> Self {
@@ -343,6 +364,7 @@ impl Seen {
             avoidance: Chance::ALL
                 .map(|which| player.and_then(|s| which.read(&s.0)).map(f32::to_bits)),
             range_units,
+            ranged_slot,
             unit: UnitFields::of(player),
             reputations: Vec::new(),
             race_class: player.map_or((0, 0), |s| {
@@ -366,8 +388,10 @@ impl Seen {
             gender: self.gender != prev.gender,
             form: self.form != prev.form,
             range_units: self.range_units != prev.range_units,
+            ranged_slot: self.ranged_slot != prev.ranged_slot,
             disarm: self.disarmed != prev.disarmed,
             reputation: self.reputations != prev.reputations || self.race_class != prev.race_class,
+            race_class: self.race_class != prev.race_class,
             unit: self.unit.diff(&prev.unit),
             ..Changes::default()
         };
