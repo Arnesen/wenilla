@@ -43,10 +43,10 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().battlefield_position_lookups)
     }
 
-    /// `RequestBattlefieldPositions()` calls since the last drain; the app sends at most every
-    /// 5000 ms, and only with an active slot.
-    pub fn take_battlefield_position_requests(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().battlefield_position_requests)
+    /// The positions request's clear with no active slot (`0x4aa5df`): the teammate count
+    /// `[0xb6ebdc]` alone, the carrier kept until the next packet.
+    pub fn clear_battlefield_positions(&mut self) {
+        self.model_mut().battlefield_positions.clear();
     }
 }
 
@@ -126,12 +126,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // `0x4abef0` is a call to `0x4aa5c0`, applied by the host inside the call.
     g.set(
         "RequestBattlefieldPositions",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.battlefield_position_requests += 1;
-            Ok(())
+            super::battlefield_queue::submit(lua, super::BattlefieldCall::Positions)
         })?,
     )?;
 
@@ -142,6 +141,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 mod tests {
     use super::*;
     use crate::script::UiScript;
+
+    /// The request's clear with no slot zeroes the count alone (`0x4aa5df`): the carrier stays.
+    #[test]
+    fn the_positions_clear_keeps_the_carrier() {
+        let mut s = UiScript::new().unwrap();
+        s.set_battlefield_positions(
+            vec![BattlefieldPositionView {
+                uv: (0.25, 0.5),
+                name: None,
+            }],
+            Some(BattlefieldFlagView {
+                uv: (0.375, 0.625),
+                token: None,
+            }),
+            1.0,
+        );
+        s.clear_battlefield_positions();
+        let counts: (i64, i64) = s
+            .eval("return GetNumBattlefieldPositions(), GetNumBattlefieldFlagPositions()")
+            .unwrap();
+        assert_eq!(counts, (0, 1));
+    }
 
     #[test]
     fn the_getters_answer_three_values_and_zero_off_the_list() {
@@ -240,9 +261,19 @@ mod tests {
                 .abs()
                 < 1e-6
         );
+        s.keep_calls();
         s.run("RequestBattlefieldPositions() RequestBattlefieldPositions()")
             .unwrap();
-        assert_eq!(s.take_battlefield_position_requests(), 2);
-        assert_eq!(s.take_battlefield_position_requests(), 0);
+        assert_eq!(
+            s.take_battlefield_calls(),
+            vec![crate::script::BattlefieldCall::Positions; 2],
+            "each call is the host's"
+        );
+        s.clear_battlefield_positions();
+        assert_eq!(
+            s.eval::<i64>("return GetNumBattlefieldPositions()")
+                .unwrap(),
+            0
+        );
     }
 }

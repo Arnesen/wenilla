@@ -17,7 +17,7 @@ use benilla_protocol::messages::{BattlefieldPosition, BattlefieldPositions as Po
 use benilla_ui::script::{BattlefieldFlagView, BattlefieldPositionView};
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, EnteredWorldMessage, GuidIndex, NetCommands, NetEntity, SelfGuid};
+use crate::net::{EnteredWorldMessage, GuidIndex, NetCommands, NetEntity, SelfGuid};
 use crate::query_cache::Ask;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
@@ -43,13 +43,29 @@ impl BattlefieldPositions {
         self.packet = Some(packet);
     }
 
+    /// The positions request's clear with no active slot (`0x4aa5df`): the teammate count
+    /// `[0xb6ebdc]` alone, the carrier kept.
+    pub(crate) fn clear_teammates(&mut self) {
+        if let Some(packet) = self.packet.as_mut() {
+            packet.players.clear();
+        }
+        self.pending_names.clear();
+    }
+
+    /// Everything the last packet left, at a world entry.
     fn clear(&mut self) {
         self.packet = None;
         self.pending_names.clear();
     }
 
+    /// The carrier the last packet left, if any.
+    #[cfg(test)]
+    pub(crate) fn carrier(&self) -> Option<&BattlefieldPosition> {
+        self.packet.as_ref()?.carrier.as_ref()
+    }
+
     /// The throttle: `true`, and the stamp moves, when a request may go out now.
-    fn request_due(&mut self, now: Instant) -> bool {
+    pub(crate) fn request_due(&mut self, now: Instant) -> bool {
         let due = self
             .last_request
             .is_none_or(|t| now.saturating_duration_since(t) >= REQUEST_THROTTLE);
@@ -86,8 +102,9 @@ fn flag_token(faction: Option<&str>) -> Option<&'static str> {
 }
 
 fn feed_battlefield_positions(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut state: ResMut<BattlefieldPositions>,
+    // The positions, which the request's call clears and stamps: an engine turn, its events
+    // signalled after.
+    mut vm: crate::script_calls::VmWith<ResMut<'static, BattlefieldPositions>>,
     queue: Res<BattlefieldQueue>,
     data: Option<Res<WorldMapUiData>>,
     maps: Option<Res<MapCatalogRes>>,
@@ -100,7 +117,7 @@ fn feed_battlefield_positions(
     // The last empty push: with no list the engine is told on change, with one every frame.
     mut last_empty: Local<crate::ui_script::VmMemo<Option<(bool, u32)>>>,
 ) {
-    hosted_vm.run(|script| {
+    vm.turn(|script, mut state| {
         let Some(script) = script else {
             return;
         };
@@ -120,7 +137,10 @@ fn feed_battlefield_positions(
         // `Blizzard_BattlefieldMinimap.lua:290`), so a row read nameless is asked, a refused name
         // again once per answer. The push itself only reads.
         let looked_up = script.take_battlefield_position_lookups();
-        let (Some(map), Some(packet)) = (active, packet.as_ref()) else {
+        // The getters read the count and the carrier with no slot test (`0x4abf09`, `0x4ac1c6`),
+        // under the active slot's map, 0 with none.
+        let map = active.unwrap_or(0);
+        let Some(packet) = packet.as_ref() else {
             let key = Some((false, icon_scale.to_bits()));
             let last = last_empty.get(script);
             if *last != key {
@@ -186,29 +206,6 @@ fn feed_battlefield_positions(
     })
 }
 
-fn drain_battlefield_positions(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut state: ResMut<BattlefieldPositions>,
-    queue: Res<BattlefieldQueue>,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        if script.take_battlefield_position_requests() == 0 {
-            return;
-        }
-        if queue.active_map().is_none() {
-            state.clear();
-            return;
-        }
-        if state.request_due(Instant::now()) {
-            let _ = commands.0.send(ClientCommand::RequestBattlefieldPositions);
-        }
-    })
-}
-
 fn reset_on_world_enter(
     mut entered: MessageReader<EnteredWorldMessage>,
     mut state: ResMut<BattlefieldPositions>,
@@ -247,9 +244,11 @@ impl Plugin for BattlefieldPositionsPlugin {
         app.init_resource::<BattlefieldPositions>().add_systems(
             Update,
             (
-                reset_on_world_enter.before(feed_battlefield_positions),
+                // Before the pass: the positions request's call reads and stamps the state.
+                reset_on_world_enter
+                    .before(feed_battlefield_positions)
+                    .before(crate::vm_pass::VmPass::Start),
                 feed_battlefield_positions.in_set(UiFeed),
-                drain_battlefield_positions.in_set(crate::ui_script::UiDrain),
             ),
         );
     }
@@ -336,6 +335,42 @@ mod tests {
             1,
             "the call after the refusal asks again"
         );
+    }
+
+    /// With no active slot, as after leaving, the feed still pushes the last packet's teammates
+    /// and carrier: the getters read the count and the carrier with no slot test (`0x4abf09`,
+    /// `0x4ac1c6`).
+    #[test]
+    fn with_no_active_slot_the_last_packet_still_reads() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<BattlefieldQueue>()
+            .init_resource::<BattlefieldPositions>()
+            .init_resource::<SelfGuid>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<NameCache>()
+            .add_systems(Update, feed_battlefield_positions);
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let at = |guid| BattlefieldPosition {
+            guid,
+            x: 0.0,
+            y: 0.0,
+        };
+        app.world_mut()
+            .resource_mut::<BattlefieldPositions>()
+            .apply(PositionsPacket {
+                players: vec![at(0x9)],
+                carrier: Some(at(0xA)),
+            });
+        app.update();
+        let counts: (i64, i64) = app
+            .world()
+            .non_send_resource::<UiScript>()
+            .eval("return GetNumBattlefieldPositions(), GetNumBattlefieldFlagPositions()")
+            .unwrap();
+        assert_eq!(counts, (1, 1));
     }
 
     #[test]

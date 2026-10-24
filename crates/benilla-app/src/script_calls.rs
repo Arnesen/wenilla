@@ -18,7 +18,14 @@
 use bevy::ecs::system::{SystemParam, SystemParamItem};
 use bevy::prelude::*;
 
-use benilla_ui::script::{CallHost, CallTail, PetitionCall, ScriptCall, TabardCall, UiScript};
+use benilla_ui::script::{
+    AuctionCall, BankCall, BinderCall, CallHost, CallTail, DeathAction, DuelRequest, GossipCall,
+    InstanceCall, LootRollCall, MailCall, MeetingStoneCall, MerchantCall, PetitionCall, PvpCall,
+    ScriptCall, StableCall, SummonCall, TabardCall, TaxiCall, TradeCall, TradeSkillCall,
+    TrainerCall, UiScript,
+};
+
+mod windows;
 
 /// `DoEmote` (`0x5ef560`) in the reference's order: a posture emote's stand change to a state but 0
 /// runs its local apply's leave (`0x5f0790`), the loot close (`0x48f200` at `0x5f07d5`) then the
@@ -78,6 +85,41 @@ pub(crate) struct ScriptCallHost<'w, 's> {
                             crate::ui_logout::SessionSteps<'w>,
                             crate::tutorial::TutorialSteps<'w>,
                             crate::ui_session::LatchSteps<'w>,
+                        ),
+                    >,
+                    // The bank and the profession windows. A further window's applier joins this
+                    // set.
+                    ParamSet<
+                        'w,
+                        's,
+                        (
+                            crate::ui_bank::BankSteps<'w, 's>,
+                            crate::ui_tradeskill::TradeSkillSteps<'w>,
+                            crate::ui_craft::CraftSteps<'w>,
+                        ),
+                    >,
+                    // The dialogs and queues: the battlegrounds, death, the duel, the group loot
+                    // roll, the innkeeper, the summon, the meeting stone, the lockouts and the PvP
+                    // flag.
+                    ParamSet<
+                        'w,
+                        's,
+                        (
+                            crate::ui_battlefield::BattlefieldSteps<'w>,
+                            crate::death::DeathSteps<'w, 's>,
+                            crate::ui_duel::DuelSteps<'w>,
+                            crate::ui_loot_roll::LootRollSteps<'w>,
+                            crate::ui_binder::BinderSteps<'w>,
+                            crate::ui_summon::SummonSteps<'w>,
+                            crate::ui_dialog_verbs::MeetingStoneSteps<'w>,
+                            ParamSet<
+                                'w,
+                                's,
+                                (
+                                    crate::ui_instance::InstanceSteps<'w>,
+                                    crate::ui_unit::PvpSteps<'w>,
+                                ),
+                            >,
                         ),
                     >,
                 ),
@@ -239,6 +281,33 @@ impl ScriptCallHost<'_, '_> {
         self.signal_reports(script, mark);
         self.commit_views(script);
         script.signal_point(self);
+    }
+
+    /// `AcceptAreaSpiritHeal()` (`0x492310`): the scan first (`0x492316` → `0x4923b0`), each healer
+    /// change it makes applied as `0x4921c0` does, its out-of-range signal's listeners running
+    /// where it fires, then the send with the healer it left.
+    fn accept_area_spirit_heal(
+        &mut self,
+        script: &mut UiScript,
+        mark: &mut crate::ui_cast::ReportMark,
+    ) {
+        let changes = self.appliers.p2().p7().p1().rescan_spirit();
+        for change in &changes {
+            if change.cancel_aura {
+                script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+                self.at_point(script, mark);
+            }
+            // The signal ran above; the change's sends.
+            let mut world_steps = self.appliers.p2();
+            let mut dialogs = world_steps.p7();
+            let steps = dialogs.p1();
+            crate::ui_dialog_verbs::apply_healer_change(change, None, steps.net());
+        }
+        self.appliers
+            .p2()
+            .p7()
+            .p1()
+            .apply(script, DeathAction::AcceptAreaSpiritHeal);
     }
 
     /// The reports the call made since `mark` signalled now, ahead of whatever it signals next:
@@ -572,11 +641,18 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::PickItem(pick) => popup = appliers.p1().pick_item(pick),
             ScriptCall::EnchantConfirm(answer) => popup = appliers.p1().confirm_enchant(answer),
             ScriptCall::Loot(call) => tail = appliers.p5().p1().apply(script, call),
+            ScriptCall::Auction(AuctionCall::Close) => self.close_auction(script, &mut at.mark),
             ScriptCall::Auction(call) => appliers.p4().p3().apply(script, call),
             ScriptCall::Social(call) => appliers.p4().p4().apply(script, call),
             ScriptCall::Party(request) => appliers.p4().p5().apply(script, request),
-            ScriptCall::Quest(call) => appliers.p5().p3().apply(script, call),
+            ScriptCall::Quest(call) => {
+                if let Some(giver) = appliers.p5().p3().apply(script, call) {
+                    self.finish_quest_teardown(script, &mut at.mark, giver);
+                }
+            }
+            ScriptCall::Gossip(GossipCall::Close) => self.close_gossip(script, &mut at.mark),
             ScriptCall::Gossip(call) => appliers.p5().p4().apply(script, call),
+            ScriptCall::Mail(MailCall::Close) => self.close_mail(script, &mut at.mark),
             ScriptCall::Mail(call) => appliers.p5().p2().apply(script, call),
             // The partner's slot 7 is the trade's, the bind the targeting cursor's.
             ScriptCall::Trade(
@@ -587,9 +663,20 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 let check = call == benilla_ui::script::TradeCall::TargetEnchant;
                 appliers.p1().trade_enchant(script, partner, check);
             }
+            ScriptCall::Trade(TradeCall::Close) => self.close_trade(script, &mut at.mark),
             ScriptCall::Trade(call) => tail = appliers.p4().p6().apply(call),
-            ScriptCall::Trainer(call) => tail = appliers.p5().p5().apply(call),
-            ScriptCall::Taxi(call) => tail = appliers.p5().p6().apply(call),
+            ScriptCall::Trainer(TrainerCall::Buy { trainer, spell_id }) => {
+                appliers.p5().p5().buy(trainer, spell_id);
+            }
+            ScriptCall::Trainer(TrainerCall::OpenOwn) => {
+                self.open_own_trainer(script, &mut at.mark);
+            }
+            ScriptCall::Trainer(TrainerCall::Close) => self.close_trainer(script, &mut at.mark),
+            ScriptCall::Taxi(TaxiCall::Close) => self.close_taxi(script, &mut at.mark),
+            ScriptCall::Taxi(call) => appliers.p5().p6().apply(call),
+            ScriptCall::Merchant(MerchantCall::Close) => {
+                self.close_merchant(script, &mut at.mark);
+            }
             ScriptCall::Merchant(call) => appliers.p5().p7().apply(script, call),
             ScriptCall::Guild(call) => appliers.p4().p7().p0().apply(script, call),
             ScriptCall::Petition(PetitionCall::CloseRegistrar) => tail = self.close_registrar(),
@@ -609,9 +696,39 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Skill(call) => appliers.p2().p3().p1().apply(call),
             ScriptCall::Reputation(call) => tail = appliers.p2().p3().p2().apply(script, call),
             ScriptCall::Pet(call) => appliers.p6().p1().apply(script, call),
+            ScriptCall::Stable(StableCall::Close) => self.close_stable(script, &mut at.mark),
             ScriptCall::Stable(call) => appliers.p6().p2().apply(call),
             ScriptCall::Session(request) => appliers.p2().p5().p0().apply(request),
             ScriptCall::Tutorial(call) => appliers.p2().p5().p1().apply(script, call),
+            ScriptCall::Bank(BankCall::Close) => self.close_bank(script, &mut at.mark),
+            ScriptCall::Bank(BankCall::Purchase) => appliers.p2().p6().p0().purchase(script),
+            ScriptCall::TradeSkill(TradeSkillCall::Do { spell_id, count }) => {
+                crate::ui_tradeskill::do_trade_skill(&mut appliers.p3(), spell_id, count);
+            }
+            ScriptCall::TradeSkill(TradeSkillCall::Close) => appliers.p2().p6().p1().close(),
+            ScriptCall::Craft(call) => appliers.p2().p6().p2().apply(call),
+            ScriptCall::Battlefield(call) => appliers.p2().p7().p0().apply(script, call),
+            ScriptCall::Death(DeathAction::AcceptAreaSpiritHeal) => {
+                self.accept_area_spirit_heal(script, &mut at.mark);
+            }
+            ScriptCall::Death(action) => appliers.p2().p7().p1().apply(script, action),
+            ScriptCall::Duel(DuelRequest::StartByGuid(guid)) => {
+                let spell = appliers.p2().p7().p2().duel_spell();
+                if let Some(spell) = spell {
+                    crate::ui_duel::cast_duel(&mut appliers.p3(), spell, guid);
+                }
+            }
+            ScriptCall::Duel(request) => appliers.p2().p7().p2().answer(&request),
+            ScriptCall::LootRoll(LootRollCall::Vote { roll_id, roll_type }) => {
+                appliers.p2().p7().p3().vote(roll_id, roll_type);
+            }
+            ScriptCall::Binder(BinderCall::Confirm) => appliers.p2().p7().p4().confirm(),
+            ScriptCall::Summon(SummonCall::Confirm) => appliers.p2().p7().p5().confirm(),
+            ScriptCall::MeetingStone(MeetingStoneCall::Cancel) => {
+                appliers.p2().p7().p6().cancel(script);
+            }
+            ScriptCall::Instance(InstanceCall::Reset) => appliers.p2().p7().p7().p0().reset(),
+            ScriptCall::Pvp(PvpCall::Toggle) => appliers.p2().p7().p7().p1().toggle(),
         }
         self.settle_selection(script, &mut at, owed);
         let appliers = &mut self.appliers;
@@ -1005,9 +1122,12 @@ mod tests {
 
     mod cast_reports;
     mod census;
+    mod closes;
+    mod dialogs;
     mod refusals;
     mod selection;
     mod systems;
+    mod window_verbs;
 
     const ME: u64 = 0x10;
     /// The unit selected before the script runs.
@@ -4210,7 +4330,7 @@ mod tests {
     /// The systems of `app` that write the VM, and those of them whose declared access does not
     /// cover the call host's, by schedule and name. An exclusive system declares no access and is
     /// left out.
-    fn vm_writers_and_the_unhosted(app: &mut App) -> (usize, Vec<String>) {
+    fn vm_writers_and_the_unhosted(app: &mut App) -> (Vec<String>, Vec<String>) {
         use bevy::ecs::system::{IntoSystem, System};
         let world = app.world_mut();
         let host = System::initialize(&mut IntoSystem::into_system(|_: ScriptCallHost| {}), world);
@@ -4219,7 +4339,7 @@ mod tests {
             .iter()
             .map(|(_, s)| s.label())
             .collect();
-        let (mut writers, mut unhosted) = (0, Vec::new());
+        let (mut writers, mut unhosted) = (Vec::new(), Vec::new());
         for label in labels {
             world.schedule_scope(label, |world, schedule| {
                 schedule.graph_mut().systems.initialize(world);
@@ -4238,7 +4358,7 @@ mod tests {
                     if system.is_exclusive() || !access.has_resource_write(vm) {
                         continue;
                     }
-                    writers += 1;
+                    writers.push(system.name().to_string());
                     let mut with_host = declared.access.clone();
                     with_host.extend(host.clone());
                     if with_host.combined_access() != access {
@@ -4270,16 +4390,27 @@ mod tests {
             ),
         );
         let (writers, unhosted) = vm_writers_and_the_unhosted(&mut probe);
-        assert_eq!((writers, unhosted.len()), (3, 1), "{unhosted:?}");
+        assert_eq!((writers.len(), unhosted.len()), (3, 1), "{unhosted:?}");
 
         let mut app = crate::game_plugins::schedule_tests::headless_client_with(
             crate::dev::add_every_instrument,
         );
         let (writers, unhosted) = vm_writers_and_the_unhosted(&mut app);
+        // The census reads the client's systems: a hundred writers at least in either build, and
+        // where the build carries type names, a feed, a death feed and a frame poll among them.
         assert!(
-            writers > 200,
-            "the census reads the client's VM writers: {writers}"
+            writers.len() >= 100,
+            "the census reads the client's VM writers: {} read",
+            writers.len()
         );
+        if writers.iter().any(|w| w.contains("benilla_app::")) {
+            for name in ["feed_dialog_verbs", "feed_death", "poll_area_spirit_healer"] {
+                assert!(
+                    writers.iter().any(|w| w.contains(name)),
+                    "the census reads the client's VM writers, `{name}` among them"
+                );
+            }
+        }
         assert!(
             unhosted.is_empty(),
             "these systems write the VM without holding its call host (`HostedVm` or `VmWith`), \

@@ -1,6 +1,6 @@
 //! The app half of the verbs behind the stock `StaticPopup.lua` dialogs: the packet feeds that
-//! raise them and the drains behind their buttons, for the pet trainer's unlearn, the instance
-//! boot countdown, the area spirit healer's wave, the battleground queue and the meeting stone.
+//! raise them and what their buttons do, for the pet trainer's unlearn, the instance boot
+//! countdown, the area spirit healer's wave, the battleground queue and the meeting stone.
 //! A meeting stone's click runs the stone's own use slot, which refuses a join client-side or
 //! sends `CMSG_MEETINGSTONE_JOIN`, never the shared `CMSG_GAMEOBJ_USE`.
 
@@ -108,7 +108,7 @@ const SPIRIT_GUIDE_ACQUIRE_YD: f32 = 20.0;
 const SPIRIT_GUIDE_RETAIN_YD: f32 = SPIRIT_GUIDE_ACQUIRE_YD * 1.1;
 
 /// What [`AreaSpiritHealer::set_healer`] owes the frame; the reference does both in `0x4921c0`.
-#[derive(Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub(crate) struct SetHealerOutcome {
     /// A wave was pending and the healer changed (`0x4921fc`): `AREA_SPIRIT_HEALER_OUT_OF_RANGE`
     /// fires and `CMSG_CANCEL_AURA` goes out for 2584; this, not Lua, closes the dialog.
@@ -166,6 +166,12 @@ impl AreaSpiritHealer {
             cancel_aura: bust.cancel_aura || set.cancel_aura,
             query: set.query,
         }
+    }
+
+    /// Whether a wave's deadline is armed (`[0xb4e338]` non-zero).
+    #[cfg(test)]
+    pub(crate) fn armed(&self) -> bool {
+        self.deadline.is_some()
     }
 
     /// The cached healer: `AcceptAreaSpiritHeal`'s guid and the poll's retain subject.
@@ -281,7 +287,7 @@ impl BattlefieldQueue {
     }
 
     /// The map id `AcceptBattlefieldPort` sends for a 1-based slot, if the slot holds a queue.
-    fn map_id(&self, index: u8) -> Option<u32> {
+    pub(crate) fn map_id(&self, index: u8) -> Option<u32> {
         self.slots
             .get(usize::from(index).checked_sub(1)?)
             .and_then(|s| s.as_ref())
@@ -668,20 +674,32 @@ fn area_spirit_healer_leave_world(mut spirit: ResMut<AreaSpiritHealer>) {
     *spirit = AreaSpiritHealer::default();
 }
 
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(crate) fn feed_dialog_verbs(
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // The healer and the queue, which the death and battleground calls read: taken first.
+    mut vm: crate::script_calls::VmWith<(
+        ResMut<'static, AreaSpiritHealer>,
+        ResMut<'static, BattlefieldQueue>,
+    )>,
     mut pet: ResMut<PetUnlearnState>,
     mut boot: ResMut<InstanceBoot>,
-    mut spirit: ResMut<AreaSpiritHealer>,
-    mut queue: ResMut<BattlefieldQueue>,
     mut sink: crate::ui_action::MessageSink,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
-    hosted_vm.run(|script| {
+    let now = Instant::now();
+    let (spirit_secs, spirit_in_range, queue_tutorials, queue_changed) = {
+        let (mut spirit, mut queue) = vm.own();
+        (
+            spirit.secs(now),
+            std::mem::take(&mut spirit.in_range),
+            std::mem::take(&mut queue.tutorials),
+            std::mem::take(&mut queue.changed),
+        )
+    };
+    vm.run(|script| {
         let Some(script) = script else {
             return;
         };
-        let now = Instant::now();
 
         script.set_pet_untrainer_pending(pet.pending().is_some());
         if pet.ask {
@@ -707,28 +725,26 @@ pub(crate) fn feed_dialog_verbs(
             crate::ui_action::show_messages(script, &mut sink, "ui_dialog_verbs", lines);
         }
 
-        let secs = spirit.secs(now);
-        script.set_area_spirit_healer(spirit.healer().is_some(), secs);
-        if std::mem::take(&mut spirit.in_range) {
+        script.set_area_spirit_healer_secs(spirit_secs);
+        if spirit_in_range {
             script.fire_event("AREA_SPIRIT_HEALER_IN_RANGE", vec![]);
         }
 
-        for id in std::mem::take(&mut queue.tutorials) {
+        for id in queue_tutorials {
             if let Some(t) = tutorials.as_mut() {
                 t.write(crate::tutorial::TutorialEvent::trigger(id));
             }
         }
-        if std::mem::take(&mut queue.changed) {
+        if queue_changed {
             script.fire_event("UPDATE_BATTLEFIELD_STATUS", vec![]);
         }
     })
 }
 
-/// The pet trainer's confirm and the spirit healer's accept, the two drains over a latch.
+/// The pet trainer's confirm, a drain over its latch.
 fn drain_latch_verbs(
     mut hosted_vm: crate::script_calls::HostedVm,
     pet: Res<PetUnlearnState>,
-    spirit: Res<AreaSpiritHealer>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut sink: crate::ui_action::MessageSink,
@@ -764,170 +780,178 @@ fn drain_latch_verbs(
                 }
             }
         }
-
-        // AcceptAreaSpiritHeal: the cached healer's guid, nothing without one.
-        let accepts = script.take_area_spirit_accepts();
-        if let Some(healer) = spirit.healer() {
-            for _ in 0..accepts {
-                let _ = commands
-                    .0
-                    .send(ClientCommand::AreaSpiritHealerQueue { healer });
-            }
-        }
     })
 }
 
-/// The battleground port and the meeting-stone leave, the two drains over a queue.
-fn drain_queue_verbs(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    queue: Res<BattlefieldQueue>,
-    group: Option<Res<GroupState>>,
-    self_guid: Res<SelfGuid>,
-    commands: Res<NetCommands>,
-    mut sink: crate::ui_action::MessageSink,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
+/// `CancelMeetingStoneRequest()` inside its call ([`benilla_ui::script::MeetingStoneCall`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MeetingStoneSteps<'w> {
+    group: Option<Res<'w, GroupState>>,
+    self_guid: Res<'w, SelfGuid>,
+    net: Res<'w, NetCommands>,
+    sink: crate::ui_action::MessageSink<'w>,
+}
+
+impl MeetingStoneSteps<'_> {
+    /// `0x4ca120`: in a party whose leader is not the player, `ERR_MEETING_STONE_NOT_LEADER`
+    /// (`0x4ca14e`); otherwise `0x293`, queued or not.
+    pub(crate) fn cancel(&mut self, script: &mut UiScript) {
+        let not_leader = self
+            .group
+            .as_deref()
+            .is_some_and(|g| g.in_group && Some(g.leader) != self.self_guid.0);
+        if not_leader {
+            let input = script.input_events();
+            if let Some(line) = crate::ui_action::keyed_line(script, "ERR_MEETING_STONE_NOT_LEADER")
+            {
+                crate::ui_action::show_now(
+                    script,
+                    &mut self.sink,
+                    "ui_dialog_verbs",
+                    line.under(input),
+                );
+            }
             return;
-        };
-
-        for (index, accept) in script.take_battlefield_port_requests() {
-            if let Some(map_id) = queue.map_id(index) {
-                let _ = commands
-                    .0
-                    .send(ClientCommand::BattlefieldPort { map_id, accept });
-            }
         }
-
-        // CancelMeetingStoneRequest: in a party we do not lead, ERR_MEETING_STONE_NOT_LEADER;
-        // otherwise `0x293`, queued or not.
-        let cancels = script.take_meeting_stone_cancels();
-        if cancels > 0 {
-            let not_leader = group
-                .as_deref()
-                .is_some_and(|g| g.in_group && Some(g.leader) != self_guid.0);
-            if not_leader {
-                if let Some(line) =
-                    crate::ui_action::keyed_line(script, "ERR_MEETING_STONE_NOT_LEADER")
-                {
-                    crate::ui_action::show_messages(script, &mut sink, "ui_dialog_verbs", [line]);
-                }
-            } else {
-                for _ in 0..cancels {
-                    let _ = commands.0.send(ClientCommand::MeetingStoneLeave);
-                }
-            }
-        }
-    })
+        let _ = self.net.0.send(ClientCommand::MeetingStoneLeave);
+    }
 }
 
-/// The area-spirit-healer poll `0x4923b0`, run every frame from `CGWorldFrame`'s `OnUpdate`
-/// (`0x4818ca`): only a ghost (`[[player+0xe68]+8]` bit 4) holds a healer; a cached one is kept
-/// within 22 yd, else the last unit in the walk that is a `SPIRITGUIDE`, assistable and within
-/// 20 yd is adopted. Last, not nearest: the enumerate callback `0x4924c0` never stops the walk.
-fn poll_area_spirit_healer(
-    mut spirit: ResMut<AreaSpiritHealer>,
-    me: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
+/// The area-spirit-healer scan `0x4923b0`: only a ghost (`[[player+0xe68]+8]` bit 4) holds a
+/// healer; a cached one is kept within 22 yd, else the last unit in the walk that is a
+/// `SPIRITGUIDE`, assistable and within 20 yd is adopted. Last, not nearest: the enumerate callback
+/// `0x4924c0` never stops the walk. `CGWorldFrame`'s `OnUpdate` runs it every frame (`0x4818ca`),
+/// `AcceptAreaSpiritHeal` before its send (`0x492316`) and the time packet before its arm
+/// (`0x492296`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SpiritScan<'w, 's> {
+    me: Query<'w, 's, (&'static ObjectStore, &'static Transform), With<SelfPlayer>>,
+    #[allow(clippy::type_complexity)] // the walk's unit view
     units: Query<
+        'w,
+        's,
         (
-            &crate::net::Guid,
-            &crate::net::NetEntity,
-            &ObjectStore,
-            &Transform,
+            &'static crate::net::Guid,
+            &'static crate::net::NetEntity,
+            &'static ObjectStore,
+            &'static Transform,
         ),
         Without<SelfPlayer>,
     >,
+    relations: crate::target::RelationWorld<'w, 's>,
+}
+
+impl SpiritScan<'_, '_> {
+    /// The scan on `spirit`: what each healer change it makes owes, in order.
+    pub(crate) fn run(&self, spirit: &mut AreaSpiritHealer) -> Vec<SetHealerOutcome> {
+        let Ok((self_store, self_tf)) = self.me.single() else {
+            return vec![spirit.set_healer(None)];
+        };
+        if !self_store.0.player_is_ghost() {
+            return vec![spirit.set_healer(None)];
+        }
+        let here = self_tf.translation;
+        let mut out = Vec::new();
+
+        // Retain: a guid that no longer streams drops like one out of range (an `ObjectPtr` miss).
+        if let Some(cached) = spirit.healer() {
+            let still = self.units.iter().find(|(guid, ..)| guid.0 == cached);
+            let keep = still.is_some_and(|(_, _, _, tf)| {
+                tf.translation.distance_squared(here)
+                    <= SPIRIT_GUIDE_RETAIN_YD * SPIRIT_GUIDE_RETAIN_YD
+            });
+            if !keep {
+                out.push(spirit.set_healer(None));
+            }
+        }
+        if spirit.healer().is_some() {
+            return out;
+        }
+
+        // Acquire: `CanAssist 0x6066f0` with the guide as `this` (`0x492506`).
+        let relations = &self.relations;
+        let (rel, Some(me)) = (relations.get(), relations.me()) else {
+            return out;
+        };
+        let mut adopted = None;
+        for (guid, kind, store, tf) in self.units.iter() {
+            if kind.kind != benilla_protocol::EntityKind::Unit {
+                continue;
+            }
+            if store.0.unit_npc_flags() & NPC_FLAG_SPIRITGUIDE == 0 {
+                continue;
+            }
+            if tf.translation.distance_squared(here)
+                > SPIRIT_GUIDE_ACQUIRE_YD * SPIRIT_GUIDE_ACQUIRE_YD
+            {
+                continue;
+            }
+            if !rel.can_assist(&relations.unit_of(guid.0, store), &me) {
+                continue;
+            }
+            adopted = Some(guid.0); // last wins: the callback never stops the walk
+        }
+        if let Some(guid) = adopted {
+            out.push(spirit.set_healer(Some(guid)));
+        }
+        out
+    }
+}
+
+/// What one healer change owes, as `0x4921c0` does it: a pending wave's cancel, `0x6e7040(0xA18)`,
+/// signals `AREA_SPIRIT_HEALER_OUT_OF_RANGE` with no argument into `script`, if given, then sends
+/// `CMSG_CANCEL_AURA`; a new healer is queried.
+pub(crate) fn apply_healer_change(
+    outcome: &SetHealerOutcome,
+    script: Option<&mut UiScript>,
+    net: &NetCommands,
+) {
+    if outcome.cancel_aura {
+        if let Some(script) = script {
+            script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
+        }
+        let _ = net.0.send(ClientCommand::CancelAura {
+            spell_id: AREA_SPIRIT_HEALER_AURA,
+        });
+    }
+    if let Some(healer) = outcome.query {
+        let _ = net.0.send(ClientCommand::AreaSpiritHealerQuery { healer });
+    }
+}
+
+/// The scan's every-frame run (`0x4818ca` → `0x4923b0`).
+fn poll_area_spirit_healer(
     commands: Res<NetCommands>,
-    // The relation inputs, which a call the event's handlers make can write: read first.
-    mut vm: crate::script_calls::VmWith<crate::target::RelationWorld<'static, 'static>>,
+    // The relation inputs, which a call the event's handlers make can write, and the healer the
+    // accept's call reads: read and written first.
+    mut vm: crate::script_calls::VmWith<(
+        SpiritScan<'static, 'static>,
+        ResMut<'static, AreaSpiritHealer>,
+    )>,
 ) {
     let outcomes = {
-        let relations = vm.own();
-        poll_outcomes(&mut spirit, &me, &units, &relations)
+        let (scan, mut spirit) = vm.own();
+        scan.run(&mut spirit)
     };
     vm.run(|mut script| {
-        for outcome in outcomes {
-            if outcome.cancel_aura {
-                // `0x6e7040(0xA18)`: the event with no argument, the packet with no guid.
-                if let Some(script) = script.as_deref_mut() {
-                    script.fire_event("AREA_SPIRIT_HEALER_OUT_OF_RANGE", vec![]);
-                }
-                let _ = commands.0.send(ClientCommand::CancelAura {
-                    spell_id: AREA_SPIRIT_HEALER_AURA,
-                });
-            }
-            if let Some(healer) = outcome.query {
-                let _ = commands
-                    .0
-                    .send(ClientCommand::AreaSpiritHealerQuery { healer });
-            }
+        for outcome in &outcomes {
+            apply_healer_change(outcome, script.as_deref_mut(), &commands);
         }
     })
 }
 
-/// [`poll_area_spirit_healer`]'s walk: what each healer change it makes owes, in order.
-fn poll_outcomes(
-    spirit: &mut AreaSpiritHealer,
-    me: &Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
-    units: &Query<
-        (
-            &crate::net::Guid,
-            &crate::net::NetEntity,
-            &ObjectStore,
-            &Transform,
-        ),
-        Without<SelfPlayer>,
-    >,
-    relations: &crate::target::RelationWorld,
-) -> Vec<SetHealerOutcome> {
-    let Ok((self_store, self_tf)) = me.single() else {
-        return vec![spirit.set_healer(None)];
-    };
-    if !self_store.0.player_is_ghost() {
-        return vec![spirit.set_healer(None)];
-    }
-    let here = self_tf.translation;
-    let mut out = Vec::new();
-
-    // Retain: a guid that no longer streams drops like one out of range (an `ObjectPtr` miss).
-    if let Some(cached) = spirit.healer() {
-        let still = units.iter().find(|(guid, ..)| guid.0 == cached);
-        let keep = still.is_some_and(|(_, _, _, tf)| {
-            tf.translation.distance_squared(here) <= SPIRIT_GUIDE_RETAIN_YD * SPIRIT_GUIDE_RETAIN_YD
-        });
-        if !keep {
-            out.push(spirit.set_healer(None));
+/// The healer changes the time packet's scan made, signalled and sent in order with the VM in
+/// hand (`0x4921c0` inside `0x492296`).
+fn apply_healer_changes(
+    In(changes): In<Vec<SetHealerOutcome>>,
+    commands: Res<NetCommands>,
+    mut vm: crate::script_calls::HostedVm,
+) {
+    vm.run(|mut script| {
+        for change in &changes {
+            apply_healer_change(change, script.as_deref_mut(), &commands);
         }
-    }
-    if spirit.healer().is_some() {
-        return out;
-    }
-
-    // Acquire: `CanAssist 0x6066f0` with the guide as `this` (`0x492506`).
-    let (rel, Some(me)) = (relations.get(), relations.me()) else {
-        return out;
-    };
-    let mut adopted = None;
-    for (guid, kind, store, tf) in units.iter() {
-        if kind.kind != benilla_protocol::EntityKind::Unit {
-            continue;
-        }
-        if store.0.unit_npc_flags() & NPC_FLAG_SPIRITGUIDE == 0 {
-            continue;
-        }
-        if tf.translation.distance_squared(here) > SPIRIT_GUIDE_ACQUIRE_YD * SPIRIT_GUIDE_ACQUIRE_YD
-        {
-            continue;
-        }
-        if !rel.can_assist(&relations.unit_of(guid.0, store), &me) {
-            continue;
-        }
-        adopted = Some(guid.0); // last wins: the callback never stops the walk
-    }
-    if let Some(guid) = adopted {
-        out.push(spirit.set_healer(Some(guid)));
-    }
-    out
+    });
 }
 
 /// The dialog verbs' packet handlers: each parks a question or a countdown for the feed.
@@ -978,9 +1002,25 @@ mod net {
         }
     }
 
-    fn on_area_spirit_healer_time(In(ev): In<SessionEvent>, mut spirit: ResMut<AreaSpiritHealer>) {
+    /// `0x492290`: the scan first (`0x492296`), then the arm for the healer it left cached
+    /// (`0x4922a0`); the scan's changes signal and send as the handler returns, in their order.
+    fn on_area_spirit_healer_time(
+        In(ev): In<SessionEvent>,
+        scan: super::SpiritScan,
+        mut spirit: ResMut<AreaSpiritHealer>,
+        mut world_commands: Commands,
+    ) {
         if let SessionEvent::AreaSpiritHealerTime { healer, ms } = ev {
+            let changes = scan.run(&mut spirit);
             spirit.on_time(healer, ms, std::time::Instant::now());
+            if changes.is_empty() {
+                return;
+            }
+            world_commands.queue(move |world: &mut World| {
+                if let Err(e) = world.run_system_cached_with(super::apply_healer_changes, changes) {
+                    debug!("net: the spirit healer's changes did not run: {e}");
+                }
+            });
         }
     }
 
@@ -1036,13 +1076,7 @@ impl Plugin for UiDialogVerbsPlugin {
                         .after(crate::ui_battlefield::reset_on_world_enter)
                         .before(feed_meeting_stone),
                     feed_meeting_stone.in_set(UiFeed),
-                    // Before the target chain, where the poll and the click can change the
-                    // healer: the reference resolves an Accept press in the UI dispatch, before
-                    // its pick and poll run later in the frame.
-                    drain_latch_verbs
-                        .in_set(crate::ui_script::UiDrain)
-                        .before(crate::target::TargetUpdate),
-                    drain_queue_verbs.in_set(crate::ui_script::UiDrain),
+                    drain_latch_verbs.in_set(crate::ui_script::UiDrain),
                     // After the target chain, which writes `MeetingStoneUse`, so the join leaves
                     // on the click's own frame.
                     drain_meeting_stone_joins

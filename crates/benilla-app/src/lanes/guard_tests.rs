@@ -89,27 +89,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     (Row::Queue, "::ui_bank::BankErrors", "the bank errors"),
     (
         Row::Queue,
-        "::ui_battlefield_positions::BattlefieldPositions",
-        "the battlefield positions",
-    ),
-    (
-        Row::Queue,
-        "::ui_battlefield::Battlefield",
-        "the battlefield status",
-    ),
-    (Row::Queue, "::ui_binder::BinderState", "the binder confirm"),
-    (
-        Row::Queue,
-        "::ui_dialog_verbs::AreaSpiritHealer",
-        "the area spirit healer",
-    ),
-    (
-        Row::Queue,
-        "::ui_dialog_verbs::BattlefieldQueue",
-        "the battlefield queue",
-    ),
-    (
-        Row::Queue,
         "::ui_dialog_verbs::InstanceBoot",
         "the instance boot",
     ),
@@ -123,7 +102,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "::ui_dialog_verbs::PetUnlearnState",
         "the pet unlearn confirm",
     ),
-    (Row::Queue, "::ui_duel::DuelState", "the duel state"),
     (
         Row::HostHeld,
         "::ui_guild::GuildState",
@@ -175,7 +153,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "::ui_session::latch::LatchCloses",
         "the close counts each window's core adds to, which every latched window's feed compares",
     ),
-    (Row::Queue, "::ui_loot_roll::LootRolls", "the loot rolls"),
     (
         Row::Queue,
         "::ui_merchant::MerchantErrors",
@@ -238,7 +215,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "the stable's packets, which `feed_stable` fires from; the stable verbs and the pet's \
          abandon, acting in their calls, read it in the host",
     ),
-    (Row::Queue, "::ui_summon::SummonState", "the summon state"),
     (
         Row::HostHeld,
         "::ui_tabard::TabardOpen",
@@ -269,9 +245,74 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "the trainer errors",
     ),
     (
-        Row::Queue,
+        Row::HostHeld,
+        "::death::DeathNet",
+        "the death stores, which `feed_death` fires the offers and the corpse range from; the death verbs, acting in their calls, hold them in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_bank::BankOpen",
+        "the banker's cell, which `feed_bank` fires from; `PurchaseSlot` and `CloseBankFrame`, acting in their calls, hold it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_battlefield::Battlefield",
+        "the battleground list, which `feed_battlefield` fires from; the join, acting in its call, reads it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_battlefield_positions::BattlefieldPositions",
+        "the teammate positions, which `feed_battlefield_positions` fires from; the positions request, acting in its call, holds them in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_battlefield_score::BattlefieldScoreboard",
+        "the scoreboard, which `feed_battlefield_score` fires from; the score request, acting in its call, holds its stamp in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_binder::BinderState",
+        "the bind question, which `feed_binder` fires from; `ConfirmBinder`, acting in its call, reads it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_craft::CraftOpen",
+        "the craft window's line, which `feed_craft` fires from; `CloseCraft`, acting in its call, holds it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_dialog_verbs::AreaSpiritHealer",
+        "the area spirit healer, whose `in_range` the time packet's handler fills and `feed_dialog_verbs` fires `AREA_SPIRIT_HEALER_IN_RANGE` from in system order; `AcceptAreaSpiritHeal`'s scan, acting in its call, holds it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_dialog_verbs::BattlefieldQueue",
+        "the battleground queue slots, which `feed_dialog_verbs` and `feed_battlefield_score` fire from; the port, leave and positions verbs, acting in their calls, read them in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_duel::DuelState",
+        "the duel session, which `feed_duel` fires from; the duel answers, acting in their calls, read it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_loot_roll::LootRolls",
+        "the open rolls, which `feed_loot_rolls` fires from; the votes, acting in their calls, hold them in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_summon::SummonState",
+        "the summon latch, which `feed_summon` fires from; `ConfirmSummon`, acting in its call, reads it in the host",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_tradeskill::TradeSkillOpen",
+        "the profession window's line, which `feed_trade_skill` fires from; `CloseTradeSkill`, acting in its call, holds it in the host",
+    ),
+    (
+        Row::HostHeld,
         "::ui_trainer::TrainerOpen",
-        "the trainer's packets",
+        "the trainer's cell, which `feed_trainer` fires from; the trainer verbs, acting in their calls, hold it in the host",
     ),
     (
         Row::Edge,
@@ -665,12 +706,19 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::LootKneel",
     "::MailOpen",
     "::Stationery",
-    "::MerchantOpen",
     // The repair discounts and the taxi graph the host's merchant and taxi verbs consult.
     "::RepairTables",
     "::TaxiCatalogs",
+    // The bank's prices and the dialogs' states the host's bank, battleground, death, duel,
+    // innkeeper and summon verbs consult.
+    "::BankPrices",
+    "::ui_battlefield::Battlefield",
+    "::MapCatalogRes",
+    "::BinderState",
+    "::BattlefieldQueue",
+    "::DuelState",
+    "::SummonState",
     "::PetBar",
-    "::ui_stable::StableOpen",
     "::QuestLog",
     "::UiClock",
     "::InteractNpc",

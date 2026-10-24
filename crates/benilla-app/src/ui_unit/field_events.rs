@@ -38,9 +38,7 @@ pub(crate) struct NoticeFiring<'w, 's> {
     skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     // The aura watcher's cache and the store its packet left.
     auras: crate::ui_aura::PlayerAuraWatch<'w, 's>,
-    // `SetPetGuid`'s trainer refresh reads the open trainer (`0x4bc860`-`0x4bc879`) and runs its
-    // close, which needs the latch, as a world turn after the notice.
-    trainer: Option<Res<'w, crate::ui_trainer::TrainerOpen>>,
+    // `SetPetGuid`'s trainer refresh, whose close needs the latch: a world turn after the notice.
     commands: Commands<'w, 's>,
     // `SetPetGuid`'s unit lookup of the new guid (`0x4bc8e4`).
     index: Option<Res<'w, crate::net::GuidIndex>>,
@@ -50,9 +48,9 @@ pub(crate) struct NoticeFiring<'w, 's> {
 impl NoticeFiring<'_, '_> {
     /// One notice's signals; whether it left a world turn the lane's firing must yield to, so the
     /// turn runs before the next notice.
-    fn fire(&mut self, script: &mut UiScript, notice: FieldNotice) -> bool {
+    fn fire(&mut self, script: &mut UiScript, notice: FieldNotice, trainer: Option<u64>) -> bool {
         if let FieldNotice::PetGuidSet { changed, guid } = notice {
-            return self.pet_guid_set(script, changed, guid);
+            return self.pet_guid_set(script, changed, guid, trainer);
         }
         if notice == FieldNotice::PlayerAuras {
             self.auras.run(script);
@@ -118,9 +116,16 @@ impl NoticeFiring<'_, '_> {
     /// `SetPetGuid`'s signals in its order (`0x4bc847`-`0x4bc911`): on a change, `UNIT_PET`, then,
     /// with a pet trainer open and our player held, `TalkToTrainer` on it (`0x4bc8b2`), then, when
     /// the new guid resolves as a unit (`0x4bc8e4`) that `IsPlayerOrHunterPet` passes (`0x4bc8ef`),
-    /// `PET_UI_CLOSE` (`0x4bc907`); then `PET_BAR_UPDATE`. The trainer's close needs the latch, so
-    /// with one to refresh the rest runs as a world turn after this notice.
-    fn pet_guid_set(&mut self, script: &mut UiScript, changed: bool, guid: u64) -> bool {
+    /// `PET_UI_CLOSE` (`0x4bc907`); then `PET_BAR_UPDATE`. `trainer` is the open pet trainer
+    /// (`0x4bc860`-`0x4bc879`), whose close needs the latch, so with one the rest runs as a world
+    /// turn after this notice.
+    fn pet_guid_set(
+        &mut self,
+        script: &mut UiScript,
+        changed: bool,
+        guid: u64,
+        trainer: Option<u64>,
+    ) -> bool {
         if !changed {
             script.fire_event("PET_BAR_UPDATE", vec![]);
             return false;
@@ -134,9 +139,7 @@ impl NoticeFiring<'_, '_> {
                 .and_then(|i| i.0.get(&guid))
                 .and_then(|&e| self.stores.get(e).ok())
                 .is_some_and(|unit| crate::ui_pet::is_player_or_hunter_pet(unit, guid, player));
-        let trainer = crate::ui_trainer::open_pet_trainer(self.trainer.as_deref())
-            .filter(|_| player.is_some());
-        let Some(trainer) = trainer else {
+        let Some(trainer) = trainer.filter(|_| player.is_some()) else {
             if closes {
                 script.fire_event("PET_UI_CLOSE", vec![]);
             }
@@ -211,37 +214,44 @@ fn peek(world: &World) -> Option<crate::lanes::Stamp> {
     world.get_resource::<NoticeLane>()?.peek()
 }
 
+/// The VM and the host, with the open trainer `SetPetGuid` reads between notices.
+type NoticeVm<'w, 's> =
+    crate::script_calls::VmWith<'w, 's, Option<Res<'static, crate::ui_trainer::TrainerOpen>>>;
+
 /// The notices `until` admits, in stamp order, each one's signals with the host lent; the lane's
 /// firing stops after a notice whose firing stamped anything, so the drain takes what it pushed
-/// next, or left a world turn, which runs as the firing returns. With no VM there is nobody to hear them, and they are dropped, as below.
-fn fire_lane(
-    hosted_vm: &mut crate::script_calls::HostedVm,
-    lane: &mut NoticeLane,
-    firing: &mut NoticeFiring,
-    until: Until,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            lane.clear();
-            return;
-        };
-        while let Some((stamp, notice)) = lane.pop(until) {
-            let (yielded, moved) = crate::lanes::firing(stamp, || firing.fire(script, notice));
-            if moved || yielded {
-                break;
+/// next, or left a world turn, which runs as the firing returns. With no VM there is nobody to
+/// hear them, and they are dropped, as below.
+fn fire_lane(vm: &mut NoticeVm, lane: &mut NoticeLane, firing: &mut NoticeFiring, until: Until) {
+    if vm.parts().0.is_none() {
+        lane.clear();
+        return;
+    }
+    while let Some((stamp, notice)) = lane.pop(until) {
+        let trainer = match &notice {
+            FieldNotice::PetGuidSet { changed: true, .. } => {
+                crate::ui_trainer::open_pet_trainer(vm.own().as_deref())
             }
+            _ => None,
+        };
+        let (yielded, moved) = vm.run(|script| match script {
+            Some(script) => crate::lanes::firing(stamp, || firing.fire(script, notice, trainer)),
+            None => (false, false),
+        });
+        if moved || yielded {
+            break;
         }
-    })
+    }
 }
 
 /// The notice lane's `fire_until`.
 fn fire_notices(
     In(until): In<Until>,
-    mut hosted_vm: crate::script_calls::HostedVm,
+    mut vm: NoticeVm,
     mut lane: ResMut<NoticeLane>,
     mut firing: NoticeFiring,
 ) {
-    fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+    fire_lane(&mut vm, &mut lane, &mut firing, until);
 }
 
 /// `PLAYER_LEVEL_UP` (`0x5e413e`, event `0xc7`), its nine values pushed as `%d`: the message's
@@ -296,13 +306,13 @@ pub(super) fn on_level_up(
 /// Every notice waiting, fired alone, for a test that drives the notices without the chat lane.
 #[cfg(test)]
 pub(crate) fn fire_field_notices(
-    mut hosted_vm: crate::script_calls::HostedVm,
+    mut vm: NoticeVm,
     mut lane: ResMut<NoticeLane>,
     mut firing: NoticeFiring,
 ) {
     let until = Until::all();
     while lane.peek().is_some_and(|s| until.admits(s)) {
-        fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+        fire_lane(&mut vm, &mut lane, &mut firing, until);
     }
 }
 
@@ -726,6 +736,32 @@ mod tests {
             mouseover: MOB,
             ..Default::default()
         }
+    }
+
+    /// `SetPetGuid` with no pet trainer open signals inside its notice (`0x4bc847`-`0x4bc911`):
+    /// `UNIT_PET` and `PET_BAR_UPDATE` ahead of the next notice's events, with no world turn.
+    #[test]
+    fn a_pet_change_with_no_trainer_signals_inside_its_notice() {
+        let mut app = world(seated());
+        assert_eq!(
+            fired(
+                &mut app,
+                &[
+                    FieldNotice::PetGuidSet {
+                        changed: true,
+                        guid: 0
+                    },
+                    FieldNotice::Global {
+                        id: crate::field_watch::id::PLAYER_REGEN_DISABLED
+                    }
+                ]
+            ),
+            [
+                "UNIT_PET player",
+                "PET_BAR_UPDATE nil",
+                "PLAYER_REGEN_DISABLED nil"
+            ]
+        );
     }
 
     /// `UNIT_INVENTORY_CHANGED` from its three kinds of producer: the visible-item bridge

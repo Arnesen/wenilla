@@ -112,7 +112,7 @@ fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCo
     (app, rx)
 }
 
-pub(super) fn latch(app: &App) -> Option<u64> {
+pub(crate) fn latch(app: &App) -> Option<u64> {
     app.world().resource::<InteractLatch>().guid()
 }
 
@@ -165,7 +165,7 @@ fn read_book(world: &mut World, npc: u64) {
 }
 
 /// Each window's open as its packet handler or click runs it, on `npc`.
-pub(super) fn open(app: &mut App, window: W, npc: u64) {
+pub(crate) fn open(app: &mut App, window: W, npc: u64) {
     let world = app.world_mut();
     match window {
         W::Trade => {
@@ -356,70 +356,6 @@ fn a_direct_close_of_the_latched_window_fires_its_event_twice_and_quest_once() {
             [event(window)],
             "{window:?} through the dispatcher"
         );
-    }
-}
-
-/// The stock frames answer `*_CLOSED` with `HideUIPanel`, whose `OnHide` calls the close verb.
-/// The verb runs inside the fire, as the reference's does. From the X button (the frame already
-/// hidden, its `OnHide` calling the verb) every core fires twice. From a walk-away the merchant's
-/// verb finds its cell already clear (`0x4fae0e` clears before `0x4fae2c` fires), while the bank's
-/// and the trainer's fire before they clear (`0x4f84df`, `0x4d7468`), so their verb fires again.
-#[test]
-fn a_stock_on_hide_close_inside_the_fire_runs_as_the_reference() {
-    for (window, event, verb, walk_away_times) in [
-        (
-            super::NpcWindow::Merchant,
-            "MERCHANT_CLOSED",
-            "CloseMerchant",
-            1,
-        ),
-        (
-            super::NpcWindow::Bank,
-            "BANKFRAME_CLOSED",
-            "CloseBankFrame",
-            2,
-        ),
-        (
-            super::NpcWindow::Trainer,
-            "TRAINER_CLOSED",
-            "CloseTrainer",
-            2,
-        ),
-    ] {
-        for walk_away in [false, true] {
-            let mut app = harness();
-            app.world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
-                .run(&format!(
-                    "SHOWN = true local f = CreateFrame('Frame') f:RegisterEvent('{event}') \
-                     f:SetScript('OnEvent', function() \
-                       if SHOWN then SHOWN = false {verb}() end end)"
-                ))
-                .unwrap();
-            open(&mut app, window, NPC);
-            if walk_away {
-                dispatch(app.world_mut());
-            } else {
-                // The X button: `HideUIPanel` hides the frame, and `OnHide` calls the verb.
-                app.world()
-                    .non_send_resource::<benilla_ui::script::UiScript>()
-                    .run("SHOWN = false")
-                    .unwrap();
-                close(&mut app, window);
-            }
-            let times = if walk_away { walk_away_times } else { 2 };
-            assert_eq!(
-                seen_in(&app),
-                vec![event; times],
-                "{window:?}, walk-away {walk_away}"
-            );
-            assert_eq!(latch(&app), None);
-            assert!(app
-                .world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
-                .errors()
-                .is_empty());
-        }
     }
 }
 

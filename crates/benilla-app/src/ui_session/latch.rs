@@ -109,6 +109,10 @@ pub(crate) struct InteractLatch {
     guid: Option<u64>,
     /// [`fire`]'s nesting, against a handler that re-closes forever.
     depth: u32,
+    /// The guids [`LatchSteps::release`] released inside a call, for the world's check after it
+    /// ([`check_call_releases`]).
+    #[cfg(debug_assertions)]
+    released: Vec<u64>,
 }
 
 impl InteractLatch {
@@ -178,9 +182,9 @@ impl LatchSteps<'_> {
     /// re-enters while its cell is still set, so its signal fires twice. Whether it re-enters. No
     /// other cell holds a latched guid: every opener registers before it writes its cell
     /// ([`register`] closes the holder first), and the two that write first, the designer's and
-    /// the item text's, are closed by that register, or hold an item's or an object's guid. Every
-    /// walk checks it in a debug build ([`debug_assert_one_holder`]), as this cannot read the
-    /// other windows' cells beside the host.
+    /// the item text's, are closed by that register, or hold an item's or an object's guid. A debug
+    /// build checks it, as for every walk ([`debug_assert_one_holder`]), once the call is done
+    /// ([`check_call_releases`]): this cannot read the other windows' cells beside the host.
     pub(crate) fn release(&mut self, cell: u64) -> bool {
         let Some(latch) = self.latch.as_deref_mut() else {
             return false;
@@ -192,6 +196,8 @@ impl LatchSteps<'_> {
             vocal.write(LatchVocal::Goodbye(cell));
         }
         latch.guid = None;
+        #[cfg(debug_assertions)]
+        latch.released.push(cell);
         true
     }
 
@@ -216,10 +222,6 @@ pub(crate) trait LatchedWindow: Resource + Sized {
     fn take_close_verb(_script: &mut UiScript) -> bool {
         false
     }
-    /// What the close verb does: its binding's call into the core.
-    fn close_verb(world: &mut World) {
-        Self::dispatched(world);
-    }
 }
 
 /// One registered window, type-erased for the dispatcher.
@@ -229,7 +231,6 @@ struct Entry {
     cell: fn(&World) -> Option<u64>,
     dispatched: fn(&mut World),
     take_close_verb: fn(&mut UiScript) -> bool,
-    close_verb: fn(&mut World),
 }
 
 /// The windows on the latch, in `0x493310`'s order.
@@ -243,6 +244,9 @@ pub(crate) trait LatchApp {
 
 impl LatchApp for App {
     fn add_latched_window<T: LatchedWindow>(&mut self) -> &mut Self {
+        if !self.world().contains_resource::<LatchedWindows>() {
+            self.add_systems(Last, check_call_releases);
+        }
         let world = self.world_mut();
         world.init_resource::<InteractLatch>();
         world.init_resource::<LatchCloses>();
@@ -253,7 +257,6 @@ impl LatchApp for App {
                 cell: |world| world.get_resource::<T>().and_then(T::cell),
                 dispatched: T::dispatched,
                 take_close_verb: T::take_close_verb,
-                close_verb: T::close_verb,
             });
             windows.0.sort_by_key(|e| e.window);
         }
@@ -365,6 +368,27 @@ fn debug_assert_one_holder(world: &World, guid: u64, left: usize) {
     }
 }
 
+/// [`debug_assert_one_holder`] for each guid a call's core released without the walk
+/// ([`LatchSteps::release`]), where every cell is readable: none still holds it, unless the latch
+/// took it again since, as an opener's register does.
+pub(crate) fn check_call_releases(world: &mut World) {
+    #[cfg(debug_assertions)]
+    {
+        let Some(mut latch) = world.get_resource_mut::<InteractLatch>() else {
+            return;
+        };
+        let released = std::mem::take(&mut latch.released);
+        let latched = latch.guid;
+        for guid in released {
+            if latched != Some(guid) {
+                debug_assert_one_holder(world, guid, 0);
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = world;
+}
+
 /// A core cleared `window`'s cell: its feed starts over from closed.
 pub(crate) fn note_closed(world: &mut World, window: NpcWindow) {
     world.get_resource_or_init::<LatchCloses>().note(window);
@@ -399,7 +423,7 @@ pub(crate) fn fire(world: &mut World, f: impl FnOnce(&mut UiScript)) {
                 .get_non_send_resource_mut::<UiScript>()
                 .is_some_and(|mut s| (e.take_close_verb)(&mut s));
             if called {
-                (e.close_verb)(world);
+                (e.dispatched)(world);
             }
         }
     }

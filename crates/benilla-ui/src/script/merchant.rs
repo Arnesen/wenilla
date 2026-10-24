@@ -94,14 +94,9 @@ pub struct MerchantState {
 }
 
 impl super::UiScript {
-    /// Push (or clear, with `None`) the open vendor. Clearing it leaves repair mode, as the
-    /// merchant-close handler restores the Point base mode (`0x4fadf0`).
+    /// Push (or clear, with `None`) the open vendor.
     pub fn set_merchant(&mut self, state: Option<MerchantState>) {
-        let closing = state.is_none();
         self.model_mut().merchant = state;
-        if closing {
-            self.model_mut().repair_mode = false;
-        }
     }
 
     /// Push `GetRepairAllCost`'s total in copper, swept by the app ahead of the events that read it.
@@ -143,11 +138,6 @@ impl super::UiScript {
         })
     }
 
-    /// Whether `CloseMerchant` was called since the last drain; the close sends no packet.
-    pub fn take_merchant_close(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().merchant_close)
-    }
-
     /// The 1-based buyback slots a harness's VM kept ([`Self::keep_calls`]) for `BuybackItem`.
     pub fn take_merchant_buybacks(&mut self) -> Vec<u32> {
         self.take_calls_where(|call| match call {
@@ -171,7 +161,8 @@ impl super::UiScript {
     }
 
     /// Leave repair mode, as `HideRepairCursor` does, for the world's right mouse-down, which
-    /// resets the Repair base mode to Point (`0x492c68`).
+    /// resets the Repair base mode to Point (`0x492c68`), and the merchant close's tail
+    /// (`0x4fae4f`-`0x4fae68`).
     pub fn end_repair_mode(&mut self) {
         self.model_mut().repair_mode = false;
     }
@@ -205,6 +196,8 @@ pub enum MerchantCall {
     /// `CMSG_BUY_ITEM_IN_SLOT` into the item in that bag slot, `None` the player's own for the
     /// backpack (`0x4c7c7d`), slot `0xFF` so the server picks, count 1.
     BuyIntoBag { bag_guid: Option<u64>, entry: u32 },
+    /// `CloseMerchant()` (`0x4fb120`): the close core `0x4fadf0`.
+    Close,
 }
 
 /// Hand `call` to the host, which applies it before this returns ([`super::calls::submit`]).
@@ -440,15 +433,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CloseMerchant(): sends no packet; the app runs the close core on the flag, as the core
-    // needs the latch (Part of #2202).
+    // CloseMerchant() (`0x4fb120`): the close core `0x4fadf0` inside the call; no packet.
     g.set(
         "CloseMerchant",
-        lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.merchant_close = true;
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| submit(lua, MerchantCall::Close))?,
     )?;
 
     g.set(
@@ -857,13 +845,12 @@ mod tests {
     }
 
     #[test]
-    fn close_merchant_flags_the_intent() {
+    fn close_merchant_is_a_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_merchant(Some(stock()));
-        assert!(!s.take_merchant_close());
         s.run("CloseMerchant()").unwrap();
-        assert!(s.take_merchant_close());
-        assert!(!s.take_merchant_close(), "drained");
+        assert_eq!(s.take_merchant_calls(), [super::MerchantCall::Close]);
     }
 
     /// The question-mark fallback and the buyback miss: a vendor row whose wire display has no
@@ -1024,13 +1011,6 @@ mod tests {
         assert_eq!(s.ui_cursor(), None, "repair clears a stale hover override");
         s.run("HideRepairCursor()").unwrap();
         assert!(!s.repair_mode());
-
-        s.run("ShowRepairCursor()").unwrap();
-        s.set_merchant(None);
-        assert!(
-            !s.repair_mode(),
-            "closing the merchant hides the repair cursor"
-        );
     }
 
     #[test]

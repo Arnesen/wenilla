@@ -23,6 +23,9 @@ pub(crate) struct TradeSteps<'w, 's> {
     errors: Res<'w, UiErrorKeys>,
     objects: Objects<'w, 's>,
     items: Res<'w, Items>,
+    /// The item watchers' trade halves still on the lane, which a close runs first.
+    lane: Option<ResMut<'w, crate::item_lane::ItemLane>>,
+    touch_reads: super::TouchReads<'w, 's>,
 }
 
 impl TradeSteps<'_, '_> {
@@ -35,6 +38,7 @@ impl TradeSteps<'_, '_> {
             errors,
             objects,
             items,
+            ..
         } = self;
         let Some(trade) = trade.as_deref_mut() else {
             debug!("ui_trade: no trade window in this world; {call:?} dropped");
@@ -114,8 +118,48 @@ impl TradeSteps<'_, '_> {
             TradeCall::TargetEnchant | TradeCall::ReplaceEnchant => {
                 debug!("ui_trade: {call:?} is the targeting cursor's, not the trade's");
             }
+            // The close core needs the latch, which the host lends beside this.
+            TradeCall::Close => {}
         }
         None
+    }
+
+    /// The close core's first step here, the trade halves of the item watcher runs still on the
+    /// lane, as the world close core drains them; whether any ran.
+    pub(crate) fn run_trade_touches(&mut self, script: &mut UiScript) -> bool {
+        let touches = self
+            .lane
+            .as_deref_mut()
+            .map(crate::item_lane::ItemLane::take_trade_touches)
+            .unwrap_or_default();
+        let Some(trade) = self.trade.as_deref_mut() else {
+            return false;
+        };
+        let ran = !touches.is_empty();
+        for touch in touches {
+            super::touch_trade(script, trade, touch, &self.touch_reads);
+        }
+        ran
+    }
+
+    /// The partner's cell `[0xb71728]`, set only while the window is open.
+    pub(crate) fn partner_cell(&self) -> Option<u64> {
+        use crate::ui_session::LatchedWindow;
+        self.trade.as_deref().and_then(TradeSession::cell)
+    }
+
+    /// The close core's clear of the cell (`0x4bf516`), and the VM's window with it; both offers
+    /// stay for the handlers' getters, and for the next open to clear.
+    pub(crate) fn close_window(&mut self, script: &mut UiScript) {
+        if let Some(trade) = self.trade.as_deref_mut() {
+            trade.close_window();
+        }
+        script.close_trade_window();
+    }
+
+    /// The close core's last step, `CMSG_CANCEL_TRADE` open or not (`0x4bf527` → `0x5d4310`).
+    pub(crate) fn send_cancel(&mut self) {
+        let _ = self.net.0.send(ClientCommand::CancelTrade);
     }
 
     /// The partner's slot 7 as the trade bind and its clash check read it: `Some` with the record's
