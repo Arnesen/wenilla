@@ -188,6 +188,196 @@ fn a_logon_refusal_opens_its_result_and_ends_the_logon() {
     }
 }
 
+/// The grid seed `0x12345678` builds.
+const GRID: [u8; 10] = [6, 3, 2, 1, 9, 8, 7, 0, 4, 5];
+/// The number of the IO thread's PIN prompt in these tests.
+const PROMPT: u64 = 41;
+
+/// A logon whose challenge asked for a PIN, past the frame that showed the keypad.
+fn at_the_keypad() -> GlueMgr {
+    let mut m = fresh();
+    m.login("a".into(), "b".into());
+    settle(&mut m);
+    m.on_stage(LoginStage::Connecting, true);
+    m.tick();
+    settle(&mut m);
+    m.on_stage(
+        LoginStage::Pin {
+            grid: GRID,
+            prompt: PROMPT,
+        },
+        true,
+    );
+    m.tick();
+    settle(&mut m);
+    m
+}
+
+/// A PIN challenge reports logon state 7 (`0x5b1cd7`): its `CANCEL` dialog, then the arm
+/// (`0x46bac3`) closes it, fires `PLAYER_ENTER_PIN` with the grid and stores state 8, which shows
+/// nothing more (`0x46ba7c`).
+#[test]
+fn a_pin_challenge_shows_the_keypad_its_grid() {
+    let mut m = fresh();
+    m.login("a".into(), "b".into());
+    settle(&mut m);
+    m.on_stage(LoginStage::Connecting, true);
+    m.tick();
+    settle(&mut m);
+    m.outbox.clear();
+    m.on_stage(
+        LoginStage::Pin {
+            grid: GRID,
+            prompt: PROMPT,
+        },
+        true,
+    );
+    m.tick();
+    settle(&mut m);
+    assert_eq!(
+        m.outbox,
+        [
+            open("CANCEL", Some("LOGIN_STATE_PIN")),
+            Outgoing::Close,
+            Outgoing::EnterPin(GRID),
+        ]
+    );
+    assert_eq!(m.cells.state, LOGIN_PIN_WAIT);
+    m.outbox.clear();
+    m.tick();
+    settle(&mut m);
+    assert!(m.outbox.is_empty(), "{:?}", m.outbox);
+    assert_eq!(m.state, ScreenState::Logon);
+}
+
+/// `PINEntered`'s tail (`0x46b0c0`): the `CANCEL` dialog with no text, then the keys on to the
+/// logon, which reports state 9 (`0x5b31cc`), shown on the next frame.
+#[test]
+fn pin_entered_sends_the_keys_on() {
+    let mut m = at_the_keypad();
+    m.outbox.clear();
+    m.call(GlueCall::PinEntered(benilla_ui::script::GluePin {
+        positions: vec![2, 9, 4, 7],
+    }));
+    settle(&mut m);
+    assert_eq!(m.outbox, [open("CANCEL", None)]);
+    assert!(
+        matches!(
+            m.park_out.as_slice(),
+            [ParkRequest::Realm(RealmRequest::Pin { prompt: PROMPT, keys: Some(k) })]
+                if k.positions == [2, 9, 4, 7]
+        ),
+        "{} park asks",
+        m.park_out.len()
+    );
+    m.outbox.clear();
+    m.tick();
+    settle(&mut m);
+    assert_eq!(
+        m.outbox,
+        [open("CANCEL", Some("LOGIN_STATE_CHECKINGVERSIONS"))]
+    );
+}
+
+/// A prompt with no logon on the screen to show it (a run with no glue screen, or one in another
+/// state) is answered at once with no keys, so the logon fails rather than wait for good.
+#[test]
+fn a_prompt_with_no_keypad_is_declined() {
+    let mut m = fresh();
+    m.on_stage(LoginStage::Connecting, false);
+    m.on_stage(
+        LoginStage::Pin {
+            grid: GRID,
+            prompt: PROMPT,
+        },
+        false,
+    );
+    settle(&mut m);
+    assert!(
+        matches!(
+            m.park_out.as_slice(),
+            [ParkRequest::Realm(RealmRequest::Pin {
+                prompt: PROMPT,
+                keys: None
+            })]
+        ),
+        "{} park asks",
+        m.park_out.len()
+    );
+    assert!(m.outbox.is_empty(), "{:?}", m.outbox);
+}
+
+/// The keys never print: with the grid `PLAYER_ENTER_PIN` showed, they spell the PIN.
+#[test]
+fn a_pin_request_prints_no_keys() {
+    let shown = format!(
+        "{:?}",
+        RealmRequest::Pin {
+            prompt: 1,
+            keys: Some(benilla_ui::script::GluePin {
+                positions: vec![2, 9, 5, 7],
+            }),
+        }
+    );
+    assert!(!shown.contains(['2', '9', '5', '7']), "{shown}");
+}
+
+/// The proof's refusal of a logon with a PIN counts in the logon object (`0x5b2d0d`): the PIN text
+/// twice, then the call text from the third (`0x5b2d19`-`0x5b2d23`); a refusal with no PIN is the
+/// plain text and counts nothing (`0x5b2d00`); a success zeroes the count (`0x5b2e1f`).
+#[test]
+fn refused_pins_count_to_the_call_text() {
+    let mut m = fresh();
+    let attempt = |m: &mut GlueMgr, pin: bool, refusal: Option<LoginRefusal>| {
+        m.state = ScreenState::Idle;
+        m.login("a".into(), "b".into());
+        settle(m);
+        m.on_stage(LoginStage::Connecting, true);
+        if pin {
+            m.on_stage(
+                LoginStage::Pin {
+                    grid: GRID,
+                    prompt: PROMPT,
+                },
+                true,
+            );
+        }
+        m.outbox.clear();
+        match refusal {
+            Some(r) => m.on_failed(&failed(Some(r))),
+            None => m.on_logon_done(),
+        }
+        m.tick();
+        settle(m);
+        std::mem::take(&mut m.outbox)
+    };
+    let proof = || Some(LoginRefusal::LogonProof(0x04));
+    for key in [
+        "LOGIN_UNKNOWN_ACCOUNT_PIN",
+        "LOGIN_UNKNOWN_ACCOUNT_PIN",
+        "LOGIN_UNKNOWN_ACCOUNT_CALL",
+        "LOGIN_UNKNOWN_ACCOUNT_CALL",
+    ] {
+        assert_eq!(attempt(&mut m, true, proof()), [open("OKAY", Some(key))]);
+    }
+    assert_eq!(
+        attempt(&mut m, false, proof()),
+        [open("OKAY", Some("LOGIN_UNKNOWN_ACCOUNT"))],
+        "no PIN this attempt"
+    );
+    assert_eq!(
+        attempt(&mut m, true, Some(LoginRefusal::LogonProof(0x05))),
+        [open("OKAY", Some("LOGIN_UNKNOWN_ACCOUNT_CALL"))],
+        "5 shares 4's arm"
+    );
+    attempt(&mut m, true, None);
+    assert_eq!(
+        attempt(&mut m, true, proof()),
+        [open("OKAY", Some("LOGIN_UNKNOWN_ACCOUNT_PIN"))],
+        "a success zeroed the count"
+    );
+}
+
 /// One realm, `name`, as realmd lists it.
 fn realm(name: &str) -> RealmInfo {
     RealmInfo {
@@ -2202,6 +2392,69 @@ fn the_stock_login_reaches_the_login_engine_and_shows_its_status() {
     assert!(!unknown.is_empty());
     assert_eq!(dialog(&app), Some(("OKAY".into(), unknown)));
     assert_eq!(mgr(&app).state, ScreenState::Idle);
+}
+
+/// A PIN challenge over the stock screens: the dialog goes down for the stock keypad
+/// (`AccountLogin.xml`'s `VirtualKeypadFrame`), whose keys show the grid in order; the keys
+/// pressed and its Okay reach the logon as positions, under the `CANCEL` dialog, then
+/// `LOGIN_STATE_CHECKINGVERSIONS`.
+#[test]
+fn the_stock_keypad_shows_the_grid_and_sends_the_keys_pressed() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, rx, _) = stock_app();
+    let (park_tx, park_rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::RealmChoice(crate::net::ParkSender::Park(
+        park_tx,
+        std::marker::PhantomData,
+    )));
+    vm(&app).run("AcceptEULA() AcceptTOS()").unwrap();
+    app.update();
+    type_and_login(&mut app);
+    assert!(rx.try_recv().is_ok());
+    for stage in [
+        LoginStage::Connecting,
+        LoginStage::Pin {
+            grid: GRID,
+            prompt: PROMPT,
+        },
+    ] {
+        app.world_mut().write_message(LoginStageMessage { stage });
+        app.update();
+    }
+    assert_eq!(dialog(&app), None, "the keypad replaces the dialog");
+    let shown: Vec<String> = vm(&app)
+        .eval(
+            "local t = {} for i = 1, 10 do \
+               t[i] = getglobal('VirtualKeypadButton'..i):GetText() or '' end return t",
+        )
+        .unwrap();
+    assert_eq!(shown, GRID.map(|d| d.to_string()));
+    assert!(vm(&app)
+        .eval::<bool>("return VirtualKeypadFrame:IsShown() == 1")
+        .unwrap());
+
+    // 2590 on this grid: the keys with ids 2, 9, 4 and 7, buttons 3, 10, 5 and 8.
+    vm(&app)
+        .run(
+            "VirtualKeypadButton3:Click() VirtualKeypadButton10:Click() \
+             VirtualKeypadButton5:Click() VirtualKeypadButton8:Click() \
+             VirtualKeypadOkayButton:Click()",
+        )
+        .unwrap();
+    app.update();
+    assert!(
+        matches!(
+            park_rx.try_recv(),
+            Ok(ParkRequest::Realm(RealmRequest::Pin { prompt: PROMPT, keys: Some(k) }))
+                if k.positions == [2, 9, 4, 7]
+        ),
+        "the keys reach the logon"
+    );
+    assert!(!vm(&app)
+        .eval::<bool>("return VirtualKeypadFrame:IsShown() == 1")
+        .unwrap());
+    let checking = vm(&app).global_text("LOGIN_STATE_CHECKINGVERSIONS");
+    assert_eq!(dialog(&app), Some(("CANCEL".into(), checking)));
 }
 
 /// The account guard's refusal of the run's own credentials, which no network message carries,

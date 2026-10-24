@@ -11,6 +11,8 @@ use sha1::{Digest, Sha1};
 use crate::wire::{read_array, read_cstring, read_f32_le, read_u16_le, read_u32_le, read_u8};
 use crate::RealmInfo;
 
+pub mod pin;
+
 const CMD_AUTH_LOGON_CHALLENGE: u8 = 0x00;
 const CMD_AUTH_LOGON_PROOF: u8 = 0x01;
 const CMD_REALM_LIST: u8 = 0x10;
@@ -156,6 +158,27 @@ pub struct ChallengeReply {
     pub salt: [u8; 32],
     /// The version challenge answered by `crc_hash` ([`version_proof`]); not an SRP6 input.
     pub crc_salt: [u8; 16],
+    /// The PIN the account asks for, when the security byte is non-zero.
+    pub pin: Option<PinChallenge>,
+}
+
+/// A challenge's PIN fields, which the reference keeps on the logon object (`0x5b1ed0`): the
+/// security byte (`+0x1ac`), the seed of the keypad's grid ([`pin::grid`], `+0x1ae`) and the
+/// server's salt (`+0x1b8`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PinChallenge {
+    pub flags: u8,
+    pub grid_seed: u32,
+    pub salt: [u8; 16],
+}
+
+/// What a logon proof carries for a PIN ([`PinProof::new`]): the challenge's security byte, the
+/// client's salt (`+0x1c8`) and the hash of the positions pressed (`+0x1d8`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PinProof {
+    pub flags: u8,
+    pub salt: [u8; 16],
+    pub hash: [u8; 20],
 }
 
 /// Send `CMD_AUTH_LOGON_CHALLENGE_Client`. `account_name` must be uppercased, as the SRP6 hashes
@@ -226,21 +249,26 @@ pub fn read_challenge_reply(r: &mut impl Read) -> Result<Option<ChallengeReply>>
         .try_into()
         .map_err(|_| anyhow::anyhow!("large safe prime was {prime_len} bytes, expected 32"))?;
     let salt = read_array::<32>(r)?;
-    // Read to the end: login packets are not length-framed, so leftover bytes desync the next
-    // read. `security_flag` and the PIN block are unused but must be consumed.
     let crc_salt = read_array::<16>(r)?;
-    let security_flag = read_u8(r)?;
-    if security_flag & 0x01 != 0 {
-        // PIN: pin_grid_seed (u32) + pin_salt[16]; vmangos always sends security_flag 0.
-        let _pin_grid_seed = read_u32_le(r)?;
-        let _pin_salt = read_array::<16>(r)?;
-    }
+    // Any non-zero security byte carries the PIN's seed and salt (`0x5bab5a` `test al,al`), as
+    // vmangos sends for an account with a PIN lock (`AuthSocket.cpp:517`).
+    let flags = read_u8(r)?;
+    let pin = if flags != 0 {
+        Some(PinChallenge {
+            flags,
+            grid_seed: read_u32_le(r)?,
+            salt: read_array::<16>(r)?,
+        })
+    } else {
+        None
+    };
     Ok(Some(ChallengeReply {
         server_public_key,
         generator,
         large_safe_prime,
         salt,
         crc_salt,
+        pin,
     }))
 }
 
@@ -298,20 +326,30 @@ pub fn version_proof(crc_salt: &[u8; 16], client_public_key: &[u8; 32]) -> [u8; 
     }
 }
 
-/// Send `CMD_AUTH_LOGON_PROOF_Client`, computing `crc_hash` from the challenge's `crc_salt`.
+/// Send `CMD_AUTH_LOGON_PROOF_Client`, computing `crc_hash` from the challenge's `crc_salt`. The
+/// security byte is the challenge's, 0 with no PIN, and a PIN's salt and hash follow it
+/// (`0x5bbc80`-`0x5bbcad`).
 pub fn write_logon_proof(
     w: &mut impl Write,
     client_public_key: &[u8; 32],
     client_proof: &[u8; 20],
     crc_salt: &[u8; 16],
+    pin: Option<&PinProof>,
 ) -> std::io::Result<()> {
-    let mut packet = Vec::with_capacity(1 + 32 + 20 + 20 + 1 + 1);
+    let mut packet = Vec::with_capacity(1 + 32 + 20 + 20 + 1 + 1 + 16 + 20);
     packet.push(CMD_AUTH_LOGON_PROOF);
     packet.extend_from_slice(client_public_key);
     packet.extend_from_slice(client_proof);
     packet.extend_from_slice(&version_proof(crc_salt, client_public_key));
     packet.push(0); // number_of_telemetry_keys
-    packet.push(0); // security_flag = None
+    match pin {
+        Some(pin) => {
+            packet.push(pin.flags);
+            packet.extend_from_slice(&pin.salt);
+            packet.extend_from_slice(&pin.hash);
+        }
+        None => packet.push(0),
+    }
     w.write_all(&packet)
 }
 
@@ -547,7 +585,7 @@ mod tests {
         let a = test_public_key();
         let m1: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(4));
         let mut packet = Vec::new();
-        write_logon_proof(&mut packet, &a, &m1, &MANGOS_VERSION_CHALLENGE).unwrap();
+        write_logon_proof(&mut packet, &a, &m1, &MANGOS_VERSION_CHALLENGE, None).unwrap();
 
         assert_eq!(packet.len(), 1 + 32 + 20 + 20 + 1 + 1);
         assert_eq!(packet[0], CMD_AUTH_LOGON_PROOF);
@@ -686,5 +724,92 @@ mod tests {
     #[test]
     fn the_address_is_not_cleaned() {
         assert_eq!(realm_named(b"R").address, "127.0.0.1:8085");
+    }
+
+    /// A successful challenge reply up to its security byte, then `tail`.
+    fn challenge_with(tail: &[u8]) -> Vec<u8> {
+        let mut p = vec![CMD_AUTH_LOGON_CHALLENGE, 0, 0];
+        p.extend_from_slice(&[9u8; 32]); // B
+        p.extend_from_slice(&[1, 7, 32]); // g's length, g, N's length
+        p.extend_from_slice(&[0x11u8; 32]); // N
+        p.extend_from_slice(&[0x22u8; 32]); // salt
+        p.extend_from_slice(&MANGOS_VERSION_CHALLENGE);
+        p.extend_from_slice(tail);
+        p
+    }
+
+    fn pin_salt() -> [u8; 16] {
+        std::array::from_fn(|i| 0xa0 + i as u8)
+    }
+
+    /// A non-zero security byte is followed by the grid seed and the PIN salt (`0x5bab5a`
+    /// `test al,al`, the dword at `0x5bab7f`, 16 bytes at `0x5bab8c`), handed on with the byte
+    /// itself (`0x5bac05` → `0x5b1ed0`).
+    #[test]
+    fn a_pin_challenge_keeps_its_seed_and_salt() {
+        let mut tail = vec![0x01, 0x78, 0x56, 0x34, 0x12];
+        tail.extend_from_slice(&pin_salt());
+        let packet = challenge_with(&tail);
+        let mut r = packet.as_slice();
+        let reply = read_challenge_reply(&mut r).unwrap().unwrap();
+        assert!(r.is_empty(), "{} bytes left", r.len());
+        assert_eq!(
+            reply.pin,
+            Some(PinChallenge {
+                flags: 0x01,
+                grid_seed: 0x1234_5678,
+                salt: pin_salt(),
+            })
+        );
+    }
+
+    /// The test is of the whole byte, not of bit 0: any non-zero byte reads the two fields.
+    #[test]
+    fn any_nonzero_security_byte_carries_the_pin_fields() {
+        let mut tail = vec![0x02, 1, 0, 0, 0];
+        tail.extend_from_slice(&pin_salt());
+        let packet = challenge_with(&tail);
+        let mut r = packet.as_slice();
+        let reply = read_challenge_reply(&mut r).unwrap().unwrap();
+        assert!(r.is_empty());
+        assert_eq!(reply.pin.map(|p| (p.flags, p.grid_seed)), Some((0x02, 1)));
+    }
+
+    #[test]
+    fn a_zero_security_byte_has_no_pin() {
+        let packet = challenge_with(&[0]);
+        let mut r = packet.as_slice();
+        let reply = read_challenge_reply(&mut r).unwrap().unwrap();
+        assert!(r.is_empty());
+        assert_eq!(reply.pin, None);
+    }
+
+    /// With a PIN the proof's security byte is the challenge's, followed by the 16-byte client
+    /// salt and the 20-byte hash (`0x5bbc80`-`0x5bbcad`): 111 bytes in all.
+    #[test]
+    fn the_proof_carries_the_pin_salt_and_hash() {
+        let a = test_public_key();
+        let m1: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(4));
+        let pin = PinProof {
+            flags: 0x01,
+            salt: std::array::from_fn(|i| 0x30 + i as u8),
+            hash: std::array::from_fn(|i| 0x80 + i as u8),
+        };
+        let mut packet = Vec::new();
+        write_logon_proof(&mut packet, &a, &m1, &MANGOS_VERSION_CHALLENGE, Some(&pin)).unwrap();
+
+        let mut want = vec![CMD_AUTH_LOGON_PROOF];
+        want.extend_from_slice(&a);
+        want.extend_from_slice(&m1);
+        want.extend_from_slice(&version_proof(&MANGOS_VERSION_CHALLENGE, &a));
+        want.extend_from_slice(&[0x00, 0x01]); // no keys, the security byte
+        want.extend_from_slice(&[
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
+            0x3e, 0x3f, // client salt
+            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
+            0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, // hash
+        ]);
+        assert_eq!(packet.len(), 111);
+        assert_eq!(packet, want);
     }
 }

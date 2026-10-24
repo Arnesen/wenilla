@@ -125,6 +125,20 @@ impl std::fmt::Debug for GlueCredentials {
     }
 }
 
+/// `PINEntered`'s keys: the positions pressed on the keypad, 4 to 10 of them. Never logged: the
+/// `Debug` form gives the count only, since with the grid `PLAYER_ENTER_PIN` showed they spell the
+/// PIN.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GluePin {
+    pub positions: Vec<u8>,
+}
+
+impl std::fmt::Debug for GluePin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GluePin(<{} keys>)", self.positions.len())
+    }
+}
+
 /// The `accountName` CVar's table key, its name lowercased.
 const CVAR_ACCOUNT_NAME_KEY: &str = "accountname";
 
@@ -158,6 +172,9 @@ pub enum GlueCall {
     /// `StatusDialogClick()` (`0x46d270` → `0x46b720`): the status dialog's button, per screen
     /// state.
     StatusDialogClick,
+    /// `PINEntered(...)` (`0x46d1c0`) past its checks: `0x46b0c0`, the `CANCEL` dialog and the keys
+    /// on to the logon (`0x5ab5a0` → `0x5b3120`).
+    PinEntered(GluePin),
     /// `DisconnectFromServer()` (`0x46d340`): the world link's flag down and the link dropped if
     /// up (`0x5ab1a0`), then the logon cancelled (`0x5b3320`).
     DisconnectFromServer,
@@ -244,6 +261,8 @@ pub enum GlueSignal {
     SelectLast,
     /// `FORCE_RENAME_CHARACTER(key)` (event 23): the key, unresolved.
     ForceRename(&'static str),
+    /// `PLAYER_ENTER_PIN` (event 25, `0x46bb15`): the keypad's grid, ten numbers.
+    EnterPin([u8; 10]),
     /// A CVar the manager set (`CVar::Set`, `0x63df50`), written to the VM's table as the
     /// engine's write.
     Cvar { name: &'static str, value: String },
@@ -710,6 +729,12 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
                 vec![ScriptValue::Str(key.to_string())],
             );
         }
+        GlueSignal::EnterPin(grid) => fire(
+            "PLAYER_ENTER_PIN",
+            grid.iter()
+                .map(|&d| ScriptValue::Int(i64::from(d)))
+                .collect(),
+        ),
         GlueSignal::Cvar { name, value } => {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             super::cvars::set_from_engine(&mut model, name, value);
@@ -778,6 +803,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "StatusDialogClick",
         lua.create_function(|lua, _: MultiValue| {
             call(lua, GlueCall::StatusDialogClick);
+            Ok(())
+        })?,
+    )?;
+
+    // Arguments 1 to 10 up to the first nil or none (`lua_type` ≤ 0, `0x46d1eb`), each passing
+    // `lua_isnumber` (`0x46d1f1`, numeric strings too) or the usage error with its position
+    // (`0x837d34`); each key is the low byte of the number's `__ftol` (`0x46d203`, `0x46d20f`).
+    // Fewer than 4 or more than 10 raise `0x837cf4` with the count; the rest is `0x46b0c0`.
+    g.set(
+        "PINEntered",
+        lua.create_function(|lua, args: MultiValue| {
+            let mut positions = Vec::with_capacity(10);
+            for (i, v) in args.into_iter().take(10).enumerate() {
+                if matches!(v, Value::Nil) {
+                    break;
+                }
+                let Some(n) = lua.coerce_number(v)? else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Usage: PINEntered(4-10 key positions) - non-numeric arg #{}",
+                        i + 1
+                    )));
+                };
+                positions.push(super::binding_abi::ftol(n) as u8);
+            }
+            if !(4..=10).contains(&positions.len()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Usage: PINEntered(4-10 key positions) - bad number of args {}",
+                    positions.len()
+                )));
+            }
+            call(lua, GlueCall::PinEntered(GluePin { positions }));
             Ok(())
         })?,
     )?;
@@ -1250,6 +1306,82 @@ mod tests {
             "{err}"
         );
         assert!(s.take_glue_calls().is_empty());
+    }
+
+    /// `PLAYER_ENTER_PIN` (event 25) carries the grid's ten digits as numbers, the first key's
+    /// first (`0x46bac3`-`0x46bb15`, `%d` ten times at `0x8372a8`).
+    #[test]
+    fn enter_pin_fires_the_grid_as_ten_numbers() {
+        let grid = [6, 3, 2, 1, 9, 8, 7, 0, 4, 5];
+        let (s, _host) = seated(vec![(
+            "StatusDialogClick",
+            vec![GlueSignal::EnterPin(grid)],
+        )]);
+        s.run(
+            "GOT = {} F = CreateFrame('Frame') F:RegisterEvent('PLAYER_ENTER_PIN') \
+             F:SetScript('OnEvent', function() for i = 1, 10 do \
+               local v = getglobal('arg'..i) if type(v) == 'number' then GOT[i] = v end \
+             end end)",
+        )
+        .unwrap();
+        let got: Vec<i64> = s.eval("StatusDialogClick() return GOT").unwrap();
+        assert_eq!(got, grid.map(i64::from));
+    }
+
+    /// The keys `PINEntered` handed the host, or the error it raised.
+    fn pin_entered(args: &str) -> Result<Vec<u8>, String> {
+        let mut s = UiScript::new_glue().unwrap();
+        s.run(&format!("PINEntered({args})"))
+            .map_err(|e| e.to_string())?;
+        match s.take_glue_calls().as_slice() {
+            [GlueCall::PinEntered(pin)] => Ok(pin.positions.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `PINEntered` (`0x46d1c0`) reads arguments 1 to 10 up to the first nil (`lua_type` ≤ 0,
+    /// `0x46d1eb`), numbers or numeric strings, each the low byte of its `__ftol` (`0x46d20f`), and
+    /// hands 4 to 10 of them to `0x46b0c0`. The stock keypad passes its keys' ids as strings.
+    #[test]
+    fn pin_entered_hands_on_the_keys_pressed() {
+        assert_eq!(pin_entered("'2', '9', '4', '7'"), Ok(vec![2, 9, 4, 7]));
+        assert_eq!(pin_entered("1, 2, 3, 4, nil, 6"), Ok(vec![1, 2, 3, 4]));
+        assert_eq!(pin_entered("258, -1, 3.9, '7'"), Ok(vec![2, 255, 3, 7]));
+        assert_eq!(
+            pin_entered("0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
+            Ok((0..10).collect()),
+            "the eleventh is never read"
+        );
+        assert!(
+            format!(
+                "{:?}",
+                GlueCall::PinEntered(GluePin {
+                    positions: vec![1, 2, 3, 4]
+                })
+            )
+            .contains("4 keys"),
+            "the keys are never printed"
+        );
+    }
+
+    /// A count outside 4 to 10 raises `0x837cf4` with the count; an argument that is not a number
+    /// raises `0x837d34` with its position. Either hands nothing on.
+    #[test]
+    fn pin_entered_raises_its_usage() {
+        let err = pin_entered("1, 2, 3").unwrap_err();
+        assert!(
+            err.contains("Usage: PINEntered(4-10 key positions) - bad number of args 3"),
+            "{err}"
+        );
+        let err = pin_entered("").unwrap_err();
+        assert!(err.contains("bad number of args 0"), "{err}");
+        let err = pin_entered("1, 'x', 3, 4").unwrap_err();
+        assert!(
+            err.contains("Usage: PINEntered(4-10 key positions) - non-numeric arg #2"),
+            "{err}"
+        );
+        let err = pin_entered("1, 2, 3, false").unwrap_err();
+        assert!(err.contains("non-numeric arg #4"), "{err}");
     }
 
     /// An agreement's flags come off its record's integer (`0x46a41a` reads `+0x28`), Storm's
