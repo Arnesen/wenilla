@@ -99,8 +99,15 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     (Row::Queue, "::ui_bank::BankErrors", "the bank errors"),
     (
         Row::Queue,
-        "::ui_action::drain::ActionSlotWrites",
-        "the action slot writes a handler's Lua makes, sent in the call and stored after the pass",
+        "::player::view_subject::FarSight",
+        "the far-sight machine a handler's Lua runs through the host's buff cancel; every feed \
+         that lends the host reads it, and none fires from it",
+    ),
+    (
+        Row::HostHeld,
+        "::ui_action::ActionSlots",
+        "the action slots, which `feed_actions` resolves; a handler's Lua writes them in its \
+         call, through the host's bar verbs",
     ),
     (
         Row::Queue,
@@ -501,7 +508,8 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_action::recount::recount_item_actions", &["items::Countdowns", "items::Items",
         "net::GuidIndex", "net::ObjectStore"]),
     ("::ui_action::feed::feed_actions", &["items::Countdowns", "items::Items", "net::GuidIndex",
-        "net::ObjectStore", "ui_action::PlayerActions", "ui_action::errors::MountErrors",
+        "net::ObjectStore", "ui_action::ActionSlots", "ui_action::PlayerActions",
+        "ui_action::errors::MountErrors",
         "ui_action::errors::PetTameFailures", "ui_action::errors::UiErrorTexts"]),
     ("::ui_action::state::feed_action_state", &["Transform",
         "creature_anim::sheath::CommittedSheath", "items::Countdowns", "items::Items",
@@ -509,8 +517,8 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::UnitSpeeds", "net::game_time::ServerTime", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
         "player::state::StandPending", "spell::cooldowns::Cooldowns", "spell::mods::SpellModifiers",
-        "target::Selection", "ui_action::PlayerActions", "ui_action::state::ActionStateMemory",
-        "ui_pet::PetBar"]),
+        "target::Selection", "ui_action::ActionSlots", "ui_action::PlayerActions",
+        "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
     // The ranged-slot item scales a ranged spell's range, read as the frame left it (#2217).
     ("::spell::targeting::feed_targeting_to_vm", &["items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
@@ -535,8 +543,9 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "ui_spellbook::LearnedInTab"]),
     // The pet book's sorts, which each pet spell list counts and the derivation follows
     // (`0x4bdae0`): the frame's lists derive once, after the last.
-    ("::ui_macro::rebind_macro_spells", &["ui_action::PlayerActions", "ui_pet::PetBar"]),
-    ("::ui_macro::load_macros", &["ui_action::PlayerActions"]),
+    ("::ui_macro::rebind_macro_spells", &["ui_action::ActionSlots", "ui_action::PlayerActions",
+        "ui_pet::PetBar"]),
+    ("::ui_macro::load_macros", &["ui_action::ActionSlots"]),
     ("::ui_talent::feed_talents", &["net::ObjectStore", "ui_action::PlayerActions"]),
     ("::ui_talent_wipe::feed_talent_wipe", &["ui_talent_wipe::TalentWipeState"]),
     ("::ui_shapeshift::feed_shapeshift_bar", &["items::Countdowns", "items::Items",
@@ -645,8 +654,8 @@ const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
 /// other sinks (the message sounds and the unit edits, which raise no event) are not queues here.
 const FILLED_THROUGH_A_READ: &[&str] = &[
     "::ui_action::errors::UiErrorKeys",
-    // The slot writes the call host's action bar verbs queue for the store.
-    "::ui_action::drain::ActionSlotWrites",
+    // The far-sight machine the call host's buff cancel runs (`0x6e70ad`).
+    "::player::view_subject::FarSight",
     "::tutorial::Tutorials",
     "::ui_session::latch::LatchCloses",
     "::ui_logout::SessionPosts",

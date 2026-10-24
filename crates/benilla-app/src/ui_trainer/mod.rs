@@ -451,6 +451,35 @@ pub(crate) struct ReEvalInputs<'w, 's> {
     edges: MessageReader<'w, 's, FieldChanged>,
 }
 
+/// The pet a pet-learn row re-evaluates against: the unit the player's `UNIT_FIELD_SUMMON` names
+/// (`0x4d7f2d`, looked up with mask 8 at `0x4d7f49`), `None` when none is held (`0x4d7f5a`), at its
+/// own level (`0x4d7f99`). `KnowsSpell` (`0x60c740`) reads a unit's book only as the pet bar's
+/// unit (`0x60c77a`-`0x60c790`), so another summon knows nothing.
+fn pet_view<'a>(
+    summon: Option<u64>,
+    store_of: impl Fn(u64) -> Option<&'a ObjectStore>,
+    bar: &benilla_protocol::messages::PetSpells,
+) -> Option<reeval::PetView> {
+    /// `TYPEMASK_UNIT`, the lookup's mask.
+    const TYPEMASK_UNIT: u32 = 0x8;
+    let guid = summon?;
+    let store = store_of(guid)
+        .filter(|store| store.0.object_type_mask().unwrap_or(0) & TYPEMASK_UNIT != 0)?;
+    let known = if guid == bar.pet_guid {
+        bar.spells
+            .iter()
+            .filter(|e| e.is_spell())
+            .map(|e| e.action())
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    Some(reeval::PetView {
+        level: store.0.unit_level().unwrap_or(0),
+        known,
+    })
+}
+
 /// The resources a service description's `$`-tokens read beside the caster's descriptor: the
 /// spell-modifier tables and the bind point `$z` names, the same two reads the item and spell
 /// tooltip feeds make.
@@ -578,21 +607,17 @@ pub(crate) fn feed_trainer(
                             .collect()
                     })
                     .unwrap_or_default(),
-                pet: (re_eval.pet_bar.spells.pet_guid != 0)
-                    .then(|| re_eval.index.0.get(&re_eval.pet_bar.spells.pet_guid))
-                    .flatten()
-                    .and_then(|&e| re_eval.stores.get(e).ok())
-                    .map(|store| reeval::PetView {
-                        level: store.0.unit_level().unwrap_or(0),
-                        known: re_eval
-                            .pet_bar
-                            .spells
-                            .spells
-                            .iter()
-                            .filter(|e| e.is_spell())
-                            .map(|e| e.action())
-                            .collect(),
-                    }),
+                pet: pet_view(
+                    self_player.and_then(|(_, store)| store.0.unit_summon()),
+                    |guid| {
+                        re_eval
+                            .index
+                            .0
+                            .get(&guid)
+                            .and_then(|&e| re_eval.stores.get(e).ok())
+                    },
+                    &re_eval.pet_bar.spells,
+                ),
             };
             let TrainerOpen {
                 services,

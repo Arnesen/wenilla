@@ -80,6 +80,8 @@ impl SoundKits {
 /// One playing channel the pump owns, the client's channel struct.
 pub(crate) struct ActiveChannel {
     pub(crate) kit: u32,
+    /// The file it opened, whose `SStrHash` the sound keeps at `+0x80` for the duplicate walk.
+    file: String,
     /// The entity this channel belongs to; [`Latch`] says whether it also holds a latch, which
     /// the pump's reap releases when the sound stops.
     source: Option<Entity>,
@@ -239,10 +241,29 @@ const BUS_CAP: [u32; 13] = [0x7fff_ffff, 1, 2, 2, 1, 1, 2, 2, 1, 6, 4, 1, 2];
 /// coherently (five are one sound +14 dB), so a mass buff distorts.
 const SAME_KIT_MAX: usize = 2;
 
-/// The reference's per-kit suppressor: kit flag 0x20 and a same-kit channel still live
-/// (`0x458f40` lifts it into the flags word the pre-play gate `0x7a66a0` reads).
-fn no_duplicates_blocks(dedupe_exempt: bool, flags: u32, live_same_kit: usize) -> bool {
-    !dedupe_exempt && flags & sound_kit_flags::NO_DUPLICATES != 0 && live_same_kit > 0
+/// The reference's duplicate suppressor: kit flag 0x20 and a channel of the same file still live
+/// ([`live_duplicates`]; `0x458f40` lifts the flag into the flags word the pre-play gate `0x7a66a0`
+/// reads).
+fn no_duplicates_blocks(dedupe_exempt: bool, flags: u32, live_same_file: usize) -> bool {
+    !dedupe_exempt && flags & sound_kit_flags::NO_DUPLICATES != 0 && live_same_file > 0
+}
+
+/// How many live channels the duplicate walk (`0x7a66e7`-`0x7a670b`) matches for a play of `file`,
+/// each live channel given as the file it opened: whatever kit opened it.
+fn live_duplicates<'a>(live: impl Iterator<Item = &'a str>, file: &str) -> usize {
+    live.filter(|f| same_file(f, file)).count()
+}
+
+/// Two names `SStrHash` (`0x64af90`, flags 0) hashes alike: ASCII case and `/` against `\` folded.
+fn same_file(a: &str, b: &str) -> bool {
+    let fold = |c: u8| {
+        if c == b'/' {
+            b'\\'
+        } else {
+            c.to_ascii_uppercase()
+        }
+    };
+    a.len() == b.len() && a.bytes().zip(b.bytes()).all(|(x, y)| fold(x) == fold(y))
 }
 
 /// The [`SAME_KIT_MAX`] cap, part of the one-shot lane ([`PlayExtras::dedupe_exempt`]).
@@ -457,27 +478,9 @@ pub(super) fn play_kit_ext(
         return Ok(false); // a kit with no files is playable-as-nothing, not an error
     }
 
-    // The per-bus cap, the pre-play gate `0x7a66a0`'s always-on arm, before the duplicate walk
-    // (`0x7a66b5` precedes `0x7a66c4`). It counts allocated channels (`[0xcf553c + 4*bus]`), and a
-    // distance cull releases one, as the pump's reap does here.
-    if bus_at_cap(out.channels.iter().map(|c| c.bus), bus) {
-        return Ok(false);
-    }
-
-    // Duplicate suppression, the gate's other arm: kit flag 0x20 and a same-kit channel still
-    // live drop the play (`0x458f40` lifts `SoundEntries +0x7c` bit 0x20 into the flags word).
-    let live_same_kit = out.channels.iter().filter(|c| c.kit == id).count();
-    if no_duplicates_blocks(dedupe_exempt, flags, live_same_kit) {
-        return Ok(false);
-    }
-
-    // The same-kit cap ([`SAME_KIT_MAX`]) for kits the flag leaves ungated.
-    if same_kit_cap_blocks(dedupe_exempt, live_same_kit) {
-        out.copies_dropped += 1;
-        return Ok(false);
-    }
-
-    // An explicit index when the caller drives the cycle, else the depleting weighted pick.
+    // The file is picked ahead of the open's gate (`0x45cf52`, `0x45ce8c` → `0x7a66a0`), which
+    // tests it: an explicit index when the caller drives the cycle, else the depleting weighted
+    // pick.
     let pick = match variant {
         Some(i) if i < weights.len() => i,
         Some(_) => return Ok(false), // out-of-range explicit variant: playable-as-nothing
@@ -486,6 +489,27 @@ pub(super) fn play_kit_ext(
     let path = kits.catalog.get(id).expect("resolved above").files[pick]
         .0
         .clone();
+
+    // The per-bus cap, the pre-play gate `0x7a66a0`'s always-on arm, before the duplicate walk
+    // (`0x7a66b5` precedes `0x7a66c4`). It counts allocated channels (`[0xcf553c + 4*bus]`), and a
+    // distance cull releases one, as the pump's reap does here.
+    if bus_at_cap(out.channels.iter().map(|c| c.bus), bus) {
+        return Ok(false);
+    }
+
+    // Duplicate suppression, the gate's other arm: kit flag 0x20 and a live channel of the same
+    // file drop the play (`0x458f40` lifts `SoundEntries +0x7c` bit 0x20 into the flags word).
+    let live_same_file = live_duplicates(out.channels.iter().map(|c| c.file.as_str()), &path);
+    if no_duplicates_blocks(dedupe_exempt, flags, live_same_file) {
+        return Ok(false);
+    }
+    let live_same_kit = out.channels.iter().filter(|c| c.kit == id).count();
+
+    // The same-kit cap ([`SAME_KIT_MAX`]) for kits the flag leaves ungated.
+    if same_kit_cap_blocks(dedupe_exempt, live_same_kit) {
+        out.copies_dropped += 1;
+        return Ok(false);
+    }
 
     // Decode (cached).
     let data = kits.sfx(assets, &path)?;
@@ -553,6 +577,7 @@ pub(super) fn play_kit_ext(
     }
     out.channels.push(ActiveChannel {
         kit: id,
+        file: path,
         source,
         tracked: looping && source.is_some(),
         handle,
@@ -744,6 +769,7 @@ pub(crate) fn play_file(
     }
     out.channels.push(ActiveChannel {
         kit: 0,
+        file: path.to_string(),
         source: None,
         tracked: false,
         handle,
@@ -1347,6 +1373,28 @@ mod tests {
             same_kit_cap_blocks(false, SAME_KIT_MAX),
             "the exemption is scoped to the caller that asks for it, not global"
         );
+    }
+
+    /// The duplicate walk compares the open file's `SStrHash` (`0x7a66cf`, which folds ASCII case
+    /// and `/` to `\`) with each live sound's `+0x80` (`0x7a66f0`): another file of the same
+    /// kit is no duplicate, and the same file is one whatever kit or `PlaySoundFile` opened it.
+    #[test]
+    fn the_duplicate_walk_matches_the_file_not_the_kit() {
+        // Kit 7 sounds A and B; `PlaySoundFile` sounds C.
+        let live = [
+            "Sound\\Spells\\A.wav",
+            "Sound\\Spells\\B.wav",
+            "Sound\\Spells\\C.wav",
+        ];
+        let dupes = |file| live_duplicates(live.into_iter(), file);
+        assert_eq!(dupes("Sound\\Spells\\D.wav"), 0, "kit 7's other file");
+        assert_eq!(dupes("sound/spells/a.WAV"), 1, "the same file, folded");
+        assert_eq!(
+            dupes("Sound\\Spells\\C.wav"),
+            1,
+            "a file another open holds"
+        );
+        assert_eq!(dupes("Sound\\Spells\\A.wa"), 0, "a prefix is another name");
     }
 
     /// A kit with flag 0x20 is still capped at one; the looser cap does not loosen it.
