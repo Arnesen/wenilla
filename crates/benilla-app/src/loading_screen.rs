@@ -217,6 +217,10 @@ pub(crate) struct LoadingScreen {
     held: bool,
     /// The transfer's route (`0x8828e0`), which draws in place of the art, the bar and the tip.
     route: Option<route::ActiveRoute>,
+    /// Whether the layers below run under the screen (`core/framepass`): its flag bit 0, cleared by
+    /// every raise (`0x406808`) and set by an arrival aboard a transport (`0x5debb6`), or the
+    /// screen the reference ends at any other arrival (`0x5debbd`) while the cover here waits.
+    see_through: bool,
     /// Bumped whenever [`Self::route`] changes, for [`route::draw_route`].
     route_built: u32,
 
@@ -229,6 +233,14 @@ impl LoadingScreen {
     /// Whether the opaque cover is up; the world camera renders under it, never behind the glue.
     pub(crate) fn covering(&self) -> bool {
         self.active
+    }
+
+    /// Whether the screen's layer hides the interface's beneath it, so the frame pass calls no
+    /// `OnUpdate` (`0x442431`-`0x442437`, `0x4424b9`): up, and not yet let through by our arrival
+    /// ([`release_interface_on_arrival`]). The world→glue blackout is no raise of the screen and
+    /// hides nothing.
+    pub(crate) fn hides_interface(&self) -> bool {
+        self.active && !self.blackout && !self.see_through
     }
 
     /// An active cover, for tests.
@@ -268,6 +280,8 @@ impl LoadingScreen {
         self.displayed = 0.0; // restart the fill for the new load
         self.active_since = now;
         self.last_wait_log = now;
+        // `0x406808`: every raise hides the layers below again.
+        self.see_through = false;
         info!("loading screen: up ({reason}, map {map:?})");
     }
 
@@ -306,6 +320,8 @@ impl LoadingScreen {
         self.art_resolved = false;
         // `0x407f1e`: the route goes with the screen.
         self.set_route(None);
+        // `0x407e8d` closes the layer whose flags these are.
+        self.see_through = false;
     }
 
     /// Take a route, or drop the one held: a build that fails clears it (`0x407405`).
@@ -351,6 +367,12 @@ impl Plugin for LoadingScreenPlugin {
             .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present))
             .add_systems(
                 Update,
+                release_interface_on_arrival
+                    .in_set(WorldStage::Present)
+                    .before(drive_loading_screen),
+            )
+            .add_systems(
+                Update,
                 route::draw_route
                     .in_set(WorldStage::Present)
                     .after(drive_loading_screen),
@@ -367,6 +389,23 @@ impl Plugin for LoadingScreenPlugin {
             );
         // The cover's input rule, registered here so the two cannot be registered apart.
         input::build(app);
+    }
+}
+
+/// Our own player's arrival (`0x5dea50`) lets the interface run: aboard a transport (slot 9's
+/// GUID a game object, `0x5deb93`-`0x5debb2`) it sets the screen's bit 0 (`0x5debb6`), else it
+/// ends the screen (`0x5debbd` → `0x407e80`). Either way the layers below are drawn from then on,
+/// though here the cover stays up for the readiness poll. A pending cinematic (`0xc4d75c`,
+/// `0x5deb80`) takes the arrival instead and does neither, leaving the screen to the
+/// cinematic's black frame (`0x48edd0`).
+fn release_interface_on_arrival(
+    arrived: Query<(), Added<crate::net::SelfPlayer>>,
+    cinematic: Option<Res<crate::cinematic::Cinematic>>,
+    mut screen: ResMut<LoadingScreen>,
+) {
+    let pending = cinematic.is_some_and(|c| c.is_pending());
+    if !arrived.is_empty() && !pending && screen.active {
+        screen.see_through = true;
     }
 }
 
@@ -1211,5 +1250,69 @@ mod tests {
         }
         app.world_mut().resource_mut::<LoadingScreen>().dismiss();
         assert!(app.world().resource::<LoadingScreen>().route.is_none());
+    }
+
+    /// Our arrival under a raised screen, aboard a transport or not and with a cinematic latched
+    /// or not: whether the screen still hides the UI.
+    fn arrive(aboard: bool, cinematic: bool) -> bool {
+        use bevy::ecs::system::RunSystemOnce;
+        const DECK: u64 = 0xF120_0000_0000_0042;
+        let mut world = World::new();
+        let mut screen = LoadingScreen::default();
+        screen.raise("transfer pending", true, Some(1), 0.0);
+        assert!(screen.hides_interface(), "a raise hides the layers below");
+        world.insert_resource(screen);
+        world.insert_resource(if cinematic {
+            crate::cinematic::Cinematic::pending_for_test(81)
+        } else {
+            crate::cinematic::Cinematic::default()
+        });
+        let me = world.spawn(crate::net::SelfPlayer).id();
+        if aboard {
+            world
+                .entity_mut(me)
+                .insert(crate::transport::TransportRider {
+                    transport_guid: DECK,
+                    local_pos: [0.0; 3],
+                    local_orientation: 0.0,
+                });
+        }
+        world.run_system_once(release_interface_on_arrival).unwrap();
+        world.resource::<LoadingScreen>().hides_interface()
+    }
+
+    /// `0x5deb78`-`0x5debbd`: an arrival aboard a transport sets the layer's bit 0 and any other
+    /// ends the screen, so either way the interface runs; a latched cinematic takes the arrival
+    /// and leaves the layers below hidden. The next raise hides them again (`0x406808`).
+    #[test]
+    fn an_arrival_lets_the_interface_run_unless_a_cinematic_is_latched() {
+        assert!(!arrive(true, false), "aboard a transport: let through");
+        assert!(!arrive(false, false), "on foot: the screen ends");
+        assert!(arrive(false, true), "a latched cinematic takes the arrival");
+        assert!(arrive(true, true), "aboard, too");
+
+        let mut screen = LoadingScreen::default();
+        screen.raise("world entry", true, Some(0), 0.0);
+        screen.see_through = true;
+        screen.raise("worldport", false, Some(1), 0.0);
+        assert!(
+            screen.hides_interface(),
+            "a raise hides the layers below again"
+        );
+    }
+
+    /// `0x5deb93`-`0x5debbd`: an arrival on foot ends the screen at once (`0x407e80`), so the
+    /// interface runs from that frame on, while here the cover waits for the world to be ready.
+    #[test]
+    fn an_arrival_on_foot_lets_the_interface_run() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let mut screen = LoadingScreen::default();
+        screen.raise("world entry", true, Some(0), 0.0);
+        world.insert_resource(screen);
+        world.init_resource::<crate::cinematic::Cinematic>();
+        world.spawn(crate::net::SelfPlayer);
+        world.run_system_once(release_interface_on_arrival).unwrap();
+        assert!(!world.resource::<LoadingScreen>().hides_interface());
     }
 }

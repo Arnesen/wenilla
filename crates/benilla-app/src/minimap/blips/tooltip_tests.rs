@@ -3,7 +3,7 @@
 use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
-use super::{drive_blip_tooltip, MinimapBlipHover};
+use super::{drive_blip_tooltip, BlipBlock, BlipName, MinimapBlipHover};
 use crate::names::NameCache;
 use crate::net::NetCommands;
 
@@ -42,6 +42,20 @@ fn blip(app: &mut App, hover: MinimapBlipHover) {
     app.update();
 }
 
+/// A landmark icon under the cursor.
+fn landmark(name: &str) -> MinimapBlipHover {
+    let mut hover = MinimapBlipHover::default();
+    hover.push(BlipBlock::Icon, BlipName::Known(name.into()), false);
+    hover
+}
+
+/// A tracked unit's dot under the cursor.
+fn unit(guid: u64) -> MinimapBlipHover {
+    let mut hover = MinimapBlipHover::default();
+    hover.push(BlipBlock::Dot(1), BlipName::Unit(guid), false);
+    hover
+}
+
 fn shown(app: &mut App) -> bool {
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
@@ -54,13 +68,13 @@ fn shown(app: &mut App) -> bool {
 #[test]
 fn a_blip_hover_loss_hides_whoever_holds_the_tooltip() {
     let mut app = minimap_app();
-    blip(&mut app, MinimapBlipHover::Landmark("Stormwind".into()));
+    blip(&mut app, landmark("Stormwind"));
     assert!(shown(&mut app), "the blip tooltip is up");
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
         .run(r#"GameTooltip:SetOwner(UIParent, "ANCHOR_NONE"); GameTooltip:SetText("Addon")"#)
         .unwrap();
-    blip(&mut app, MinimapBlipHover::None);
+    blip(&mut app, MinimapBlipHover::default());
     assert!(!shown(&mut app), "the addon's tooltip is hidden");
     assert!(app
         .world_mut()
@@ -77,7 +91,7 @@ fn a_hovered_unnamed_blip_only_reads() {
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     for _ in 0..600 {
-        blip(&mut app, MinimapBlipHover::Npc(0x9, false));
+        blip(&mut app, unit(0x9));
     }
     assert!(!shown(&mut app), "no name, no tooltip");
     assert!(crate::query_cache::queries(&rx).is_empty());
@@ -102,9 +116,9 @@ fn a_hovered_live_unit_is_asked_by_each_probe_once_per_answer() {
         .resource_mut::<crate::net::GuidIndex>()
         .0
         .insert(UNIT, e);
-    blip(&mut app, MinimapBlipHover::Npc(UNIT, false));
+    blip(&mut app, unit(UNIT));
     assert_eq!(crate::query_cache::queries(&rx).len(), 1, "the probe asks");
-    blip(&mut app, MinimapBlipHover::Npc(UNIT, false));
+    blip(&mut app, unit(UNIT));
     assert!(
         crate::query_cache::queries(&rx).is_empty(),
         "once while the answer is pending"
@@ -112,10 +126,100 @@ fn a_hovered_live_unit_is_asked_by_each_probe_once_per_answer() {
     app.world_mut()
         .resource_mut::<NameCache>()
         .insert_player(UNIT, String::new(), None);
-    blip(&mut app, MinimapBlipHover::Npc(UNIT, false));
+    blip(&mut app, unit(UNIT));
     assert_eq!(
         crate::query_cache::queries(&rx).len(),
         1,
         "the probe after the refusal asks again"
+    );
+}
+
+/// What the probe sees with the cursor on the player's own position, the disc 133 yd across.
+fn ctx_at_centre() -> super::BlipCtx {
+    super::BlipCtx {
+        center: Vec2::ZERO,
+        side: super::BLIP_BASIS_PX,
+        px_per_yd: super::BLIP_BASIS_PX * 0.5 / 133.0,
+        radius_yd: 133.0,
+        z: 0,
+        alpha: 1.0,
+        wx: 0.0,
+        wy: 0.0,
+        wz: 0.0,
+        cursor: Some(Vec2::ZERO),
+    }
+}
+
+/// `0x4eb0c0` keeps every landmark icon the cursor is over as a bit of `0xbdcbac`, and the build
+/// joins a line for each in list order, `\n` between them (`0x4eb67a`-`0x4eb6ed`, `0x835144`),
+/// into the one gold line it adds (`0x530380`): the gossip marker's static slot before the
+/// corpse's, both stacked on the player.
+#[test]
+fn stacked_landmarks_each_get_a_line_in_list_order() {
+    let marker = benilla_formats::AreaPoi {
+        importance: 0,
+        icon: 6,
+        faction_id: 0,
+        pos: [0.0; 3],
+        continent_id: 0,
+        flags: 2,
+        area_id: 0,
+        name: "Guards' directions".into(),
+        description: String::new(),
+        world_state_id: 0,
+    };
+    let corpse = super::corpse_landmark([0.0; 3], 0, "Corpse".into());
+    let mut hover = MinimapBlipHover::default();
+    let mut quads = crate::ui_pass::UiQuads::default();
+    super::emit_landmarks(
+        &ctx_at_centre(),
+        None,
+        Some(&marker),
+        Some(&corpse),
+        0,
+        Some(&Handle::default()),
+        &mut quads,
+        &mut hover,
+    );
+    let mut app = minimap_app();
+    blip(&mut app, hover);
+    assert!(shown(&mut app));
+    let text = app
+        .world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .eval::<String>("return GameTooltipTextLeft1:GetText()")
+        .unwrap();
+    assert_eq!(text, "Guards' directions\nCorpse");
+}
+
+/// The build's order (`0x4eb58c`-`0x4eb840`): the rim arrows, the party and pet arrow frames, the
+/// icons, then the dot categories 0 to 4, whatever order the emitters found them in. A grey dot
+/// is wrapped in `|cffb0b0b0`…`|r` (`0x4eb7cf`); a dot whose name the cache lacks has no line
+/// (`0x4eb785`).
+#[test]
+fn the_lines_join_in_the_probes_order_greyed_and_named() {
+    const MEMBER: u64 = 0x7;
+    const UNNAMED: u64 = 0x8;
+    let mut app = minimap_app();
+    app.world_mut()
+        .resource_mut::<NameCache>()
+        .insert_player(MEMBER, "Aldwyn".into(), None);
+    let mut hover = MinimapBlipHover::default();
+    let known = |n: &str| BlipName::Known(n.into());
+    hover.push(BlipBlock::Icon, known("Goldshire"), false);
+    hover.push(BlipBlock::RimArrow, known("Stormwind"), false);
+    hover.push(BlipBlock::Dot(0), known("Copper Vein"), true);
+    hover.push(BlipBlock::Dot(1), BlipName::Unit(UNNAMED), false);
+    hover.push(BlipBlock::Dot(3), known("Marshal"), false);
+    hover.push(BlipBlock::GroupArrow, BlipName::Unit(MEMBER), false);
+    blip(&mut app, hover);
+    let text = app
+        .world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .eval::<String>("return GameTooltipTextLeft1:GetText()")
+        .unwrap();
+    assert_eq!(
+        text,
+        "Stormwind\nAldwyn\nGoldshire\n|cffb0b0b0Copper Vein|r\nMarshal"
     );
 }
