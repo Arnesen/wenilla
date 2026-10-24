@@ -20,9 +20,10 @@ pub(crate) use cast_lines::{CastFailLines, CastFailRedisplays};
 mod drain;
 // A `UseAction` press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::{attack_nearest_probe, use_action, ActionPress, AttackPress, UseOutcome};
-// The bar's drain of the VM's queued writes, which the macro migration's test runs end to end.
+// The bar's sends inside their calls, and the store of the slot writes they queue.
+pub(crate) use drain::ActionBarSteps;
 #[cfg(test)]
-pub(crate) use drain::drain_action_sets;
+pub(crate) use drain::{store_action_writes, ActionSlotWrites};
 // The right-click casts' drain, which the click's tests run after the click.
 #[cfg(test)]
 pub(crate) use drain::drain_click_casts;
@@ -72,7 +73,7 @@ pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon, substit
 pub(crate) const SPELL_ATTACK: u32 = 6603;
 
 /// The action slots (wire 0..119) and the known spells. The bar is client-authoritative:
-/// [`drain::drain_action_sets`] writes it directly, and vmangos stores a slot without a reply
+/// [`drain::store_action_writes`] writes it directly, and vmangos stores a slot without a reply
 /// (`MasterPlayer::addActionButton`).
 #[derive(Resource, Default)]
 pub(crate) struct PlayerActions {
@@ -96,6 +97,10 @@ pub(crate) struct PlayerActions {
     /// item tooltip's lock walk `0x5da5e0` scan it from the front, so its order picks between
     /// 6478 "Opening" and 22810 "Opening - No Text", which open the same locks.
     pub openers: Vec<u32>,
+    /// `[0xb70098]`, the spell `Stuck()` casts: the last registered spell whose `Effect[0]` is
+    /// `SPELL_EFFECT_STUCK` (`0x4b2614`-`0x4b261d`); `None` is its 0, after the book's reset
+    /// (`0x4b2433`).
+    pub stuck_spell: Option<u32>,
     /// `SMSG_SUPERCEDED_SPELL`'s `(old, new)` pairs in arrival order, for the macro arm of
     /// `0x4e5e60`: a macro on the bar whose cached spell is `old` gets `new` (`0x4e5ec4`). The
     /// macro rebind drains it ([`crate::ui_macro`]).
@@ -388,6 +393,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<state::ActionStateMemory>()
             .add_message::<crate::net::WorldEnterCascadeMessage>()
             .init_resource::<PlayerActions>()
+            .init_resource::<drain::ActionSlotWrites>()
             .init_resource::<LearnedAbilities>()
             .init_resource::<CastFailRedisplays>()
             .init_resource::<MountErrors>()
@@ -450,7 +456,7 @@ impl Plugin for UiActionPlugin {
                         .after(state::feed_action_state)
                         .after(crate::ui_unit::UnitSnapshots)
                         .before(crate::ui_cast::feed_cast_reports),
-                    drain::drain_action_sets.in_set(crate::ui_script::UiDrain),
+                    drain::store_action_writes.in_set(crate::ui_script::UiDrain),
                     // The target chain queues the right-click casts earlier in the frame.
                     drain::drain_click_casts
                         .after(UiInput)

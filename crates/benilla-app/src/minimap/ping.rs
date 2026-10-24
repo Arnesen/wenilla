@@ -9,7 +9,7 @@
 //!   world point against the frame's own size and the zoom diameter. A group member's
 //!   `MSG_MINIMAP_PING` (raw world floats) applies through [`drive_minimap_ping`].
 //! - Out: our own ping goes on the wire when grouped (relayed to the rest of the group only,
-//!   `GroupHandler.cpp:384-391`), from [`send_own_pings`].
+//!   `GroupHandler.cpp:384-391`), inside its call ([`MinimapSteps`]).
 //!
 //! The reference keeps the world point in two statics nothing clears (`0xbc787c`/`0xbc7880`),
 //! across a `ReloadUI` too, so [`MinimapPing`] keeps the process's copy for each new VM. The stock
@@ -23,7 +23,7 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::coords::bevy_to_wow;
+use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::net::{ClientCommand, Guid, NetCommands, SelfPlayer};
 use crate::player::Player;
@@ -48,27 +48,34 @@ impl MinimapPing {
 /// Push the player's position, seat a new VM's stored ping, and apply the members' pings, each
 /// signalling `MINIMAP_PING` with its sender's unit token. Runs before the script tick.
 pub(super) fn drive_minimap_ping(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut ping: ResMut<MinimapPing>,
+    // The ping, which the host's `PingLocation` writes too: taken before the VM runs.
+    mut hosted: crate::script_calls::disjoint::Pair<
+        ResMut<'static, MinimapPing>,
+        crate::script_calls::HostedVm<'static, 'static>,
+    >,
     player: Res<Player>,
     group: Res<crate::ui_party::GroupState>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     mut seated: Local<crate::ui_script::VmMemo<bool>>,
 ) {
-    hosted_vm.run(|script| {
+    let (stored, inbound) = {
+        let mut ping = hosted.p0();
+        (ping.world, std::mem::take(&mut ping.inbound))
+    };
+    hosted.p1().run(|script| {
         let Some(script) = script else { return };
         let wow = bevy_to_wow(player.pos);
         script.set_minimap_player(player.active.then_some((wow[0], wow[1])));
         let seated = seated.get(script);
         if !*seated {
-            script.set_minimap_ping_point(ping.world);
+            script.set_minimap_ping_point(stored);
             *seated = true;
         }
         // The token (`0x4ee330`): ourselves, else the sender's party slot (`party%d`, `0x4ee412`),
         // else its raid row (`raid%d`, `0x4ee41b`), the party scan first; a sender in neither
         // leaves `player`.
         let self_guid = self_q.iter().next().map(|g| g.0);
-        for (world, sender) in std::mem::take(&mut ping.inbound) {
+        for (world, sender) in inbound {
             let token = if Some(sender) == self_guid {
                 "player".to_string()
             } else if let Some(i) = group.party_slots().position(|m| m.guid == sender) {
@@ -88,23 +95,45 @@ pub(super) fn drop_inbound_pings(mut ping: ResMut<MinimapPing>) {
     ping.inbound.clear();
 }
 
-/// Our own `PingLocation` calls, after the tick that made them: each is the process's ping now,
-/// and goes on the wire when grouped (`0x4eef15`, `0x4eef26`, `0x4eef72`).
-pub(super) fn send_own_pings(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut ping: ResMut<MinimapPing>,
-    group: Res<crate::ui_party::GroupState>,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else { return };
-        for (x, y) in script.take_minimap_pings_sent() {
+/// Our own `PingLocation` inside its call ([`benilla_ui::script::MinimapCall`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MinimapSteps<'w> {
+    /// Absent in a harness without the minimap.
+    ping: Option<ResMut<'w, MinimapPing>>,
+    group: Option<Res<'w, crate::ui_party::GroupState>>,
+    commands: Res<'w, NetCommands>,
+    /// The streamed terrain the ground cast's trace reads.
+    terrain: benilla_world::world_point::TerrainHeights<'w>,
+}
+
+impl MinimapSteps<'_> {
+    /// The ground cast's point under the world point `(x, y)`: the terrain-only trace down the
+    /// column from z 100000 to -100000 (`0x672170` with flags `0x100`, `0x4eee91`), whose hit is
+    /// the heightfield's height there, raised by `[0x807b10]` (`0x4eeee9`). `None` is a miss: no
+    /// tile streamed there, or a hole.
+    pub(crate) fn ground_under(&self, x: f32, y: f32) -> Option<[f32; 3]> {
+        let z = self.terrain.under(wow_to_bevy([x, y, 0.0]))?;
+        Some(ground_cast_point(x, y, z))
+    }
+
+    /// The ping at the world point `(x, y)`: the process's ping now, and on the wire when grouped
+    /// (`0x4eef15`, `0x4eef26`, `0x4eef72`), before the VM applies it (`0x4eefb5`).
+    pub(crate) fn ping(&mut self, x: f32, y: f32) {
+        if let Some(ping) = self.ping.as_deref_mut() {
             ping.world = (x, y);
-            if group.in_group {
-                let _ = commands.0.send(ClientCommand::MinimapPing { x, y });
-            }
         }
-    })
+        if self.group.as_deref().is_some_and(|g| g.in_group) {
+            let _ = self.commands.0.send(ClientCommand::MinimapPing { x, y });
+        }
+    }
+}
+
+/// `[0x807b10]`, the lift `PingLocation` puts on the trace's hit (`0x4eeee9`).
+const GROUND_CAST_LIFT: f32 = 8.0;
+
+/// The bound point of a ground cast whose trace hit the terrain at height `z`.
+fn ground_cast_point(x: f32, y: f32, z: f32) -> [f32; 3] {
+    [x, y, z + GROUND_CAST_LIFT]
 }
 
 /// Register the ping's packet handler.
@@ -128,8 +157,8 @@ mod tests {
     use super::*;
     use benilla_ui::script::UiScript;
 
-    /// The two ping systems over a VM with a Minimap and a `MINIMAP_PING` listener, the player at
-    /// WoW (100, 200) and in a group.
+    /// The drive over a VM with a Minimap and a `MINIMAP_PING` listener, the player at WoW
+    /// (100, 200) and in a group.
     fn ping_app(in_group: bool) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
         let mut app = App::new();
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -144,8 +173,9 @@ mod tests {
             .insert_resource(group)
             .insert_resource(player)
             .init_resource::<MinimapPing>()
-            .add_systems(Update, (drive_minimap_ping, send_own_pings).chain());
-        let script = UiScript::new().unwrap();
+            .add_systems(Update, drive_minimap_ping);
+        let mut script = UiScript::new().unwrap();
+        script.keep_calls();
         script
             .run(
                 r#"m = CreateFrame("Minimap", "Minimap") m:SetWidth(140) m:SetHeight(140)
@@ -232,7 +262,12 @@ mod tests {
             let (mut app, rx) = ping_app(grouped);
             app.update();
             script(&mut app).run("m:PingLocation(0, 70)").unwrap();
-            app.update();
+            // The call as the host applies it.
+            let pings = script(&mut app).take_minimap_pings_sent();
+            let mut steps = bevy::ecs::system::SystemState::<MinimapSteps>::new(app.world_mut());
+            for (x, y) in pings {
+                steps.get_mut(app.world_mut()).ping(x, y);
+            }
             let sent: Vec<_> = rx.try_iter().collect();
             assert_eq!(sent.len(), usize::from(grouped), "grouped: {grouped}");
             let d = 2.0 * benilla_ui::widget::minimap_radius_yd(3, 3, false);
@@ -257,5 +292,39 @@ mod tests {
                 .unwrap();
             assert!((y - 0.5).abs() < 1e-6, "{y}");
         }
+    }
+
+    /// A trace's hit binds 8 above the ground (`0x4eeee9`) as the waiting spell's DEST (`0x40`,
+    /// `0x6e612c`), and the bind empties the word and sends (`0x6e6177`).
+    #[test]
+    fn a_ground_hit_binds_eight_above_the_terrain_as_the_spells_location() {
+        const BLIZZARD: u32 = 10;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        app.world_mut()
+            .resource_mut::<crate::spell::targeting::SpellTargeting>()
+            .enter(BLIZZARD, crate::spell::CastCommit::Spell, 0x40);
+        let mut cursor =
+            bevy::ecs::system::SystemState::<crate::spell::ScriptCursor>::new(app.world_mut());
+        cursor
+            .get_mut(app.world_mut())
+            .bind_location(ground_cast_point(100.0, 200.0, 30.5));
+        cursor.apply(app.world_mut());
+        let sent: Vec<_> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::CastSpellAtDest { spell_id, dest } => Some((spell_id, dest)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [(BLIZZARD, [100.0, 200.0, 38.5])]);
+        assert_eq!(
+            app.world()
+                .resource::<crate::spell::targeting::SpellTargeting>()
+                .spell(),
+            None,
+            "the bind ends the mode"
+        );
     }
 }

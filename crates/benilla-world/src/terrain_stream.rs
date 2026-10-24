@@ -516,15 +516,26 @@ impl Plugin for TerrainPlugin {
                 release_world
                     .run_if(crate::schedule::world_left)
                     // On the frame the world went away: the session publishes its edge before
-                    // `Net`, and the release lands before the stream stage.
+                    // `Net`, and the release lands ahead of the stream chain. In the stream stage,
+                    // so whatever reads the tiles in a declared order against the stage reads
+                    // them before or after the release, never beside it.
                     .after(crate::schedule::WorldStage::Net)
-                    .before(crate::schedule::WorldStage::Stream),
+                    .in_set(crate::schedule::WorldStage::Stream)
+                    .before(stream_terrain)
+                    // The forms and the stream activity it clears, which the ungated form
+                    // furnisher in the same stage writes.
+                    .before(crate::model_forms::furnish_model_forms),
             )
             // Ungated, so the last world's art drains at character select too.
             .add_systems(Update, scope_placement_art)
             // Ungated, so the density tracker never misses a boot-time config apply; ordered
             // before the residency publish, which reads the tiles whose clutter it rewrites.
-            .add_systems(Update, rescatter_clutter.before(publish_terrain_residency))
+            .add_systems(
+                Update,
+                rescatter_clutter
+                    .in_set(WorldStage::Stream)
+                    .before(publish_terrain_residency),
+            )
             .add_systems(
                 Update,
                 // After the interior claim: the reference resolves leaf, indoor and names from one
