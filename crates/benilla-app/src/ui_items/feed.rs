@@ -358,13 +358,14 @@ fn taught_spell(
     })
 }
 
-/// Answers the engine's set-id asks from `ItemSet.dbc`: member names from the template cache, each
+/// Answers the engine's set-id asks from `ItemSet.dbc`: member names from the item-name store, each
 /// miss queried as the reference queries set members, and bonus text from the `$`-engine. A set
 /// stays pending, re-pushing, until every member resolves.
 pub(super) fn feed_item_sets(
     mut hosted_vm: crate::script_calls::HostedVm,
     sets: Option<Res<super::ItemSets>>,
     items: Res<Items>,
+    item_names: Res<crate::item_names::ItemNames>,
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
     spell_mods: Res<crate::spell::SpellModifiers>,
@@ -454,11 +455,7 @@ pub(super) fn feed_item_sets(
             } else {
                 Ask::Read
             };
-            let members: Vec<(u32, Option<String>)> = row
-                .items
-                .iter()
-                .map(|&id| (id, items.template(id, 0, ask).map(|t| t.name.clone())))
-                .collect();
+            let members = set_members(&row.items, &item_names, ask);
             let view = benilla_ui::script::ItemSetView {
                 name: row.name.clone(),
                 bonuses: row
@@ -503,6 +500,18 @@ pub(super) fn feed_item_sets(
             pending.remove(&id);
         }
     })
+}
+
+/// An item set's member names, each read as `ask` says from the item-name store, as the tooltip's
+/// set block reads them (`0x52df5a` on `0xc0e2dc`), not from the template store.
+pub(super) fn set_members(
+    ids: &[u32],
+    names: &crate::item_names::ItemNames,
+    ask: Ask<'_>,
+) -> Vec<(u32, Option<String>)> {
+    ids.iter()
+        .map(|&id| (id, names.name(id, ask).map(str::to_string)))
+        .collect()
 }
 
 /// Pushes the whole random-suffix table once per VM, when both catalogs are in, and the enchant
@@ -1729,6 +1738,41 @@ fn push_changed(
 #[cfg(test)]
 mod tests {
     use super::{ask_build_lookups, push_containers, resolve_slot, ContainerSlot, FeedMemory};
+
+    /// A set's member names come from the item-name store (`0x52df5a` looks up `0xc0e2dc` with a
+    /// callback and a zero owner), asked with `CMSG_ITEM_NAME_QUERY`, never the template store.
+    #[test]
+    fn a_set_member_is_named_through_the_item_name_store() {
+        use crate::item_names::ItemNames;
+        use crate::net::{ClientCommand, NetCommands};
+        use crate::query_cache::Ask;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+        let mut names = ItemNames::default();
+        let members = super::set_members(&[16_866, 16_867], &names, Ask::Event(&commands));
+        assert_eq!(members, [(16_866, None), (16_867, None)]);
+        let asked = crate::query_cache::queries(&rx);
+        assert!(
+            matches!(
+                asked[..],
+                [
+                    ClientCommand::ItemNameQuery {
+                        entry: 16_866,
+                        guid: 0
+                    },
+                    ClientCommand::ItemNameQuery {
+                        entry: 16_867,
+                        guid: 0
+                    }
+                ]
+            ),
+            "{asked:?}"
+        );
+        names.file(16_866, Some("Helm of Wrath".into()));
+        let members = super::set_members(&[16_866], &names, Ask::Read);
+        assert_eq!(members, [(16_866, Some("Helm of Wrath".into()))]);
+    }
 
     /// The view carries what `GetTradeSkillItemStats` reads beyond the tooltip: the item level, and
     /// the five spell slots whose id names a `Spell.dbc` row with their charges, in slot order.

@@ -269,6 +269,7 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
         self.answered.iter()
     }
 
+    #[cfg(test)]
     /// How many records it holds.
     pub(crate) fn len(&self) -> usize {
         self.answered.len()
@@ -320,6 +321,7 @@ pub(crate) fn queries(
                     | C::CreatureQuery { .. }
                     | C::PetNameQuery { .. }
                     | C::ItemQuery { .. }
+                    | C::ItemNameQuery { .. }
                     | C::NpcTextQuery { .. }
                     | C::GameObjectQuery { .. }
                     | C::PageTextQuery { .. }

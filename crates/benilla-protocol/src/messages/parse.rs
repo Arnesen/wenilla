@@ -626,6 +626,10 @@ fn parse_server_body(
             let guid = read_u64_le(&mut r)?;
             ServerPacket::Emote { guid, emote_id }
         }
+        opcode::SMSG_ITEM_NAME_QUERY_RESPONSE => {
+            let (entry, name) = items::read_item_name_query_response(&mut r)?;
+            ServerPacket::ItemNameQueryResponse { entry, name }
+        }
         opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE => {
             let (entry, info) = items::read_item_query_response(&mut r)?;
             ServerPacket::ItemQueryResponse {
@@ -1287,8 +1291,8 @@ fn parse_server_body(
                 }
             }
         }
-        // `u32 petNumber, cstring name, u32 nameTimestamp` (`Pet.cpp:79-84`); the timestamp only
-        // ages the reference's on-disk pet-name cache.
+        // `u32 petNumber, cstring name, u32 nameTimestamp` (`Pet.cpp:79-84`); the timestamp is
+        // read and dropped.
         opcode::SMSG_PET_NAME_QUERY_RESPONSE => {
             let pet_number = read_u32_le(&mut r)?;
             let name = read_cstring(&mut r)?;

@@ -237,6 +237,10 @@ pub enum SessionEvent {
     /// The world session ended, and with [`SessionEnd::Lost`] the link with it; `reason` is
     /// human-readable.
     Disconnected { reason: String, end: SessionEnd },
+    /// The body of an answer whose record the 1.12 client saves to disk, as it came off the wire,
+    /// its key the first dword (`0x556e5b`): emitted by the IO thread ahead of the answer's
+    /// decoded events, never wire-decoded, for the app's on-disk template caches.
+    SavedAnswer { opcode: u16, body: Vec<u8> },
     /// A placed object entered view, its spawn identity decoded per object type.
     ObjectCreate {
         guid: u64,
@@ -584,6 +588,8 @@ pub enum SessionEvent {
     PetActionSound { pet_guid: u64, talk: u32 },
     /// A dismissed pet's sound (`SMSG_PET_DISMISS_SOUND`): the `CreatureModelData` column-29 kit.
     PetDismissSound { model_id: u32, position: [f32; 3] },
+    /// `SMSG_ITEM_NAME_QUERY_RESPONSE`, by entry; `None` is unknown.
+    ItemName { entry: u32, name: Option<String> },
     /// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, by entry; `None` is unknown. Boxed, being wide.
     ItemTemplate {
         entry: u32,

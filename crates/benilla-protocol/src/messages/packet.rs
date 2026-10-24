@@ -348,7 +348,7 @@ pub enum ServerPacket {
         info: Option<CreatureQueryInfo>,
     },
     /// `SMSG_PET_NAME_QUERY_RESPONSE`: keyed by pet number, as the client's pet-name cache is; the
-    /// `nameTimestamp` tail, which only ages that on-disk cache, is read and dropped.
+    /// `nameTimestamp` tail is read and dropped.
     PetNameQueryResponse {
         pet_number: u32,
         name: String,
@@ -429,6 +429,11 @@ pub enum ServerPacket {
     Emote {
         guid: u64,
         emote_id: u32,
+    },
+    /// `SMSG_ITEM_NAME_QUERY_RESPONSE`: an item's name by entry; `None` is a refusal.
+    ItemNameQueryResponse {
+        entry: u32,
+        name: Option<String>,
     },
     /// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`: the full item template, boxed for size; `None` is a miss.
     ItemQueryResponse {
@@ -1399,6 +1404,7 @@ impl ServerPacket {
             ServerPacket::TextEmote { .. } => "SMSG_TEXT_EMOTE".into(),
             ServerPacket::Emote { .. } => "SMSG_EMOTE".into(),
             ServerPacket::ItemQueryResponse { .. } => "SMSG_ITEM_QUERY_SINGLE_RESPONSE".into(),
+            ServerPacket::ItemNameQueryResponse { .. } => "SMSG_ITEM_NAME_QUERY_RESPONSE".into(),
             ServerPacket::InventoryChangeFailure { .. } => "SMSG_INVENTORY_CHANGE_FAILURE".into(),
             ServerPacket::MessageChat(_) => "SMSG_MESSAGECHAT".into(),
             ServerPacket::ChannelNotify(_) => "SMSG_CHANNEL_NOTIFY".into(),
