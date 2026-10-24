@@ -146,7 +146,9 @@ mod messageframe;
 mod minimap;
 mod movieframe;
 pub mod nameplate;
-pub use nameplate::{PlateBitWrites, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND};
+pub use nameplate::{
+    PlateBitWrite, PlateBitWrites, PlateGeometry, PlateState, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND,
+};
 mod model;
 mod modelframe;
 mod mouseover;
@@ -235,7 +237,7 @@ pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldS
 pub use bind_confirm::PendingEquipAnswer;
 pub use binder::BinderCall;
 pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
-pub use calls::{NearestMode, QueuedCall, ScriptCall};
+pub use calls::{NearestMode, QueuedCall, RecordAsk, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, JoinedChannel, RecruitmentPlan, ZoneChannelRow};
 pub use char_stats::{

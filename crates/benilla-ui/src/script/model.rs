@@ -5,9 +5,9 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     auction, backdrop, bank, camera_view, char_stats, chat_window, colorselect, container, craft,
-    cursor, death, follow, gossip, guild, item_calls, item_text, loot, loot_roll, macros, mail,
-    merchant, parse_unit_token, party, petition, pvp, quest, quest_log, reputation, simplehtml,
-    skills, slider, social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant,
+    cursor, death, gossip, guild, item_calls, item_text, loot, loot_roll, macros, mail, merchant,
+    parse_unit_token, party, petition, pvp, quest, quest_log, reputation, simplehtml, skills,
+    slider, social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant,
     ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest, PlayerReqState, RegionData,
     ScriptValue, SoundRequest, UnitBase, UnitState, UnitTokenParse,
 };
@@ -486,8 +486,6 @@ pub(crate) struct Model {
     /// The roster module's own cells and the rank editor's unsaved edits, apart from `guild` so a
     /// push keeps them.
     pub(crate) guild_cells: guild::GuildCells,
-    /// The guilds `GetGuildInfo` missed, `(guild_id, guid)`, for the app to ask with a waiter.
-    pub(crate) guild_info_asks: Vec<(u32, u64)>,
     /// The charter price and open petition, names resolved from caches as the reference does.
     pub(crate) petition: petition::PetitionState,
     /// Per chat window from `ChatFrame1`, the tint, alpha and font size its tab menu can change.
@@ -512,8 +510,6 @@ pub(crate) struct Model {
     pub(crate) guild_recruitment_plan: super::channel::RecruitmentPlan,
     /// Lua changed the recruitment mode: the chat cache's dirty signal.
     pub(crate) guild_recruitment_changed: bool,
-    /// `ConsoleExec` lines that were not CVar writes.
-    pub(crate) console_lines: Vec<String>,
     /// `LoggingChat` and `LoggingCombat`'s flags, and their change cue.
     pub(crate) logging_chat: bool,
     pub(crate) logging_combat: bool,
@@ -522,8 +518,6 @@ pub(crate) struct Model {
     pub(crate) user_placed_changed: bool,
     /// The default chat language; `None` is no player, so `GetDefaultLanguage()` returns nothing.
     pub(crate) default_language: Option<String>,
-    /// `FollowUnit` and `FollowByName` calls; Lua sees following only as `AUTOFOLLOW_*` events.
-    pub(crate) follow_requests: Vec<follow::FollowRequest>,
     /// `SetView`, `SaveView`, `ResetView`, `NextView`, `PrevView` and `FlipCameraYaw` calls; the
     /// views reach Lua only as CVars, `cameraView` and `camera{Distance,Pitch,Yaw}{,A..D}`.
     pub(crate) camera_view_requests: Vec<camera_view::CameraViewRequest>,
@@ -943,9 +937,6 @@ pub(crate) struct Model {
     /// The partner cell `[0xb71728]` is set: the window is open. Read by the checks that test the
     /// cell first (`0x4bfd20`) and by `GetPlayerTradeMoney` (`0x4c0706`).
     pub(crate) trade_window: bool,
-    /// The entries the item getters found filled and unnamed (`0x4c017f`, `0x4c0582`), for the
-    /// host to ask the item cache for with the callback that signals `TRADE_UPDATE`.
-    pub(crate) trade_record_asks: Vec<u32>,
     /// The close core's done flag `[0xb71748]`, which `CloseTrade` tests (`0x4bfdc0`).
     pub(crate) trade_done: bool,
     /// The placements whose send the host has yet to answer, by the id their call carries
@@ -989,9 +980,6 @@ pub(crate) struct Model {
     /// creator's and the giver's lookups pass a callback (`0x52e204`, `0x52e29d`) at every build,
     /// and a hovered bag or paper-doll slot's `OnUpdate` builds again each frame.
     pub(crate) item_name_asks: HashSet<u64>,
-    /// Guids `UnitName` read off a unit with no object and missed in the name cache, for the app
-    /// to ask: the no-object leg's lookup passes a callback (`0x5171eb`, `0x517205`).
-    pub(crate) unit_name_asks: HashSet<u64>,
     /// Charter item guids whose build missed the petition record or its owner's name, for the
     /// app to ask: both lookups pass a callback (`0x52b93b`, `0x52b9d2`) at every build.
     pub(crate) petition_asks: HashSet<u64>,
@@ -1200,8 +1188,6 @@ pub(crate) struct Model {
     /// The minimap's process-wide statics (zoom cells, indoor byte, mask), shared by every
     /// Minimap frame of this VM.
     pub(crate) minimap: crate::widget::MinimapStatics,
-    /// `OpeningCinematic()` calls, one empty `CMSG_OPENING_CINEMATIC` each.
-    pub(crate) opening_cinematic_asks: u32,
     /// `Screenshot()` calls, one capture each.
     pub(crate) screenshot_asks: u32,
     /// `GetRealmName()`: `""` until pushed, never nil, since addons index tables with it at load.
@@ -1489,7 +1475,6 @@ impl Model {
             lfg_slots: [0; 3],
             lfg_comment: String::new(),
             guild: guild::GuildState::default(),
-            guild_info_asks: Vec::new(),
             guild_cells: guild::GuildCells::default(),
             petition: petition::PetitionState::default(),
             // Per window, as the stock dock differs: 1 and 2 are the dock, the rest undocked.
@@ -1504,13 +1489,11 @@ impl Model {
             guild_recruitment_cascade: false,
             guild_recruitment_plan: Default::default(),
             guild_recruitment_changed: false,
-            console_lines: Vec::new(),
             logging_chat: false,
             logging_combat: false,
             logging_changed: false,
             user_placed_changed: false,
             default_language: None,
-            follow_requests: Vec::new(),
             camera_view_requests: Vec::new(),
             glue: Default::default(),
             player_login_armed: false,
@@ -1673,7 +1656,6 @@ impl Model {
             auction_sell_item: None,
             trade: None,
             trade_window: false,
-            trade_record_asks: Vec::new(),
             trade_done: false,
             trade_placing: std::collections::HashMap::new(),
             trade_place_seq: 0,
@@ -1689,7 +1671,6 @@ impl Model {
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
             item_name_asks: HashSet::new(),
-            unit_name_asks: HashSet::new(),
             petition_asks: HashSet::new(),
             random_properties: HashMap::new(),
             enchant_names: HashMap::new(),
@@ -1728,7 +1709,6 @@ impl Model {
             item_locks: std::collections::HashSet::new(),
             cursor_pos: (0.0, 0.0),
             minimap: crate::widget::MinimapStatics::default(),
-            opening_cinematic_asks: 0,
             screenshot_asks: 0,
             realm_name: String::new(),
             player_record: super::PlayerRecord::default(),

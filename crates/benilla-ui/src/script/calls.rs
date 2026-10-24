@@ -124,6 +124,8 @@ pub enum ScriptCall {
     RandomRoll { min: u32, max: u32 },
     /// `RequestTimePlayed()` (`0x48a900`): the empty `CMSG_PLAYED_TIME`, sent at `0x48a936`.
     RequestTimePlayed,
+    /// `OpeningCinematic()` (`0x48c8c0`): the empty `CMSG_OPENING_CINEMATIC`, sent at `0x48c8f6`.
+    OpeningCinematic,
     /// `DoEmote(token, target)` (`0x49fd30`) past its empty-token check: the host finds the
     /// `EmotesText` row by name (`0x49fd72`-`0x49fda6`), resolves the target (`0x49fdb1`-`0x49fdee`)
     /// and runs `0x5ef560` (`0x49fe16`), its gates, posture, play and `CMSG_TEXT_EMOTE`.
@@ -260,9 +262,55 @@ pub enum ScriptCall {
     Minimap(super::MinimapCall),
     /// A posture verb ([`super::PostureCall`]): the stand-state setter inside the call.
     Posture(super::PostureCall),
+    /// A getter's lookup with a callback on a record its mirror misses ([`RecordAsk`]): the host
+    /// asks the cache inside the call, which sends the query on the miss (`0x556aa0`).
+    RecordAsk(RecordAsk),
+    /// A `ConsoleExec` line that is no CVar write: `ConsoleCommandExecute` (`0x63ce00`) inside the
+    /// call (`0x515f43`), a registered command, a CVar's print or `Unknown command`.
+    Console(String),
+    /// `FollowUnit` or `FollowByName` ([`super::FollowRequest`]): the start gate, its refusal's
+    /// line or the follow armed and `AUTOFOLLOW_BEGIN` signalled, inside the call (`0x60fed0`).
+    Follow(super::FollowRequest),
+    /// A plate verb (`ShowNameplates` `0x489450` and its three siblings): its bit of
+    /// `[0xc4da34]` written inside the call ([`super::PlateBitWrite`]).
+    Nameplates(super::PlateBitWrite),
     /// `ConfirmPetUnlearn()` (`0x48dca0` → `0x5dfba0(0, 0)`): `CMSG_PET_UNLEARN` to the
     /// remembered trainer, or the money refusal's line, inside the call.
     ConfirmPetUnlearn,
+}
+
+/// A getter's lookup with a callback, which the host makes inside the getter's call: the cache
+/// sends the query on a miss, once while it is in flight, and keeps the callback for the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordAsk {
+    /// `UnitName` on a unit with no object: the player-name cache by guid (`0x5171eb`).
+    PlayerName(u64),
+    /// A trade getter's filled slot whose template the mirror lacks: the item cache, with the
+    /// callback `0x4c0340` that signals `TRADE_UPDATE` (`0x4c017f`, `0x4c0582`).
+    TradeItem(u32),
+    /// `GetGuildInfo` on a player whose guild the mirror lacks: the guild cache, with a waiter
+    /// of the call's own for the unit (`0x4c93b6`-`0x4c93d2`).
+    Guild { guild_id: u32, guid: u64 },
+}
+
+/// Make `ask` inside the getter's call. A getter never raises for its lookup: with no host lent,
+/// and no harness keeping calls, nothing asks, and at the nesting bound ([`MAX_NESTING`]) the ask
+/// is dropped where a verb would raise [`TOO_DEEP`].
+pub(crate) fn ask(lua: &Lua, ask: RecordAsk) -> mlua::Result<()> {
+    let open = super::host::open(lua);
+    let Some(model) = lua.app_data_ref::<Model>() else {
+        return Ok(());
+    };
+    let skip = if open {
+        model.call_depth >= MAX_NESTING
+    } else {
+        model.kept_calls.is_none()
+    };
+    drop(model);
+    if skip {
+        return Ok(());
+    }
+    submit(lua, ScriptCall::RecordAsk(ask))
 }
 
 /// The mode the four `TargetNearest*` shims hand the TAB cycler `0x493f60`, the only byte that
@@ -922,6 +970,65 @@ mod tests {
         assert!(errors[0].contains(TOO_DEEP), "{errors:?}");
         drop(errors);
         assert_eq!(s.refuse_waiting(), 0, "nothing waits");
+    }
+
+    /// A host whose every `TargetLastEnemy` leaves `UnitName` on an unheld unit and then
+    /// `TargetLastEnemy` again to run in its tail, so the getter's ask is made at every depth.
+    struct AskingAtDepth {
+        applied: Vec<ScriptCall>,
+        errors: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl CallHost for AskingAtDepth {
+        fn apply(&mut self, _: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+            let again = call == LAST_ENEMY;
+            self.applied.push(call);
+            if !again {
+                return None;
+            }
+            let errors = self.errors.clone();
+            Some(Box::new(move |script: &mut UiScript| {
+                let chunk = r#"UnitName("target") reached = (reached or 0) + 1 TargetLastEnemy()"#;
+                if let Err(e) = script.run(chunk) {
+                    errors.borrow_mut().push(e.to_string());
+                }
+            }))
+        }
+    }
+
+    /// A getter never raises for its lookup: at the nesting bound its ask is dropped and the
+    /// getter returns, and only the verb after it raises [`TOO_DEEP`]. The reference's getter
+    /// simply asks (`0x5171eb`).
+    #[test]
+    fn a_getters_ask_at_the_nesting_bound_is_dropped_not_raised() {
+        let mut s = UiScript::new().unwrap();
+        s.set_unit(
+            "target",
+            Some(super::super::UnitState {
+                guid: 0x77,
+                ..Default::default()
+            }),
+        );
+        let mut host = AskingAtDepth {
+            applied: Vec::new(),
+            errors: Default::default(),
+        };
+        s.hosted(&mut host, |s| s.run("TargetLastEnemy()").unwrap());
+        let levels = usize::from(MAX_NESTING);
+        assert_eq!(
+            s.eval::<usize>("return reached").unwrap(),
+            levels,
+            "every tail, the one at the bound too, gets past its getter"
+        );
+        let asks = host
+            .applied
+            .iter()
+            .filter(|c| matches!(c, ScriptCall::RecordAsk(_)))
+            .count();
+        assert_eq!(asks, levels - 1, "the ask at the bound is dropped");
+        let errors = host.errors.borrow();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains(TOO_DEEP), "{errors:?}");
     }
 
     /// With no host lent a call is refused with an error: an entry ran Lua without lending one.
