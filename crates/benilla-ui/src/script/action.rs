@@ -166,8 +166,9 @@ impl ActionState {
 
 /// The player's cast state as the reference's globals hold it, which the action bar's checked
 /// tests (`0x4e53a0`, `0x4e55b0`) and `SpellStopCasting` (`0x6e6e80`) read live. The app pushes it
-/// each frame and after every script call it applies, so a script's next line reads what the
-/// call left.
+/// each frame, as each packet left it where that packet's events fire, and after every script call
+/// that moved it, so a listener reads its own packet's and a script's next line what the call
+/// left.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CastView {
     /// The spell in the in-flight slot (`0xceca88`, `0x6e3d10`): a cast from its attempt to its
@@ -647,22 +648,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // at 0 (`0x4e6f0d`) and only the cooldown query writes it, to 1 before any leg (`0x6e1406`):
     // a slot that reaches no query, an empty one included, answers `(0, 0, 0)`, and one that
     // reaches it with nothing running `(0, 0, 1)`, so a later `CooldownFrame_SetTimer` replays no
-    // sweep and no finish flash.
+    // sweep and no finish flash. The query reads the list inside the call (`0x4e6ca0`: `0x6e2ea0`
+    // for a spell at `0x4e6d0b`, `0x6e2ed0` for an item at `0x4e6ce9`), through the lent host; a slot bound to the
+    // pet's book reads the pet's list off the snapshot.
     g.set(
         "GetActionCooldown",
         lua.create_function(|lua, action: Value| {
             // `is-number` else `Usage: GetActionCooldown(slot)` (`0x84bfb4`, `0x4e6f77`).
             let action = binding_abi::index_arg32(lua, action, "Usage: GetActionCooldown(slot)")?;
             let now = crate::script::clock::now(lua);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(state) = model
-                .action_states
-                .get(&action)
-                .filter(|s| !s.state.no_cooldown_query)
-            else {
-                return Ok((0.0, 0.0, 0));
+            let (query, snapshot) = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let Some(state) = model
+                    .action_states
+                    .get(&action)
+                    .filter(|s| !s.state.no_cooldown_query)
+                else {
+                    return Ok((0.0, 0.0, 0));
+                };
+                let query = match (state.state.spell, state.state.item) {
+                    (Some(spell), _) => Some(super::CooldownQuery::Spell(spell)),
+                    (None, Some(entry)) => Some(super::CooldownQuery::Item(entry)),
+                    (None, None) => None,
+                };
+                (query, state.cooldown)
             };
-            Ok(match state.cooldown {
+            let live = query.and_then(|q| super::cooldown_read::read_live(lua, q));
+            Ok(match live.unwrap_or(snapshot) {
                 Some((start, duration, enabled)) if start + duration > now || !enabled => (
                     crate::script::clock::held_start(start, enabled, now),
                     duration,
