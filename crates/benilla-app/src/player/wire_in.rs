@@ -195,6 +195,8 @@ pub(super) fn apply_server_moves(
     }
     // Cross-map worldport: snap, bump `CurrentMap` for the terrain streamer, ack if required.
     for w in worldports.read() {
+        // A transfer ends any teleport hold, so its loading screen reaches the window.
+        player.world_reload = false;
         let riding = w.transport_entry.is_some() && player.ride.is_some();
         if riding {
             // Riding through: the pose is deck-local (`Player.cpp:2114`) and the boat survived the
@@ -437,7 +439,9 @@ fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessag
     // (`Player.cpp:1866-1893`), and the reference's apply (`0x6186b0`) re-parents to the packet's
     // transport guid, zero here. A kept ride would carry us back onto the deck.
     player.ride = None;
+    let from = player.pos;
     player.pos = wow_to_bevy(t.position);
+    mark_world_reload(player, from, player.pos, now);
     player.face_yaw = t.orientation;
     *cam_yaw = t.orientation;
     player.move_flags = 0;
@@ -446,13 +450,35 @@ fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessag
     player.pitch_keys = None;
     player.mover_pitch = 0.0;
     player.airborne_since = None; // a snap ends any jump arc (no phantom FALL_LAND)
-    player.settling = true; // hold (gravity off) until the destination loads
+    hold_until_resident(player, now);
+    // Voids any self ride: `drive_self_ride` drops it rather than mirror the stale pose over this.
+    player.ride_abort = true;
+}
+
+/// The teleport apply `0x617e90`'s reload, for every teleport that reaches it (the ack's snap and
+/// our own `MSG_MOVE_TELEPORT`): a move of more than 30 yards (`0x80c730`, squared against `d²`)
+/// of the unit the world view follows reloads the destination before the frame goes on
+/// (`0x630bd0`). `from` and `to` are in the mover's frame, deck-local aboard a transport, as `d²` is
+/// taken of the mover's own position (`+0x10`) after the transport is set (`0x617170`). Returns
+/// whether it does. Only marks: a later, shorter teleport (vmangos sends `MSG_MOVE_TELEPORT` twice,
+/// `MovementHandler.cpp:252,255`) leaves a hold up, which only its release ends; a far one restarts
+/// the hold's ceiling.
+fn mark_world_reload(player: &mut Player, from: Vec3, to: Vec3, now: f32) -> bool {
+    let far = !player.detached && from.distance_squared(to) > 30.0 * 30.0;
+    if far {
+        player.world_reload = true;
+        player.reload_ceiling = now + SETTLE_TIMEOUT;
+    }
+    far
+}
+
+/// Hold the body (gravity off) until the destination is resident, which releases it.
+fn hold_until_resident(player: &mut Player, now: f32) {
+    player.settling = true;
     player.settle_since = now;
     player.settle_deadline = now + SETTLE_TIMEOUT;
     // The destination's ground may not have streamed yet.
     player.world_stale = true;
-    // Voids any self ride: `drive_self_ride` drops it rather than mirror the stale pose over this.
-    player.ride_abort = true;
 }
 
 /// The reference's masked merge of a server-authored `MOVEMENTFLAGS` (`0x618c30` at `0x618deb`:
@@ -494,6 +520,13 @@ fn apply_self_move(
     player.modes.merge_from_wire(player.move_flags);
     // Neither mode touches `settling`: the terrain streamer releases it in every mode alike.
 
+    // The mover's own frame for the reload's `d²`: deck-local when the packet places us on the
+    // deck we ride, else the world.
+    let deck_local = player.ride.as_ref().and_then(|r| {
+        let t = m.transport.filter(|t| t.guid == r.guid)?;
+        Some((r.local_pos, wow_to_bevy([t.pos.x, t.pos.y, t.pos.z])))
+    });
+    let from = player.pos;
     player.pos = wow_to_bevy(m.position);
     // Aim, body and camera turn by the same delta; the reference writes only the mover's facing,
     // and a hard camera set would yank the view on every `.cheat fly` toggle.
@@ -550,6 +583,13 @@ fn apply_self_move(
     }
     player.wedged = false;
     player.wedge_still = 0;
+    // A teleport's apply, unlike a placing relay's, reloads a far destination (`0x6186b0` →
+    // `0x617e90`), so the body waits for it as the ack's snap does.
+    let (from, to) = deck_local.unwrap_or((from, player.pos));
+    let now = time.elapsed_secs();
+    if m.teleport && mark_world_reload(player, from, to, now) {
+        hold_until_resident(player, now);
+    }
 }
 
 /// Our own player's create gives control back (`OnActiveArrival 0x5dea50`): with the manager's
@@ -897,6 +937,42 @@ mod teleport_tests {
         assert_eq!((player.face_yaw, cam_yaw), (1.25, 1.25));
         assert!(player.settling && player.ride_abort && player.world_stale);
     }
+
+    /// `0x617e90` reloads the world only for `d² > 900` of the unit the camera follows
+    /// (`0x630bd0`): a short hop, or a snap under a free-fly eye, holds no frame.
+    #[test]
+    fn only_a_snap_past_30_yards_of_the_followed_body_reloads_the_world() {
+        let snapped = |from: [f32; 3], to: [f32; 3], detached: bool| {
+            let mut player = Player {
+                active: true,
+                detached,
+                pos: wow_to_bevy(from),
+                ..Default::default()
+            };
+            let t = TeleportMessage {
+                guid: 0x45,
+                counter: 1,
+                position: to,
+                orientation: 0.0,
+            };
+            snap_near_teleport(&mut player, &mut 0.0, &t, 10.0);
+            player
+        };
+        let from = [16_222.0, 16_252.0, 12.5];
+        let south_seas = [-11_880.0, -4_700.0, 2.0];
+        let holds = |to, detached| snapped(from, to, detached).holds_the_frame();
+        assert!(holds(south_seas, false), "GM Island to the South Seas");
+        assert!(holds([16_222.0, 16_282.5, 12.5], false), "30.5 yards");
+        assert!(!holds([16_222.0, 16_281.5, 12.5], false), "29.5 yards");
+        assert!(!holds(south_seas, true), "the eye does not follow");
+
+        let mut player = snapped(from, south_seas, false);
+        player.end_settle(true, 11.0);
+        assert!(
+            !player.holds_the_frame(),
+            "the settle release ends the hold"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -995,6 +1071,83 @@ mod arrival_tests {
         app.world_mut().write_message(WorldEnterCascadeMessage);
         app.update();
         assert!(!app.world().resource::<Player>().reseat);
+    }
+}
+
+#[cfg(test)]
+mod self_teleport_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// One bare self-addressed move from GM Island's dock, applied as the controller applies it.
+    fn applied(to: [f32; 3], teleport: bool, detached: bool) -> Player {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(Player {
+            active: true,
+            detached,
+            pos: wow_to_bevy([16_222.0, 16_252.0, 12.5]),
+            ..Default::default()
+        });
+        let m = SelfMoveMessage {
+            position: to,
+            orientation: 0.0,
+            flags: 0,
+            pitch: 0.0,
+            fall_time: 0,
+            jump: None,
+            transport: None,
+            teleport,
+        };
+        world
+            .run_system_once(
+                move |time: Res<Time>,
+                      mut player: ResMut<Player>,
+                      transports: super::super::TransportQuery| {
+                    let mut cam = FlyCam {
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        speed: 0.0,
+                    };
+                    apply_self_move(&m, &mut player, &mut cam, &time, &transports);
+                },
+            )
+            .expect("runs");
+        world.remove_resource::<Player>().expect("player")
+    }
+
+    /// Our own mover's `MSG_MOVE_TELEPORT` reaches the teleport apply `0x617e90` (`0x6186ee`,
+    /// `0x61870c`), so it reloads under the same gate as the ack's snap: past 30 yards, with the
+    /// camera following. The other relays never reach it.
+    #[test]
+    fn a_self_teleport_past_30_yards_holds_the_body_and_the_frame() {
+        let south_seas = [-11_880.0, -4_700.0, 2.0];
+        let far = applied(south_seas, true, false);
+        assert!(
+            far.holds_the_frame(),
+            "GM Island to the South Seas holds the frame"
+        );
+        assert!(
+            far.settling && far.world_stale,
+            "and the body, until resident"
+        );
+        assert!(
+            !applied([16_222.0, 16_281.5, 12.5], true, false).holds_the_frame(),
+            "29.5 yards"
+        );
+        assert!(
+            applied([16_222.0, 16_282.5, 12.5], true, false).holds_the_frame(),
+            "30.5 yards"
+        );
+        assert!(
+            !applied(south_seas, true, true).holds_the_frame(),
+            "the eye does not follow"
+        );
+        let placed = applied(south_seas, false, false);
+        assert!(
+            !placed.holds_the_frame() && !placed.settling,
+            "a relay that only places the mover reloads nothing"
+        );
     }
 }
 

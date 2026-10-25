@@ -375,6 +375,13 @@ pub(crate) struct Player {
     /// before the streamer swaps maps. Set at every snap, cleared once the destination is resident;
     /// while set, the streamer judges no release and pushes [`Player::settle_deadline`] on.
     pub(crate) world_stale: bool,
+    /// The snap moved the body the camera follows more than 30 yards, which the reference answers
+    /// by reloading the destination before the frame goes on (`0x617e90` calls `0x630bd0` for
+    /// `d² > 900`): the frame is held until the settle hold ends ([`Self::holds_the_frame`]).
+    pub(crate) world_reload: bool,
+    /// When the reload hold gives up (`Time::elapsed_secs`): the stall budget from its snap, never
+    /// extended, as the reference's wait-all ends once every read has, failed or not (`0x443d30`).
+    pub(crate) reload_ceiling: f32,
     /// The camera pitch the login seize seats: the saved pose's `cameraPitch` when
     /// [`super::camera_saved`] restored one, else the stock opening pitch.
     pub(super) login_pitch: Option<f32>,
@@ -597,8 +604,15 @@ impl Player {
     /// [`SETTLE_TIMEOUT`] fired first, which the `sett` trace records.
     pub(crate) fn end_settle(&mut self, resident: bool, now: f32) {
         self.settling = false;
+        self.world_reload = false;
         let waited = now - self.settle_since;
         super::move_trace::settle(resident, waited, self.pos);
+    }
+
+    /// The window keeps its last presented frame: a reloading snap's settle hold is up, as the
+    /// reference's reload holds its frame until the destination is in (`0x694920`).
+    pub(crate) fn holds_the_frame(&self) -> bool {
+        self.active && self.settling && self.world_reload
     }
 
     /// The movement flags as last streamed; the water foam tests `& 0xf` (translating) and `& 0x30`

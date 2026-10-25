@@ -28,6 +28,8 @@ use benilla_world::terrain_stream::WorldLoadProgress;
 /// The cover's input half: while it is up the client takes no input (a source cut in `PreUpdate`).
 mod input;
 pub(crate) use input::CoverInput;
+/// A same-map teleport's frozen frame, and the frames the window presents.
+pub(crate) mod hold;
 /// A transport transfer's route screen.
 mod route;
 
@@ -389,6 +391,7 @@ impl Plugin for LoadingScreenPlugin {
             );
         // The cover's input rule, registered here so the two cannot be registered apart.
         input::build(app);
+        hold::build(app);
     }
 }
 
@@ -407,6 +410,13 @@ fn release_interface_on_arrival(
     if !arrived.is_empty() && !pending && screen.active {
         screen.see_through = true;
     }
+}
+
+/// The cover's per-frame drive alone, in `Update` after `after`, for the tests of the paths that
+/// feed it.
+#[cfg(test)]
+pub(crate) fn add_drive<M>(app: &mut App, after: impl bevy::ecs::schedule::IntoSystemSet<M>) {
+    app.add_systems(Update, drive_loading_screen.after(after));
 }
 
 /// Startup: load the LoadingScreens catalog and the bar textures, and spawn the hidden UI tree.
