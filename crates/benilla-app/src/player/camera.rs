@@ -563,7 +563,7 @@ pub(crate) struct CameraControl {
     /// Written by [`run_look_session`], read the same frame for `cameraTerrainTilt`'s hand-off.
     pub(super) freelook: bool,
     /// The mouse buttons the world owns this frame, latched by [`latch_world_mouse`].
-    pub(super) world_mouse: WorldMouse,
+    pub(crate) world_mouse: WorldMouse,
     /// `ToggleMouseMove` entered mouselook with no mouse bit (`0x50f910` → `0x50f930`): the
     /// session lasts with no channel held, until a toggle or a button's release leaves it.
     pub(super) toggled: bool,
@@ -653,7 +653,7 @@ impl LookButton {
 /// The world's down sets the bit and that button's up clears it, so a frame appearing under the
 /// locked cursor cannot steal it. `MouselookStart` sets the TurnOrAction bit with no button.
 #[derive(Default)]
-pub(super) struct WorldMouse {
+pub(crate) struct WorldMouse {
     /// Held by the world right now, indexed by [`LookButton`].
     held: [bool; 2],
     /// Took its down edge from the world this frame, same index.
@@ -662,12 +662,17 @@ pub(super) struct WorldMouse {
     scripted: bool,
     /// This frame's `MouselookStart` raised the channel.
     scripted_rise: bool,
-    /// A `MouselookStart`/`Stop` ran this frame; each disarms the pending click (`0x514810(0)`).
+    /// A `MouselookStart` after the frame's look session raised it: the controller hands the
+    /// body off for it ([`Self::late_rise`]).
+    late_rise: bool,
+    /// A `MouselookStart`/`Stop` ran since the last look session; each disarms the pending click
+    /// (`0x514810(0)`).
     disarmed: bool,
-    /// This frame's `ToggleMouseMove` calls.
+    /// The `ToggleMouseMove` calls since the last look session.
     toggles: u32,
-    /// The fourth argument of this frame's last mouse-bit release, which `0x50f940` stores as the
-    /// camera's sticky bit when the release ends mouselook; `None` with no release call.
+    /// The fourth argument of the last mouse-bit release since the last look session, which
+    /// `0x50f940` stores as the camera's sticky bit when the release ends mouselook; `None` with
+    /// no release call.
     release_sticky: Option<bool>,
 }
 
@@ -705,18 +710,43 @@ impl WorldMouse {
         self.down(LookButton::Left) || self.down(LookButton::Right) || self.scripted_rise
     }
 
-    /// A `MouselookStart`/`Stop` this frame: no click may settle from the gesture in flight.
-    pub(super) fn disarmed(&self) -> bool {
-        self.disarmed
+    /// The left button held by the world, then a `MouselookStart` made after the frame's look
+    /// session, as a packet's handler makes one: the call that completes both mouse bits.
+    #[cfg(test)]
+    pub(crate) fn late_mouselook_start_over_a_left_drag(&mut self) {
+        self.held[LookButton::Left as usize] = true;
+        self.call_late(benilla_ui::script::LookCall::Mouselook(true));
+    }
+
+    /// The right button, as the world holds it, for a test of who owns a press.
+    #[cfg(test)]
+    pub(crate) fn holds_right(&self) -> bool {
+        self.held(LookButton::Right)
+    }
+
+    /// A `MouselookStart` made after this frame's look session raised the channel, as a packet's
+    /// handler makes one: the session saw no rise, so the controller hands the body off for it,
+    /// as the reference's press handler does inside the call (`0x514924`-`0x514966`).
+    pub(super) fn late_rise(&self) -> bool {
+        self.late_rise
+    }
+
+    /// What the calls since the last look session hand it, taken: whether one disarmed the
+    /// pending click, the `ToggleMouseMove` count and the last release's sticky argument. A call
+    /// made after a session reaches the next one.
+    fn take_session_edges(&mut self) -> (bool, u32, Option<bool>) {
+        (
+            std::mem::take(&mut self.disarmed),
+            std::mem::take(&mut self.toggles),
+            self.release_sticky.take(),
+        )
     }
 
     /// Latch this frame; `world_press` says whether a down edge belongs to the world. A held bit
     /// rides to its release, including a cover's emptying of the button planes.
     fn update(&mut self, buttons: &ButtonInput<MouseButton>, world_press: bool) {
         self.scripted_rise = false;
-        self.disarmed = false;
-        self.toggles = 0;
-        self.release_sticky = None;
+        self.late_rise = false;
         for b in [LookButton::Right, LookButton::Left] {
             let i = b as usize;
             self.down[i] = world_press && buttons.just_pressed(b.button());
@@ -739,6 +769,13 @@ impl WorldMouse {
         }
     }
 
+    /// One look-session call made after the frame's look session, in call order.
+    fn call_late(&mut self, call: benilla_ui::script::LookCall) {
+        let rises = call == benilla_ui::script::LookCall::Mouselook(true) && !self.turn();
+        self.call(call);
+        self.late_rise |= rises;
+    }
+
     /// One look-session call from the VM, in call order.
     fn call(&mut self, call: benilla_ui::script::LookCall) {
         use benilla_ui::script::LookCall;
@@ -752,9 +789,9 @@ impl WorldMouse {
 
 /// Decide once per frame which mouse buttons the world owns: a press in the viewport off the UI,
 /// or any press while a look session owns the cursor (a chord's second button). Its own system,
-/// ahead of `/follow`'s both-button cancel ([`super::follow::steer_follow`]), which runs before
-/// the controller and would otherwise read it a frame late.
-pub(super) fn latch_world_mouse(
+/// first of the world's mouse input ([`super::WorldMouse`]), ahead of the look session and of
+/// `/follow`'s both-button cancel ([`super::follow::steer_follow`]) in the frame time.
+pub(crate) fn latch_world_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
     // The raw flag: a press on a nameplate is the plate's, so dragging from a plate never turns the
     // camera, as in 1.12. `0x7662c0` hands a mouse-down to one frame (capture at `0x7663e9`), and
@@ -805,6 +842,31 @@ pub(super) fn latch_world_mouse(
         if let Some(script) = script {
             script.set_turn_or_action_held(rig.world_mouse.turn());
         }
+    })
+}
+
+/// The look calls the handlers of the frame's packets made, after the input's latch
+/// ([`latch_world_mouse`]) and before the frame time's controller: the reference's press and
+/// release handlers move the input control inside the call (`MouselookStart` `0x514210` →
+/// `0x515090` → `0x514840`), so a packet's handler's call holds the channel for the input tick of
+/// the same tick (category 5), and the next mouse message turns. The frame pass's `OnUpdate`
+/// runs after that tick, so its calls wait for the next frame's latch.
+pub(crate) fn apply_late_look_calls(
+    mut rig: ResMut<CameraControl>,
+    mut hosted_vm: crate::script_calls::HostedVm,
+) {
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let calls = script.take_look_calls();
+        if calls.is_empty() {
+            return;
+        }
+        for call in calls {
+            rig.world_mouse.call_late(call);
+        }
+        script.set_turn_or_action_held(rig.world_mouse.turn());
     })
 }
 
@@ -892,7 +954,7 @@ pub(super) fn run_look_session(
     // none while another primary's binding is held (`0x514ac1`, `0x51481a`). A `MouselookStart` or
     // `Stop` disarms it too, ahead of the channel's move (`0x514810(0)` stores mode 0 unguarded,
     // then `0x515090`), so a stop's release, or the button's after it, selects nothing.
-    let disarmed = rig.world_mouse.disarmed();
+    let (disarmed, toggles, release_sticky) = rig.world_mouse.take_session_edges();
     if rig.world_mouse.both() || disarmed {
         *left_click = None;
         *right_click = None;
@@ -911,7 +973,7 @@ pub(super) fn run_look_session(
     // set, it leaves through `0x50f940(0)`, which also clears the sticky bit (`0x50f95d`); clear,
     // it enters through `0x50f930` with no mouse bit, so the mouse turns the camera alone, as the
     // body's hand-off wants the TurnOrAction bit (`0x5145e0`).
-    for _ in 0..rig.world_mouse.toggles {
+    for _ in 0..toggles {
         if rig.look.is_some() {
             *left_click = None;
             *right_click = None;
@@ -975,7 +1037,7 @@ pub(super) fn run_look_session(
                 // The last mouse bit's release, `0x514b70` → `0x50f940(extra)` (`0x514c48`): the
                 // camera leaves mouselook and keeps the release's fourth argument as its sticky
                 // bit (`0x50f958`/`0x50f95d`). A release no binding ran hands 0.
-                rig.follow.sticky = rig.world_mouse.release_sticky.unwrap_or(false);
+                rig.follow.sticky = release_sticky.unwrap_or(false);
                 disengage_look(rig, window, cursor_opts);
             }
         }

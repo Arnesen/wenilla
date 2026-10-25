@@ -172,11 +172,12 @@ pub(crate) struct UiPassState {
     pub(crate) derives_before: u64,
 }
 
-/// The player-UI feed phase, after [`WorldStage::Net`] and the input pass and ungated (`UnitFeed`
+/// The player-UI feed phase, after the input pass and [`WorldStage::Net`] and ungated (`UnitFeed`
 /// is the gated sub-phase): every push this frame's tick must see, as in the reference's tick,
 /// where the packets (category 6, `0x420d55`) follow the window input and precede the frame pass's
-/// `OnUpdate`. Every VM holder in `Update` is in [`UiInput`], in this set or `.after(UiTick)`, as
-/// `game_plugins::schedule_tests` checks.
+/// `OnUpdate`. Every VM holder in `Update` is in the frame's input records ([`UiInput`],
+/// [`crate::player::WorldMouse`], [`crate::target::WorldClicks`]), in this set or
+/// `.after(UiTick)`, as `game_plugins::schedule_tests` checks.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiFeed;
 
@@ -192,11 +193,17 @@ pub(crate) struct UiPaint;
 
 /// The player-UI input pass (hit test, handlers, then the bindings): the frame's window input
 /// records, which the reference runs ahead of its packets (`0x423920` at `0x420d23`), so ahead of
-/// [`UiFeed`]; and before [`WorldStage::Input`], so its [`PlayerUiHover`] reaches `PointerOverUi`
-/// before `player::control` reads it. It follows the net drain, as the pass's start does
-/// ([`crate::vm_pass::VmPass::Start`]).
+/// the net drain ([`WorldStage::Net`]) and [`UiFeed`]: a handler and the calls it makes read the
+/// world as the last frame left it. First of the frame's input records, so its
+/// [`PlayerUiHover`] reaches `PointerOverUi` before the world's mouse reads it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
+
+/// The VM's views the input records read pushed ahead of them, at the head of [`UiInput`]: what an
+/// engine writer outside the calls moved after the last frame's feeds (the targeting cursor's
+/// word).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UiInputViews;
 
 /// The tick: the `OnUpdate` walk of the frame pass (category 0x11 at `0x420d6a`, `0x764330` →
 /// `0x765650`), after the input pass and the feeds, so a handler reads this frame's input and
@@ -411,22 +418,26 @@ impl Plugin for UiScriptPlugin {
                     .chain(),
             )
             // The UI phases in the reference's tick order (`core/loop`, "What one tick runs"): the
-            // window input records (`0x423920` at `0x420d23`), then the feeds of the packets
-            // (category 6, `0x420d55`), then the tick, the frame pass's `OnUpdate` walk (category
-            // 0x11, `0x420d6a`), and the paint; the drains of what the Lua asked after the tick,
-            // and after every later host the VM pass can put them behind, before the paint
-            // (`crate::vm_pass`).
+            // window input records (`0x423920` at `0x420d23`) ahead of the net drain, then the
+            // feeds of the packets it applied (category 6, `0x420d55`), then the tick, the frame
+            // pass's `OnUpdate` walk (category 0x11, `0x420d6a`), and the paint; the drains of
+            // what the Lua asked after the tick, and after every later host the VM pass can put
+            // them behind, before the paint (`crate::vm_pass`).
             .configure_sets(
                 Update,
                 (
-                    UiInput.after(WorldStage::Net),
-                    UiFeed,
+                    UiInput.before(WorldStage::Net),
+                    UiFeed.after(WorldStage::Net),
                     UiTick.before(WorldStage::Input),
                     UiPaint,
                 )
                     .chain(),
             )
             .configure_sets(Update, UiDrain.after(UiTick))
+            .configure_sets(
+                Update,
+                UiInputViews.in_set(UiInput).before(input::feed_ui_input),
+            )
             // `GetFramerate()`'s ring, a static of the client's that no reload or logout
             // resets: the feed hands a new VM its rate before the tick, and each world frame's
             // step joins the ring after its paint, standing for `CGWorldFrame::OnRender`
@@ -501,12 +512,14 @@ impl Plugin for UiScriptPlugin {
                     .after(crate::vplates::VPlateSet)
                     .before(crate::ui_pass::UiQuadAppend),
             )
-            // After the hover is known and before gameplay reads `PointerOverUi`.
+            // After the hover is known and before gameplay reads `PointerOverUi`: the world's
+            // mouse among the input records, so a press the cursor brings onto a frame is the
+            // frame's alone.
             .add_systems(
                 Update,
                 arbitrate_pointer_over_ui
                     .after(UiInput)
-                    .before(WorldStage::Input),
+                    .before(crate::player::WorldMouse),
             )
             .add_message::<server_alert::LaunchUrl>()
             .add_message::<server_alert::LaunchAddonUrl>()
@@ -897,6 +910,15 @@ mod glue_input_tests;
 mod key_walk_tests;
 #[cfg(test)]
 mod tick_order_tests;
+
+/// Whether `Update` declares `system` before the tick, the frame pass's `OnUpdate` walk.
+#[cfg(test)]
+pub(crate) fn tick_runs_after<M>(
+    app: &mut App,
+    system: impl bevy::ecs::system::IntoSystem<(), (), M>,
+) -> bool {
+    crate::test_support::runs_before(app, system, extract::tick_script)
+}
 
 #[cfg(test)]
 mod cast_tests;

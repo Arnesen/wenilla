@@ -1330,6 +1330,12 @@ pub(crate) fn bind_parked_picks(mut cursor: crate::spell::ScriptCursor) {
     cursor.bind_parked();
 }
 
+/// [`bind_parked_picks`] after a walk's arrival in the frame time, whose dispatch selects through
+/// the same front.
+pub(crate) fn bind_arrival_picks(mut cursor: crate::spell::ScriptCursor) {
+    cursor.bind_parked();
+}
+
 /// The census list ([`benilla_ui::script::census`]).
 #[cfg(test)]
 pub(crate) mod census;
@@ -1464,7 +1470,7 @@ mod tests {
             }],
         });
         if selected {
-            // The frame's unit snapshot, as the feed pushed it before the input pass.
+            // The frame's unit snapshot, as the last feed pushed it.
             script.set_unit(
                 "target",
                 Some(benilla_ui::script::UnitState {
