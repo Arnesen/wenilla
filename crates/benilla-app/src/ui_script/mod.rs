@@ -25,10 +25,14 @@ pub(crate) mod glue_mgr;
 pub(crate) mod glue_scene;
 mod input;
 mod movie;
+mod records;
 /// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
 pub(crate) mod server_alert;
 #[cfg(test)]
 pub(crate) use input::feed_keys;
+#[cfg(test)]
+pub(crate) use records::records_from_planes;
+pub(crate) use records::{collect_input_records, InputRecord, InputRecords, Record};
 // Test-only: the bindings tests run the UI's wheel sweep ahead of the dispatch pass.
 #[cfg(test)]
 pub(crate) use input::feed_wheel;
@@ -150,6 +154,24 @@ pub(crate) struct PlayerUiClickConsumed(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiPressConsumed(pub(crate) bool);
 
+/// Who this frame's button presses went to, as the records dispatched them: `(button, over_ui)`
+/// per press, `over_ui` when a frame was hovered, the interface consumed it or the dev overlay held
+/// the pointer. The world frame's binding and the world's mouse latch both read it, so they agree
+/// on who owns a press; a button no record pressed this frame is absent.
+#[derive(Resource, Default)]
+pub(crate) struct WorldPresses(pub(crate) Vec<(MouseButton, bool)>);
+
+impl WorldPresses {
+    /// Whether the frame's last press of `button` was the interface's, `None` with no press.
+    pub(crate) fn over_ui(&self, button: MouseButton) -> Option<bool> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(b, _)| *b == button)
+            .map(|(_, over)| *over)
+    }
+}
+
 /// Whether the cursor carries a payload, a `Send` mirror. A click on sky with one held never
 /// deselects: the reference gates its nothing-leg `SetSelection(0,0)` on no payload (`0x492d30`).
 #[derive(Resource, Default)]
@@ -191,11 +213,12 @@ pub(crate) struct UiDrain;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiPaint;
 
-/// The player-UI input pass (hit test, handlers, then the bindings): the frame's window input
-/// records, which the reference runs ahead of its packets (`0x423920` at `0x420d23`), so ahead of
-/// the net drain ([`WorldStage::Net`]) and [`UiFeed`]: a handler and the calls it makes read the
-/// world as the last frame left it. First of the frame's input records, so its
-/// [`PlayerUiHover`] reaches `PointerOverUi` before the world's mouse reads it.
+/// The player-UI input pass: the frame's window input records ([`InputRecords`]), each whole
+/// through the interface's walk and the world frame's binding before the next, which the reference
+/// runs ahead of its packets (`0x423920` at `0x420d23`), so ahead of the net drain
+/// ([`WorldStage::Net`]) and [`UiFeed`]: a handler and the calls it makes read the world as the
+/// last frame left it. First of the frame's input records, so its [`PlayerUiHover`] reaches
+/// `PointerOverUi` before the world's mouse reads it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
 
@@ -294,6 +317,12 @@ pub(crate) fn seam_scale(window_h: f32) -> f32 {
     }
 }
 
+/// [`window_to_ui`]'s inverse: a point in the VM's root units as a window cursor.
+pub(crate) fn ui_to_window(window_h: f32, at: Vec2) -> Vec2 {
+    let s = seam_scale(window_h);
+    Vec2::new(at.x * s, window_h - at.y * s)
+}
+
 /// A window cursor (logical px, y-down from the top left) in the VM's root units, y up: what the
 /// pointer feed hands the engine and `GetCursorPosition` answers (`0x48b820`, no scale divided out).
 pub(crate) fn window_to_ui(window_h: f32, cursor: Vec2) -> Vec2 {
@@ -360,6 +389,7 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
             .init_resource::<PlayerUiPressConsumed>()
+            .init_resource::<WorldPresses>()
             .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
             .init_resource::<benilla_world::frame_pace::FrameStep>()
@@ -455,6 +485,20 @@ impl Plugin for UiScriptPlugin {
             // records meet the rects its last frame pass drained (`0x7656ba`, `0x765799`), and runs
             // in-world only or on the stock glue screens.
             .init_resource::<UiPassState>()
+            // The frame's window input records, read first, ungated, so no frame dispatches a
+            // stale one.
+            .init_resource::<InputRecords>()
+            .add_message::<bevy::window::WindowEvent>()
+            .add_systems(
+                Update,
+                collect_input_records
+                    .in_set(UiInput)
+                    .before(UiInputViews)
+                    .before(crate::bindings::BindingHead),
+            )
+            // In `Last`, after a look session's end has put the cursor back, so the next frame's
+            // records start from where the pointer is.
+            .add_systems(Last, records::note_frame_end_cursor)
             .add_systems(
                 Update,
                 (
@@ -467,8 +511,9 @@ impl Plugin for UiScriptPlugin {
                 )
                     .chain()
                     .in_set(UiInput)
-                    // So a key a focused box consumed never also fires a binding.
-                    .before(crate::bindings::BindingSet),
+                    // Each record's binding runs inside its walk, between the pass's head and tail.
+                    .after(crate::bindings::BindingHead)
+                    .before(crate::bindings::BindingTail),
             )
             .add_systems(
                 Update,
@@ -552,11 +597,12 @@ impl Plugin for UiScriptPlugin {
     }
 }
 
-/// The mouse and key feed once, for a test over the whole client: the input pass's Lua, with the
-/// call host the world lends.
+/// The mouse and key feed once, for a test over the whole client: the input pass's Lua over the
+/// records the test's planes and key messages make, with the call host the world lends.
 #[cfg(test)]
 pub(crate) fn feed_input_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
+    records_from_planes(world);
     world
         .run_system_once(input::feed_ui_input)
         .expect("the input feeds");
@@ -908,6 +954,8 @@ mod cinematic_tests;
 mod glue_input_tests;
 #[cfg(test)]
 mod key_walk_tests;
+#[cfg(test)]
+mod record_order_tests;
 #[cfg(test)]
 mod tick_order_tests;
 
