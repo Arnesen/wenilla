@@ -314,10 +314,15 @@ fn a_chain_end_reads_its_own_packets_health() {
     frame(
         &mut app,
         crate::lanes::unit_view_tests::wire_packets(vec![
+            // The mate targets the add (`UNIT_FIELD_TARGET`, fields 16 and 17).
             vec![created(
                 MATE,
                 EntityKind::Player,
-                &[(benilla_protocol::field::FIELD_UNIT_HEALTH, 100)],
+                &[
+                    (benilla_protocol::field::FIELD_UNIT_HEALTH, 100),
+                    (16, ADD as u32),
+                    (17, (ADD >> 32) as u32),
+                ],
             )],
             vec![created(
                 ADD,
@@ -346,7 +351,9 @@ fn a_chain_end_reads_its_own_packets_health() {
     assert_eq!(seen, ["UNIT_COMBAT:player:50", "UNIT_COMBAT:player:40"]);
 }
 
-/// `"pet"` reads our summon as each packet left it.
+/// `"pet"` reads our summon as each packet left it, and the pet's own health change signals
+/// under `"pet"`: our live `UNIT_FIELD_SUMMON` gives it the token, whatever the seat holds
+/// (`0x515cb9`).
 #[test]
 fn the_pet_reads_its_own_packets_health() {
     let mut app = party_client();
@@ -370,7 +377,14 @@ fn the_pet_reads_its_own_packets_health() {
             vec![fall(1)],
         ]),
     );
-    assert_eq!(seen, ["UNIT_COMBAT:player:60", "UNIT_COMBAT:player:30"]);
+    assert_eq!(
+        seen,
+        [
+            "UNIT_COMBAT:player:60",
+            "UNIT_HEALTH:pet:30",
+            "UNIT_COMBAT:player:30"
+        ]
+    );
 }
 
 /// `"pet"` resolves off our own descriptor at the call (`0x515a5e`-`0x515a6e`): a listener ahead

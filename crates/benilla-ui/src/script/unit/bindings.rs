@@ -12,8 +12,8 @@ use super::super::stat_read::read_self;
 use super::super::Model;
 use super::{
     check_unit_token, classification_word, grey_band, level_is_hidden_at, names_self,
-    object_predicate, read_object, unit_is_grey, unit_predicate, unknownobject, with_object,
-    with_unit, PlayerRecord, SelectionRequest,
+    object_predicate, read_identity, read_object, unit_is_grey, unit_predicate, unknownobject,
+    with_object, with_unit, PlayerRecord, SelectionRequest,
 };
 
 /// The `"player"` fast path of `UnitName`, `UnitRace`, `UnitClass` and `UnitSex`, never
@@ -139,9 +139,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 };
                 return Ok((name, Value::Nil));
             }
-            let name = with_unit(lua, &token, None, |u| {
-                Some((u.name.clone(), u.has_object, u.guid))
-            })?;
+            // A held unit is named off its object as the call runs ([`read_identity`]).
+            check_unit_token(&token)?;
+            let name = token
+                .as_deref()
+                .and_then(|t| read_identity(lua, t, |u, id| (id.name(), u.has_object, u.guid)));
             let name = match name {
                 None => Value::Nil,
                 Some((Some(n), _, _)) => Value::String(lua.create_string(&n)?),
@@ -396,7 +398,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let guid = |t: &Option<String>| {
                 t.as_deref()
-                    .and_then(|t| model.unit(t))
+                    .and_then(|t| super::view(lua, &model, t))
                     .map_or(0, |u| u.guid)
             };
             let (ga, gb) = (guid(&a), guid(&b));
@@ -453,7 +455,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     return Ok(Value::Nil);
                 }
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let me = model.unit("player").map(|p| p.guid).unwrap_or(0);
+                let me = super::view(lua, &model, "player").map_or(0, |p| p.guid);
                 let in_group = |guid: u64| {
                     guid != 0
                         && if raid {
@@ -483,7 +485,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let hit = token
                 .as_ref()
-                .and_then(|t| model.unit(t))
+                .and_then(|t| super::view(lua, &model, t))
                 .filter(|u| u.exists && u.guid != 0)
                 .is_some_and(|u| {
                     model
@@ -505,11 +507,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitInParty",
         lua.create_function(|lua, token: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let guids = &model.unit_guids;
             let guid = match token.as_deref() {
-                Some(t) => guids.guid_of(t)?.unwrap_or(0),
+                Some(t) => super::guid_of(lua, &model, t)?.unwrap_or(0),
                 None => 0,
             };
+            let guids = &model.unit_guids;
             Ok(flag(
                 guid != 0 && (guid == guids.player || guids.party.contains(&guid)),
             ))
@@ -617,9 +619,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     None => Ok((Value::Nil, Value::Nil)),
                 };
             }
-            let pair = with_unit(lua, &token, None, |u| {
-                u.race.clone().zip(u.race_file.clone())
-            })?;
+            // A held unit's race byte, read off its object as the call runs ([`read_identity`]).
+            check_unit_token(&token)?;
+            let pair = token
+                .as_deref()
+                .and_then(|t| read_identity(lua, t, |_, id| id.race()))
+                .flatten();
             match pair {
                 Some((loc, file)) => Ok((
                     Value::String(lua.create_string(&loc)?),
@@ -648,9 +653,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     None => Ok((Value::Nil, Value::Nil)),
                 };
             }
-            let pair = with_unit(lua, &token, None, |u| {
-                u.class.clone().zip(u.class_file.clone())
-            })?;
+            // A held unit's class byte, read off its object as the call runs ([`read_identity`]).
+            check_unit_token(&token)?;
+            let pair = token
+                .as_deref()
+                .and_then(|t| read_identity(lua, t, |_, id| id.class()))
+                .flatten();
             match pair {
                 Some((loc, file)) => Ok((
                     Value::String(lua.create_string(&loc)?),
@@ -796,7 +804,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXP("unit")"#)?;
             check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if names_self(&model, &token) {
+            Ok(if names_self(lua, &model, &token) {
                 i64::from(read_self(lua, |own| own.xp()))
             } else {
                 0
@@ -810,7 +818,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXPMax("unit")"#)?;
             check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if names_self(&model, &token) {
+            Ok(if names_self(lua, &model, &token) {
                 i64::from(read_self(lua, |own| own.next_level_xp()))
             } else {
                 0
@@ -846,7 +854,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if class != CLASS_ROGUE && class != CLASS_DRUID {
                 return Ok(0_i64);
             }
-            let target = model.unit("target").map_or(0, |u| u.guid);
+            let target = super::view(lua, &model, "target").map_or(0, |u| u.guid);
             if model.combo_target != target {
                 return Ok(0_i64);
             }
@@ -1071,7 +1079,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let had = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.unit("target").is_some_and(|u| u.exists)
+                super::view(lua, &model, "target").is_some_and(|u| u.exists)
             };
             submit(lua, ScriptCall::ClearTarget)?;
             Ok(flag(had))
