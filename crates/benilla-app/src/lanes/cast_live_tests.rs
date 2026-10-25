@@ -369,3 +369,94 @@ fn a_failed_cast_result_pops_the_slot_at_its_place_in_the_drain() {
         ]
     );
 }
+
+/// A failed `SMSG_CAST_RESULT`'s report clears the GCD the send armed and fires its pair
+/// (`0x6e1d89` → `0x6e1630`, the pair at `0x6e167d`) before it pops the slot (`0x6e2218`): the
+/// pair's `SPELL_UPDATE_COOLDOWN` reads Heal still in flight, and the pop's
+/// `CURRENT_SPELL_CAST_CHANGED` and `SPELLCAST_FAILED` after it read it popped.
+#[test]
+fn a_failed_results_gcd_clear_reads_the_cast_still_in_flight() {
+    let mut c = client();
+    c.app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            HEAL,
+            SpellDisplay {
+                id: HEAL,
+                name: "Heal".into(),
+                icon: Some("Interface\\Icons\\Spell_Holy_Heal".into()),
+                start_recovery_category: 133,
+                start_recovery_ms: 1500,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    c.frame(vec![]);
+    c.seen(&[]);
+    cast_heal(&mut c);
+    c.frame(vec![vec![SessionEvent::CastResult {
+        spell_id: HEAL,
+        success: false,
+        reason: Some(0x0b),
+        arg: None,
+    }]]);
+    assert_eq!(
+        c.seen(&[
+            "SPELL_UPDATE_COOLDOWN",
+            "CURRENT_SPELL_CAST_CHANGED",
+            "SPELLCAST_FAILED",
+        ]),
+        [
+            "SPELL_UPDATE_COOLDOWN:1:nil",
+            "CURRENT_SPELL_CAST_CHANGED:nil:nil",
+            "SPELLCAST_FAILED:nil:nil",
+        ]
+    );
+}
+
+/// `CancelCast 0x6e4940` drops the targeting word (`0x6e4955`) where it pops the slot
+/// (`0x6e49d6`), at the failed report's pop (`0x6e2218`), after the GCD clear's pair
+/// (`0x6e167d`): with the cursor up for Heal, the pair's `SPELL_UPDATE_COOLDOWN` reads the slot and
+/// the word both still up.
+#[test]
+fn a_failed_results_gcd_clear_reads_the_targeting_word_still_up() {
+    let mut c = client();
+    let heal = SpellDisplay {
+        id: HEAL,
+        name: "Heal".into(),
+        start_recovery_category: 133,
+        start_recovery_ms: 1500,
+        ..Default::default()
+    };
+    let world = c.app.world_mut();
+    world.resource_mut::<crate::spell::Cooldowns>().start_gcd(
+        HEAL,
+        &heal,
+        std::time::Instant::now(),
+        &crate::spell::SpellModifiers::default(),
+    );
+    world.resource_mut::<crate::spell::SpellTargeting>().enter(
+        HEAL,
+        crate::spell::CastCommit::Spell,
+        0x0002,
+    );
+    c.frame(vec![]);
+    c.seen(&[]);
+    c.frame(vec![vec![SessionEvent::CastResult {
+        spell_id: HEAL,
+        success: false,
+        reason: Some(0x0b),
+        arg: None,
+    }]]);
+    let seen = c.seen(&["SPELL_UPDATE_COOLDOWN", "CURRENT_SPELL_CAST_CHANGED"]);
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("SPELL_UPDATE_COOLDOWN:1:1"),
+        "{seen:?}"
+    );
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some("CURRENT_SPELL_CAST_CHANGED:nil:nil"),
+        "{seen:?}"
+    );
+}

@@ -197,6 +197,7 @@ struct PetBookLeg<'a> {
 fn pet_book_state(leg: PetBookLeg) -> ActionState {
     let mut st = ActionState {
         is_attack: leg.d.is_melee_auto_attack(),
+        pet_spell: Some(leg.spell),
         ..Default::default()
     };
     if let (Some(player), Some(pet)) = (leg.player, leg.pet) {
@@ -363,6 +364,12 @@ impl ActionStateMemory {
     /// start is mapped through; `None` before the first feed.
     pub(crate) fn clock(&self) -> Option<(Instant, f64)> {
         self.clock
+    }
+
+    /// The pair a feed would have read, for a rig that runs no action feed.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, clock: (Instant, f64)) {
+        self.clock = Some(clock);
     }
 }
 
