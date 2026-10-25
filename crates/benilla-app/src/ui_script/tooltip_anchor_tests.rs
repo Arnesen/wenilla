@@ -451,6 +451,8 @@ fn buff_hover_hangs_below_left_of_the_button() {
         until_cancelled: false,
         channeled: false,
         raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
         vision_hidden: false,
     }]);
     // The event the stock buff buttons register (`BuffFrame.lua:113`).

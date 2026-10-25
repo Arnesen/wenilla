@@ -5,6 +5,34 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::{cancel_authorized, AuraState, Model};
+use crate::script::live::{ask, LiveQuery};
+
+/// When the player's aura in descriptor slot `slot` runs out, as the lent host reads the expiry
+/// array the duration packet writes (`0xbc5f68`, `0x4e4390`): the `GetTime()` instant, 0 for a
+/// slot with no stamp. `GetPlayerBuffTimeLeft` and the buff tooltip's line read it at the call
+/// (`0x4e4450`), so a listener sees the stamps its own packet left.
+pub struct PlayerBuffExpiry {
+    pub slot: u8,
+}
+
+impl LiveQuery for PlayerBuffExpiry {
+    type Answer = f64;
+}
+
+/// The record's `+0xc` flag as the call reads it: the flag, or for a record whose spell the
+/// catalog lacks, whether its slot holds no stamp.
+pub(crate) fn until_cancelled_of(lua: &Lua, a: &AuraState) -> bool {
+    if a.until_cancelled_unknown {
+        expiry_of(lua, a) == 0.0
+    } else {
+        a.until_cancelled
+    }
+}
+
+/// `a`'s expiry as the call reads it: through the lent host, else the snapshot's.
+pub(crate) fn expiry_of(lua: &Lua, a: &AuraState) -> f64 {
+    ask(lua, &PlayerBuffExpiry { slot: a.slot }).unwrap_or(a.expiration_time)
+}
 
 /// `GetPlayerBuff`'s filter mask: no filter argument means
 /// `HELPFUL|HARMFUL` (`0x4e4618`), and a filter string starts the mask at zero (`0x4e4639`), so a
@@ -112,7 +140,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let index = buff_index_arg(lua, index, r#"Usage: GetPlayerBuff(index [, "filter"])"#)?;
             let hit = enumerate_player_buff(lua, index, PlayerBuffFilter::parse(filter.as_deref()));
             let (pos, until_cancelled) = match hit {
-                Some((pos, a)) => (pos as i64, i64::from(a.until_cancelled)),
+                Some((pos, a)) => (pos as i64, i64::from(until_cancelled_of(lua, &a))),
                 None => (-1, 0),
             };
             Ok(MultiValue::from_vec(vec![
@@ -166,7 +194,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let pos = buff_index_arg(lua, index, "Usage: GetPlayerBuffTimeLeft(buffIndex)")?;
             let now = crate::script::clock::now(lua);
             // `max(0, …)` covers both zero cases: an expired aura, and a permanent one, expiry 0.
-            Ok(player_buff_record(lua, pos).map_or(0.0, |a| (a.expiration_time - now).max(0.0)))
+            Ok(player_buff_record(lua, pos).map_or(0.0, |a| (expiry_of(lua, &a) - now).max(0.0)))
         })?,
     )?;
 
@@ -206,6 +234,8 @@ mod tests {
             until_cancelled: false,
             channeled: false,
             raid_listed: false,
+            slot: 0,
+            until_cancelled_unknown: false,
             vision_hidden: false,
         }
     }

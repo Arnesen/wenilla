@@ -70,6 +70,8 @@ fn aura(
         until_cancelled: expiration_time == 0.0,
         channeled: false,
         raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
         vision_hidden: false,
     }
 }

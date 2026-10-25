@@ -119,6 +119,8 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
         until_cancelled: false,
         channeled: false,
         raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
         vision_hidden: false,
     }
 }
