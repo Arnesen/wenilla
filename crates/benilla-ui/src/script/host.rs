@@ -61,6 +61,39 @@ pub trait CallHost {
         let _ = (guid, read);
         false
     }
+
+    /// Hand `read` the unit object the engine holds under `guid` and its combat stats, as a stat
+    /// getter reads them now, each field derived as it is asked for, as of the place the getter
+    /// runs (`UnitStat` reads the object it resolved, `0x518600`): the active player's with what
+    /// its equipment and skills answer, any other unit's with their defaults. Whether there was
+    /// one to hand: `false` when it holds no object there, and from a host that reads none.
+    /// `read` runs no Lua.
+    fn read_unit_stats(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(&dyn super::UnitObjectRead, &dyn super::CombatRead),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Hand `read` the active player's combat stats as a getter with no unit argument reads them
+    /// now, with what its equipment and skills answer, as of the place it runs
+    /// (`GetDodgeChance`, `0x516f00`); `None` while it holds no player (0 at `0x516f42`). Whether
+    /// it read: `false` from a host that reads none. `read` runs no Lua.
+    fn read_own_stats(&mut self, read: &mut dyn FnMut(Option<&dyn super::CombatRead>)) -> bool {
+        let _ = read;
+        false
+    }
+
+    /// Hand `read` the active player's own fields as a getter reads them now (`GetMoney` reads
+    /// the coinage, `0x518160`), as of the place it runs; [`super::NoPlayer`] while it holds no
+    /// player (`0x5181db`). Whether it read: `false` from a host that reads none. `read` runs no
+    /// Lua.
+    fn read_self(&mut self, read: &mut dyn FnMut(&dyn super::SelfRead)) -> bool {
+        let _ = read;
+        false
+    }
 }
 
 /// What a call leaves for the VM to run once its host is back in the VM.
