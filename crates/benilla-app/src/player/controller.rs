@@ -774,12 +774,12 @@ pub(super) fn control(
         );
         // The integration runs in any mode the bits survive into (`0x7c53b9`), at three quarters
         // under a direction bit or FALLING (`0x200f`, `0x7c5cb3`).
-        let moving = if swimming {
+        let pitch_integrating = if swimming {
             swim_fwd != 0.0 || swim_side != 0.0
         } else {
             (may_translate && (fwd_axis != 0 || side_axis != 0)) || player.airborne_since.is_some()
         };
-        swim::integrate_pitch_keys(&mut player, turn_rate, moving, dt);
+        swim::integrate_pitch_keys(&mut player, turn_rate, pitch_integrating, dt);
 
         // The mounted Space flourish, the jump-key handler `0x60dea0`: mounted, still and grounded
         // plays MountSpecial (94) locally, then sends `CMSG_MOUNTSPECIAL_ANIM`; moving jumps;
