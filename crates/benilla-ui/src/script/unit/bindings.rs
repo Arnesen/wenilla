@@ -8,6 +8,7 @@ use mlua::{Lua, Value};
 use super::super::binding_abi::flag;
 use super::super::calls::{submit, ScriptCall};
 use super::super::protected::select_may_cast;
+use super::super::roster_read;
 use super::super::stat_read::read_self;
 use super::super::Model;
 use super::{
@@ -112,7 +113,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 .and_then(|t| read_object(lua, t, |u, o| (o.group_leader(), u.guid)))
                 .unwrap_or((false, 0));
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(flag(by_flag || guid == model.party.leader_guid))
+            let leader = roster_read::cells(lua, &model.party).leader_guid;
+            Ok(flag(by_flag || guid == leader))
         })?,
     )?;
 
@@ -434,9 +436,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitPlayerOrPetInParty/InRaid(unit): the unit or its owner (`UnitState::owner`) is in the
-    // group. The reference's predicate behind `0x5162f0`/`0x5163b0` is untraced; the owner reading
-    // is benilla's.
+    // UnitPlayerOrPetInParty/InRaid(unit) (`0x5162f0`, `0x5163b0`): the token's guid (`0x515970`,
+    // none checked, none needing an object) against the party slots (`0x4e8fa0`, which loops the
+    // `0x4e86d0` count and never matches the player) or the raid roster (`0x4bafd0`): a member's
+    // own guid, or its pet's, read live. With no host to ask, the pushed rows' pets and the unit
+    // snapshot's owner stand in.
     for (name, raid) in [
         ("UnitPlayerOrPetInParty", false),
         ("UnitPlayerOrPetInRaid", true),
@@ -445,6 +449,14 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, token: Option<String>| {
                 check_unit_token(&token)?;
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let guid = match token.as_deref() {
+                    Some(t) => super::guid_of(lua, &model, t)?.unwrap_or(0),
+                    None => 0,
+                };
+                if let Some(hit) = roster_read::live_member_or_pet(lua, guid, raid) {
+                    return Ok(flag(hit));
+                }
                 let Some((exists, guid, owner)) = token
                     .as_deref()
                     .and_then(|t| read_object(lua, t, |u, o| (u.exists, u.guid, o.owner())))
@@ -454,23 +466,23 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 if !exists || guid == 0 {
                     return Ok(Value::Nil);
                 }
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let me = super::view(lua, &model, "player").map_or(0, |p| p.guid);
                 let in_group = |guid: u64| {
                     guid != 0
                         && if raid {
                             model.party.raid.iter().any(|m| m.guid == guid)
                         } else {
-                            guid == me || model.party.members.iter().any(|m| m.guid == guid)
+                            model.party.members.iter().any(|m| m.guid == guid)
                         }
                 };
-                let grouped = if raid {
-                    !model.party.raid.is_empty()
+                // The pets the last push resolved for the rows, else the owner's.
+                let pets = if raid {
+                    &model.unit_guids.raid_pets[..]
                 } else {
-                    !model.party.members.is_empty()
+                    &model.unit_guids.party_pets[..]
                 };
-                let hit = grouped && (in_group(guid) || in_group(owner));
-                Ok(flag(hit))
+                Ok(flag(
+                    in_group(guid) || pets.contains(&guid) || in_group(owner),
+                ))
             })?,
         )?;
     }
@@ -487,12 +499,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 .as_ref()
                 .and_then(|t| super::view(lua, &model, t))
                 .filter(|u| u.exists && u.guid != 0)
-                .is_some_and(|u| {
-                    model
+                .is_some_and(|u| match roster_read::live_membership(lua, u.guid) {
+                    Some(m) => m.raid,
+                    None => model
                         .party
                         .raid
                         .iter()
-                        .any(|m| m.guid != 0 && m.guid == u.guid)
+                        .any(|m| m.guid != 0 && m.guid == u.guid),
                 });
             Ok(flag(hit))
         })?,
@@ -512,9 +525,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 None => 0,
             };
             let guids = &model.unit_guids;
-            Ok(flag(
-                guid != 0 && (guid == guids.player || guids.party.contains(&guid)),
-            ))
+            let member = match roster_read::live_membership(lua, guid) {
+                Some(m) => m.party,
+                None => guid != 0 && (guid == guids.player || guids.party.contains(&guid)),
+            };
+            Ok(flag(member))
         })?,
     )?;
 
