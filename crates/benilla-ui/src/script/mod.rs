@@ -305,6 +305,10 @@ pub use item_read::{ItemInfoFields, ItemKey, ItemRead, ItemRoll};
 pub use lfg::LfgDungeon;
 pub use lottery::UnservedSend;
 pub use modelframe::{CharacterPaneFrame, ModelPaneFrame, ModelWanted};
+pub use movieframe::{
+    movie_bitmap, MovieAudio, MovieAudioStart, MovieBitmap, MovieOpen, MoviePicture, MovieReadFn,
+    MovieReader,
+};
 pub use petition::{
     validate_guild_name, PetitionCall, PetitionRecordView, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
@@ -617,8 +621,7 @@ const SCRIPT_KINDS: [&str; 46] = [
     "OnDoubleClick",
     // The layout event (base map `0x76a0d0`, `+0x120`), fired by the resolve pass on a size change.
     "OnSizeChanged",
-    // The movie frame's three (script map `0x78c2e0`): fired by its player alone, which does not
-    // exist here ([`movieframe`]), so they are stored and never run.
+    // The movie frame's three (script map `0x78c2e0`), fired by its player ([`movieframe`]).
     "OnMovieFinished",
     "OnMovieShowSubtitle",
     "OnMovieHideSubtitle",
@@ -642,6 +645,16 @@ pub struct UiScript {
     /// VM instructions counted while a budget is installed ([`UiScript::set_instruction_budget`]).
     instructions: std::sync::Arc<std::sync::atomic::AtomicU64>,
     session: u64,
+}
+
+/// A VM's end destroys its frames, and a movie frame's destructor stops its movie, firing
+/// `OnMovieFinished` (`0x78c280`).
+impl Drop for UiScript {
+    fn drop(&mut self) {
+        if self.lua.app_data_ref::<Model>().is_some() {
+            self.stop_movies();
+        }
+    }
 }
 
 /// Hands out [`UiScript::session`] ids: process-global and monotone, so an id is never reused.
