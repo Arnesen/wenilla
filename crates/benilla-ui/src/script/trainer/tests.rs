@@ -35,6 +35,7 @@ fn svc(
         skill_step: false,
         step_increase: None,
         line_name: Some(group_name.into()),
+        skill_line: None,
     }
 }
 
@@ -266,6 +267,44 @@ fn service_getters_read_the_row_at_a_visible_index() {
     assert!(s
         .eval::<bool>("return GetTrainerServiceSkillReq(1) == nil")
         .unwrap());
+
+    // An empty name answers `nil, 0` and the flag (`0x4d9589`).
+    let mut t = trainer();
+    t.services[0].skill_req = Some(TrainerSkillReq {
+        name: String::new(),
+        rank: 100,
+        met: false,
+    });
+    s.set_trainer(Some(t));
+    assert!(s
+        .eval::<bool>(
+            "local n, r, m = GetTrainerServiceSkillReq(2) return n == nil and r == 0 and m == nil"
+        )
+        .unwrap());
+}
+
+/// `GetTrainerServiceSkillLine` answers the service's own skill line (`0x4d92bb`), never its
+/// group's name, and nil for a header, a service with none and a row past the list.
+#[test]
+fn the_skill_line_is_the_services_own_not_its_groups() {
+    let mut s = UiScript::new().unwrap();
+    let mut t = trainer();
+    t.services[0].skill_line = Some("Alchemy".into());
+    s.set_trainer(Some(t));
+    // Row 1 is Arms' header; rows 2 and 3 are its services.
+    assert_eq!(
+        s.eval::<String>("return GetTrainerServiceSkillLine(2)")
+            .unwrap(),
+        "Alchemy",
+        "not the group's \"Arms\""
+    );
+    for row in [1, 3, 99] {
+        assert!(
+            s.eval::<bool>(&format!("return GetTrainerServiceSkillLine({row}) == nil"))
+                .unwrap(),
+            "row {row}"
+        );
+    }
 }
 
 /// The reference's filter hide exempts no header (`0x4d8528`, `0x4d8535`).
@@ -864,6 +903,47 @@ fn the_filter_and_collapse_verbs_fire_trainer_update_in_place() {
         )
         .unwrap();
     assert_eq!(seen, ["TRAINER_UPDATE 4", "TRAINER_UPDATE 3"]);
+}
+
+/// The fold verbs take `n - 1` signed (`0x4da6f4`, `0x4da774`): below 0 they fold every group, a
+/// row that is no header (`0x4d8be0` answers -1 for a service or a row past the total) raises
+/// "Bad skill line in ..." and fires no `TRAINER_UPDATE`.
+#[test]
+fn the_fold_verbs_take_a_negative_index_for_all_and_raise_on_a_bad_row() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    s.run("CollapseTrainerSkillLine(-1)").unwrap();
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 2);
+    s.run("ExpandTrainerSkillLine(-5)").unwrap();
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
+
+    crate::script::tick::heard::listen(&s, &["TRAINER_UPDATE"], None);
+    for (call, want) in [
+        (
+            "CollapseTrainerSkillLine(2)",
+            "Bad skill line in CollapseTrainerSkillLine",
+        ),
+        (
+            "CollapseTrainerSkillLine(6)",
+            "Bad skill line in CollapseTrainerSkillLine",
+        ),
+        (
+            "ExpandTrainerSkillLine(3)",
+            "Bad skill line in ExpandTrainerSkillLine",
+        ),
+        (
+            "ExpandTrainerSkillLine(99)",
+            "Bad skill line in ExpandTrainerSkillLine",
+        ),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(want), "{call}: {err}");
+    }
+    assert!(
+        crate::script::tick::heard::take(&s).is_empty(),
+        "a raise fires no update"
+    );
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
 }
 
 /// `OpenTrainer` (`0x4d8cf0`) asks for the player's own list: it hands the host its call, which

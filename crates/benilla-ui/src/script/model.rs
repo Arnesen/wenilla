@@ -703,6 +703,9 @@ pub(crate) struct Model {
     /// `HasFullControl`, the reference's `[0xb4b3e4]`: set by `SMSG_CLIENT_CONTROL_UPDATE` for the
     /// player, boots 1, and every cast, item and cursor gate refuses at 0.
     pub(crate) player_control: bool,
+    /// `+0x1c70` bit 0 of the player: far sight is on (`CMSG_FAR_SIGHT` 1 sent), which
+    /// `HasFullControl` refuses (`0x51a142`).
+    pub(crate) far_sight_on: bool,
     /// The on-use spells that pass the item dispatcher's control gate without control of the
     /// character (`0x5d8ec0`-`0x5d8f6a`), fed by the app.
     pub(crate) control_bypass: HashSet<u32>,
@@ -861,6 +864,10 @@ pub(crate) struct Model {
     pub(crate) craft: Option<craft::CraftState>,
     /// The window is open (`[0xbdcfb8]`), which a close alone zeroes (`0x4f5fe0`).
     pub(crate) craft_open: bool,
+    /// The names of the spells in the player's four effect slots (`CGPlayer_C+0x1d10`,
+    /// `0x5ea360`), which `GetCraftName` reads at the open marker (`[0xbdcfb8]`, 0 closed); `None`
+    /// is nil.
+    pub(crate) craft_slot_names: [Option<String>; 4],
     /// The selected spell id (`0xbdcfbc`), 0 for none, which a header or an index past the rows
     /// stores (`0x4f6050`); the index answers by finding its row (`0x4f6080`).
     pub(crate) craft_selection: u32,
@@ -1175,8 +1182,8 @@ pub(crate) struct Model {
     /// `"player"` pushes that carry it: corrected, never blanked. A per-login rebuild is unseen, as
     /// its verbs exist only in game (`0x850438`), not at the glue screen (`0x46abb0`).
     pub(crate) player_record: super::PlayerRecord,
-    /// `GetBindLocation()`, the bind point's area name: `""` before it lands, never nil.
-    pub(crate) bind_location: String,
+    /// `GetBindLocation()`, the bind point's area name; `None` answers the `HOME_INN` text.
+    pub(crate) bind_location: Option<String>,
     /// `GMTicketCategory.dbc` `(id, name)` rows in file order; the ids are wire values.
     pub(crate) gm_ticket_categories: Vec<(u32, String)>,
     /// `CheckBinderDist()`: the innkeeper's question is live and in range; false hides its dialog.
@@ -1578,6 +1585,7 @@ impl Model {
             shapeshift_forms: Vec::new(),
             pet_bar: super::pet::PetBarState::default(),
             player_control: true,
+            far_sight_on: false,
             control_bypass: HashSet::new(),
             containers: HashMap::new(),
             container_cooldowns: HashMap::new(),
@@ -1637,6 +1645,7 @@ impl Model {
             trade_skill_repeat_count: 0,
             craft: None,
             craft_open: false,
+            craft_slot_names: Default::default(),
             craft_selection: 0,
             craft_rows: Vec::new(),
             craft_visible: 0,
@@ -1717,7 +1726,7 @@ impl Model {
             screenshot_asks: 0,
             realm_name: String::new(),
             player_record: super::PlayerRecord::default(),
-            bind_location: String::new(),
+            bind_location: None,
             gm_ticket_categories: Vec::new(),
             binder_pending: false,
             summon_confirm: super::summon::SummonConfirmUiState::default(),

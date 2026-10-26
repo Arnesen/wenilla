@@ -69,8 +69,8 @@ fn filter_bit_named(name: &str) -> Option<u32> {
 /// The state mask `"all"` sets (`0x4da2a9`): the three states a filter can name.
 const TRAINER_FILTER_ALL: u32 = 7;
 
-/// A service's skill requirement (`GetTrainerServiceSkillReq`). The wire has no per-gate bit, so
-/// `met` comes from the service's `category`.
+/// A service's skill requirement (`GetTrainerServiceSkillReq`). `met` is the snapshot's answer to
+/// the player's skill; the getter reads it again at the call ([`TrainerServiceLive::skill_met`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrainerSkillReq {
     pub name: String,
@@ -182,6 +182,10 @@ pub struct TrainerService {
     /// `GetTrainerSkillLines` (`0x4da660`) lists per header; `None` for a key with no row, the
     /// known-talents group's -1 and a tradeskill trainer's 1 and 2 included.
     pub line_name: Option<String>,
+    /// `GetTrainerServiceSkillLine`'s name (`0x4d91dc`): the `SkillLine` of the ability row of the
+    /// spell the row teaches, else of the sent spell, which differs from the group's name at a
+    /// tradeskill trainer; `None` answers nil.
+    pub skill_line: Option<String>,
 }
 
 /// One header and its services, built by [`UiScript::set_trainer`].
@@ -234,6 +238,9 @@ pub struct TrainerServiceLive {
     pub description: Option<TooltipText>,
     pub description_wait: Option<ProductWait>,
     pub ability_reqs: Vec<TrainerAbilityReq>,
+    /// `GetTrainerServiceSkillReq`'s third value as the call finds it (`0x4d9570`): the player's
+    /// skill reaches the required value, 1 whenever nothing asks it.
+    pub skill_met: bool,
 }
 
 impl super::UiScript {
@@ -682,6 +689,7 @@ fn live(lua: &Lua, model: &Model, index: usize) -> Option<TrainerServiceLive> {
             description: s.description.clone().map(TooltipText::from),
             description_wait: s.description_wait,
             ability_reqs: s.ability_reqs.clone(),
+            skill_met: s.skill_req.as_ref().is_none_or(|r| r.met),
         })
     })
 }
@@ -719,19 +727,18 @@ fn raise_trainer_update(model: &mut Model) {
     model.raise("TRAINER_UPDATE", Vec::new());
 }
 
-fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
-    if id == 0 && !collapse {
-        model.trainer_collapsed.clear();
-        return;
-    }
-    let targets: Vec<u32> = if id == 0 {
-        model
+/// The fold verbs' write on the row `n - 1` signed (`0x4da6f4`, `0x4da774`): below 0 every group
+/// at once (`0x4da6f5`, `0x4da775`), else the row must be a header of the array (`0x4d8be0` answers
+/// -1 for a service or a row past the total) whose group's bit is set or cleared. `false` is the
+/// bad skill line, which raises with nothing touched and no `TRAINER_UPDATE` (`0x4d8cd0`).
+fn set_collapsed(model: &mut Model, n: i32, collapse: bool) -> bool {
+    let targets: Vec<u32> = match usize::try_from(n.wrapping_sub(1)) {
+        Err(_) => model
             .trainer
             .as_ref()
             .map(|t| t.groups.iter().map(|g| g.key).collect())
-            .unwrap_or_default()
-    } else {
-        match rows(model).0.get(id - 1) {
+            .unwrap_or_default(),
+        Ok(row) => match rows(model).0.get(row) {
             Some(Row::Header(gi)) => model
                 .trainer
                 .as_ref()
@@ -739,8 +746,8 @@ fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
                 .map(|g| g.key)
                 .into_iter()
                 .collect(),
-            _ => Vec::new(),
-        }
+            _ => return false,
+        },
     };
     for sl in targets {
         if collapse {
@@ -749,6 +756,21 @@ fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
             model.trainer_collapsed.remove(&sl);
         }
     }
+    true
+}
+
+/// A fold verb past its usage check: the write, then `TRAINER_UPDATE`, or the `bad` line raised.
+fn fold(lua: &Lua, n: i32, collapse: bool, bad: &'static str) -> mlua::Result<()> {
+    let folded = super::tick::verb(lua, |model| {
+        let ok = set_collapsed(model, n, collapse);
+        if ok {
+            raise_trainer_update(model);
+        }
+        ok
+    });
+    folded
+        .then_some(())
+        .ok_or_else(|| mlua::Error::RuntimeError(bad.into()))
 }
 
 fn opt_str(lua: &Lua, s: Option<&String>) -> mlua::Result<Value> {
@@ -816,8 +838,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetTrainerServiceSkillLine(index): the group name, nil for a header. The reference's return
-    // (`0x4d9160`) is untraced; the stock `CONFIRM_PROFESSION` dialog shows it as the profession.
+    // GetTrainerServiceSkillLine(index) (`0x4d9160`): the name of the skill line of the row's
+    // ability (see [`TrainerService::skill_line`]), nil for a header; the stock `CONFIRM_PROFESSION`
+    // dialog shows it as the profession.
     g.set(
         "GetTrainerServiceSkillLine",
         lua.create_function(|lua, index: Value| {
@@ -825,19 +848,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let index =
                 binding_abi::index_arg(lua, index, "Usage: GetTrainerServiceSkillLine(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(n) = index.checked_sub(1) else {
-                return Ok(Value::Nil);
-            };
-            let Some(Row::Service(si)) = rows(&model).0.get(n).copied() else {
-                return Ok(Value::Nil);
-            };
-            let t = model
-                .trainer
-                .as_ref()
-                .expect("a resolved row ⇒ an open trainer");
-            Ok(Value::String(
-                lua.create_string(&t.services[si].group_name)?,
-            ))
+            opt_str(
+                lua,
+                service(&model, index).and_then(|s| s.skill_line.as_ref()),
+            )
         })?,
     )?;
 
@@ -924,10 +938,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(req) = service(&model, index).and_then(|s| s.skill_req.as_ref()) else {
                 return Ok(binding_abi::tuple(&[None, Some(0), Some(1)]));
             };
+            // The flag compares the player's skill at the call, not the row's colour (`0x4d9570`).
+            let met = live(lua, &model, index).map_or(req.met, |l| l.skill_met);
+            // An empty name answers `nil, 0` and the flag (`0x4d9589`-`0x4d9599`).
+            if req.name.is_empty() {
+                return Ok(binding_abi::tuple(&[None, Some(0), met.then_some(1)]));
+            }
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&req.name)?),
                 Value::Integer(i64::from(req.rank)),
-                binding_abi::flag(req.met),
+                binding_abi::flag(met),
             ]))
         })?,
     )?;
@@ -1247,30 +1267,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Collapse/ExpandTrainerSkillLine(id): fold the group headed by row `id`, or all at 0. `id`
-    // spans the whole row array like the getters' gate (`0x4d89b0`); their own bound is untraced.
+    // Collapse/ExpandTrainerSkillLine(n): fold the group headed by row `n`, or every group for
+    // `n - 1` below 0; a row that is no header raises (`0x4da6c0`, `0x4da740`). `n` spans the
+    // whole row array like the getters' gate (`0x4d89b0`).
     g.set(
         "CollapseTrainerSkillLine",
-        lua.create_function(|lua, id: Value| {
+        lua.create_function(|lua, n: Value| {
             // `is-number` else `Usage: CollapseTrainerSkillLine(index)` (`0x84ad24`, `0x4da6d1`).
-            let id = binding_abi::index_arg(lua, id, "Usage: CollapseTrainerSkillLine(index)")?;
-            super::tick::verb(lua, |model| {
-                set_collapsed(model, id, true);
-                raise_trainer_update(model);
-            });
-            Ok(())
+            let n = binding_abi::number_arg(lua, n, "Usage: CollapseTrainerSkillLine(index)")?;
+            fold(lua, n, true, "Bad skill line in CollapseTrainerSkillLine")
         })?,
     )?;
     g.set(
         "ExpandTrainerSkillLine",
-        lua.create_function(|lua, id: Value| {
+        lua.create_function(|lua, n: Value| {
             // `is-number` else `Usage: ExpandTrainerSkillLine(index)` (`0x84ad78`, `0x4da751`).
-            let id = binding_abi::index_arg(lua, id, "Usage: ExpandTrainerSkillLine(index)")?;
-            super::tick::verb(lua, |model| {
-                set_collapsed(model, id, false);
-                raise_trainer_update(model);
-            });
-            Ok(())
+            let n = binding_abi::number_arg(lua, n, "Usage: ExpandTrainerSkillLine(index)")?;
+            fold(lua, n, false, "Bad skill line in ExpandTrainerSkillLine")
         })?,
     )?;
 

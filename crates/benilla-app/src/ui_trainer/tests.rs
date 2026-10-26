@@ -8,7 +8,7 @@ use benilla_formats::{
     SPELL_EFFECT_SKILL_STEP,
 };
 use benilla_protocol::messages::trainer_spell_state;
-use benilla_ui::script::TrainerTooltip;
+use benilla_ui::script::{TrainerServiceCategory, TrainerTooltip};
 use std::collections::HashMap;
 
 /// An empty spell catalog, as before `Spell.dbc` loads.
@@ -26,6 +26,7 @@ fn probe_strings(key: &str) -> Option<String> {
         "TRADESKILL_SERVICE_LEARN" => Some("<LEARN>".into()),
         "KNOWN_TALENTS_HEADER" => Some("<KNOWN>".into()),
         "INCREASE_POTENTIAL" => Some("Increases potential in %s by %d".into()),
+        "HOME_INN" => Some("<INN>".into()),
         _ => None,
     }
 }
@@ -77,6 +78,18 @@ fn resolve_service(
     skill_lines: Option<&SkillLineCatalog>,
     known: &BTreeSet<u32>,
 ) -> TrainerService {
+    resolve_service_skilled(wire, trainer_type, spells, skill_lines, known, Some(&[]))
+}
+
+/// [`resolve_service`] with the player's skill slots, `None` for no player object.
+fn resolve_service_skilled(
+    wire: &TrainerSpell,
+    trainer_type: u32,
+    spells: &SpellCatalog,
+    skill_lines: Option<&SkillLineCatalog>,
+    known: &BTreeSet<u32>,
+    skills: Option<&[benilla_protocol::messages::PlayerSkillSlot]>,
+) -> TrainerService {
     let deps = Deps::new();
     with_text(spells, 0, 0, None, |text| {
         super::resolve_service(
@@ -88,6 +101,7 @@ fn resolve_service(
                 player: known,
                 pet: None,
                 race_class: (1, 1),
+                skills,
             },
             None,
             &deps.items,
@@ -124,6 +138,7 @@ fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
                 player: &BTreeSet::new(),
                 pet: None,
                 race_class: (1, 1),
+                skills: Some(&[]),
             },
             None,
             &deps.items,
@@ -533,17 +548,11 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
     assert_eq!(svc.cost, 1000);
     assert_eq!(svc.category, TrainerServiceCategory::Unavailable);
     assert_eq!(svc.level_req, 20);
-    // The skill gate follows the category; the ability gate reads met, as no service spell
-    // record reaches the known test (`0x4d9842`), and a requirement with no record answers nil
-    // (`0x4d97c8`, `0x4d98d1`). Every slot stays in place (`0x4d97a5`).
-    assert_eq!(
-        svc.skill_req,
-        Some(TrainerSkillReq {
-            name: "Skill 164".to_string(),
-            rank: 100,
-            met: false,
-        })
-    );
+    // A skill line with no `SkillLine.dbc` row is no requirement (`0x4d94c5` → `0x4d95bc`); the
+    // ability gate reads met, as no service spell record reaches the known test (`0x4d9842`), and
+    // a requirement with no record answers nil (`0x4d97c8`, `0x4d98d1`). Every slot stays in place
+    // (`0x4d97a5`).
+    assert_eq!(svc.skill_req, None);
     assert_eq!(
         svc.ability_reqs,
         vec![
@@ -878,8 +887,8 @@ fn service_description_expands_against_the_pet_for_a_learn_pet_row() {
     });
 }
 
-/// The `$z` token: the bind point's area name (`AreaTable.dbc`), and raw where no bind point has
-/// arrived, as the item and tooltip feeds' `$z` behaves.
+/// The `$z` token: the bind point's area name (`AreaTable.dbc`), and the `HOME_INN` text where no
+/// bind point has arrived (`0x507f3a`), as the item and tooltip feeds' `$z` behaves.
 #[test]
 fn service_description_expands_z_to_the_bind_area() {
     let d = SpellDisplay {
@@ -890,7 +899,7 @@ fn service_description_expands_z_to_the_bind_area() {
     let deps = Deps::new();
     for (home, want) in [
         (Some("Razor Hill"), "Returns you to Razor Hill."),
-        (None, "Returns you to $z."),
+        (None, "Returns you to <INN>."),
     ] {
         with_text(&spells, 0, 0, home, |text| {
             assert_eq!(
@@ -958,6 +967,7 @@ fn service_description_on_real_data_reads_astral_recalls_bind_area() {
                 player: &BTreeSet::new(),
                 pet: None,
                 race_class: (1, 1),
+                skills: Some(&[]),
             },
             None,
             &deps.items,
@@ -1785,6 +1795,7 @@ fn resolve_with_pet(
                 player,
                 pet,
                 race_class: (1, 1),
+                skills: Some(&[]),
             },
             None,
             &deps.items,
@@ -2253,4 +2264,156 @@ fn a_pet_rows_pet_is_the_summon_not_the_bar() {
         pet_view(Some(0xF140_0000_0000_0099), store_of, &bar(0)),
         None
     );
+}
+
+fn skill_slot(
+    skill_id: u16,
+    value: u16,
+    perm_bonus: i16,
+) -> benilla_protocol::messages::PlayerSkillSlot {
+    benilla_protocol::messages::PlayerSkillSlot {
+        skill_id,
+        step: 0,
+        value,
+        max: 300,
+        temp_bonus: 0,
+        perm_bonus,
+    }
+}
+
+/// `GetTrainerServiceSkillReq`'s flag (`0x4d9570`) compares the player's rank plus the permanent
+/// bonus, added only to a nonzero rank, with the required value: a row that is red for its level
+/// still reports the skill met, and an unmet skill shows on a green row. No player, no slot for
+/// the line, and an unknown line keep the default 1 or fail as the scan ends (`0x4d945a`,
+/// `0x4d9575`, `0x4d95bc`).
+#[test]
+fn skill_req_met_compares_the_players_skill_not_the_rows_colour() {
+    const ALCHEMY: u32 = 171;
+    let spells = empty_catalog();
+    let lines = SkillLineCatalog::from_spell_lines([]).with_line_names([(ALCHEMY, "Alchemy")]);
+    let met = |state: u8, skills: Option<&[benilla_protocol::messages::PlayerSkillSlot]>| {
+        let mut w = wire(2018, state, 100, 10, ALCHEMY);
+        w.req_skill_value = 50;
+        resolve_service_skilled(
+            &w,
+            TRAINER_TYPE_TRADESKILL,
+            &spells,
+            Some(&lines),
+            &BTreeSet::new(),
+            skills,
+        )
+        .skill_req
+        .map(|r| r.met)
+    };
+    let red = trainer_spell_state::RED;
+    let green = trainer_spell_state::GREEN;
+    assert_eq!(
+        met(red, Some(&[skill_slot(171, 50, 0)])),
+        Some(true),
+        "50 of 50, red for level"
+    );
+    assert_eq!(
+        met(green, Some(&[skill_slot(171, 40, 9)])),
+        Some(false),
+        "49 of 50"
+    );
+    assert_eq!(
+        met(green, Some(&[skill_slot(171, 40, 10)])),
+        Some(true),
+        "bonus counts"
+    );
+    assert_eq!(
+        met(green, Some(&[skill_slot(171, 0, 80)])),
+        Some(false),
+        "no bonus on rank 0"
+    );
+    assert_eq!(
+        met(green, Some(&[skill_slot(164, 300, 0)])),
+        Some(false),
+        "no slot for the line"
+    );
+    assert_eq!(met(red, None), None, "no player is the miss `nil, 0, 1`");
+    // A zero value and a line with no row are the miss too (`0x4d94a0`, `0x4d94c5`).
+    let skill_req = |req_skill: u32, value: u32| {
+        let mut w = wire(2018, green, 100, 10, req_skill);
+        w.req_skill_value = value;
+        resolve_service_skilled(
+            &w,
+            TRAINER_TYPE_TRADESKILL,
+            &spells,
+            Some(&lines),
+            &BTreeSet::new(),
+            Some(&[]),
+        )
+        .skill_req
+    };
+    assert_eq!(skill_req(ALCHEMY, 0), None, "a zero value");
+    assert_eq!(skill_req(0, 50), None, "a zero line");
+    assert_eq!(skill_req(999, 50), None, "a line with no row");
+    assert_eq!(
+        skill_req(ALCHEMY, 50).map(|r| r.name),
+        Some("Alchemy".into())
+    );
+}
+
+/// `GetTrainerServiceSkillLine` (`0x4d9160`) names the line of the ability row of the spell the
+/// first learn effect teaches (`0x4d91e6`), else of the sent spell, and falls on to the spell the
+/// record's third `EffectMiscValue` numbers (`0x4d9261`); nil without a player or a match. It is
+/// not the group's name, which at a tradeskill trainer is the learn header.
+#[test]
+fn skill_line_name_is_the_taught_spells_line_not_the_group() {
+    let learn = |taught: u32| SpellDisplay {
+        name: "Alchemy".into(),
+        effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+        effect_trigger_spell: [taught, 0, 0],
+        ..Default::default()
+    };
+    let spells = SpellCatalog::from_displays(HashMap::from([
+        (2018, learn(2259)),
+        (2019, learn(31337)),
+        (2259, taught_ability()),
+        (78, taught_ability()),
+        (
+            5000,
+            SpellDisplay {
+                effect_misc_value: [0, 0, 78],
+                ..taught_ability()
+            },
+        ),
+    ]));
+    let lines = SkillLineCatalog::from_spell_lines([(2259, 171), (78, 26)])
+        .with_line_names([(171, "Alchemy"), (26, "Arms")]);
+    let name = |spell: u32, trainer_type: u32, skills: Option<&[_]>| {
+        resolve_service_skilled(
+            &wire(spell, trainer_spell_state::GREEN, 100, 1, 0),
+            trainer_type,
+            &spells,
+            Some(&lines),
+            &BTreeSet::new(),
+            skills,
+        )
+        .skill_line
+    };
+    let player = Some(&[][..]);
+    assert_eq!(
+        name(2018, TRAINER_TYPE_TRADESKILL, player).as_deref(),
+        Some("Alchemy")
+    );
+    assert_eq!(name(2018, TRAINER_TYPE_TRADESKILL, None), None, "no player");
+    assert_eq!(
+        name(2019, 0, player),
+        None,
+        "a taught spell with no ability row"
+    );
+    assert_eq!(
+        name(78, 0, player).as_deref(),
+        Some("Arms"),
+        "the sent spell's own row"
+    );
+    assert_eq!(
+        name(5000, 0, player).as_deref(),
+        Some("Arms"),
+        "the third misc value's spell"
+    );
+    assert_eq!(name(31337, 0, player), None, "no record");
 }
