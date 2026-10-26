@@ -126,6 +126,210 @@ pub const LOOT_KEYS: [&str; 8] = [
 ];
 pub const MONEY_KEY: &str = "Rate.Drop.Money";
 
+/// How a gameplay tweak is edited.
+#[derive(Clone, Copy, Debug)]
+pub enum TweakKind {
+    /// A number written to every key; `int` keys are integers in the core.
+    Rate { min: f64, max: f64, int: bool },
+    /// Checked writes `on` to every key, unchecked writes `off`; the box shows checked when the
+    /// first key reads `on`.
+    Toggle { on: &'static str, off: &'static str },
+}
+
+/// One extra mangosd.conf switch. Every one of these is re-read by `reload config` *and* read by
+/// the core each time it is used (traced in mangos-classic at the core pin), so it applies live
+/// without a restart; `default` is the core's own default, used when the key is absent.
+#[derive(Clone, Copy, Debug)]
+pub struct Tweak {
+    pub id: &'static str,
+    pub group: &'static str,
+    pub label: &'static str,
+    pub hint: &'static str,
+    pub keys: &'static [&'static str],
+    pub default: &'static str,
+    pub kind: TweakKind,
+}
+
+pub const TWEAKS: &[Tweak] = &[
+    Tweak {
+        id: "regen_rate",
+        group: "rates",
+        label: "Health & mana regen",
+        hint: "players, pets and mobs",
+        keys: &["Rate.Health", "Rate.Mana"],
+        default: "1",
+        kind: TweakKind::Rate {
+            min: 0.1,
+            max: 20.0,
+            int: false,
+        },
+    },
+    Tweak {
+        id: "rep_rate",
+        group: "rates",
+        label: "Reputation",
+        hint: "",
+        keys: &["Rate.Reputation.Gain"],
+        default: "1",
+        kind: TweakKind::Rate {
+            min: 0.1,
+            max: 20.0,
+            int: false,
+        },
+    },
+    Tweak {
+        id: "profession_gain",
+        group: "rates",
+        label: "Profession skill-ups",
+        hint: "points per craft or gather",
+        keys: &["SkillGain.Crafting", "SkillGain.Gathering"],
+        default: "1",
+        kind: TweakKind::Rate {
+            min: 1.0,
+            max: 10.0,
+            int: true,
+        },
+    },
+    Tweak {
+        id: "aggro_rate",
+        group: "rates",
+        label: "Mob aggro range",
+        hint: "0 = mobs never attack first",
+        keys: &["Rate.Creature.Aggro"],
+        default: "1",
+        kind: TweakKind::Rate {
+            min: 0.0,
+            max: 2.0,
+            int: false,
+        },
+    },
+    Tweak {
+        id: "fall_damage",
+        group: "rates",
+        label: "Fall damage",
+        hint: "0 = none",
+        keys: &["Rate.Damage.Fall"],
+        default: "1",
+        kind: TweakKind::Rate {
+            min: 0.0,
+            max: 5.0,
+            int: false,
+        },
+    },
+    Tweak {
+        id: "gear_wear",
+        group: "rules",
+        label: "Gear wears down when hit (death still costs durability)",
+        hint: "",
+        keys: &["DurabilityLossChance.Damage"],
+        default: "0.5",
+        kind: TweakKind::Toggle {
+            on: "0.5",
+            off: "0",
+        },
+    },
+    Tweak {
+        id: "res_sickness",
+        group: "rules",
+        label: "Resurrection sickness at the spirit healer",
+        hint: "",
+        keys: &["Death.SicknessLevel"],
+        default: "11",
+        kind: TweakKind::Toggle {
+            on: "11",
+            off: "99",
+        },
+    },
+    Tweak {
+        id: "ignore_instance_reqs",
+        group: "rules",
+        label: "Anyone may enter dungeons and raids (no level or raid-group requirement)",
+        hint: "",
+        keys: &["Instance.IgnoreLevel", "Instance.IgnoreRaid"],
+        default: "0",
+        kind: TweakKind::Toggle { on: "1", off: "0" },
+    },
+    Tweak {
+        id: "cross_faction",
+        group: "rules",
+        label: "Cross-faction grouping, chat, trade, mail, /who and friends",
+        hint: "",
+        keys: &[
+            "AllowTwoSide.Interaction.Group",
+            "AllowTwoSide.Interaction.Chat",
+            "AllowTwoSide.Interaction.Trade",
+            "AllowTwoSide.Interaction.Mail",
+            "AllowTwoSide.WhoList",
+            "AllowTwoSide.AddFriend",
+        ],
+        default: "0",
+        kind: TweakKind::Toggle { on: "1", off: "0" },
+    },
+    Tweak {
+        id: "show_low_quests",
+        group: "rules",
+        label: "Show grey (low-level) quests in the world",
+        hint: "",
+        keys: &["Quests.LowLevelHideDiff"],
+        default: "5",
+        kind: TweakKind::Toggle { on: "-1", off: "5" },
+    },
+];
+
+/// A tweak and its current value, as the settings page renders it.
+pub struct TweakRow {
+    pub t: &'static Tweak,
+    pub value: f64,
+}
+
+impl TweakRow {
+    pub fn is_rate(&self) -> bool {
+        matches!(self.t.kind, TweakKind::Rate { .. })
+    }
+    pub fn checked(&self) -> bool {
+        self.value != 0.0
+    }
+    pub fn min(&self) -> f64 {
+        match self.t.kind {
+            TweakKind::Rate { min, .. } => min,
+            TweakKind::Toggle { .. } => 0.0,
+        }
+    }
+    pub fn max(&self) -> f64 {
+        match self.t.kind {
+            TweakKind::Rate { max, .. } => max,
+            TweakKind::Toggle { .. } => 1.0,
+        }
+    }
+    pub fn step(&self) -> &'static str {
+        match self.t.kind {
+            TweakKind::Rate { int: true, .. } | TweakKind::Toggle { .. } => "1",
+            TweakKind::Rate { int: false, .. } => "0.1",
+        }
+    }
+}
+
+/// The current value of each tweak: the rate, or 1.0/0.0 for a toggle.
+fn load_tweaks(m: &str) -> std::collections::BTreeMap<String, f64> {
+    TWEAKS
+        .iter()
+        .map(|t| {
+            let raw = read_str(m, t.keys[0]).unwrap_or_else(|| t.default.to_string());
+            let v = match t.kind {
+                TweakKind::Rate { .. } => raw.parse().unwrap_or(1.0),
+                TweakKind::Toggle { on, .. } => {
+                    if raw == on {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            (t.id.to_string(), v)
+        })
+        .collect()
+}
+
 /// The whole settings surface the panel exposes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -139,6 +343,22 @@ pub struct Settings {
     pub bots: i64,
     pub bot_account_count: i64,
     pub ahbot: bool,
+    /// [`TWEAKS`] by id.
+    #[serde(default)]
+    pub tweaks: std::collections::BTreeMap<String, f64>,
+}
+
+impl Settings {
+    pub fn tweak_rows(&self, group: &str) -> Vec<TweakRow> {
+        TWEAKS
+            .iter()
+            .filter(|t| t.group == group)
+            .map(|t| TweakRow {
+                t,
+                value: self.tweaks.get(t.id).copied().unwrap_or(0.0),
+            })
+            .collect()
+    }
 }
 
 fn num(text: &str, key: &str, default: f64) -> f64 {
@@ -171,6 +391,7 @@ pub fn load(files: &ConfFiles) -> Result<Settings> {
         bot_account_count: num(&b, "AiPlayerbot.RandomBotAccountCount", 50.0) as i64,
         ahbot: num(&a, "AuctionHouseBot.Chance.Sell", 0.0) > 0.0
             || num(&a, "AuctionHouseBot.Chance.Buy", 0.0) > 0.0,
+        tweaks: load_tweaks(&m),
     })
 }
 
@@ -299,6 +520,31 @@ pub fn save(files: &ConfFiles, old: &Settings, new: &Settings) -> Result<Vec<App
         write(&files.ahbot, "AuctionHouseBot.Chance.Buy", buy, false)?;
         need(Apply::AhBot, &mut steps);
     }
+    for t in TWEAKS {
+        let (Some(&v), o) = (new.tweaks.get(t.id), old.tweaks.get(t.id)) else {
+            continue;
+        };
+        if o == Some(&v) {
+            continue;
+        }
+        let value = match t.kind {
+            TweakKind::Rate { min, max, int } => {
+                if !(min..=max).contains(&v) {
+                    return Err(anyhow!("{} must be between {min} and {max}", t.label));
+                }
+                if int {
+                    (v.round() as i64).to_string()
+                } else {
+                    fmt_rate(v)
+                }
+            }
+            TweakKind::Toggle { on, off } => (if v != 0.0 { on } else { off }).to_string(),
+        };
+        for k in t.keys {
+            write(&files.mangosd, k, &value, false)?;
+        }
+        need(Apply::Hot, &mut steps);
+    }
     Ok(steps)
 }
 
@@ -355,5 +601,44 @@ mod tests {
             read(&files.mangosd, "Rate.XP.Explore").unwrap().as_deref(),
             Some("2")
         );
+    }
+
+    #[test]
+    fn tweaks_default_when_absent_and_write_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ConfFiles::in_dir(dir.path());
+        std::fs::write(
+            &files.mangosd,
+            "Rate.Health = 1\nDeath.SicknessLevel = 11\n",
+        )
+        .unwrap();
+        let old = load(&files).unwrap();
+        assert_eq!(old.tweaks["regen_rate"], 1.0);
+        assert_eq!(old.tweaks["res_sickness"], 1.0);
+        assert_eq!(old.tweaks["cross_faction"], 0.0);
+        assert_eq!(
+            old.tweaks["gear_wear"], 1.0,
+            "absent key reads the core default"
+        );
+        let mut new = old.clone();
+        new.tweaks.insert("regen_rate".into(), 2.5);
+        new.tweaks.insert("res_sickness".into(), 0.0);
+        new.tweaks.insert("cross_faction".into(), 1.0);
+        new.tweaks.insert("profession_gain".into(), 3.0);
+        assert_eq!(save(&files, &old, &new).unwrap(), vec![Apply::Hot]);
+        assert_eq!(load(&files).unwrap(), new);
+        let r = |k| read(&files.mangosd, k).unwrap();
+        assert_eq!(r("Rate.Mana").as_deref(), Some("2.5"));
+        assert_eq!(r("Death.SicknessLevel").as_deref(), Some("99"));
+        assert_eq!(r("AllowTwoSide.AddFriend").as_deref(), Some("1"));
+        assert_eq!(r("SkillGain.Gathering").as_deref(), Some("3"));
+        assert_eq!(
+            r("DurabilityLossChance.Damage"),
+            None,
+            "untouched tweak is not written"
+        );
+        let mut bad = new.clone();
+        bad.tweaks.insert("aggro_rate".into(), 3.0);
+        assert!(save(&files, &new, &bad).is_err());
     }
 }

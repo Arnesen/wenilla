@@ -64,6 +64,7 @@ async fn dashboard(
         bots: 0,
         bot_account_count: 0,
         ahbot: false,
+        tweaks: Default::default(),
     });
     Ok(render(templates::AdminDashboard {
         realm_name: state.realm_name().await,
@@ -494,8 +495,13 @@ async fn config_save(
     session: Session,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Form(f): Form<ConfigForm>,
+    body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
+    // Parsed twice: the fixed fields, and the `t.<id>` fields of the data-driven tweaks.
+    let f: ConfigForm =
+        serde_urlencoded::from_bytes(&body).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let pairs: Vec<(String, String)> =
+        serde_urlencoded::from_bytes(&body).map_err(|e| AppError::BadRequest(e.to_string()))?;
     csrf::verify(&session, &f._csrf)?;
     let old = mangos_conf::load(&state.conf)?;
     let mut new = old.clone();
@@ -514,6 +520,36 @@ async fn config_save(
         .collect();
     new.bots = f.bots;
     new.ahbot = f.ahbot.is_some();
+    // Only a form that renders the tweaks carries `tweaks=1`; without it an unchecked box and an
+    // absent one would look the same.
+    if pairs.iter().any(|(k, v)| k == "tweaks" && v == "1") {
+        for t in mangos_conf::TWEAKS {
+            let field = format!("t.{}", t.id);
+            let sent = pairs
+                .iter()
+                .find(|(k, _)| *k == field)
+                .map(|(_, v)| v.trim());
+            let v = match t.kind {
+                mangos_conf::TweakKind::Rate { .. } => match sent.map(str::parse::<f64>) {
+                    Some(Ok(v)) => v,
+                    _ => {
+                        return Ok(back(
+                            "/admin/config",
+                            Err(format!("{}: not a number", t.label)),
+                        ))
+                    }
+                },
+                mangos_conf::TweakKind::Toggle { .. } => {
+                    if sent.is_some() {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            new.tweaks.insert(t.id.to_string(), v);
+        }
+    }
     if new == old {
         return Ok(back("/admin/config", Ok("nothing changed".into())));
     }
