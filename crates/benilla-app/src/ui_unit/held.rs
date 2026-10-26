@@ -23,22 +23,20 @@ use crate::query_cache::Ask;
 use crate::target::{Candidacy, NameSearch, RelUnit, Relations};
 use crate::ui_script::{gate, VmMemo};
 
-/// A held unit's entry in the reach map: its squared distance from the player at `me_at`, and
+/// A held unit's reach from the player: its squared distance between `at` and `me_at`, and
 /// whether it passes `0x4944a0`'s other legs, the one `CanInspect` answers by (`0x48a2a1`): a
 /// player unit (`0x4944d8`) that is the active player (`0x4944dd`) or one it can cooperate with
-/// (`0x4944e4`). Cooperation is the faction group, not attackability: an unflagged enemy-faction
-/// player is not inspectable, a same-faction duel opponent is.
-pub(crate) fn unit_reach(
-    world: &crate::target::RelationWorld,
-    guid: u64,
-    store: Option<&ObjectStore>,
+/// (`0x4944e4`), judged by `rel`. Cooperation is the faction group, not attackability: an
+/// unflagged enemy-faction player is not inspectable, a same-faction duel opponent is.
+pub(crate) fn reach_between(
+    rel: &Relations,
+    unit: Option<&RelUnit>,
+    me: Option<&RelUnit>,
     at: Vec3,
     me_at: Vec3,
 ) -> benilla_ui::script::UnitReach {
-    let (rel, me) = (world.get(), world.me());
-    let unit = store.map(|s| world.unit_of(guid, s));
-    let inspectable = unit.zip(me.as_ref()).is_some_and(|(unit, me)| {
-        unit.is_player && (unit.guid == me.guid || rel.can_cooperate(me, &unit))
+    let inspectable = unit.zip(me).is_some_and(|(unit, me)| {
+        unit.is_player && (unit.guid == me.guid || rel.can_cooperate(me, unit))
     });
     benilla_ui::script::UnitReach {
         dist_sq: super::dist_sq(at, me_at),
@@ -939,10 +937,11 @@ mod tests {
         const TEMPLATE: u16 = 35;
         const FLAGS: u16 = 46;
         let mut app = app();
-        app.insert_resource(fx::factions()).add_systems(
-            Update,
-            crate::ui_unit::relations::feed_unit_relations.before(crate::ui_aura::AuraEvents),
-        );
+        // The verbs ask the relation functions of the lent host, as of the call.
+        let lent = |app: &mut App, expr: &str| -> bool {
+            crate::ui_unit::live::eval_lent(app.world_mut(), &format!("return {expr}"))
+        };
+        app.insert_resource(fx::factions());
         let with = |extra: &[(u16, u32)], target: u64, kind: u32| {
             let mut pairs = vec![
                 (OBJECT_TYPE, kind),
@@ -985,22 +984,22 @@ mod tests {
             );
         app.update();
         assert!(
-            holds(&app, r#"UnitCanAssist("player", "party1target") == 1"#),
+            lent(&mut app, r#"UnitCanAssist("player", "party1target") == 1"#),
             "a friendly, PvP-flagged creature"
         );
         assert!(
-            holds(&app, r#"UnitCanAssist("player", "raid2target") == nil"#),
+            lent(&mut app, r#"UnitCanAssist("player", "raid2target") == nil"#),
             "a friendly creature that is not PvP-flagged"
         );
         // The other way round the creature is `this` and the player the argument: the player is
         // player-controlled, so no PvP flag is asked, and `ADD` assists us though we cannot it.
         assert!(
-            holds(&app, r#"UnitCanAssist("raid2target", "player") == 1"#),
+            lent(&mut app, r#"UnitCanAssist("raid2target", "player") == 1"#),
             "a friendly creature toward the player"
         );
         // A unit nobody holds is no unit: nil.
-        assert!(holds(
-            &app,
+        assert!(lent(
+            &mut app,
             r#"UnitCanAssist("player", "party1targettarget") == nil"#
         ));
         // The verdict follows a descriptor that moves: `ADD` takes the flag.
@@ -1010,8 +1009,8 @@ mod tests {
             with(&[(TEMPLATE, 1), (FLAGS, 0x1000)], 0, 0x09),
         );
         app.update();
-        assert!(holds(
-            &app,
+        assert!(lent(
+            &mut app,
             r#"UnitCanAssist("player", "raid2target") == 1"#
         ));
         // `UNIT_FLAG_NOT_SELECTABLE` (bit 25) refuses it.
@@ -1021,8 +1020,8 @@ mod tests {
             with(&[(TEMPLATE, 1), (FLAGS, 0x1000 | 0x0200_0000)], 0, 0x09),
         );
         app.update();
-        assert!(holds(
-            &app,
+        assert!(lent(
+            &mut app,
             r#"UnitCanAssist("player", "raid2target") == nil"#
         ));
     }
