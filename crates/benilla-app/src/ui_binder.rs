@@ -6,8 +6,10 @@
 //! The stock surface (`StaticPopup.lua:1321-1335`, `UIParent.lua:125`, `547-548`) is the
 //! `CONFIRM_BINDER` event, whose one argument fills the dialog's `%s`; `ConfirmBinder()`, the
 //! Accept that sends the activate; and `CheckBinderDist()`, polled from `OnUpdate`, which hides
-//! the dialog the frame it goes false. The reference's handler is `0x5dfdc0`, its
-//! `SMSG_BINDER_CONFIRM` arm `0x5e4aa2`.
+//! the dialog the frame it goes false and reads the latch through the call host
+//! ([`crate::ui_dialog_verbs::DialogLive`]). The reference's handler is `0x5dfdc0`, its
+//! `SMSG_BINDER_CONFIRM` arm `0x5e4aa2`: an innkeeper in range (`0x5dfe3c`) is latched and the
+//! event fires inside it, here on the dialogs' lane at the packet's place; out of range nothing.
 //!
 //! `CheckBinderDist()` tests `d² <= [0xc4c28c]` (`5.55555534362793²`), the same constant and
 //! inclusive bound as [`crate::target::SERVICE_RANGE_SQ`], so the question is an [`NpcSession`]
@@ -18,12 +20,10 @@
 //! `ConfirmBinder()` in range re-sends the activate; this drops the guid on `SMSG_PLAYERBOUND`,
 //! because an answered question is not a question and the reference's dialog is gone by then.
 
-use benilla_ui::script::ScriptValue;
 use bevy::prelude::*;
 
 use crate::area::AreaTableRes;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_script::UiFeed;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
 /// The innkeeper's pending bind question; everything the dialog reads rides the event's argument.
@@ -31,27 +31,22 @@ use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 pub(crate) struct BinderState {
     /// The innkeeper who asked, sent back on the wire; vmangos binds only a live one in range.
     npc: Option<u64>,
-    /// A dialog the feed still owes, set per packet: asking again after a decline is a second
-    /// dialog, which a state diff would swallow.
-    ask: bool,
 }
 
 impl BinderState {
-    /// `SMSG_BINDER_CONFIRM`: parks the innkeeper's guid and owes the UI a dialog.
+    /// `SMSG_BINDER_CONFIRM` in range: the latch (`0xc4d7c0`).
     pub(crate) fn ask(&mut self, npc: u64) {
         self.npc = Some(npc);
-        self.ask = true;
     }
 
     /// The guid to answer with, if a question is live.
-    fn pending(&self) -> Option<u64> {
+    pub(crate) fn pending(&self) -> Option<u64> {
         self.npc
     }
 
     /// Retracts the question: the range guard's close, and `SMSG_PLAYERBOUND`'s.
     pub(crate) fn clear(&mut self) {
         self.npc = None;
-        self.ask = false;
     }
 }
 
@@ -67,50 +62,10 @@ impl NpcSession for BinderState {
     }
 }
 
-/// Publishes `CheckBinderDist()` every frame and fires `CONFIRM_BINDER` for each packet that
-/// asked, unconditionally, as the reference's handler always reaches its `SignalEvent2`.
-fn feed_binder(
-    // The question, which the Accept reads inside its call: an engine turn, its events signalled
-    // after.
-    mut vm: crate::script_calls::VmWith<ResMut<'static, BinderState>>,
-    world: benilla_world::world_point::WorldPoint,
-    areas: Option<Res<AreaTableRes>>,
-) {
-    vm.turn(|script, mut binder| {
-        let Some(script) = script else {
-            return;
-        };
-        script.set_binder_pending(binder.pending().is_some());
-
-        if !binder.ask {
-            return;
-        }
-        binder.ask = false;
-        let name = area_name(&world, areas.as_deref(), &|key: &str| {
-            script
-                .lua()
-                .globals()
-                .get::<String>(key)
-                .ok()
-                .filter(|t| !t.is_empty())
-        });
-        script.fire_event("CONFIRM_BINDER", vec![ScriptValue::Str(name)]);
-    })
-}
-
-/// The dialog's `%s`, an area and never the NPC's name (`0x5dfe5e`): the player's sub-area, else
-/// its parent zone, else `HOME_INN`. The reference never withholds the question for want of one.
-fn area_name(
-    world: &benilla_world::world_point::WorldPoint,
-    areas: Option<&AreaTableRes>,
-    get: &dyn Fn(&str) -> Option<String>,
-) -> String {
-    area_name_of(world.area(), areas, get)
-}
-
-/// [`area_name`] over a bare leaf id. The tail is the install's `HOME_INN`, the same fallback as
+/// The dialog's `%s`, an area and never the NPC's name (`0x5dfe5e`): the player's sub-area
+/// (`0xb4e318`), else its parent zone (`0xb4e314`), else `HOME_INN`, the same fallback as
 /// `GetBindLocation` (`0x48dae0`); an install without it gives an empty name and still asks.
-fn area_name_of(
+pub(crate) fn area_name_of(
     leaf: Option<u32>,
     areas: Option<&AreaTableRes>,
     get: &dyn Fn(&str) -> Option<String>,
@@ -130,6 +85,31 @@ fn area_name_of(
         .or_else(|| zone.and_then(named))
         .or_else(|| get("HOME_INN"))
         .unwrap_or_default()
+}
+
+/// What `0x5dfdc0` with a guid reads and writes: the latch, the dialogs' lane, the area under the
+/// player and the range gate.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BinderAsk<'w, 's> {
+    binder: ResMut<'w, BinderState>,
+    lane: ResMut<'w, crate::ui_dialog_verbs::DialogLane>,
+    area: benilla_world::world_point::AreaUnderfoot<'w>,
+    reach: crate::ui_dialog_verbs::DialogReach<'w, 's>,
+}
+
+/// `0x5dfdc0` with a guid, the packet's (`0x5e4aa2`) or the innkeeper's click's (bit 7 of the
+/// service ladder): an innkeeper past the range gate (`0x5dfe3c`,
+/// [`crate::ui_dialog_verbs::DialogReach`]) is latched, then `CONFIRM_BINDER` fires with the area
+/// under the player (`0x5dfe5e`); one out of range, or no unit, drops the question.
+pub(crate) fn ask_binder(In(npc): In<u64>, mut ask: BinderAsk) {
+    if !ask.reach.holds(npc) {
+        debug!("ui_binder: innkeeper {npc:#x} missing or out of range — the question drops");
+        return;
+    }
+    ask.binder.ask(npc);
+    let leaf = ask.area.area();
+    ask.lane
+        .push(crate::ui_dialog_verbs::DialogSignal::ConfirmBinder { leaf });
 }
 
 /// `ConfirmBinder()` inside its call ([`benilla_ui::script::BinderCall`]).
@@ -173,9 +153,11 @@ pub(crate) mod net {
             .net_handler(K::PlayerBound, on_bound);
     }
 
-    fn on_confirm(In(ev): In<SessionEvent>, mut binder: ResMut<BinderState>) {
+    /// `SMSG_BINDER_CONFIRM`'s arm (`0x5e4aa2`): `0x5dfdc0` with the packet's guid
+    /// ([`super::ask_binder`]). Asking again after a decline is a second dialog, each its packet's.
+    fn on_confirm(In(ev): In<SessionEvent>, ask: super::BinderAsk) {
         if let SessionEvent::BinderConfirm { binder: npc } = ev {
-            binder.ask(npc);
+            super::ask_binder(In(npc), ask);
         }
     }
 
@@ -226,18 +208,15 @@ pub(crate) struct UiBinderPlugin;
 impl Plugin for UiBinderPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
+        crate::ui_dialog_verbs::add_dialog_lane(app);
         app.init_resource::<BinderState>().add_systems(
             Update,
-            (
-                // Range-close before the feed, so walking away hides the dialog the same frame.
-                // In the frame time, after the drain that despawns the NPC and before the pass
-                // resumes: `ConfirmBinder`'s call reads the question.
-                close_npc_session_out_of_range::<BinderState>
-                    .after(benilla_world::schedule::WorldStage::Net)
-                    .before(feed_binder)
-                    .before(crate::vm_pass::VmPass::Resume),
-                feed_binder.in_set(UiFeed),
-            ),
+            // Range-close after the drain that despawns the NPC and ahead of the pass's resume,
+            // so walking away hides the dialog the same frame: `CheckBinderDist` and
+            // `ConfirmBinder`'s call read the question.
+            close_npc_session_out_of_range::<BinderState>
+                .after(benilla_world::schedule::WorldStage::Net)
+                .before(crate::vm_pass::VmPass::Resume),
         );
     }
 }
@@ -246,20 +225,6 @@ impl Plugin for UiBinderPlugin {
 mod tests {
     use super::*;
     use benilla_ui::script::UiScript;
-
-    #[test]
-    fn asking_twice_owes_two_dialogs() {
-        let mut binder = BinderState::default();
-        assert_eq!(binder.pending(), None);
-
-        binder.ask(0x2a);
-        assert!(binder.ask);
-        binder.ask = false; // the feed fired the first dialog
-        assert_eq!(binder.pending(), Some(0x2a), "the guid outlives the fire");
-
-        binder.ask(0x2a);
-        assert!(binder.ask, "the same innkeeper asking again owes a dialog");
-    }
 
     /// Area 186 is Dolanaar, a leaf area with an innkeeper.
     #[test]
@@ -313,11 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn closing_retracts_the_guid_and_the_unfired_dialog() {
+    fn closing_retracts_the_guid() {
         let mut binder = BinderState::default();
         binder.ask(0x2a);
         binder.close();
         assert_eq!(binder.pending(), None);
-        assert!(!binder.ask);
     }
 }

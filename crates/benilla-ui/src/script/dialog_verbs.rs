@@ -4,7 +4,11 @@
 use mlua::{Lua, Value};
 
 use super::binding_abi::{bool_or_default, coerced_number, flag};
-use super::Model;
+use super::live::ask;
+use super::{
+    meeting_stone_text, AreaSpiritHealerSecsQuery, InstanceBootSecsQuery, MeetingStoneQuery, Model,
+    PetUntrainerPendingQuery,
+};
 
 /// The meeting stone's verb the host applies inside its call ([`super::ScriptCall::MeetingStone`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,17 +24,17 @@ impl super::UiScript {
         self.take_calls_like(&super::ScriptCall::ConfirmPetUnlearn) as u32
     }
 
-    /// What `CheckPetUntrainerDist()` answers: a pending question whose trainer is in reach.
+    /// Set what `CheckPetUntrainerDist()` answers with no host lent.
     pub fn set_pet_untrainer_pending(&mut self, pending: bool) {
         self.model_mut().pet_untrainer_pending = pending;
     }
 
-    /// `GetInstanceBootTimeRemaining()`'s answer, whole seconds (0 idle).
+    /// Set `GetInstanceBootTimeRemaining()`'s answer with no host lent, whole seconds (0 idle).
     pub fn set_instance_boot_secs(&mut self, secs: u32) {
         self.model_mut().instance_boot_secs = secs;
     }
 
-    /// The seconds to the area spirit healer's next wave (`[0xb4e338]`).
+    /// Set the seconds to the area spirit healer's next wave (`[0xb4e338]`) read with no host lent.
     pub fn set_area_spirit_healer_secs(&mut self, secs: u32) {
         self.model_mut().area_spirit_secs = secs;
     }
@@ -50,8 +54,8 @@ impl super::UiScript {
         self.take_calls_like(&super::ScriptCall::MeetingStone(MeetingStoneCall::Cancel)) as u32
     }
 
-    /// The meeting stone's two globals: the queued area id (`0xb72038`, 0 for none) and the
-    /// cached status text (`0xb7203c`, `None` outside the world), which the app rebuilds.
+    /// Set the meeting stone's two globals read with no host lent: the queued area id
+    /// (`0xb72038`, 0 for none) and the status text (`0xb7203c`, `None` outside the world).
     pub fn set_meeting_stone(&mut self, area: u32, status_text: Option<String>) {
         let mut model = self.model_mut();
         model.meeting_stone_area = area;
@@ -69,8 +73,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetInstanceBootTimeRemaining",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(i64::from(model.instance_boot_secs))
+            let secs = ask(lua, &InstanceBootSecsQuery).unwrap_or_else(|| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.instance_boot_secs
+            });
+            Ok(i64::from(secs))
         })?,
     )?;
 
@@ -98,8 +105,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetAreaSpiritHealerTime",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(i64::from(model.area_spirit_secs))
+            let secs = ask(lua, &AreaSpiritHealerSecsQuery).unwrap_or_else(|| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.area_spirit_secs
+            });
+            Ok(i64::from(secs))
         })?,
     )?;
 
@@ -152,29 +162,48 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsInMeetingStoneQueue",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(flag(model.meeting_stone_area != 0))
+            let area = match ask(lua, &MeetingStoneQuery) {
+                Some(stone) => stone.area,
+                None => {
+                    lua.app_data_ref::<Model>()
+                        .expect("model app_data")
+                        .meeting_stone_area
+                }
+            };
+            Ok(flag(area != 0))
         })?,
     )?;
 
-    // `0x4ca5b0`: a string or nil, never `""` for nothing.
+    // `0x4ca5b0`: a string or nil, never `""` for nothing; the text the last rebuild left
+    // (`0x4ca070`).
     g.set(
         "GetMeetingStoneStatusText",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(match &model.meeting_stone_status_text {
-                Some(text) => Value::String(lua.create_string(text)?),
+            let text = match ask(lua, &MeetingStoneQuery) {
+                Some(stone) => meeting_stone_text(lua, &stone.text),
+                None => lua
+                    .app_data_ref::<Model>()
+                    .expect("model app_data")
+                    .meeting_stone_status_text
+                    .clone(),
+            };
+            Ok(match text {
+                Some(text) => Value::String(lua.create_string(&text)?),
                 None => Value::Nil,
             })
         })?,
     )?;
 
-    // `0x48d1c0`: `1` or nil, never `0`; the app tests the range to the latched trainer.
+    // `0x48d1c0`: `1` or nil, never `0`; the latch read at the call, whose range the app tests
+    // (`0x5dfd30`).
     g.set(
         "CheckPetUntrainerDist",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(flag(model.pet_untrainer_pending))
+            let pending = ask(lua, &PetUntrainerPendingQuery).unwrap_or_else(|| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.pet_untrainer_pending
+            });
+            Ok(flag(pending))
         })?,
     )?;
     // `0x48dca0` → `PetUnlearnDialog(0, 0)` (`0x5dfba0`): the host holds the latch and the money
