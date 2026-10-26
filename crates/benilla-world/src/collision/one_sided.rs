@@ -12,7 +12,10 @@
 //! Deviation: the slide, step and snap are avian's kinematic controller, with parry's edge-hit
 //! normals, not the reference's resolver, because pieces of that resolver grafted onto the
 //! controller left the mover in states the reference never reaches; only its face filters, the
-//! facing law and the backface band, are ported.
+//! facing law and the backface band, are ported. A cast also reports the hit face's own normal,
+//! and every class the reference takes from its face record reads it: the ground classify, the
+//! settle snap, the step trigger and the step-up's floor (`0x6334e6`, `0x636ecf`, `0x636592`),
+//! except on a shared edge ([`EDGE_TIE`]).
 //!
 //! There is no depenetration: the reference's resolver (`0x634040`) is a sweep with no push-out, so
 //! a body inside geometry, such as a player the server seats inside a chair's box, walks out
@@ -32,6 +35,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use core::time::Duration;
 
+use super::BodyHit;
+
 /// The facing gate (`[0x80c5c4]`, −1e-5): a face blocks only when `n·dir` is at most this, `n` its
 /// authored normal and `dir` the unit motion.
 const FACING_EPS: f32 = f32::from_bits(0xb727_c5ac);
@@ -45,8 +50,16 @@ const DOT_EPSILON: f32 = 0.005;
 /// sloped floor just above the feet, and the body would fall through the world.
 const BACKFACE_BAND: f32 = 1.0 / 36.0;
 
+/// parry's cast reaches both faces of one edge within this (yd) of each other; 1e-4 splits them.
+/// Deviation: the reference keeps the later record in file order on an exact tie (`0x6327e2`),
+/// and its box-and-cone volume meets a lip where our capsule does not, so a capsule hit on an
+/// edge two different front faces share is classified by its contact normal. A face the facing
+/// law drops (a riser under a down sweep) never ties, so a stair's nosing reads as its tread.
+const EDGE_TIE: f32 = 1.0e-3;
+
 /// One-sided [`MoveAndSlide::cast_move`]: sweeps the axis-aligned `shape` along `movement` to
-/// `skin_width` short of the first face whose authored winding opposes the motion.
+/// `skin_width` short of the first face whose authored winding opposes the motion, with that face's
+/// own normal beside the contact's.
 pub(crate) fn cast_move(
     ms: &MoveAndSlide<'_, '_>,
     shape: &Collider,
@@ -54,7 +67,7 @@ pub(crate) fn cast_move(
     movement: Vec3,
     skin_width: f32,
     filter: &SpatialQueryFilter,
-) -> Option<MoveHitData> {
+) -> Option<BodyHit> {
     let (dir, len) = Dir3::new_and_length(movement).unwrap_or((Dir3::X, 0.0));
     let max_toi = len + skin_width;
 
@@ -65,7 +78,7 @@ pub(crate) fn cast_move(
         max: a0.max.max(a1.max) + Vec3::splat(skin_width),
     };
 
-    let mut best: Option<MoveHitData> = None;
+    let mut best: Option<BodyHit> = None;
     let mut best_toi = max_toi;
     for entity in ms.spatial_query.aabb_intersections_with_aabb(swept) {
         let Ok((collider, pos, rot, layers)) = ms.colliders.get(entity) else {
@@ -100,7 +113,7 @@ pub(crate) fn cast_move(
                     local_dir,
                     shape.shape_scaled().as_ref(),
                     ShapeCastOptions {
-                        max_time_of_impact: best_toi,
+                        max_time_of_impact: best_toi + EDGE_TIE,
                         target_distance: 0.0,
                         stop_at_penetration: false,
                         compute_impact_geometry_on_penetration: true,
@@ -114,17 +127,36 @@ pub(crate) fn cast_move(
                 {
                     continue;
                 }
-                if hit.time_of_impact < best_toi {
-                    best_toi = hit.time_of_impact;
-                    best = Some(MoveHitData {
-                        entity,
-                        distance: 0.0, // pulled back below, once, for the winner
-                        point1: pos.0 + rot.0 * hit.witness1,
-                        point2: pos.0 + rot.0 * (hit.witness2 + local_dir * hit.time_of_impact),
-                        normal1: rot.0 * hit.normal1,
-                        normal2: rot.0 * hit.normal2,
-                        collision_distance: hit.time_of_impact,
-                    });
+                let face_normal = rot.0 * n;
+                let tie = best.as_ref().is_some_and(|b| {
+                    (hit.time_of_impact - best_toi).abs() <= EDGE_TIE
+                        && !face_normal.abs_diff_eq(b.face_normal, 1.0e-4)
+                });
+                if hit.time_of_impact < best_toi || tie {
+                    let earlier = hit.time_of_impact < best_toi;
+                    let found = BodyHit {
+                        hit: MoveHitData {
+                            entity,
+                            distance: 0.0, // pulled back below, once, for the winner
+                            point1: pos.0 + rot.0 * hit.witness1,
+                            point2: pos.0 + rot.0 * (hit.witness2 + local_dir * hit.time_of_impact),
+                            normal1: rot.0 * hit.normal1,
+                            normal2: rot.0 * hit.normal2,
+                            collision_distance: hit.time_of_impact,
+                        },
+                        face_normal,
+                    };
+                    let mut won = match (earlier, best) {
+                        (true, _) | (_, None) => found,
+                        (false, Some(b)) => b,
+                    };
+                    // An edge two different front faces share names neither: the contact's own
+                    // normal stands for it.
+                    if tie {
+                        won.face_normal = won.hit.normal1;
+                    }
+                    best_toi = best_toi.min(hit.time_of_impact);
+                    best = Some(won);
                 }
             }
         } else {
@@ -147,29 +179,38 @@ pub(crate) fn cast_move(
             };
             if hit.time_of_impact < best_toi {
                 best_toi = hit.time_of_impact;
-                best = Some(MoveHitData {
-                    entity,
-                    distance: 0.0,
-                    point1: pos.0 + rot.0 * hit.witness1,
-                    point2: from + hit.witness2 + *dir * hit.time_of_impact,
-                    normal1: rot.0 * hit.normal1,
-                    normal2: hit.normal2,
-                    collision_distance: hit.time_of_impact,
+                let normal1 = rot.0 * hit.normal1;
+                best = Some(BodyHit {
+                    hit: MoveHitData {
+                        entity,
+                        distance: 0.0,
+                        point1: pos.0 + rot.0 * hit.witness1,
+                        point2: from + hit.witness2 + *dir * hit.time_of_impact,
+                        normal1,
+                        normal2: hit.normal2,
+                        collision_distance: hit.time_of_impact,
+                    },
+                    face_normal: normal1,
                 });
             }
         }
     }
 
-    best.map(|mut hit| {
-        // avian's skin-width pull-back: `skin / |n·dir|` short of the surface, never negative.
-        hit.distance = if max_toi == 0.0 {
-            0.0
-        } else {
-            let dot = dir.dot(-hit.normal1).max(DOT_EPSILON);
-            (hit.collision_distance - skin_width / dot).max(0.0)
-        };
-        hit
-    })
+    best.map(
+        |BodyHit {
+             mut hit,
+             face_normal,
+         }| {
+            // avian's skin-width pull-back: `skin / |n·dir|` short of the surface, never negative.
+            hit.distance = if max_toi == 0.0 {
+                0.0
+            } else {
+                let dot = dir.dot(-hit.normal1).max(DOT_EPSILON);
+                (hit.collision_distance - skin_width / dot).max(0.0)
+            };
+            BodyHit { hit, face_normal }
+        },
+    )
 }
 
 /// One-sided [`SpatialQuery::cast_ray`] for movement probes that are rays, such as the creature
