@@ -664,13 +664,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     texture_pair(lua, &m, "Highlight", Slot::Highlight)?;
 
     // SetText/GetText go to the ButtonText fontstring, as the `text` attribute does (`0x778dc0`).
+    // SetText (`0x780d20`) gates on `lua_isstring` (`0x780dac`): nil, a boolean or a table raises
+    // `Usage: %s:SetText("text")` (`0x87a198`) naming the button, so the worker's own NULL guard
+    // (`0x778dcc`) is unreachable from Lua.
     m.set(
         "SetText",
-        lua.create_function(|lua, (this, text): (Table, Option<Value>)| {
-            let text = super::binding_abi::text_arg(lua, text)?;
-            // A nil returns at once (`0x778dcc`): no clear, no label created. The guard is the
-            // button's own; `FontString:SetText(nil)` clears (`0x771d80`).
-            let Some(text) = text else { return Ok(()) };
+        lua.create_function(|lua, (this, text): (Table, Value)| {
+            with_button(lua, &this, |_| ())?;
+            let text = super::binding_abi::method_string(lua, &this, text, r#"SetText("text")"#)?;
             let id = ensure_slot(lua, &this, Slot::Text)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let rh = *model.id_to_region.get(&id).expect("text region id");
@@ -990,12 +991,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // SetButtonState(state [, lock]) (`0x780270`): DISABLED, NORMAL or PUSHED in any case
-    // (`0x780390`), else a usage error; `lock` is `GetBoolOrDefault` with default 0 (`0x78032c`),
-    // so the `1` of `MainMenuBarMicroButtons.lua:22` sets it. While locked, presses and releases
-    // leave the state alone; unlocked, the next release un-pushes a scripted push.
+    // (`0x780390`); a non-string (`0x780307`) or another token raises
+    // `Usage: %s:SetButtonState("state", lock)` (`0x87a0d8`) naming the button. `lock` is
+    // `GetBoolOrDefault` with default 0 (`0x78032c`), so the `1` of `MainMenuBarMicroButtons.lua:22`
+    // sets it. While locked, presses and releases leave the state alone; unlocked, the next release
+    // un-pushes a scripted push.
     m.set(
         "SetButtonState",
-        lua.create_function(|lua, (this, state, lock): (Table, String, MultiValue)| {
+        lua.create_function(|lua, (this, state, lock): (Table, Value, MultiValue)| {
+            with_button(lua, &this, |_| ())?;
+            let line = r#"SetButtonState("state", lock)"#;
+            let state = super::binding_abi::method_string(lua, &this, state, line)?;
             let new = if state.eq_ignore_ascii_case("PUSHED") {
                 ButtonVisualState::Pushed
             } else if state.eq_ignore_ascii_case("NORMAL") {
@@ -1003,9 +1009,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             } else if state.eq_ignore_ascii_case("DISABLED") {
                 ButtonVisualState::Disabled
             } else {
-                return Err(mlua::Error::runtime(format!(
-                    "Usage: SetButtonState(\"state\", lock) — unknown state '{state}'"
-                )));
+                return Err(super::binding_abi::usage(lua, &this, line));
             };
             let first = lock.into_iter().next();
             let locked = super::binding_abi::bool_or_default(first.as_ref(), false);

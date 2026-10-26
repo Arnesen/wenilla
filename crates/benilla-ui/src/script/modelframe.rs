@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use super::binding_abi::{optional_string, usage};
+use super::binding_abi::{self, optional_string, usage};
 use super::object::frame_handle_of;
 use super::Model;
 use crate::widget::{model_key, FrameHandle, KindState, ModelFileFacts, ModelLight, ModelState};
@@ -212,10 +212,17 @@ pub(super) fn with_model<T>(
     }
 }
 
-/// `lua_tonumber`, which the reference's coordinate and angle setters read through: a number or a
-/// numeric string, anything else 0.0.
+/// A bare `lua_tonumber` (`0x6f3620`), which `SetPosition` (`0x76dc92`) and `SetFogColor`'s
+/// colour read through: a number or a string the VM converts, anything else 0.0.
 fn num(lua: &Lua, v: &Value) -> f32 {
-    super::binding_abi::coerced_number(lua, Some(v.clone())) as f32
+    binding_abi::coerced_number(lua, Some(v.clone())) as f32
+}
+
+/// A scalar setter's argument: `lua_isnumber` (`0x6f34d0`) after the receiver check, else the
+/// verb's `Usage: %s:<line>` naming the pane.
+fn model_number(lua: &Lua, this: &Table, v: Value, line: &str) -> mlua::Result<f64> {
+    with_model(lua, this, |_| ())?;
+    binding_abi::method_number(lua, this, v, line)
 }
 
 /// `SetSequence`/`SetSequenceTime` on any model pane: a character pane's copy takes the arm (the
@@ -225,33 +232,29 @@ fn arm_pane(m: &mut ModelState, id: i32, ms: i64, facts: Option<&ModelFileFacts>
     m.arm_key_bone(id, ms, false, facts);
 }
 
-/// `lua_tonumber` then `_ftol` on the double, as the integer setters read it (`SetSequence`
-/// `0x76df62`, `SetSequenceTime` `0x76e072`/`0x76e084`, `SetCamera` `0x76e182`).
-fn int(lua: &Lua, v: &Value) -> i32 {
-    super::binding_abi::ftol(super::binding_abi::coerced_number(lua, Some(v.clone())))
-}
-
-/// `lua_isnumber`: a number or a string that converts. Separate from [`num`] because `SetLight`
-/// raises on a non-number where the coordinate setters read 0.
+/// `lua_isnumber` then `lua_tonumber`: a number or a string the VM converts. Separate from
+/// [`num`] because `SetLight` raises on a non-number where the coordinate setters read 0.
 fn number(lua: &Lua, v: &Value) -> Option<f32> {
-    super::binding_abi::is_number(lua, v.clone()).map(|n| n as f32)
+    binding_abi::is_number(lua, v.clone()).map(|n| n as f32)
 }
 
 /// `[0x8029d4]`, the client's float-zero epsilon: `SetLight`'s intensity gate, `0x71b6a0`'s
 /// direction normalise and the paint's degenerate-rect test.
 const FLOAT_EPS: f32 = 2.384_185_8e-7;
 
-/// `Model:SetLight`'s usage error. The reference's (`0x878c00`) names the receiver through `%s`
-/// and ends in `)`; this one names `Model` and drops the `)`.
-const SET_LIGHT_USAGE: &str = "Usage: Model:SetLight(enabled[, omni, dirX, dirY, dirZ, \
-     ambIntensity[, ambR, ambG, ambB], dirIntensity[, dirR, dirG, dirB]]";
+/// `Model:SetLight`'s usage line, `Usage: %s:SetLight(…)` (`0x878c00`) naming the receiver.
+const SET_LIGHT_USAGE: &str = "SetLight(enabled[, omni, dirX, dirY, dirZ, \
+     ambIntensity[, ambR, ambG, ambB], dirIntensity[, dirR, dirG, dirB]])";
 
 /// `PlayerModel:SetUnit`'s usage error (`0x84f284`), which names no receiver.
 const SET_UNIT_USAGE: &str = "Usage: SetUnit(\"unit\")";
 
+/// `PlayerModel:SetRotation`'s usage error (`0x84f29c`), which names no receiver.
+const SET_ROTATION_USAGE: &str = "Usage: SetRotation(rotation (in radians))";
+
 /// What [`parse_set_light`] decided.
 enum SetLight {
-    /// A non-number where one is required: `luaL_error(SET_LIGHT_USAGE)`.
+    /// A non-number where one is required: `luaL_error` of [`SET_LIGHT_USAGE`].
     Raise,
     /// `enabled == 0` returns (`0x76e2cb`) before the copy, so the call neither disables nor
     /// edits the light.
@@ -362,10 +365,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     //
     // On a character pane holding a copy the arm lands on the copy, blend 0; the next paint's
     // turn timer replaces anything but Stand with Stand (`0x505c81`), so it shows for one paint.
+    // Each argument passes `lua_isnumber` (`0x76df4c`; `0x76e04c`, `0x76e05d`) and is `_ftol`ed,
+    // else `Usage: %s:SetSequence(sequence)` (`0x878b94`) or `…SetSequenceTime(sequence, time)`
+    // (`0x878bb4`).
     m.set(
         "SetSequence",
         lua.create_function(|lua, (this, seq): (Table, Value)| {
-            let seq = int(lua, &seq);
+            let seq = binding_abi::ftol(model_number(lua, &this, seq, "SetSequence(sequence)")?);
             let facts = facts_of_pane(lua, &this)?;
             with_model(lua, &this, |m| arm_pane(m, seq, 0, facts.as_deref()))
         })?,
@@ -373,7 +379,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetSequenceTime",
         lua.create_function(|lua, (this, seq, ms): (Table, Value, Value)| {
-            let (seq, ms) = (int(lua, &seq), int(lua, &ms));
+            let line = "SetSequenceTime(sequence, time)";
+            let seq = model_number(lua, &this, seq, line)?;
+            let ms = model_number(lua, &this, ms, line)?;
+            let (seq, ms) = (binding_abi::ftol(seq), binding_abi::ftol(ms));
             let facts = facts_of_pane(lua, &this)?;
             with_model(lua, &this, |m| {
                 arm_pane(m, seq, i64::from(ms), facts.as_deref())
@@ -384,11 +393,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ── The pane's view: yaw, scale, camera, position ───────────────────────────────────────
     //
     // `SetFacing` (`0x878948[4]` → `0x76dce0`) writes the yaw at `+0x39c`, the field
-    // `PlayerModel:SetRotation` also writes.
+    // `PlayerModel:SetRotation` also writes. It and `SetModelScale`, `SetCamera`, `SetFogNear`
+    // and `SetFogFar` gate on `lua_isnumber` (`0x76dd6c`, `0x76de5c`, `0x76e16c`, `0x76f26c`,
+    // `0x76f41c`), else their usage line (`0x878b5c`, `0x878b78` "SetScale" sic, `0x878be0`,
+    // `0x878ca4`, `0x878cc0`).
     m.set(
         "SetFacing",
         lua.create_function(|lua, (this, rad): (Table, Value)| {
-            let rad = num(lua, &rad);
+            let rad = model_number(lua, &this, rad, "SetFacing(facing)")? as f32;
             with_model(lua, &this, |m| m.facing = rad)
         })?,
     )?;
@@ -399,7 +411,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetModelScale",
         lua.create_function(|lua, (this, s): (Table, Value)| {
-            let s = num(lua, &s);
+            let s = model_number(lua, &this, s, "SetScale(scale)")? as f32;
             with_model(lua, &this, |m| m.scale = s)
         })?,
     )?;
@@ -414,8 +426,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetCamera",
         lua.create_function(|lua, (this, c): (Table, Value)| {
-            let c = int(lua, &c);
-            with_model(lua, &this, |_| ())?;
+            let c = binding_abi::ftol(model_number(lua, &this, c, "SetCamera(index)")?);
             let h = frame_handle_of(lua, &this)?;
             lua.app_data_mut::<Model>()
                 .expect("model app_data")
@@ -448,8 +459,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 _ => return Err(mlua::Error::runtime("expected a Model")),
             };
             let a: Vec<Value> = it.collect();
+            with_model(lua, &this, |_| ())?;
             match parse_set_light(lua, &a) {
-                SetLight::Raise => Err(mlua::Error::runtime(SET_LIGHT_USAGE)),
+                SetLight::Raise => Err(usage(lua, &this, SET_LIGHT_USAGE)),
                 SetLight::NoOp => with_model(lua, &this, |_| ()),
                 SetLight::Set(l) => with_model(lua, &this, |m| m.light = l),
             }
@@ -483,10 +495,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetFogColor",
         lua.create_function(
             |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<Value>)| {
-                // The fifth argument is alpha, clamped like the rest but 1.0 when absent, where an
-                // absent r, g or b reads 0.0: `SetFogColor(r, g, b)` is opaque.
+                // The fifth argument is alpha, clamped like the rest but 1.0 unless it passes
+                // `lua_isnumber` (`0x76efa9`-`0x76efb7`), where r, g and b are bare `lua_tonumber`
+                // and read 0.0: `SetFogColor(r, g, b)` and `SetFogColor(r, g, b, "x")` are opaque.
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-                let a = a.as_ref().map_or(1.0, |v| num(lua, v));
+                let a = a.as_ref().and_then(|a| number(lua, a)).unwrap_or(1.0);
                 let packed = (q(a) << 24)
                     | (q(num(lua, &r)) << 16)
                     | (q(num(lua, &g)) << 8)
@@ -514,7 +527,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFogNear",
         lua.create_function(|lua, (this, v): (Table, Value)| {
-            let v = num(lua, &v);
+            let v = model_number(lua, &this, v, "SetFogNear(value)")? as f32;
             with_model(lua, &this, |m| m.fog_near = v)
         })?,
     )?;
@@ -525,7 +538,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFogFar",
         lua.create_function(|lua, (this, v): (Table, Value)| {
-            let v = num(lua, &v);
+            let v = model_number(lua, &this, v, "SetFogFar(value)")? as f32;
             with_model(lua, &this, |m| m.fog_far = v)
         })?,
     )?;
@@ -617,11 +630,13 @@ pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
 
     // `SetRotation(rad)` (`0x84f1fc[2]` → `0x505f00` → `0x505bb0`) turns whatever `+0x318` holds
     // toward the angle ([`crate::widget::ModelState::rotate`]) and writes the yaw `SetFacing` writes
-    // (`0x505c44`).
+    // (`0x505c44`). The angle passes `lua_isnumber` (`0x505f8c`), else
+    // `Usage: SetRotation(rotation (in radians))` (`0x84f29c`, `0x505fb6`), naming no receiver.
     m.set(
         "SetRotation",
         lua.create_function(|lua, (this, rad): (Table, Value)| {
-            let rad = num(lua, &rad);
+            with_model(lua, &this, |_| ())?;
+            let rad = binding_abi::float_arg(lua, rad, SET_ROTATION_USAGE)? as f32;
             let now_ms = lua
                 .app_data_ref::<Model>()
                 .expect("model app_data")

@@ -133,17 +133,6 @@ pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
     }
 }
 
-/// A free-text argument for the text sinks (`SetText`, `SetFormattedText`, `EditBox:Insert`):
-/// `Option<String>`'s conversion, except that a string that is not valid UTF-8 becomes lossy text
-/// instead of raising, as the reference takes bytes.
-pub(crate) fn text_arg(lua: &Lua, v: Option<Value>) -> mlua::Result<Option<String>> {
-    match v {
-        None | Some(Value::Nil) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.to_string_lossy())),
-        Some(other) => mlua::FromLua::from_lua(other, lua).map(Some),
-    }
-}
-
 /// Lua's number-to-string as the 1.12 client compiles it: MSVC's `sprintf("%.14g")`
 /// (`luaV_tostring` `0x6f7c80`, format `0x871960`), the VM's own ([`mlua::benilla_lua::fmt_g14`]).
 /// `EditBox:SetNumber` (`0x798690`) formats through it too, being byte-identical to `SetText`
@@ -217,6 +206,16 @@ pub(crate) fn usage(lua: &Lua, this: &Table, line: &str) -> mlua::Error {
 /// numeric string passes, else the method's [`usage`] line naming `this`.
 pub(crate) fn method_number(lua: &Lua, this: &Table, v: Value, line: &str) -> mlua::Result<f64> {
     lua.coerce_number(v)?.ok_or_else(|| usage(lua, this, line))
+}
+
+/// A method's string argument: `is-number-or-string` (`0x6f3510`) then `lua_tostring`
+/// (`0x6f3690`), so a number passes as its text, else the method's [`usage`] line naming `this`.
+pub(crate) fn method_string(lua: &Lua, this: &Table, v: Value, line: &str) -> mlua::Result<String> {
+    match lua.coerce_string(v)? {
+        // Lossy: a Lua string is bytes, so invalid UTF-8 costs a glyph, never the call.
+        Some(s) => Ok(s.to_string_lossy()),
+        None => Err(usage(lua, this, line)),
+    }
 }
 
 /// `SetOrientation`'s argument on the StatusBar and the Slider (`0x78f320`, `0x790610`): a

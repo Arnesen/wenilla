@@ -11,7 +11,13 @@ use crate::order::{DrawLayer, Strata};
 use crate::script::{visibility, Backdrop, Insets, Model};
 use crate::widget::FrameKind;
 
-use super::{decode_id, draw_layer_from_str, frame_handle_of, frame_wrapper, strata_from_str};
+use super::{draw_layer_from_str, frame_handle_of, frame_wrapper, strata_from_str};
+
+/// `Usage: %s:SetBackdrop(…)` (`0x8798a8`), the line after the receiver's name.
+const SET_BACKDROP_USAGE: &str =
+    "SetBackdrop(nil or {bgFile = \"bgFile\", edgeFile = \"edgeFile\", \
+     tile = false, tileSize = 0, edgeSize = 32, insets = { left = 0, right = 0, top = 0, \
+     bottom = 0 }})";
 
 /// Populate `m`'s visibility, hierarchy, strata, backdrop and input methods.
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
@@ -232,10 +238,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetNumRegions",
         lua.create_function(|lua, this: Table| Ok(regions_of(lua, &this)?.len()))?,
     )?;
-    // `SetParent` (`0x7a1550`): a frame, a name (`0x76c760`) or an explicit nil; an absent argument
-    // raises like an unknown name (`0x6f3400` gives -1), and so does a cycle (`0x87cb14`). As in
-    // the reference, the hide transition runs between `reparent_begin` and `reparent_finish`, and
-    // the show transition after.
+    // `SetParent` (`0x7a1550`): a frame, a name (`0x76c760`) or an explicit nil, read by
+    // [`super::frame_arg`]; a cycle raises (`0x87cb14`). An explicit nil reparents to the screen
+    // root, resetting strata and level. As in the reference, the hide transition runs between
+    // `reparent_begin` and `reparent_finish`, and the show transition after.
     set_shared(
         lua,
         m,
@@ -249,52 +255,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             let h = frame_handle_of(lua, &this)?;
             let who = binding_abi::frame_name(&lua.app_data_ref::<Model>().expect("model"), h);
-            let parent_arg = it.next();
-            // `_G[name]` is read with no guard alive and no `$parent` expansion: `0x7a1550` calls
-            // `0x76c760` directly, and only the layout path's `0x76c700` expands the token.
-            let named = match &parent_arg {
-                Some(Value::String(s)) => Some(match s.to_str() {
-                    Ok(n) => super::prefetch_named_target(lua, n.as_ref(), None),
-                    Err(_) => super::NamedTarget::unreadable(),
-                }),
-                _ => None,
-            };
-            let new_parent = {
-                let model = lua.app_data_ref::<Model>().expect("model");
-                match &parent_arg {
-                    // An explicit nil reparents to the screen root, resetting strata and level.
-                    Some(Value::Nil) => None,
-                    Some(Value::Table(t)) => Some(
-                        decode_id(t)
-                            .ok()
-                            .and_then(|id| model.id_to_frame.get(&id).copied())
-                            .ok_or_else(|| {
-                                mlua::Error::runtime(format!(
-                                    "{who}:SetParent(): Couldn't find region named ''"
-                                ))
-                            })?,
-                    ),
-                    Some(Value::String(_)) => {
-                        // `0x76c760` accepts only a frame (`[0xcf0c10]`), not any region
-                        // (`[0xcf0c3c]`), so a region's name fails like an absent one.
-                        let nt = named.as_ref().expect("a String argument is prefetched");
-                        let hit = super::resolve_named_target(&model, nt)
-                            .and_then(|id| model.id_to_frame.get(&id).copied());
-                        Some(hit.ok_or_else(|| {
-                            mlua::Error::runtime(format!(
-                                "{who}:SetParent(): Couldn't find region named '{}'",
-                                nt.name
-                            ))
-                        })?)
-                    }
-                    // Absent, or any other type: the reference raises first (`0x87cb48`).
-                    _ => {
-                        return Err(mlua::Error::runtime(format!(
-                            "{who}:SetParent(): Couldn't find region named ''"
-                        )))
-                    }
-                }
-            };
+            let new_parent = super::frame_arg(lua, &who, &super::SET_PARENT_LINES, it.next())?;
             // The cycle guard raises (`0x7a177f`'s ancestor walk, the frame itself included).
             if let Some(np) = new_parent {
                 let model = lua.app_data_ref::<Model>().expect("model");
@@ -333,8 +294,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Strata / level / scale / alpha
     m.set(
         "SetFrameStrata",
-        lua.create_function(|lua, (this, strata): (Table, String)| {
+        lua.create_function(|lua, (this, strata): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // `lua_isstring` (`0x7743f0`), else `Usage: %s:SetFrameStrata(level)` (`0x8795b8`).
+            let strata = binding_abi::method_string(lua, &this, strata, "SetFrameStrata(level)")?;
             // A name off the table raises, naming the frame or `<unnamed>` (`0x774450`), and the
             // stratum stays.
             let Some(s) = strata_from_str(&strata) else {
@@ -459,20 +422,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // `SetBackdrop(table|nil)` (`0x7776e0` → `0x76a5d0`) installs or removes the tiled background
     // and 8-piece border, nine Texture regions on the frame (`script::backdrop::install`), both
     // white until tinted; the two colour setters tint the background and the border respectively
-    // (`0x77f410`/`0x77f440`).
+    // (`0x77f410`/`0x77f440`). Only an explicit nil removes (`lua_type` 0, `0x777794`); anything
+    // but a table, no argument (type -1) included, raises [`SET_BACKDROP_USAGE`] (`0x7777b6`).
     m.set(
         "SetBackdrop",
-        lua.create_function(|lua, (this, arg): (Table, Value)| {
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let h = frame_handle_of(lua, &this)?;
-            let bd = match arg {
-                Value::Nil => None,
-                Value::Table(t) => Some(backdrop_from_table(&t)?),
-                other => {
-                    return Err(mlua::Error::runtime(format!(
-                        "SetBackdrop: expected a table or nil, got {}",
-                        other.type_name()
-                    )))
-                }
+            let bd = match args.into_iter().next() {
+                Some(Value::Nil) => None,
+                Some(Value::Table(t)) => Some(backdrop_from_table(&t)?),
+                _ => return Err(binding_abi::usage(lua, &this, SET_BACKDROP_USAGE)),
             };
             let mut model = lua.app_data_mut::<Model>().expect("model");
             crate::script::backdrop::install(&mut model, h, bd);
