@@ -171,14 +171,12 @@ impl Window {
         }
         let mut slots: Vec<Option<u64>> = vec![None; MASTER_LOOT_CANDIDATE_SLOTS];
         for &guid in &self.master_candidates {
-            // A guid missing from the roster is ours: `SMSG_GROUP_LIST` lists only the others,
-            // and `Group::MasterLoot` includes us.
-            let flags = group
-                .members
-                .iter()
-                .find(|m| m.guid == guid)
-                .map_or(group.own_flags, |m| m.flags);
-            let base = usize::from(flags & GROUP_MEMBER_SUBGROUP) * MEMBERS_PER_RAID_GROUP;
+            // The stored row's subgroup (`[row+8]`, `0x61c606`); a guid on no row below the count,
+            // ours included, is placed nowhere (`0x61c5f9`).
+            let Some(row) = group.raid.iter().find(|r| r.guid == guid) else {
+                continue;
+            };
+            let base = usize::from(row.subgroup & GROUP_MEMBER_SUBGROUP) * MEMBERS_PER_RAID_GROUP;
             let end = (base + MEMBERS_PER_RAID_GROUP).min(MASTER_LOOT_CANDIDATE_SLOTS);
             if let Some(free) = (base..end).find(|&i| slots[i].is_none()) {
                 slots[free] = Some(guid);
@@ -2519,6 +2517,30 @@ mod tests {
         );
     }
 
+    /// `0x61c550` places a candidate only off its row below the roster's count: a guid on no row
+    /// is skipped (`0x61c5f9`), taking no slot, so the next candidate of that block files first.
+    #[test]
+    fn a_raid_candidate_on_no_row_is_placed_nowhere() {
+        let mut raid = GroupState {
+            group_type: crate::ui_party::GROUPTYPE_RAID,
+            members: vec![GroupMemberEntry {
+                name: "Cairne".into(),
+                guid: 0xB,
+                status: 0,
+                flags: 0,
+            }],
+            ..GroupState::default()
+        };
+        raid.rebuild_raid(0xA);
+        let mut loot = LootState::default();
+        loot.set_master_candidates(vec![0xE, 0xB, 0xA]);
+        loot.open(0x42, loot_type::CORPSE, 0, vec![master_item(0, 117, 1)]);
+        let placed: Vec<Option<u64>> = (1..=4)
+            .map(|i| loot.window.master_candidate(i, &raid))
+            .collect();
+        assert_eq!(placed, [Some(0xB), Some(0xA), None, None], "0xE has no row");
+    }
+
     /// `0x61c550`'s raid placement: each guid in the first free slot of its subgroup's block.
     #[test]
     fn raid_candidates_file_into_their_own_subgroup_block() {
@@ -2531,7 +2553,6 @@ mod tests {
         let mut raid = GroupState {
             group_type: crate::ui_party::GROUPTYPE_RAID,
             own_flags: 0, // we are in subgroup 0
-            own_raid_row: Some(0xA),
             ..GroupState::default()
         };
         raid.members = vec![
@@ -2539,6 +2560,7 @@ mod tests {
             member(0xC, "Vol", 2),
             member(0xD, "Sylvanas", 2),
         ];
+        raid.rebuild_raid(0xA);
 
         let mut loot = LootState::default();
         // The wire order interleaves the subgroups; placement ignores it.
