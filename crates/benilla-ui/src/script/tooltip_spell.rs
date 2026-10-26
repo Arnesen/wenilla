@@ -866,15 +866,16 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // macro (0x40) to `0x52b040`, which fetches it (`0x4f0f40`) and renders only its name, white
     // (`0x5303b0` in colour `0xc0cf60`), or hides with none; 1.12 has no `#showtooltip`. It
     // answers the spell or item builder's return value as 1 or nil (`0x5325a9`), the spell's only
-    // with a cooldown running, nil for the macro leg, an empty slot and any other kind;
+    // with a cooldown running, nil for the Attack slot, the macro leg, an empty slot and any other kind;
     // `ActionButton_SetTooltip` arms `updateTooltip` from it.
     m.set(
         "SetAction",
         lua.create_function(|lua, (this, slot): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
             // `is-number` else `Usage: SetAction(slot)` (`0x855200`, `0x5326c3`).
             let slot = binding_abi::index_arg32(lua, slot, "Usage: SetAction(slot)")?;
             let now = crate::script::clock::now(lua);
-            let (action, remaining_ms, owned) = {
+            let (action, remaining_ms, owned, attack) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let action = model.actions.get(&slot).cloned();
                 // An item word resolves to the player's own item by entry (`0x532490`).
@@ -882,19 +883,34 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     .as_ref()
                     .filter(|a| a.kind == 0x80)
                     .and_then(|a| super::tooltip_item::owned_instance(&model, a.action));
+                let state = model.action_states.get(&slot);
                 (
                     action,
-                    live_remaining_ms(model.action_states.get(&slot).and_then(|s| s.cooldown), now),
+                    live_remaining_ms(state.and_then(|s| s.cooldown), now),
                     owned,
+                    state.is_some_and(|s| s.state.is_attack),
                 )
             };
+            // Every slot clears the tooltip first (`0x5323ad`), an empty one included.
+            clear(lua, h);
+            // A slot whose spell has the attack effect (`0x4e59b0`) is one white line,
+            // `GetText("ATTACK")` (`0x855218`) in a 32-byte copy, shown, and nil
+            // (`0x5323bd`..`0x532409`).
+            if attack {
+                let text = super::glue_core::global_text(lua, "ATTACK");
+                let text = super::macros::cut_bytes(&text, 31).to_string();
+                append_line(lua, &this, (text, WHITE), None, false)?;
+                // The shown bit and the show slot, unconditionally (`0x5323f4`..`0x5323fe`).
+                super::visibility::set_shown(lua, h, true);
+                return Ok(Value::Nil);
+            }
             let Some(a) = action else {
                 return Ok(Value::Nil);
             };
             // A macro is a word whose top nibble is 4 (`0x5322a0`), so a character macro's slot
             // (kind 0x41) is one too.
             if let Some(id) = super::action::macro_slot_id(a.kind, a.action) {
-                let h = frame_handle_of(lua, &this)?;
+                // The macro builder clears again (`0x52b046`).
                 clear(lua, h);
                 // The same lookup as `GetActionText` and the bar icon, so the three agree on a
                 // slot's macro.
@@ -912,7 +928,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             match a.kind {
                 // The builder's value counts only with a cooldown running (`0x532597`); the other
                 // leg builds with a zero remainder and pushes nil (`0x53267c`, `0x532690`), so
-                // Attack, Parry, Block and Dodge answer nil here, whatever their chance line.
+                // Parry, Block and Dodge answer nil here, whatever their chance line.
                 0x00 => {
                     let live = set_spell_flagged(
                         lua,
@@ -949,10 +965,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GameTooltip:SetTrainerService(index): the trainer detail icon's hover
     // (`Blizzard_TrainerUI.xml:452`); list rows have no tooltip. `0x5338b0` writes no line itself
     // and hands a shared builder the subject the app resolved (`TrainerService::tooltip`). `index`
-    // is a visible row, headers included; a header is a no-op.
+    // is a visible row, headers included.
     m.set(
         "SetTrainerService",
         lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `this` first (`0x5338f0`), as every method's prologue.
+            frame_handle_of(lua, &this)?;
             // `is-number` else `Invalid trainer service in SetTrainerService(index)` (`0x8553a4`,
             // `0x533968`).
             let index = binding_abi::index_arg(
@@ -960,11 +978,17 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 index,
                 "Invalid trainer service in SetTrainerService(index)",
             )?;
+            // A row past the count (`0x533990`) or a spell with no record, a header's -1
+            // (`0x53399a`), raises the same line (`0x533a9a`).
             let subject = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 match super::trainer::service(&model, index) {
                     Some(s) => s.tooltip.clone(),
-                    None => return Ok(()),
+                    None => {
+                        return Err(mlua::Error::runtime(
+                            "Invalid trainer service in SetTrainerService(index)",
+                        ))
+                    }
                 }
             };
             match subject {
@@ -996,15 +1020,28 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetCraftSpell",
         lua.create_function(|lua, (this, craft_index): (Table, Value)| {
-            // `is-number` else `Invalid craft in SetCraftSpell(index)` (`0x85544c`, `0x533f54`).
-            let craft_index =
-                binding_abi::index_arg(lua, craft_index, "Invalid craft in SetCraftSpell(index)")?;
+            // `this` first (`0x533f29`), then `is-number` else `Invalid craft in
+            // SetCraftSpell(index)` (`0x85544c`, `0x533f54`).
+            let h = frame_handle_of(lua, &this)?;
+            const LINE: &str = "Invalid craft in SetCraftSpell(index)";
+            let craft_index = binding_abi::index_arg(lua, craft_index, LINE)?;
             let subject = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 match super::craft::recipe(&model, craft_index) {
-                    Some(r) => r.tooltip.clone(),
-                    None => return Ok(()),
+                    Some(r) => Some(r.tooltip.clone()),
+                    // A row past the count raises (`0x533f7b`, `0x53405a`).
+                    None if !super::craft::has_row(&model, craft_index) => {
+                        return Err(mlua::Error::runtime(LINE))
+                    }
+                    None => None,
                 }
+            };
+            // A header's spell -1 goes to the spell builder (`0x533f99`, `0x533fdf`), which finds
+            // no record, clears and hides (`0x52e63a`, `0x52e6a4`).
+            let Some(subject) = subject else {
+                clear(lua, h);
+                super::visibility::set_shown(lua, h, false);
+                return Ok(());
             };
             match subject {
                 CraftTooltip::Item(item_id) => {

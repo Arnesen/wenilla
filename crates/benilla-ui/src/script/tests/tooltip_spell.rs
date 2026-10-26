@@ -1025,6 +1025,73 @@ fn action_hover_delegates_by_kind() {
     assert!(s.take_errors().is_empty());
 }
 
+/// `SetAction` clears first (`0x5323ad`): a slot whose spell has the attack effect (`0x4e59b0`)
+/// is the one white `ATTACK` line, shown, and nil (`0x5323bd`..`0x532409`), never the spell's
+/// plate; an empty slot leaves the cleared tooltip (`0x532425`).
+#[test]
+fn the_attack_slot_is_one_line_and_an_empty_slot_clears() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(6603, fireball());
+    s.set_spell_tooltip(133, fireball());
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            kind: 0x00,
+            action: 6603,
+            ..Default::default()
+        }),
+    );
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            is_attack: true,
+            ..Default::default()
+        }),
+    );
+    s.set_action(
+        2,
+        Some(ActionSlot {
+            kind: 0x00,
+            action: 133,
+            ..Default::default()
+        }),
+    );
+    s.run(
+        r#"
+        ATTACK = "Attack"
+        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        local function count(...) return arg.n, arg[1] end
+        ATTACK_N, ATTACK_V = count(tt:SetAction(1))
+    "#,
+    )
+    .unwrap();
+    assert_eq!(left_lines(&mut s), vec!["Attack"]);
+    assert_eq!(
+        s.eval::<(i64, bool, bool, f32, f32, f32)>(
+            "local r, g, b = TTTextLeft1:GetTextColor() \
+             return ATTACK_N, ATTACK_V == nil, TT:IsShown() == 1, r, g, b"
+        )
+        .unwrap(),
+        {
+            let w = crate::color::quant::read32(1.0);
+            (1, true, true, w, w, w)
+        }
+    );
+    s.run("TT:SetOwner(AB1, 'ANCHOR_RIGHT') TT:SetAction(2)")
+        .unwrap();
+    assert_eq!(left_lines(&mut s)[0], "Fireball");
+    s.run("TT:SetAction(3)").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return TT:NumLines()").unwrap(),
+        0,
+        "the empty slot cleared"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 /// A macro slot's hover is the reference's `0x52b040`: one line, the macro's name in the normal
 /// colour (`0xc0cf60` holds `0xffffffff`, white); a slot whose macro is gone shows no plate.
 #[test]
@@ -1172,9 +1239,14 @@ fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
         local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
 
-        -- Row 1 is the "Arms" header: a no-op, not a shifted hit onto a neighbouring service.
+        -- Row 1 is the "Arms" header, whose spell -1 has no record: it raises (`0x53399a`), not a
+        -- shifted hit onto a neighbouring service; so does a row past the list (`0x533990`).
         TT:SetOwner(a, "ANCHOR_RIGHT")
-        TT:SetTrainerService(1)
+        for _, i in { 1, 0, 99 } do
+            local ok, e = pcall(TT.SetTrainerService, TT, i)
+            assert(not ok and string.find(e, "Invalid trainer service in SetTrainerService%(index%)"),
+                "row " .. i .. " raises")
+        end
         assert(TT:NumLines() == 0, "a header row renders nothing")
 
         -- Row 2: the recipe -> the ITEM builder, full item tooltip (not the spell's name).
@@ -1813,6 +1885,99 @@ fn a_missed_view_re_renders_the_tooltip_when_the_app_answers() {
     assert!(s.take_errors().is_empty());
 }
 
+/// A craft row past the list raises `Invalid craft in SetCraftSpell(index)` (`0x533f7b`) and a
+/// header's spell -1 reaches the spell builder, which clears and hides (`0x533f99`, `0x52e6a4`);
+/// `SetCraftItem` raises its line for both and for a reagent number naming none (`0x533e29`).
+#[test]
+fn the_craft_setters_raise_on_a_miss_and_a_header_clears() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(
+        17253,
+        SpellTooltipView {
+            name: "Bite".into(),
+            ..Default::default()
+        },
+    );
+    let grouped = |spell_id, name, group: u32, line: &str| CraftRecipe {
+        group,
+        skill_line: Some(line.into()),
+        reagents: vec![CraftReagent {
+            item: 2589,
+            name: Some("Linen Cloth".into()),
+            icon: None,
+            need: 1,
+            have: 1,
+        }],
+        ..craft_recipe(spell_id, name, CraftTooltip::Spell(17253))
+    };
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        display_line: Some("Beast Training".into()),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![
+            grouped(24599, "Bite", 1, "Bite"),
+            grouped(24600, "Claw", 2, "Claw"),
+        ],
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "CI"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        for i = 1, GetNumCrafts() do
+            local _, _, kind = GetCraftInfo(i)
+            if kind == "header" then HEADER = HEADER or i else RECIPE = RECIPE or i end
+        end
+        PAST = GetNumCrafts() + 1
+        TT:SetOwner(CI, "ANCHOR_RIGHT")
+        TT:SetCraftSpell(RECIPE)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(left_lines(&mut s), vec!["Bite"]);
+    s.run("TT:SetCraftSpell(HEADER)").unwrap();
+    assert_eq!(
+        s.eval::<(i64, bool)>("return TT:NumLines(), TT:IsShown() == 1")
+            .unwrap(),
+        (0, false),
+        "a header clears and hides"
+    );
+    for (call, line) in [
+        (
+            "TT:SetCraftSpell(PAST)",
+            "Invalid craft in SetCraftSpell(index)",
+        ),
+        (
+            "TT:SetCraftSpell(0)",
+            "Invalid craft in SetCraftSpell(index)",
+        ),
+        (
+            "TT:SetCraftItem(HEADER, 1)",
+            "Invalid craft item in SetCraftItem(index, reagent)",
+        ),
+        (
+            "TT:SetCraftItem(PAST, 1)",
+            "Invalid craft item in SetCraftItem(index, reagent)",
+        ),
+        (
+            "TT:SetCraftItem(RECIPE, 2)",
+            "Invalid craft item in SetCraftItem(index, reagent)",
+        ),
+        (
+            "TT:SetCraftItem(RECIPE, 0)",
+            "Invalid craft item in SetCraftItem(index, reagent)",
+        ),
+    ] {
+        let e = s.run(call).unwrap_err().to_string();
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    s.run("TT:SetOwner(CI, 'ANCHOR_RIGHT') TT:SetCraftItem(RECIPE, 1)")
+        .unwrap();
+    assert_eq!(left_lines(&mut s), vec!["Linen Cloth"]);
+}
+
 /// Beast Training's icon has no fallback name, so its miss is a hidden plate.
 #[test]
 fn a_hidden_miss_shows_and_an_enchant_link_fills_when_answered() {
@@ -1834,17 +1999,14 @@ fn a_hidden_miss_shows_and_an_enchant_link_fills_when_answered() {
         TT:SetOwner(CI, "ANCHOR_RIGHT")
         TT:SetCraftSpell(1)
         REF:SetOwner(CI, "ANCHOR_PRESERVE")
-        REF:SetHyperlink("|cffffd000|Henchant:20034|h[Enchant Weapon - Crusader]|h|r")
+        REF:SetHyperlink("enchant:20034")
     "#,
     )
     .unwrap();
     assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
     assert!(!s.eval::<bool>("return TT:IsShown() == 1").unwrap());
-    assert_eq!(
-        s.eval::<String>("return REFTextLeft1:GetText()").unwrap(),
-        "Enchant Weapon - Crusader"
-    );
-    assert_eq!(s.eval::<i64>("return REF:NumLines()").unwrap(), 1);
+    // The link names no spell the app pushed, and carries no name to stand in.
+    assert_eq!(s.eval::<i64>("return REF:NumLines()").unwrap(), 0);
 
     s.set_spell_tooltip(
         17253,
@@ -1962,6 +2124,68 @@ fn a_line_rewritten_in_place_ends_the_wait() {
     assert!(s.take_errors().is_empty());
 }
 
+/// The records an `enchant:` link reads through the host: 20034 a craft (`castUI` 3), 133 a plain
+/// spell, anything else no record.
+struct CastUiHost;
+
+impl crate::script::CallHost for CastUiHost {
+    fn apply(
+        &mut self,
+        _: &mut UiScript,
+        _: crate::script::ScriptCall,
+    ) -> Option<crate::script::CallTail> {
+        None
+    }
+
+    fn read_live(&mut self, ask: &mut crate::script::live::LiveAsk<'_>) -> bool {
+        ask.answer(|q: &SpellCastUiQuery| {
+            Some(match q.0 {
+                20034 => Some(3),
+                133 => Some(0),
+                _ => None,
+            })
+        })
+    }
+}
+
+/// An `enchant:` link takes a spell whose record's `castUI` is 3 (`0x53222e`..`0x532247`); a
+/// plain spell or an id with no record raises `Unknown link type` (`0x532269`).
+#[test]
+fn an_enchant_link_takes_only_a_craft_spell() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(
+        20034,
+        SpellTooltipView {
+            name: "Enchant Weapon - Crusader".into(),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "EL"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "REF", nil, "TestTooltipTemplate")
+        REF:SetOwner(EL, "ANCHOR_RIGHT")
+    "#,
+    )
+    .unwrap();
+    let mut host = CastUiHost;
+    let (craft, plain, none) = s.hosted(&mut host, |s| {
+        let craft = s
+            .eval::<String>(r#"REF:SetHyperlink("enchant:20034") return REFTextLeft1:GetText()"#)
+            .unwrap();
+        let err = |s: &mut UiScript, call| s.run(call).unwrap_err().to_string();
+        (
+            craft,
+            err(s, r#"REF:SetHyperlink("enchant:133")"#),
+            err(s, r#"REF:SetHyperlink("Enchant:99999")"#),
+        )
+    });
+    assert_eq!(craft, "Enchant Weapon - Crusader");
+    assert!(plain.contains("Unknown link type"), "{plain}");
+    assert!(none.contains("Unknown link type"), "{none}");
+}
+
 /// A re-render's `OnShow` can move another waiting tooltip onto a new spell.
 #[test]
 fn a_wait_replaced_by_an_earlier_re_render_is_not_replayed() {
@@ -1986,17 +2210,14 @@ fn a_wait_replaced_by_an_earlier_re_render_is_not_replayed() {
         B:SetCraftSpell(1)
         A:SetScript("OnShow", function()
             B:SetOwner(PB1, "ANCHOR_RIGHT")
-            B:SetHyperlink("|cffffd000|Henchant:20034|h[Enchant Weapon - Crusader]|h|r")
+            B:SetHyperlink("enchant:20034")
         end)
     "#,
     )
     .unwrap();
     s.set_spell_tooltip(3110, firebolt());
-    assert_eq!(
-        s.eval::<(i64, String)>("return B:NumLines(), BTextLeft1:GetText()")
-            .unwrap(),
-        (1, "Enchant Weapon - Crusader".to_string())
-    );
+    // B waits on the link's spell, not on the Firebolt it was moved off.
+    assert_eq!(s.eval::<i64>("return B:NumLines()").unwrap(), 0);
     assert_eq!(
         s.eval::<String>("return ATextLeft1:GetText()").unwrap(),
         "Firebolt"

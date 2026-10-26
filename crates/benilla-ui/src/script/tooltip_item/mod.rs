@@ -72,26 +72,29 @@ fn fire_add_money(lua: &Lua, h: crate::widget::FrameHandle, copper: i64) {
     }
 }
 
-fn hyperlink_enchant_spell(link: &str) -> Option<u32> {
-    let at = link.find("enchant:")? + 8;
-    let tail = &link[at..];
-    let end = tail
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(tail.len());
-    tail[..end].parse().ok().filter(|&id: &u32| id != 0)
+/// `SStrCmpI(link, prefix, len)` (`0x64a4c0`) answering 0: the link starts with `prefix`, ASCII
+/// case aside; the rest of the link.
+fn link_tail<'a>(link: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = link.as_bytes().get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix.as_bytes())
+        .then(|| &link[prefix.len()..])
 }
 
-/// A link's `item:<id>:<enchant>:<random property>` fields, each read by `atoi` (`0x64ac60`), so
-/// the enchant keeps its sign.
-fn hyperlink_item_fields(link: &str) -> Option<(u32, i32, u32)> {
-    let at = link.find("item:")? + 5;
-    let tail = &link[at..];
-    let end = tail.find("|h").unwrap_or(tail.len());
-    let mut fields = tail[..end].split(':').map(str::trim);
-    let item_id: u32 = fields.next()?.parse().unwrap_or(0);
-    let enchant_id: i32 = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-    let random_property_id = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-    (item_id != 0).then_some((item_id, enchant_id, random_property_id))
+/// An `item:` link's id and its `<enchant>:<random property>` fields, each `SStrToInt`
+/// (`0x64ac60`) after the next `:` (`0x5320fa`..`0x53214d`), a missing one 0; signed, as the
+/// reference keeps them.
+fn hyperlink_item_fields(tail: &str) -> (i32, i32, i32) {
+    let mut fields = tail.split(':').map(binding_abi::s_str_to_int);
+    let mut next = || fields.next().unwrap_or(0);
+    (next(), next(), next())
+}
+
+/// The spell record's `castUI` (column 3, `+0xc`) through the lent host, which an `enchant:` link
+/// tests against 3 (`0x532243`): `Some(None)` for an id with no record, `None` with no host to ask.
+pub struct SpellCastUiQuery(pub u32);
+
+impl super::live::LiveQuery for SpellCastUiQuery {
+    type Answer = Option<u32>;
 }
 
 /// A block's bare enchant id in `slot` as its line (`0x52c9f2`..`0x52ca46`): `abs(id)` names the
@@ -113,6 +116,7 @@ fn block_enchant(lua: &Lua, slot: u8, id: i32) -> Option<crate::script::EnchantV
 fn slot_instance(s: &crate::script::ContainerSlot, openable_source: bool) -> render::ItemInstance {
     render::ItemInstance {
         name: s.link.as_deref().and_then(link_name).map(str::to_string),
+        roll: 0,
         durability: s.durability,
         creator: s.creator.clone(),
         gift_creator: s.gift_creator.clone(),
@@ -382,75 +386,84 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GameTooltip:SetHyperlink(link): the chat-link tooltip (`ItemRef.lua:60`). Takes an item
-    // link, escaped or a bare "item:<id>", or an enchant link; any other link does nothing.
+    // GameTooltip:SetHyperlink(link): the chat-link tooltip (`ItemRef.lua:60`), handed the link
+    // part alone, "item:<id>:..." or "enchant:<spellId>" (`0x531fd0`).
     m.set(
         "SetHyperlink",
-        lua.create_function(|lua, (this, link): (Table, String)| {
-            // The only other link it takes, the craft window's `|Henchant:<spellId>|h[name]|h`
-            // (`GetCraftItemLink`): the spell's own tooltip, behind its producer's castUI gate
-            // (`0x532243`).
-            if let Some(spell) = hyperlink_enchant_spell(&link) {
-                return super::tooltip_spell::set_spell_by_id(
+        lua.create_function(|lua, (this, link): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            // `is-number-or-string` else `Usage: SetHyperlink(link)` (`0x53208b`, `0x8551c4`).
+            let link = binding_abi::string_arg(lua, link, "Usage: SetHyperlink(link)")?;
+            // Each prefix is compared at the link's start (`0x5320b1`, `0x532218`); a miss, an
+            // item id at 0 or below (`0x532178`) and an enchant naming no spell of `castUI` 3
+            // (`0x53222a`..`0x532247`) raise `Unknown link type` (`0x8551e0`, `0x532269`).
+            let unknown = || mlua::Error::runtime("Unknown link type");
+            if let Some(tail) = link_tail(&link, "item:") {
+                let (id, enchant_id, roll) = hyperlink_item_fields(tail);
+                // The item the shown tooltip holds hides it instead (`0x5320c7`..`0x5320e9`): the
+                // shown bit (`+0xd0`) and the kept entry (`+0x398`, 0 with no item kept), tested
+                // before the id is, so the same link clicked twice closes the plate.
+                let holds = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let shown = model.arena.frame(h).is_some_and(|f| f.shown);
+                    let kept = model.item_builds.get(&h).map_or(0, |b| b.item_id);
+                    shown && kept == id as u32
+                };
+                if holds {
+                    super::visibility::set_shown(lua, h, false);
+                    return Ok(());
+                }
+                if id <= 0 {
+                    return Err(unknown());
+                }
+                // The fields fill a block (p6=1, `0x532181`): the enchant id to slot 0 (`+0x3d0`,
+                // `0x5321d3`), the roll to `+0x424` (its lines expanded into slots 2..6 and its
+                // suffix joined to the name by the builder, `0x52b7bf`), the unique id to `+0x420`,
+                // unread. So a link shows its enchant and its roll's lines, never the placeholder
+                // (`0x52cc33`). The creator and giver are zeroed (`0x5321ad`, `0x5321b3`), so a
+                // link never shows a maker line.
+                let mut enchants: Vec<_> = block_enchant(lua, 0, enchant_id).into_iter().collect();
+                enchants.extend(roll_enchants(lua, roll as u32));
+                let inst = render::ItemInstance {
+                    enchants,
+                    roll,
+                    ..Default::default()
+                };
+                build_item(
                     lua,
                     &this,
-                    spell,
-                    link_name(&link).map(str::to_string),
-                    Default::default(),
-                );
-            }
-            let Some((id, enchant_id, roll)) = hyperlink_item_fields(&link) else {
-                return Ok(());
-            };
-            let h = frame_handle_of(lua, &this)?;
-            // The item the shown tooltip holds hides it instead (`0x5320c7`..`0x5320e9`): the
-            // shown bit (`+0xd0`) and the kept entry (`+0x398`), so the same link clicked twice
-            // closes the plate, whatever its other fields.
-            let holds = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let shown = model.arena.frame(h).is_some_and(|f| f.shown);
-                shown && model.item_builds.get(&h).is_some_and(|b| b.item_id == id)
-            };
-            if holds {
-                super::visibility::set_shown(lua, h, false);
+                    h,
+                    ItemBuild {
+                        inst: Some(inst),
+                        ..ItemBuild::new(id as u32)
+                    },
+                )?;
                 return Ok(());
             }
-            // The reference's format is `"%s|Hitem:%d:%d:%d:%d|h[%s]|h%s"` (`0x8549c8`), and
-            // `SetHyperlink` (`0x532181`) parses it into a block (p6=1): the enchant id to slot 0
-            // (`+0x3d0`, `0x5321d3`), the roll to `+0x424` (expanded into slots 2..6 by
-            // `0x52b7bf`), the unique id to `+0x420`, unread; a missing field is 0. So a link
-            // shows its enchant and its roll's lines, never the placeholder (`0x52cc33`). The name
-            // is the link's own, built with the suffix joined (`0x5d8b00`). The block's creator and
-            // giver are zeroed (`0x5321ad`, `0x5321b3`), so a link never shows a maker line.
-            let name = link_name(&link).map(str::to_string);
-            let mut enchants: Vec<_> = block_enchant(lua, 0, enchant_id).into_iter().collect();
-            enchants.extend(roll_enchants(lua, roll));
-            let inst = render::ItemInstance {
-                name: name.clone(),
-                enchants,
-                ..Default::default()
-            };
-            let in_flight = match name {
-                Some(name) => InFlight::Name(name, quality_color(1)),
-                None => InFlight::Nothing,
-            };
-            build_item(
+            let tail = link_tail(&link, "enchant:").ok_or_else(unknown)?;
+            // The craft window's `enchant:<spellId>` (`GetCraftItemLink`): a positive id whose
+            // record's `castUI` is 3 (`0x532225`..`0x532247`), to the spell builder (`0x532259`).
+            // With no host to read the record, the id alone decides.
+            let spell = binding_abi::s_str_to_int(tail);
+            let craft = spell > 0
+                && super::live::ask(lua, &SpellCastUiQuery(spell as u32))
+                    .is_none_or(|cast_ui| cast_ui == Some(3));
+            if !craft {
+                return Err(unknown());
+            }
+            super::tooltip_spell::set_spell_by_id(
                 lua,
                 &this,
-                h,
-                ItemBuild {
-                    inst: Some(inst),
-                    in_flight,
-                    ..ItemBuild::new(id)
-                },
-            )?;
-            Ok(())
+                spell as u32,
+                None,
+                Default::default(),
+            )
         })?,
     )?;
 
     // GameTooltip:SetInventoryItem(unit, slot [, nameOnly]) -> hasItem, hasCooldown, repairCost
-    // (`0x532ee0`), three as `PaperDollFrame.lua:741` reads them; the arity is that consumer's,
-    // not byte-read as `SetBagItem`'s two is (`0x534985`). Unit-keyed through `Model::inv_slot`:
+    // (`0x532ee0`), three as `PaperDollFrame.lua:741` reads them (`0x533300`, `0x53343e`), and
+    // two on the ammo slot (`0x533122`, `0x533140`). Unit-keyed through `Model::inv_slot`:
     // an inspected item (`InspectPaperDollFrame.xml:20`) has no durability, so that line does not
     // show, and its maker is the visible block's creator (`0x5333cd`). An armed shopping tooltip
     // renders the compare shape; the arm is consumed either way. repairCost is the item's cost
@@ -469,13 +482,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     unit,
                     "Usage: SetInventoryItem(unit, slot [, nameOnly])",
                 )?;
-                let slot0 = lua
-                    .coerce_number(slot)?
-                    .map(|n| super::binding_abi::ftol(n - 1.0))
-                    .filter(|&s| super::char_stats::inventory_slot_reader_accepts(s))
-                    .ok_or_else(|| {
-                        mlua::Error::runtime("Invalid inventory slot in SetInventoryItem")
-                    })?;
+                const SLOT_LINE: &str = "Invalid inventory slot in SetInventoryItem";
+                let slot0 = super::binding_abi::less_one_arg(lua, slot, SLOT_LINE)?;
+                if !super::char_stats::inventory_slot_reader_accepts(slot0) {
+                    return Err(mlua::Error::runtime(SLOT_LINE));
+                }
                 let slot = (slot0 + 1) as usize;
                 // `nameOnly` (usage string `0x8552dc`) is set only by a number above 0
                 // (`0x533027..0x53304c`); anything else builds the ordinary tooltip, without an
@@ -550,7 +561,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     match view {
                         Some((id, name, q, count, inst)) => (id, name, q, inst, count, cost, armed),
                         // An empty slot answers nil and still pushes the other two: callers
-                        // destructure all three first, and an addon may add up repairCost.
+                        // destructure all three first, and an addon may add up repairCost. The
+                        // ammo slot pushes two, nil and nil (`0x533130`..`0x533140`).
+                        None if slot0 == -1 => {
+                            return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]))
+                        }
                         None => {
                             return Ok(MultiValue::from_vec(vec![
                                 Value::Nil,
@@ -587,6 +602,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         ..ItemBuild::new(item_id)
                     },
                 )?;
+                // The ammo slot's leg drops the builder's answer and pushes 1 and nil
+                // (`0x53310e`..`0x533122`).
+                if slot0 == -1 {
+                    return Ok(MultiValue::from_vec(vec![Value::Integer(1), Value::Nil]));
+                }
                 Ok(MultiValue::from_vec(vec![
                     Value::Integer(1),
                     // hasCooldown is the builder's `[ebp-0x38]`, set by four lines: LOCKED, the
@@ -699,10 +719,15 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     for (name, player_side) in [("SetTradePlayerItem", true), ("SetTradeTargetItem", false)] {
         m.set(
             name,
-            lua.create_function(move |lua, (this, slot): (Table, usize)| {
+            lua.create_function(move |lua, (this, slot): (Table, Value)| {
                 let h = frame_handle_of(lua, &this)?;
-                let cell = slot
-                    .checked_sub(1)
+                // `is-number` else `Invalid trade slot in SetTradePlayerItem` (`0x8554a0`,
+                // `0x5343ea`) or `… in SetTradeTargetItem` (`0x8554cc`, `0x5345f9`); `n - 1` out of
+                // `[0, 7)` names no slot and does nothing (`0x5342c1`, `0x5344f0`).
+                let slot0 =
+                    binding_abi::less_one_arg(lua, slot, &format!("Invalid trade slot in {name}"))?;
+                let cell = usize::try_from(slot0)
+                    .ok()
                     .filter(|&n| n < super::trade::TRADE_SLOTS);
                 let source = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -711,7 +736,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // The seventh slot alone proposes the spell cast on it (`0x534391`,
                     // `0x534598`, the block's `+0x40c`).
                     let proposed = side
-                        .filter(|_| slot == 7)
+                        .filter(|_| slot0 == 6)
                         .and_then(|s| s.slots[6].as_ref()?.enchantment.clone());
                     match player_side {
                         // The object's flags, creator and giver reach the LOCKED, wrapped and
@@ -866,10 +891,19 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     };
                     (this, index)
                 } else {
-                    <(Table, usize) as mlua::FromLuaMulti>::from_lua_args(
-                        mlua::MultiValue::from_vec(vec![this, index]),
+                    let this = <Table as mlua::FromLua>::from_lua(this, lua)?;
+                    frame_handle_of(lua, &this)?;
+                    // `is-number` else `Invalid merchant slot in SetMerchantItem` (`0x855474`,
+                    // `0x5341c4`); `n - 1` below 0 names no row (`0x534166`).
+                    let slot0 = binding_abi::less_one_arg(
                         lua,
-                    )?
+                        index,
+                        "Invalid merchant slot in SetMerchantItem",
+                    )?;
+                    let Ok(index) = usize::try_from(slot0) else {
+                        return Ok(());
+                    };
+                    (this, index + 1)
                 };
                 let h = frame_handle_of(lua, &this)?;
                 // The open vendor's row as of the call.
@@ -883,7 +917,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             .checked_sub(1)
                             .and_then(|i| crate::script::merchant::buyback_row(lua, &model, i))
                     } else {
-                        crate::script::merchant::row(lua, &model, index.saturating_sub(1))
+                        crate::script::merchant::row(lua, &model, index - 1)
                     }
                 };
                 let Some(row) = row else { return Ok(()) };
@@ -927,15 +961,20 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetInboxItem",
         lua.create_function(|lua, (this, index): (Table, Value)| {
-            // `is-number` else `Usage: SetInboxItem(index)` (`0x855584`, `0x53559e`).
-            let index = binding_abi::index_arg(lua, index, "Usage: SetInboxItem(index)")?;
+            // `this` first (`0x53554f`), then `is-number` else `Usage: SetInboxItem(index)`
+            // (`0x855584`, `0x53559e`).
             let h = frame_handle_of(lua, &this)?;
+            let index = binding_abi::index_arg(lua, index, "Usage: SetInboxItem(index)")?;
             let row = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let Some(mail) = &model.mail else {
                     return Ok(Value::Nil);
                 };
-                mail.inbox.get(index.saturating_sub(1)).cloned()
+                // `ftol(n) - 1` compared unsigned (`0x5355ce`, `0x5355d1`): 0 names no row.
+                index
+                    .checked_sub(1)
+                    .and_then(|i| mail.inbox.get(i))
+                    .cloned()
             };
             let Some(row) = row.filter(|r| r.item_id != 0) else {
                 return Ok(Value::Nil);
@@ -970,13 +1009,13 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetAuctionItem",
         lua.create_function(|lua, (this, kind, index): (Table, Value, Value)| {
-            // `is-number` on arg 3, `is-number-or-string` on arg 2 else
+            // `this` first, then `is-number` on arg 3, `is-number-or-string` on arg 2 else
             // `Usage: SetAuctionItem("type", index)` (`0x8555a0`, `0x535ab6`).
+            let h = frame_handle_of(lua, &this)?;
             let kind =
                 binding_abi::string_arg(lua, kind, r#"Usage: SetAuctionItem("type", index)"#)?;
             let index =
                 binding_abi::index_arg(lua, index, r#"Usage: SetAuctionItem("type", index)"#)?;
-            let h = frame_handle_of(lua, &this)?;
             let (item_id, roll, name, charges) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let Some(auction) = &model.auction else {
@@ -985,7 +1024,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let Some(list) = super::auction::list_index_of(&kind) else {
                     return Ok(Value::Nil);
                 };
-                match auction.lists[list].rows.get(index.saturating_sub(1)) {
+                // `ftol(n) - 1` compared unsigned (`0x535933`, `0x535944`): 0 names no row.
+                match index
+                    .checked_sub(1)
+                    .and_then(|i| auction.lists[list].rows.get(i))
+                {
                     Some(r) => (r.item_id, r.random_property_id, r.name.clone(), r.charges),
                     None => (0, 0, None, -1),
                 }
@@ -1081,36 +1124,37 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // GameTooltip:SetTradeSkillItem(skillIndex [, reagentIndex]): the reagent's item, or without
     // `reagentIndex` the recipe's product. A product id of 0 or an uncached template shows the
-    // recipe's or the reagent's name alone (`render_by_id`); a bad index does nothing.
+    // recipe's or the reagent's name alone (`render_by_id`).
     m.set(
         "SetTradeSkillItem",
         lua.create_function(
             |lua, (this, skill_index, reagent_index): (Table, Value, Value)| {
-                // `is-number` on the index else `Invalid trade skill item in
-                // SetTradeSkillItem(index [,reagent])` (`0x8553d8`, `0x533b78`); a non-number
-                // reagent is absent (`0x533be7`).
-                let skill_index = binding_abi::index_arg(
-                    lua,
-                    skill_index,
-                    "Invalid trade skill item in SetTradeSkillItem(index [,reagent])",
-                )?;
+                // `this` first (`0x533b6e`).
+                frame_handle_of(lua, &this)?;
+                // `is-number` on the index, a row below the count (`0x533b9f`) whose spell has a
+                // record (`0x533bbd`, a header's -1 has none), and a reagent number that names
+                // one of the recipe's reagents (`0x533c51`..`0x533c68`), else `Invalid trade skill
+                // item in SetTradeSkillItem(index [,reagent])` (`0x8553d8`, `0x533c6a`); a
+                // non-number reagent is absent (`0x533be7`).
+                const LINE: &str =
+                    "Invalid trade skill item in SetTradeSkillItem(index [,reagent])";
+                let skill_index = binding_abi::index_arg(lua, skill_index, LINE)?;
                 let reagent_index = binding_abi::index_or(lua, reagent_index)?.map(|i| i as usize);
                 let found = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     // A visible-row index, headers included (`0x4fca20`); a header is None.
-                    let Some(recipe) = super::tradeskill::recipe_at(&model, skill_index) else {
-                        return Ok(());
-                    };
-                    match reagent_index {
-                        Some(ri) => ri
-                            .checked_sub(1)
-                            .and_then(|i| recipe.reagents.get(i))
-                            .map(|r| (r.item, r.name.clone())),
-                        None => Some((recipe.product_item, Some(recipe.name.clone()))),
-                    }
+                    super::tradeskill::recipe_at(&model, skill_index).and_then(|recipe| {
+                        match reagent_index {
+                            Some(ri) => ri
+                                .checked_sub(1)
+                                .and_then(|i| recipe.reagents.get(i))
+                                .map(|r| (r.item, r.name.clone())),
+                            None => Some((recipe.product_item, Some(recipe.name.clone()))),
+                        }
+                    })
                 };
                 let Some((item_id, fb_name)) = found else {
-                    return Ok(());
+                    return Err(mlua::Error::runtime(LINE));
                 };
                 render_by_id(lua, &this, item_id, fb_name, None)
             },
@@ -1118,29 +1162,31 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // GameTooltip:SetCraftItem(craftIndex, reagentIndex): the reagent's item
-    // (`Blizzard_CraftUI.xml:33`); a craft has no product item, so both arguments are required. A
-    // bad index does nothing.
+    // (`Blizzard_CraftUI.xml:33`); a craft has no product item, so both arguments are required.
     m.set(
         "SetCraftItem",
         lua.create_function(
             |lua, (this, craft_index, reagent_index): (Table, Value, Value)| {
-                // `is-number` on both else `Invalid craft item in SetCraftItem(index, reagent)`
-                // (`0x855418`, `0x533d88`, `0x533d9c`).
+                // `this` first (`0x533d7b`).
+                frame_handle_of(lua, &this)?;
+                // `is-number` on both (`0x533d88`, `0x533d9c`), a row below the count
+                // (`0x533dc3`) whose spell has a record (`0x533dd9`), and a reagent number naming
+                // one of its reagents (`0x533e10`..`0x533e27`), else `Invalid craft item in
+                // SetCraftItem(index, reagent)` (`0x855418`, `0x533e29`).
                 const LINE: &str = "Invalid craft item in SetCraftItem(index, reagent)";
                 let craft_index = binding_abi::index_arg(lua, craft_index, LINE)?;
                 let reagent_index = binding_abi::index_arg(lua, reagent_index, LINE)?;
                 let found = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
-                    let Some(recipe) = crate::script::craft::recipe(&model, craft_index) else {
-                        return Ok(());
-                    };
-                    reagent_index
-                        .checked_sub(1)
-                        .and_then(|i| recipe.reagents.get(i))
-                        .map(|r| (r.item, r.name.clone()))
+                    crate::script::craft::recipe(&model, craft_index).and_then(|recipe| {
+                        reagent_index
+                            .checked_sub(1)
+                            .and_then(|i| recipe.reagents.get(i))
+                            .map(|r| (r.item, r.name.clone()))
+                    })
                 };
                 let Some((item_id, fb_name)) = found else {
-                    return Ok(());
+                    return Err(mlua::Error::runtime(LINE));
                 };
                 render_by_id(lua, &this, item_id, fb_name, None)
             },

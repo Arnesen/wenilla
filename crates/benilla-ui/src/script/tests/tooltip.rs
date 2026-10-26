@@ -411,6 +411,34 @@ fn the_host_reads_the_owner_and_lua_cannot() {
 /// `SetText` shows the tooltip and `AddLine` does not. `r, g, b` apply only when the r slot is a
 /// number, so `AddLine(text, "", r, g, b)` draws in the default gold, as the reference's zone
 /// tooltip does.
+/// `SetText` reads its alpha only past a numeric r (`0x531c58`); with none the line is the
+/// default gold, opaque, whatever the alpha says.
+#[test]
+fn settext_reads_alpha_only_with_a_numeric_r() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "AA"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        TTA = CreateFrame("GameTooltip", "TTA", nil, "TestTooltipTemplate")
+        TTA:SetOwner(a, "ANCHOR_RIGHT")
+    "#,
+    )
+    .unwrap();
+    let alpha = |s: &UiScript, call: &str| {
+        s.eval::<f32>(&format!(
+            "{call} local _, _, _, a = TTATextLeft1:GetTextColor() return a"
+        ))
+        .unwrap()
+    };
+    let half = crate::color::quant::read32(0.5);
+    let opaque = crate::color::quant::read32(1.0);
+    assert_eq!(alpha(&s, r#"TTA:SetText("x", nil, nil, nil, 0.5)"#), opaque);
+    assert_eq!(alpha(&s, r#"TTA:SetText("x", 1, 1, 1, 0.5)"#), half);
+    assert_eq!(alpha(&s, r#"TTA:SetText("x", "1", 1, 1, "0.5")"#), half);
+    assert!(s.take_errors().is_empty());
+}
+
 #[test]
 fn settext_shows_and_both_addline_shapes() {
     let mut s = script();
@@ -594,6 +622,55 @@ fn fadeout_ramps_then_hides() {
     "#,
     )
     .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
+/// `SetOwner` and `IsOwned` read the owner's `[0]` with no type test (`0x531189`, `0x531065`): a
+/// texture owns the tooltip and anchors it (`0x5313c9`), `{}` matches an unowned tooltip, and a
+/// table with no `[0]` raises `%s:SetOwner(): Couldn't find 'this' in owner object` naming the
+/// tooltip (`0x855150`).
+#[test]
+fn any_region_owns_a_tooltip() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "RO"); f:SetPoint("CENTER", 0, 0); f:SetWidth(100); f:SetHeight(100)
+        ROTex = f:CreateTexture("ROTex"); ROTex:SetPoint("TOPLEFT", 0, 0); ROTex:SetWidth(20); ROTex:SetHeight(20)
+        ROFs = f:CreateFontString("ROFs")
+        TTR = CreateFrame("GameTooltip", "TTR", nil, "TestTooltipTemplate")
+        assert(TTR:IsOwned({}) == 1, "{} is the NULL owner of an unowned tooltip")
+        assert(TTR:IsOwned(ROTex) == nil, "a texture that does not own it")
+        TTR:SetOwner(ROTex, "ANCHOR_RIGHT")
+        assert(TTR:IsOwned(ROTex) == 1 and TTR:IsOwned(f) == nil, "the texture owns it")
+        assert(TTR:IsOwned({}) == nil, "{} no longer matches")
+        TTR:AddLine("x")
+        TTR:Show()
+        TTR:SetOwner(ROFs, "ANCHOR_LEFT")
+        assert(TTR:IsOwned(ROFs) == 1, "a font string owns it")
+        TTR:SetOwner(ROTex, "ANCHOR_RIGHT")
+        TTR:AddLine("x")
+        TTR:Show()
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.tooltip_owner_name("TTR").as_deref(), Some("ROTex"));
+    s.resolve();
+    measure_all(&mut s, &[("x", 10.0, 12.0)]);
+    // ANCHOR_RIGHT: the plate's BOTTOMLEFT on the texture's TOPRIGHT (350 + 20, 350).
+    let (left, bottom): (f64, f64) = s.eval("return TTR:GetLeft(), TTR:GetBottom()").unwrap();
+    crate::assert_near!(left, 370.0, "anchored to the texture's right edge");
+    crate::assert_near!(bottom, 350.0, "anchored to the texture's top edge");
+    for call in [
+        "TTR:SetOwner({}, 'ANCHOR_RIGHT')",
+        "TTR:SetOwner({ [0] = 5 })",
+    ] {
+        let e = s.run(call).unwrap_err().to_string();
+        assert!(
+            e.contains("TTR:SetOwner(): Couldn't find 'this' in owner object"),
+            "`{call}` -> {e}"
+        );
+    }
     assert!(s.take_errors().is_empty());
 }
 

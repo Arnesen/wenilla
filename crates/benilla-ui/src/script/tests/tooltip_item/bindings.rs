@@ -391,8 +391,52 @@ fn set_inventory_item_renders_full_outside_compare() {
     assert!(s.take_errors().is_empty());
 }
 
+/// The ammo slot's leg answers two values, 1 and nil with an item (`0x53310e`..`0x533122`), nil
+/// and nil without (`0x533130`..`0x533140`), where every other slot answers three.
 #[test]
-fn set_hyperlink_renders_items_and_ignores_other_links() {
+fn set_inventory_item_on_the_ammo_slot_answers_two() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(
+        2512,
+        ItemTemplateView {
+            name: "Rough Arrow".into(),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "AmmoSlot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        TT:SetOwner(a, "ANCHOR_RIGHT")
+        function AmmoShow(...) return arg.n .. ":" .. tostring(arg[1]) .. ":" .. tostring(arg[2]) end
+    "#,
+    )
+    .unwrap();
+    let show = |s: &UiScript| {
+        s.eval::<String>("return AmmoShow(TT:SetInventoryItem('player', 0))")
+            .unwrap()
+    };
+    assert_eq!(show(&s), "2:nil:nil", "no ammo");
+    let mut inv: InventorySlots = Default::default();
+    inv[0] = Some(InvSlotView {
+        item_id: 2512,
+        name: Some("Rough Arrow".into()),
+        quality: 1,
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    assert_eq!(show(&s), "2:1:nil", "ammo");
+    assert_eq!(
+        s.eval::<String>("return TTTextLeft1:GetText()").unwrap(),
+        "Rough Arrow"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// `SetHyperlink` (`0x531fd0`) takes the link part `ItemRef.lua` hands it, never a chat link.
+#[test]
+fn set_hyperlink_takes_a_link_by_its_prefix_and_raises_on_any_other() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.set_item_template(
@@ -409,13 +453,72 @@ fn set_hyperlink_renders_items_and_ignores_other_links() {
         local a = CreateFrame("Button", "Slot10"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetHyperlink("|cff1eff00|Hitem:7002:0:0:0|h[New Loop]|h|r")
-        assert(TTTextLeft1:GetText() == "New Loop", "escaped link renders")
-        tt:SetHyperlink("player:Bob")
-        assert(TTTextLeft1:GetText() == "New Loop", "non-item link leaves the content alone")
-        tt:SetOwner(a, "ANCHOR_RIGHT")
         tt:SetHyperlink("item:7002")
         assert(TTTextLeft1:GetText() == "New Loop", "bare item: form renders")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetHyperlink("ITEM:7002:0:0:0")
+        assert(TTTextLeft1:GetText() == "New Loop", "the prefix compares without case")
+    "#,
+    )
+    .unwrap();
+    // `SStrCmpI` at the link's start (`0x5320b1`, `0x532218`), an id above 0 (`0x532178`), else
+    // `Unknown link type` (`0x8551e0`); a non-string `Usage: SetHyperlink(link)` (`0x8551c4`).
+    for (call, line) in [
+        (
+            r#"TT:SetHyperlink("|cff1eff00|Hitem:7002:0:0:0|h[New Loop]|h|r")"#,
+            "Unknown link type",
+        ),
+        (r#"TT:SetHyperlink("player:Bob")"#, "Unknown link type"),
+        (r#"TT:SetHyperlink("item:0")"#, "Unknown link type"),
+        (r#"TT:SetHyperlink("item:-3")"#, "Unknown link type"),
+        (r#"TT:SetHyperlink("enchant:0")"#, "Unknown link type"),
+        ("TT:SetHyperlink(7002)", "Unknown link type"),
+        ("TT:SetHyperlink(nil)", "Usage: SetHyperlink(link)"),
+        ("TT:SetHyperlink({})", "Usage: SetHyperlink(link)"),
+    ] {
+        s.run("TT:Hide()").unwrap();
+        let e = s.run(call).unwrap_err().to_string();
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    assert!(s.take_errors().is_empty());
+}
+
+/// `SetMerchantItem` takes row `ftol(n - 1.0)` (`0x534159`): 0.5 is the first row, and 0 or a
+/// negative names none and does nothing (`0x534166`); a non-number raises
+/// `Invalid merchant slot in SetMerchantItem` (`0x5341c4`).
+#[test]
+fn set_merchant_item_reads_its_row_as_n_less_one() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_merchant(Some(MerchantState {
+        items: vec![MerchantItem {
+            name: Some("Shiny Loop".into()),
+            item_id: 8000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    s.set_item_template(
+        8000,
+        ItemTemplateView {
+            name: "Shiny Loop".into(),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "MI"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        for _, n in { 0, -1, 2 } do
+            tt:SetOwner(a, "ANCHOR_RIGHT")
+            tt:SetMerchantItem(n)
+            assert(tt:NumLines() == 0, "row " .. n .. " names none")
+        end
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetMerchantItem(0.5)
+        assert(TTTextLeft1:GetText() == "Shiny Loop", "0.5 less one truncates to the first row")
+        local ok, e = pcall(tt.SetMerchantItem, tt, "x")
+        assert(not ok and string.find(e, "Invalid merchant slot in SetMerchantItem"), tostring(e))
     "#,
     )
     .unwrap();
@@ -451,7 +554,10 @@ fn ts_recipe(spell_id: u32, name: &str, group: (u32, u32, &str)) -> TradeSkillRe
 }
 
 /// `SetTradeSkillItem` takes a visible row index, headers included, not a position in `recipes`;
-/// the product and reagent hovers both pass one, and a header row is a no-op.
+/// the product and reagent hovers both pass one. A header row, a row past the list and a reagent
+/// number naming none raise `Invalid trade skill item in SetTradeSkillItem(index [,reagent])`
+/// (`0x533bbd`, `0x533b9f`, `0x533c51`..`0x533c6a`), leaving the previous render; a non-number
+/// reagent is absent (`0x533be7`).
 #[test]
 fn set_trade_skill_item_indexes_visible_rows_not_raw_recipes() {
     let mut s = script();
@@ -491,9 +597,25 @@ fn set_trade_skill_item_indexes_visible_rows_not_raw_recipes() {
     assert_eq!(name_at(&mut s, 2, ""), "Alpha Bolt");
 
     assert_eq!(name_at(&mut s, 5, ", 1"), "Alpha Cloak Reagent");
+    assert_eq!(name_at(&mut s, 6, ", {}"), "Beta Cloak");
 
-    // A header row is a no-op: the previous render stands.
-    assert_eq!(name_at(&mut s, 4, ""), "Alpha Cloak Reagent");
+    for call in [
+        "TT:SetTradeSkillItem(4)",
+        "TT:SetTradeSkillItem(7)",
+        "TT:SetTradeSkillItem(0)",
+        "TT:SetTradeSkillItem(5, 2)",
+        "TT:SetTradeSkillItem(5, 0)",
+    ] {
+        let e = s.run(call).unwrap_err().to_string();
+        assert!(
+            e.contains("Invalid trade skill item in SetTradeSkillItem(index [,reagent])"),
+            "`{call}` -> {e}"
+        );
+    }
+    assert_eq!(
+        s.eval::<String>("return TTTextLeft1:GetText()").unwrap(),
+        "Beta Cloak"
+    );
 }
 
 /// `SetMerchantCompareItem(index [, offset])` returns the number 1 or nil, one value, and the stock
