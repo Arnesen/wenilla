@@ -486,7 +486,10 @@ async fn the_bridge_docs_are_public() {
     run_setup(&h).await;
     let page = send(&h.app, get("/docs/bridge", None)).await;
     assert_eq!(page.status, StatusCode::OK);
-    assert!(page.body.contains("wenilla.auto"), "the library reference is on the page");
+    assert!(
+        page.body.contains("wenilla.auto"),
+        "the library reference is on the page"
+    );
 }
 
 #[tokio::test]
@@ -547,12 +550,44 @@ async fn config_page_saves_and_applies() {
                 ("max_player_level", "60"),
                 ("motd", "new motd"),
                 ("bots", "10"),
+                ("tweaks", "1"),
+                ("t.regen_rate", "2"),
+                ("t.rep_rate", "1"),
+                ("t.profession_gain", "1"),
+                ("t.aggro_rate", "0.5"),
+                ("t.fall_damage", "1"),
+                ("t.gear_wear", "1"),
+                ("t.res_sickness", "1"),
+                ("t.cross_faction", "1"),
             ],
         ),
     )
     .await;
     assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
     assert!(r.location().contains("applied+live"), "{}", r.location());
+    let t = mangos_conf::load(&h.state.conf).unwrap().tweaks;
+    assert_eq!(
+        (
+            t["regen_rate"],
+            t["aggro_rate"],
+            t["cross_faction"],
+            t["show_low_quests"]
+        ),
+        (2.0, 0.5, 1.0, 0.0)
+    );
+    assert_eq!(
+        mangos_conf::read(&h.state.conf.mangosd, "Rate.Mana")
+            .unwrap()
+            .as_deref(),
+        Some("2")
+    );
+    let page = send(&h.app, get("/admin/config", Some(&admin))).await;
+    assert!(
+        page.body
+            .contains(r#"name="t.cross_faction" value="1" checked"#),
+        "{}",
+        page.body
+    );
     let s = mangos_conf::load(&h.state.conf).unwrap();
     assert_eq!(
         (
