@@ -212,13 +212,16 @@ fn parse_color(b: &[u8]) -> Option<Rgba> {
     Some(Rgba::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-/// The payload after `|H` and the length of the whole `|H<payload>|h` prefix; `None`, a literal
-/// `|`, when no `|h` follows, when the payload is empty (`0x5c2972`) or when the visible text is
-/// empty (`0x5c2992`). The delimiter scan is a plain byte search that does not skip `||`, inferred
-/// from the emitter's own scan (`0x5ccdc8`, for the literal at `0x84453c`).
+/// The payload after `|H` and the length of the whole `|H<payload>|h` prefix. The scan runs to the
+/// first `|` (`0x5c290d`), and that one must be followed by `h` (`0x5c2969`) and by a byte after
+/// it (`0x5c2933`, `0x5c2964`); anything else, an empty payload (`0x5c2972`) or an empty visible
+/// text (`0x5c2992`) leaves the `|` a literal.
 fn parse_link_open(rest: &str) -> Option<(&str, usize)> {
     let b = rest.as_bytes();
-    let delim = (2..b.len().saturating_sub(1)).find(|&i| b[i] == b'|' && b[i + 1] == b'h')?;
+    let delim = 2 + b.get(2..)?.iter().position(|&c| c == b'|')?;
+    if b.get(delim + 1) != Some(&b'h') || b.get(delim + 2).is_none_or(|&c| c == 0) {
+        return None;
+    }
     let span = delim + 2;
     if span == 4 {
         return None;
@@ -227,6 +230,41 @@ fn parse_link_open(rest: &str) -> Option<(&str, usize)> {
         return None;
     }
     Some((&rest[2..delim], span))
+}
+
+/// `GxuStripControlCodes`' mask bits (`0x85f4d8`): the classes it drops instead of keeping.
+pub mod strip {
+    /// `|c…` and `|r` (classes 0 and 1).
+    pub const COLOR: u32 = 0x100;
+    /// CR, LF and `|n` (class 2), otherwise one `\n`.
+    pub const LINE_BREAK: u32 = 0x200;
+    /// `|H…|h` and `|h` (classes 4 and 5).
+    pub const LINK: u32 = 0x400;
+    /// `||` (class 3), otherwise one `|`.
+    pub const PIPE: u32 = 0x800;
+    /// What an edit box copies (`0x77e230`): no colour and no link codes, a line break as `\n`
+    /// and `||` as `|`.
+    pub const CLIPBOARD: u32 = COLOR | LINK;
+}
+
+/// `0x5c2590`: `text` with the codes the `mask` names dropped (classes 0, 1, 4 and 5) and the
+/// others unescaped (class 2 to `\n`, class 3 to `|`), each token read with every class active
+/// (`0x5c25e3`). Everything else is copied.
+pub fn strip_control_codes(text: &str, mask: u32) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (at, token) in tokens(text) {
+        let src = &text[at..at + token.byte_len];
+        let drops = |bit| mask & bit != 0;
+        match token.class() {
+            TokenClass::Color | TokenClass::ColorReset if drops(strip::COLOR) => {}
+            TokenClass::LinkOpen | TokenClass::LinkClose if drops(strip::LINK) => {}
+            TokenClass::LineBreak if !drops(strip::LINE_BREAK) => out.push('\n'),
+            TokenClass::EscapedPipe if !drops(strip::PIPE) => out.push('|'),
+            TokenClass::LineBreak | TokenClass::EscapedPipe => {}
+            _ => out.push_str(src),
+        }
+    }
+    out
 }
 
 /// Every token of `text` with the byte offset it starts at.
@@ -645,6 +683,50 @@ mod tests {
         // The string's alpha reaches the vertex, never the escape's (`0x5cceb0`).
         assert_eq!(rgba.to_f32_at(1.0), [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(rgba.to_f32_at(0.5), [1.0, 0.0, 0.0, 0.5]);
+    }
+
+    /// The payload scan stops at the first `|` (`0x5c290d`), which must be `|h` with a byte after
+    /// it (`0x5c2969`, `0x5c2964`): a link cut short or broken by another escape draws as text.
+    #[test]
+    fn a_link_open_needs_its_first_pipe_to_be_a_pipe_h_with_a_byte_after() {
+        for text in [
+            "|Hx|cff00ff00|h[a]|h",
+            "|Hx||h[a]|h",
+            "|Hx|r|h[a]|h",
+            "|Hitem:1|h",
+            "|Hitem:1|",
+            "|Hitem:1|x[a]",
+        ] {
+            let t = token_at(text, 0).expect("a token");
+            assert_eq!(t.kind, TokenKind::Char('|'), "{text:?}");
+            assert_eq!(t.byte_len, 1, "{text:?}");
+        }
+        // One byte after the `|h` is enough.
+        assert_eq!(
+            token_at("|Hitem:1|hx", 0).expect("a token").kind,
+            TokenKind::LinkOpen { payload: "item:1" }
+        );
+    }
+
+    /// `0x5c2590` with the edit box's mask `0x500` (`0x77e230`): colour and link codes vanish, a
+    /// line break and `||` are unescaped, and nothing else changes.
+    #[test]
+    fn the_clipboard_strip_drops_colour_and_link_codes_and_unescapes_the_rest() {
+        use super::{strip, strip_control_codes};
+        let copy = |text: &str| strip_control_codes(text, strip::CLIPBOARD);
+        assert_eq!(copy(LINK), "[Chipped Claw]");
+        assert_eq!(copy("a||b"), "a|b");
+        assert_eq!(copy("a\r\nb|nc\rd\ne|Nf"), "a\nb\nc\nd\ne\nf");
+        // A lone `|h`, a malformed `|c` and a `|T` are not codes: the first is dropped as a
+        // class 5 token, the others are literal characters.
+        assert_eq!(copy("x|hy|cff|Tz"), "xy|cff|Tz");
+        assert_eq!(copy("|Hitem:1|h|h"), "|Hitem:1");
+        assert_eq!(copy("héllo ✚"), "héllo ✚");
+        assert_eq!(copy(""), "");
+        // The other mask bits: keep what the mask does not name.
+        assert_eq!(strip_control_codes("|cff00ff00x|r", 0), "|cff00ff00x|r");
+        assert_eq!(strip_control_codes("a||b|nc", strip::PIPE), "ab\nc");
+        assert_eq!(strip_control_codes("a||b|nc", strip::LINE_BREAK), "a|bc");
     }
 
     #[test]
