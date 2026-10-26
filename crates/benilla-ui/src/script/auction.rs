@@ -801,7 +801,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetNumAuctionItems(type) → numBatchAuctions (at most 50), totalAuctions (before the cap).
     g.set(
         "GetNumAuctionItems",
-        lua.create_function(|lua, kind: String| {
+        lua.create_function(|lua, kind: Value| {
+            // `is-number-or-string` else `Usage: GetNumAuctionItems("type")` (`0x849424`,
+            // `0x4ced37`).
+            let kind = binding_abi::string_arg(lua, kind, r#"Usage: GetNumAuctionItems("type")"#)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some((batch, total)) = list_index(&kind).and_then(|i| {
                 model
@@ -824,12 +827,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetAuctionItemInfo(type, index) → twelve values; `highBidder` is a name, `1` or nil.
     g.set(
         "GetAuctionItemInfo",
-        lua.create_function(|lua, (kind, index): (String, Value)| {
-            let index = crate::script::binding_abi::index_arg(
-                lua,
-                index,
-                "Usage: GetAuctionItemInfo(\"type\", index)",
-            )?;
+        lua.create_function(|lua, (kind, index): (Value, Value)| {
+            // `is-number-or-string` and `is-number` else `Usage: GetAuctionItemInfo("type", index)`
+            // (`0x849448`, `0x4cf270`).
+            const USAGE: &str = r#"Usage: GetAuctionItemInfo("type", index)"#;
+            let kind = binding_abi::string_arg(lua, kind, USAGE)?;
+            let index = binding_abi::index_arg(lua, index, USAGE)?;
             let row = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, &kind, index)
@@ -954,12 +957,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetAuctionItemLink",
-        lua.create_function(|lua, (kind, index): (String, Value)| {
-            let index = crate::script::binding_abi::index_arg(
-                lua,
-                index,
-                "Usage: GetAuctionItemLink(\"type\", index)",
-            )?;
+        lua.create_function(|lua, (kind, index): (Value, Value)| {
+            // `is-number-or-string` and `is-number` else `Usage: GetAuctionItemLink("type", index)`
+            // (`0x849474`, `0x4cf44d`).
+            const USAGE: &str = r#"Usage: GetAuctionItemLink("type", index)"#;
+            let kind = binding_abi::string_arg(lua, kind, USAGE)?;
+            let index = binding_abi::index_arg(lua, index, USAGE)?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, &kind, index).and_then(|r| r.link)

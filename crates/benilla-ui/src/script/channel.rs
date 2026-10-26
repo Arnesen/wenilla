@@ -238,10 +238,6 @@ fn submit(lua: &Lua, cmd: ChannelCommand) -> mlua::Result<()> {
     super::calls::submit(lua, super::ScriptCall::Channel(cmd))
 }
 
-fn non_empty(s: Option<String>) -> Option<String> {
-    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-}
-
 fn slot_of(model: &Model, name: &str) -> Option<usize> {
     model
         .joined_channels
@@ -334,8 +330,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetChannelName(x) (`0x4a05e0`): a number, or a string Lua reads as one (`lua_isnumber`,
     // `0x4a05ed`; `ChatFrame.lua:2113` passes the "1" of `/1`), selects a confirmed slot after
     // `__ftol` (`0x4a0602` → `0x49bf30`); any other string selects the first slot of that name in
-    // any state (`0x4a0627` → `0x49be90`), and anything else none (`0x4a0693`). Three values on
-    // every path: the number, the name or nil (`lua_pushstring(NULL)`, `0x4a0659`), the instance.
+    // any state (`0x4a0627` → `0x49be90`); anything else raises
+    // `Usage: GetChannelName([channelIndex] or [channelName])` (`0x844cf0`, `0x4a0693`). Three
+    // values on every other path: the number, the name or nil (`0x4a0659`), the instance.
     g.set(
         "GetChannelName",
         lua.create_function(|lua, key: Value| {
@@ -353,7 +350,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         Some((n as i64, slot.name.clone()))
                     })
                 }
-                _ => None,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "Usage: GetChannelName([channelIndex] or [channelName])",
+                    ))
+                }
             };
             let Some((n, name)) = found else {
                 return Ok(MultiValue::from_vec(vec![
@@ -565,7 +566,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The one-name verbs: each hands the host its `CMSG_*` and returns nothing.
+    // The one-name verbs: each hands the host its `CMSG_*` and returns nothing. The helper
+    // `0x4a00f0` gates the channel with `is-number-or-string` (`0x4a0105`), else
+    // `Usage: %s("channel")` with the verb's name (`0x844c7c`, `0x4a0112`); the string goes on
+    // as given, "" included, to `ParseChannelKey` (`0x4a014f`).
     for (verb, make) in [
         (
             "ListChannelByName",
@@ -581,9 +585,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     ] {
         g.set(
             verb,
-            lua.create_function(move |lua, name: Option<String>| match non_empty(name) {
-                Some(name) => submit(lua, make(name)),
-                None => Ok(()),
+            lua.create_function(move |lua, name: Value| {
+                let usage = format!(r#"Usage: {verb}("channel")"#);
+                let name = super::binding_abi::string_arg(lua, name, &usage)?;
+                submit(lua, make(name))
             })?,
         )?;
     }
@@ -593,7 +598,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, _ignored: MultiValue| submit(lua, ChannelCommand::ListAll))?,
     )?;
 
-    // The two-name verbs: (channel, player), or (channel, password) for the password.
+    // The two-name verbs: (channel, player), or (channel, password) for the password. The helper
+    // `0x4a04b0` gates both with `is-number-or-string` (`0x4a04c6`, `0x4a04da`), else
+    // `Usage: %s("channel", "name")` with the verb's name (`0x844cd0`, `0x4a0584`);
+    // `SetChannelPassword` is its own copy raising `0x844ca0` (`0x4a046b`). Both strings go on as
+    // given, untrimmed and "" included.
     for (verb, make) in [
         (
             "SetChannelOwner",
@@ -636,19 +645,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     ] {
         g.set(
             verb,
-            lua.create_function(
-                move |lua, (name, second): (Option<String>, Option<String>)| {
-                    if let Some(name) = non_empty(name) {
-                        // A password may be empty (`/password General` clears it); a player name
-                        // may not.
-                        let second = second.unwrap_or_default();
-                        if verb == "SetChannelPassword" || !second.trim().is_empty() {
-                            return submit(lua, make(name, second.trim().to_string()));
-                        }
-                    }
-                    Ok(())
-                },
-            )?,
+            lua.create_function(move |lua, (name, second): (Value, Value)| {
+                let usage = if verb == "SetChannelPassword" {
+                    r#"Usage: SetChannelPassword("name", "password")"#.to_string()
+                } else {
+                    format!(r#"Usage: {verb}("channel", "name")"#)
+                };
+                let name = super::binding_abi::string_arg(lua, name, &usage)?;
+                let second = super::binding_abi::string_arg(lua, second, &usage)?;
+                submit(lua, make(name, second))
+            })?,
         )?;
     }
 
@@ -780,7 +786,7 @@ mod command_tests {
     }
 
     #[test]
-    fn the_management_verbs_queue_in_call_order_and_drop_empty_names() {
+    fn the_management_verbs_queue_in_call_order_and_send_empty_names() {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
         s.run(
@@ -796,6 +802,10 @@ mod command_tests {
                 ChannelCommand::Leave {
                     name: "General".into(),
                 },
+                // "" is a string (`0x4a0105`) and goes on to `ParseChannelKey` (`0x4a014f`).
+                ChannelCommand::List {
+                    name: String::new()
+                },
                 ChannelCommand::ListAll,
                 ChannelCommand::SetPassword {
                     name: "General".into(),
@@ -804,6 +814,10 @@ mod command_tests {
                 ChannelCommand::Kick {
                     name: "General".into(),
                     player: "Bob".into()
+                },
+                ChannelCommand::Kick {
+                    name: "General".into(),
+                    player: String::new()
                 },
                 ChannelCommand::Moderate {
                     name: "General".into()
