@@ -462,6 +462,10 @@ pub(super) fn tick_script(
     mut pass: ResMut<super::UiPassState>,
     // The loading screen, whose layer hides the interface's from the frame pass.
     loading: Option<Res<crate::loading_screen::LoadingScreen>>,
+    // `widescreen`, which picks the aspect the interface's screen is built for.
+    widescreen: Option<Res<crate::video::Widescreen>>,
+    // The display size the display handler last ran for (`0x492e90`).
+    mut last_display: Local<Option<(u32, u32)>>,
 ) {
     let covered = loading.is_some_and(|l| l.hides_interface());
     hosted_vm.run(|script| {
@@ -478,7 +482,10 @@ pub(super) fn tick_script(
             booths.character.reset(0);
             return;
         };
-        let (w, h) = (window.width(), window.height());
+        // The interface's screen: the window's, or 4:3 and stretched across it
+        // ([`super::UiScreen`]).
+        let screen = super::UiScreen::of_window(window, widescreen.as_deref());
+        let h = screen.size.y;
         // The client's UI space is 768 units tall at every aspect (`f(screenH) = 768`, `0x41ad10`;
         // the caret's `H_px/192`, `0x77b8c0`), the dial being `UIParent`'s scale inside it. The VM
         // lives in it: quads scale ×s out, and the mouse and the measures ÷s in.
@@ -523,7 +530,7 @@ pub(super) fn tick_script(
         };
         {
             let _span = bevy::log::info_span!("ui_script: tick").entered();
-            let resized = script.set_window_size(w, h);
+            let resized = script.set_screen_aspect(screen.aspect);
             // The UI scale is `UIParent`'s, which only the in-game state has; the glue lays out on
             // the root alone (`0x46dd30`).
             if script.vm_kind() == benilla_ui::script::VmKind::InGame {
@@ -535,15 +542,19 @@ pub(super) fn tick_script(
                 // resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry`
                 // with it, because the window resizes freely and a reload on each resize would tear
                 // down every addon's state mid-play.
-                if resized {
-                    let display = (w.round() as u32, h.round() as u32);
+                // The handler runs on a display change (`0x492e90`), which with `widescreen` 0
+                // leaves the 4:3 cells as they were.
+                let display = screen.display();
+                let mut applied = false;
+                if resized || *last_display != Some(display) {
+                    *last_display = Some(display);
                     let mut none = None;
                     let cache = auto_cache.as_deref_mut().map_or(&mut none, |c| &mut c.0);
-                    script.apply_ui_scale(display, cache);
+                    applied = script.apply_ui_scale(display, cache);
                 }
                 let rescaled = script.set_ui_scale(ui_scale.0);
-                // Either re-runs what the interface computed from the old `GetScreenHeight()`.
-                if resized || rescaled {
+                // Any re-runs what the interface computed from the old `GetScreenHeight()`.
+                if resized || rescaled || applied {
                     super::manifest::on_screen_resized(script);
                 }
             } else if resized && script.vm_kind() == benilla_ui::script::VmKind::Glue {
@@ -663,11 +674,12 @@ pub(super) fn paint_script(
     mut font_atlas: Option<ResMut<UiFontAtlas>>,
     // The booth seam both ways: the bakes regions sample, and the pane aspects published back.
     mut booths: crate::portrait::BoothBridge,
-    // Capture mode (the cursor icon quad) and [`super::UiCostWanted`], tupled to stay inside
-    // Bevy's 16-parameter system limit.
+    // Capture mode (the cursor icon quad), [`super::UiCostWanted`] and `widescreen`, tupled to
+    // stay inside Bevy's 16-parameter system limit.
     run: (
         Option<Res<crate::run_mode::CaptureMode>>,
         Res<super::UiCostWanted>,
+        Option<Res<crate::video::Widescreen>>,
     ),
     // The `<Minimap>` widget slot, parked for `minimap::emit_minimap` to fill later in the frame.
     mut parked_minimap: ResMut<crate::minimap::MinimapWidget>,
@@ -683,7 +695,7 @@ pub(super) fn paint_script(
     let no_movies = super::movie::MovieScreen::default();
     let movies = movies.as_deref().unwrap_or(&no_movies);
     hosted_vm.run(|script| {
-        let (capture, ui_cost_wanted) = run;
+        let (capture, ui_cost_wanted, widescreen) = run;
         // Stand down with the tick half, which already cleared the booth panes.
         if !pass.live {
             return;
@@ -695,7 +707,8 @@ pub(super) fn paint_script(
         let Ok(window) = window.single() else {
             return;
         };
-        let (w, h) = (window.width(), window.height());
+        let screen = super::UiScreen::of_window(window, widescreen.as_deref());
+        let Vec2 { x: w, y: h } = screen.size;
         let (s, dpi) = (pass.seam, pass.dpi);
         let (us_tick, us_resolve) = (pass.us_tick, pass.us_resolve);
         let (solves_before, derives_before) = (Some(pass.solves_before), Some(pass.derives_before));
@@ -1077,7 +1090,9 @@ pub(super) fn paint_script(
                     Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
                 }
             });
-            if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
+            if let (Some(texture), Some(pos)) =
+                (texture, window.cursor_position().map(|p| screen.point(p)))
+            {
                 if let Some(handle) = assets
                     .as_mut()
                     .and_then(|a| a.sprite_texture(&texture, &mut images))
