@@ -563,7 +563,8 @@ pub(crate) enum StoneJoin {
 }
 
 /// The meeting stone's use slot `0x5f69d0`. With no local player it is silent (`0x5f69f8`);
-/// otherwise four refusals in this order, the first two only in a group (`0x5f6a10`):
+/// otherwise four refusals in this order, the first two only with party slot 1 set (`0x5f6a05`,
+/// `[0xbc6f48]`), never from the raid roster or the wire's member list:
 ///
 /// 1. not the leader (`0x5f6a2f`, the full 64-bit guid against `[0xbc75f8]`);
 /// 2. four other members (`0x5f6a4f`, `GetNumPartyMembers` at `0x4e86d0`);
@@ -581,12 +582,13 @@ pub(crate) fn meeting_stone_join_refusal(
     let (Some(self_guid), Some(level)) = (self_guid, level) else {
         return StoneJoin::Silent;
     };
-    let in_group = group.is_some_and(|g| g.in_group);
-    if in_group {
+    // The party slots alone: none after an ending (`0x4e84a0`), our own subgroup in a raid.
+    let party = group.map_or(0, |g| g.party_slots().count());
+    if party > 0 {
         if group.map(|g| g.leader) != Some(self_guid) {
             return StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER");
         }
-        if group.is_some_and(|g| g.members.len() >= MEETING_STONE_PARTY_CAP) {
+        if party >= MEETING_STONE_PARTY_CAP {
             return StoneJoin::Refuse("ERR_MEETING_STONE_GROUP_FULL");
         }
     }
@@ -1506,6 +1508,25 @@ mod tests {
             StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER")
         );
 
+        // The party terms read the party slots (`0x5f6a05`, `0x4e86d0`), not the wire's list: a
+        // raid leader with one other in their subgroup is not full, and the raid refuses.
+        let mut raid = party(ME, 6, 1);
+        for m in raid.members.iter_mut().skip(1) {
+            m.flags = 1;
+        }
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&raid), Some(ME), Some(40), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_NO_RAID_GROUP")
+        );
+        // After a leave or a kick the slots are empty and the leader cell 0: no party terms.
+        let mut ended = party(MATE, 2, 0);
+        ended.slots_emptied = true;
+        ended.leader = 0;
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&ended), Some(ME), Some(40), stone),
+            StoneJoin::Send
+        );
+
         // An uncached template reads 0/0 (`0x5f8150`) and refuses.
         assert_eq!(
             meeting_stone_join_refusal(None, Some(ME), Some(5), None),
@@ -1596,8 +1617,17 @@ mod tests {
         assert_eq!(joins(&rx), vec![STONE], "the clicked stone's own guid");
 
         // In a party led by someone else: the same click sends nothing.
-        app.world_mut().resource_mut::<GroupState>().in_group = true;
-        app.world_mut().resource_mut::<GroupState>().leader = MATE;
+        {
+            let mut group = app.world_mut().resource_mut::<GroupState>();
+            group.in_group = true;
+            group.leader = MATE;
+            group.members = vec![benilla_protocol::messages::GroupMemberEntry {
+                name: "Mate".into(),
+                guid: MATE,
+                status: 1,
+                flags: 0,
+            }];
+        }
         app.world_mut()
             .write_message(MeetingStoneUse { go_guid: STONE });
         app.update();
