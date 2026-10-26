@@ -3,7 +3,7 @@
 //! - [`sandbox`]: no filesystem, OS or native reach (`io`, `os`, `package`, `require`, `dofile`,
 //!   `loadfile`, `load`, `module`, `newproxy` and `debug` removed) and the reference's
 //!   `debugstack`.
-//! - [`install`]: the 1.12 bare globals (string, table and math aliases, the `debug*` family, the
+//! - [`install`]: the 1.12 bare globals the engine adds (the `debug*` family, the
 //!   error-handler pair), `time` and `date`.
 
 use mlua::{Lua, Value, Variadic};
@@ -79,7 +79,8 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Install the stdlib layer: the bare globals and `time`/`date`.
+/// Install the stdlib layer: the error handler, `time`/`date`, the profile verbs, the `debug*`
+/// stubs.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_error_handler(lua)?;
     install_time(lua)?;
@@ -124,24 +125,52 @@ fn install_profile(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// The handler `seterrorhandler` holds, `None` until one is given.
-pub(super) fn error_handler(lua: &Lua) -> Option<mlua::Function> {
-    lua.named_registry_value::<Option<mlua::Function>>(super::REG_ERRORHANDLER)
+/// The value `seterrorhandler` holds, `None` while the slot is -1 (no handler).
+pub(super) fn error_handler(lua: &Lua) -> Option<Value> {
+    lua.named_registry_value::<Value>(super::REG_ERRORHANDLER)
         .ok()
-        .flatten()
+        .filter(|v| !v.is_nil())
 }
 
-/// `seterrorhandler(f)` / `geterrorhandler()`, engine globals in 1.12 (`0x702900`, `0x702950`)
-/// over one registry reference, `[0x8722cc]`. It starts at -1 (`0x7039e0`), so `geterrorhandler()`
+/// Calls the held handler with the message. A function runs. Any other value is called as
+/// `lua_call` calls it (`0x703b6d`), so a number raises `attempt to call a number value`. A chunk
+/// that failed to compile calls the handler directly (`0x704b42`) and that is the text. A running
+/// call's error runs it as the pcall's error function (`0x703a5c`), whose own error runs it again
+/// (`luaG_errormsg`, `0x6fc780`) until `luaD_call` throws status 5 at depth 225 (`0x6f65cf`):
+/// `error in error handling`.
+pub(super) fn call_error_handler(
+    lua: &Lua,
+    handler: &Value,
+    arg: Value,
+    compile: bool,
+) -> mlua::Result<()> {
+    match handler {
+        Value::Function(f) => f.call(arg),
+        _ => lua.call_value::<()>(handler, arg).map_err(|e| {
+            if compile {
+                e
+            } else {
+                mlua::Error::RuntimeError("error in error handling".into())
+            }
+        }),
+    }
+}
+
+/// `seterrorhandler` / `geterrorhandler()`, engine globals in 1.12 (`0x702900`, `0x702950`) over
+/// one registry reference, `[0x8722cc]`. It starts at -1 (`0x7039e0`), so `geterrorhandler()`
 /// answers nil until something is set; in the running client FrameXML sets `_ERRORMESSAGE` first
-/// (`BasicControls.xml:16`), so every addon finds that. `seterrorhandler` takes a function alone
-/// and raises its `Usage:` on anything else, nil included, so the slot can never be cleared.
+/// (`BasicControls.xml:16`), so every addon finds that. `seterrorhandler` checks that argument 1 is
+/// a function (`0x702908`), then drops the old reference and takes a new one on the stack's top
+/// (`0x702930`): the last argument, whatever it is, and a nil there is -1 (`0x6f534a`), no handler.
 fn install_error_handler(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
     g.set(
         "seterrorhandler",
-        lua.create_function(|lua, f: Value| match f {
-            Value::Function(f) => lua.set_named_registry_value(super::REG_ERRORHANDLER, f),
+        lua.create_function(|lua, args: Variadic<Value>| match args.first() {
+            Some(Value::Function(_)) => {
+                let top = args.last().cloned().unwrap_or(Value::Nil);
+                lua.set_named_registry_value(super::REG_ERRORHANDLER, top)
+            }
             _ => Err(mlua::Error::RuntimeError(
                 "Usage: seterrorhandler(errfunc)".into(),
             )),
@@ -149,80 +178,22 @@ fn install_error_handler(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "geterrorhandler",
-        lua.create_function(|lua, ()| Ok(error_handler(lua)))?,
+        lua.create_function(|lua, ()| Ok(error_handler(lua).unwrap_or(Value::Nil)))?,
     )?;
     Ok(())
 }
 
 /// The stdlib layer in Lua, run once at construction.
 const WOW_STDLIB: &str = r#"
--- ── the bare string family ─────────────────────────────────────────────────────────────────────
--- Every name here is present in the REAL 1.12 client's global table — the in-world `_G` captured
--- from the running reference client (19,572 entries), which is the
--- authority this file answers to.
+-- ── the bare aliases are not here ──────────────────────────────────────────────────────────────
+-- The bare table, math and string names (`strlen`, `tinsert`, `sin`, `PI`, …) are the client's own
+-- start-up chunk, `compat.lua`, which `benilla_lua::new_state` runs; this file adds nothing to them.
 --
 -- `strmatch`, `strrev`, `gmatch`, `strlenutf8` and `strcmputf8i` come from Blizzard's *Era*
 -- enumeration, which a Classic Era addon may reach for. **None of them exist in
 -- 1.12** — `string.match`/`gmatch` are Lua 5.1 additions the 5.0 client never had — and Era is
 -- not our target. They stay out; adding a global the client does not have is how an addon that
 -- feature-detects gets sent down a path we cannot honour.
-strlen  = string.len
-strsub  = string.sub
-strupper = string.upper
-strlower = string.lower
-strrep  = string.rep
-strfind = string.find
-strbyte = string.byte
-strchar = string.char
-gsub    = string.gsub
-tinsert = table.insert
-tremove = table.remove
--- `getn`, `sort`, `foreach` and `foreachi` are bound by `lua50`, which owns the
--- 5.0 shapes of `table.getn`/`setn` and must not be shadowed by a second implementation here.
-
--- ── the bare math aliases (the same 1.12 global family; the reference FrameXML uses them
--- unqualified — WorldMapFrame's overlay pool calls ceil/mod, CooldownFrame floor, …). `mod` is
--- fmod under a 5.0-era name (stock 5.1 dropped math.mod).
-ceil  = math.ceil
-floor = math.floor
-abs   = math.abs
-max   = math.max
-min   = math.min
-sqrt  = math.sqrt
-mod   = math.mod        -- 5.0's name for fmod; `math.fmod` is removed by `lua50`
-random = math.random
--- `randomseed` is an ENGINE global in 1.12 exactly like `random` beside it (the captured `_G` types
--- both `function engine`), and it is the half that was missing: `IgniteStatus` calls it at file
--- scope in its OnLoad and dies on `attempt to call global 'randomseed'`. Seeding a PRNG is the one
--- thing an addon does that has no FrameXML counterpart to copy, so the bare name is all it has.
-randomseed = math.randomseed
--- `PI` is an ENGINE global in 1.12, not a FrameXML one: the reference reads it bare (UIParent.lua's
--- `elapsedTime * 2 * PI * ROTATIONS_PER_SECOND`, TabardFrame.lua l.61-68) and no shipped FrameXML
--- file ever assigns it (grepped over the whole 1.12 extraction) — so the client supplies it, here,
--- beside the rest of the bare math family.
-PI = math.pi
--- The 1.12 bare trig globals are DEGREE-based (the reference CombatText's fountain scroll calls
--- cos/sin with degree arguments); rad/deg ride along as the same family.
-function sin(d) return math.sin(math.rad(d)) end
-function cos(d) return math.cos(math.rad(d)) end
-rad = math.rad
-deg = math.deg
--- The rest of the bare math family, each verified present in the real 1.12 client's global
--- table (the captured `_G`).
--- `tan` and the inverses follow sin/cos into DEGREES — same family, same convention; that is
--- consistent-with the verified sin/cos finding rather than separately byte-verified, and it is
--- the convention every addon rotation helper assumes (`atan2` returning degrees is why
--- `atan2(dy, dx)` feeds a texture rotation directly).
-function tan(d) return math.tan(math.rad(d)) end
-function asin(x) return math.deg(math.asin(x)) end
-function acos(x) return math.deg(math.acos(x)) end
-function atan(x) return math.deg(math.atan(x)) end
-function atan2(y, x) return math.deg(math.atan2(y, x)) end
-exp = math.exp
-log = math.log
-log10 = math.log10
-frexp = math.frexp
-ldexp = math.ldexp
 
 -- ── the debug* family: six verified STUBS and two real ones ────────────────────────────────────
 --
@@ -257,9 +228,6 @@ end
 -- client too, or that define the name themselves under their own namespace.
 -- An addon reaching for one of these is reaching for a later client's API, and it should find
 -- what it would find there: nothing.
-
--- `format`, the bare `string.format`.
-format = string.format
 "#;
 
 /// `time([t])` and `date([format [, when]])`: 1.12 engine globals (`0x7035a0`, `0x7033a0`), Lua
