@@ -998,6 +998,25 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
             go.set_wire_state(state);
         }
     }
+    // `0x5ee990`'s helm and cloak arms re-dress the piece by its moved bit (`0x5eea45`-`0x5eea8e`),
+    // and the visible-item watch a slot by the flag (`0x5dee30` → `0x5df0de`): the watch covers the
+    // slot's whole 0x30 bytes (`0x5e2541`), so a creator or enchant move counts as the entry's.
+    if kind == ObjectType::Player {
+        if let Ok(mut pins) = sc.worn_pins.get_mut(e) {
+            for (index, old, new) in block.edges() {
+                if index == benilla_protocol::field::FIELD_PLAYER_FLAGS {
+                    pins.flags_moved(old ^ new);
+                }
+                for slot in [0u8, 14] {
+                    let first = benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR
+                        + 12 * u16::from(slot);
+                    if (first..first + 12).contains(&index) {
+                        pins.visible_moved(slot);
+                    }
+                }
+            }
+        }
+    }
     let me = sc.self_guid.0;
     let (names, index, stores, net) = (&sc.names, &sc.index, &sc.stores, &sc.net);
     let others = || {
@@ -1285,6 +1304,10 @@ fn display_changed(sc: &mut Scene, e: Entity, guid: u64, fields: &ObjectFields) 
         return;
     }
     held.0 = creatures.records_row(display);
+    // The body rebuilt (`0x60abe0`) dresses both pieces by the flag (`0x5ed802`, `0x5ed81a`).
+    if let Ok(mut pins) = sc.worn_pins.get_mut(e) {
+        pins.rebuilt();
+    }
     sc.names.ask_creature_record(guid, fields, &sc.net);
 }
 

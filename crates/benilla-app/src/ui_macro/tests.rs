@@ -500,13 +500,16 @@ fn a_save_writes_the_sorted_table_and_a_load_sorts_it_again() {
         script.eval::<String>("return GetMacroInfo(1)").unwrap(),
         "B"
     );
-    let mut app = App::new();
-    app.insert_resource(super::MacroFiles {
+    // The table read into this VM, as the load leaves it: a save writes only over a read file.
+    let mut files = super::MacroFiles {
         account: Some(account.clone()),
         ..Default::default()
-    })
-    .insert_non_send_resource(script)
-    .add_systems(Update, super::save_dirty_macros);
+    };
+    *files.identity.get(&script) = Some(("Realm".into(), "Probeone".into()));
+    let mut app = App::new();
+    app.insert_resource(files)
+        .insert_non_send_resource(script)
+        .add_systems(Update, super::save_dirty_macros);
     app.update();
 
     let text = std::fs::read_to_string(&account).unwrap();
@@ -974,7 +977,7 @@ fn macro_names(app: &bevy::prelude::App) -> Vec<String> {
 }
 
 /// A macro section the server's file replaced is read again into the VM that loaded the old
-/// file, as the reference's reader runs once the section lands (`0x5afd19`).
+/// file, as the reference's reader runs once the section lands (`0x5afd19`), merged into the table.
 #[test]
 fn a_macro_section_from_the_server_is_read_again() {
     let _l = ENV_LOCK
@@ -990,14 +993,80 @@ fn a_macro_section_from_the_server_is_read_again() {
     app.update();
     assert_eq!(macro_names(&app), ["Old"]);
 
-    crate::local_state::write_atomic(&account, "MACRO 1 \"New\" Ability_Ambush\nEND\n").unwrap();
+    crate::local_state::write_atomic(
+        &account,
+        "MACRO 1 \"New\" Ability_Ambush\nEND\nMACRO 2 \"Two\" Ability_Ambush\nEND\n",
+    )
+    .unwrap();
     app.update();
     assert_eq!(macro_names(&app), ["Old"], "loaded once per VM");
     app.world()
         .resource::<crate::account_data::AccountData>()
         .owe_reader_for_test(4);
     app.update();
-    assert_eq!(macro_names(&app), ["New"], "the server's file read again");
+    assert_eq!(
+        macro_names(&app),
+        ["Old", "Two"],
+        "the server's file merged: an id the table holds is kept (`0x4f0789`)"
+    );
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// The reader registers for each section through `0x5afe50` (`0x4f0a7c`, `0x4f0a8d`): a pending
+/// scope is not read, and nothing is saved over its file (`0x5afee0`); once its section settles
+/// (`0x5afaca`) its file merges into the table as it stands (`0x4f0600`), an id the table holds
+/// skipped (`0x4f0789`), and each scope on its own.
+#[test]
+fn the_macro_reader_reads_each_scope_as_its_section_settles() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = std::env::temp_dir().join(format!("benilla-macros-held-{}", std::process::id()));
+    std::fs::remove_dir_all(&tmp).ok();
+    let _c = EnvGuard::unset("WOW_CAPTURE");
+    let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+    let account = crate::local_state::macros_account_path().unwrap();
+    let mine = "MACRO 1 \"Mine\" Ability_Ambush\nEND\nMACRO 2 \"Two\" Ability_Ambush\nEND\n";
+    crate::local_state::write_atomic(&account, mine).unwrap();
+    let character = crate::local_state::macros_character_path("Realm", "Probeone").unwrap();
+    crate::local_state::write_atomic(&character, "MACRO 16777217 \"Alt\" X\nEND\n").unwrap();
+    let mut script = UiScript::new().unwrap();
+    script.set_macro_icons(vec!["Interface\\Icons\\Ability_Ambush".into()]);
+    let mut app = file_app(script);
+    app.world()
+        .resource::<crate::account_data::AccountData>()
+        .pend_for_test();
+    app.update();
+    assert!(macro_names(&app).is_empty(), "pending: the reader is held");
+    app.world()
+        .non_send_resource::<UiScript>()
+        .run(r#"CreateMacro("Hi", 1, "/say hi")"#)
+        .unwrap();
+    app.update();
+    assert_eq!(
+        std::fs::read_to_string(&account).unwrap(),
+        mine,
+        "a held scope is not saved over its file"
+    );
+    let settle = |app: &bevy::prelude::App, section| {
+        app.world()
+            .resource::<crate::account_data::AccountData>()
+            .settle_section_for_test(section)
+    };
+    settle(&app, 4);
+    app.update();
+    assert_eq!(
+        macro_names(&app),
+        ["Hi", "Two"],
+        "the account scope merged: \"Hi\" keeps id 1, so the file's 1 is skipped"
+    );
+    settle(&app, 5);
+    app.update();
+    assert_eq!(
+        macro_names(&app),
+        ["Hi", "Two", "Alt"],
+        "then the character's"
+    );
     std::fs::remove_dir_all(&tmp).ok();
 }
 
