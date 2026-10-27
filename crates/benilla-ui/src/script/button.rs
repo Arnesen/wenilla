@@ -330,8 +330,44 @@ fn with_button_shown(
 /// region in that layer goes dark, not only the HighlightTexture. `Enable()` here turns it back
 /// on; the reference restores it only on a hovered button, by re-running its `<OnEnter>`
 /// (`0x779183`), and never while `LockHighlight` holds (`[frame+0xf8]`).
+///
+/// On the hovered frame (`[[this+0xa0]+0x7c]`, `0x7791a3`, `0x779189`) a change runs the leave
+/// notify with 1 (`0x7791b4`) first, while the state still enables it, and the enter notify
+/// (`0x779192`) after the state is set, so the button's `OnLeave` and `OnEnter` fire for it; the
+/// hover itself does not move. A call that changes nothing returns at once (`0x779175`,
+/// `0x77919c`).
 fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
+    let hovered_change = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let frame = model
+            .arena
+            .frame(h)
+            .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+        match &frame.kind_state {
+            KindState::Button(bs) => (bs.enabled() != on && model.mouseover == Some(h))
+                .then(|| model.frame_to_id.get(&h).copied())
+                .flatten(),
+            _ => return Err(mlua::Error::runtime("not a Button")),
+        }
+    };
+    if let (Some(id), false) = (hovered_change, on) {
+        super::mouseover::leave(lua, h, Some(id));
+        // The notify's argument 1 clears the drag arm (`0x76b725`).
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        if model.drag.as_ref().is_some_and(|d| d.source == h) {
+            model.drag = None;
+        }
+    }
+    apply_enabled(lua, h, on)?;
+    if let (Some(id), true) = (hovered_change, on) {
+        super::mouseover::enter(lua, h, id);
+    }
+    Ok(())
+}
+
+/// [`set_enabled`]'s state and layer write, under one borrow.
+fn apply_enabled(lua: &Lua, h: FrameHandle, on: bool) -> mlua::Result<()> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let frame = model
         .arena
@@ -370,7 +406,9 @@ pub(super) fn edge(
 
 /// Whether a hover edge on `h` reaches the base notify, the HIGHLIGHT layer and the Lua
 /// `<OnEnter>`/`<OnLeave>`: `OnEnter`/`OnLeave` (`0x779490`/`0x7794e0`) skip it on a DISABLED
-/// Button, leaving only the hover sound (`0x7794b0`). Every hover path goes through that pair
+/// Button. The tail they still run (`0x7794b0`) calls a C++ listener at `+0x31c`, which the constructor
+/// zeroes (`0x7786be`) and whose only setter `0x779760` nothing references, so no hover sound plays.
+/// Every hover path goes through that pair
 /// (the hover walk `0x766218`, `SetMouseFocus` `0x764dc0`, the hide tail `0x764cce`), and the
 /// Hyperlink and NamePlate overrides chain back (`0x7cb8a5`). The hover target still moves, so
 /// `GetMouseFocus()` answers a disabled button.

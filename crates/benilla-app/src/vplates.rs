@@ -354,6 +354,7 @@ fn drive_vplates(
     mut vm: crate::script_calls::VmWith<PlateWorld<'static, 'static>>,
     mut plates: ResMut<VPlates>,
     mut plate_clicks: ResMut<PlateClicks>,
+    mut flashes: ResMut<PlateFlashes>,
     rig: Res<crate::player::CameraControl>,
     names: Res<NameCache>,
     spells: Option<Res<crate::ui_action::Spells>>,
@@ -710,6 +711,7 @@ fn drive_vplates(
             states,
         )
     });
+    let flashes = std::mem::take(&mut flashes.0);
     vm.run(|script| {
         let Some(script) = script else {
             return;
@@ -717,6 +719,10 @@ fn drive_vplates(
         match step {
             PlateStep::Retire => script.retire_nameplates(),
             PlateStep::Sync(geometry, states) => script.sync_nameplates(geometry, &states),
+        }
+        // After the sync, so a plate bound this frame is a hit's to flash.
+        for guid in flashes {
+            script.flash_nameplate(guid);
         }
     });
 }
@@ -738,6 +744,28 @@ enum PlateStep {
     Sync(PlateGeometry, Vec<PlateState>),
 }
 
+/// The units hit since the plate driver last ran, whose plates flash their names red for 5 s
+/// (`FlashNamePlate`, `0x6122e0`): the combat log's direct spell hit (`0x62cd80` at `0x62ce43`)
+/// and environmental damage (`0x62aac0` at `0x62abac`) push here, and [`flash_on_health_loss`]
+/// the health drops (`0x6046f0` at `0x604764`). The driver hands them to the widgets.
+#[derive(Resource, Default)]
+pub(crate) struct PlateFlashes(pub(crate) Vec<u64>);
+
+/// Queue every unit-block `UNIT_FIELD_HEALTH` edge whose old value is above the new, compared
+/// signed (`0x6046f0`: `cmp edi,[health]` at `0x60475d`, `jle` at `0x604760` skips).
+fn flash_on_health_loss(
+    mut edges: MessageReader<crate::net::FieldChanged>,
+    mut flashes: ResMut<PlateFlashes>,
+) {
+    flashes.0.extend(
+        edges
+            .read()
+            .filter(|e| e.unit_field(benilla_protocol::field::FIELD_UNIT_HEALTH))
+            .filter(|e| e.old as i32 > e.new as i32)
+            .map(|e| e.guid),
+    );
+}
+
 /// The plate driver's set; the overhead-name driver runs after it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct VPlateSet;
@@ -751,12 +779,16 @@ impl Plugin for VPlatesPlugin {
             .init_resource::<VPlates>()
             .init_resource::<PlateHover>()
             .init_resource::<PlateClicks>()
+            .init_resource::<PlateFlashes>()
             .add_systems(
                 Update,
-                // After the targeting chain, itself after `WorldStage::Input`, so this projects
-                // through this frame's camera; `ui_script::extract::paint_script` runs after it,
-                // so the plates paint the same frame.
-                drive_vplates.after(TargetUpdate).in_set(VPlateSet),
+                (
+                    // After the targeting chain, itself after `WorldStage::Input`, so this projects
+                    // through this frame's camera; `ui_script::extract::paint_script` runs after
+                    // it, so the plates paint the same frame.
+                    drive_vplates.after(TargetUpdate).in_set(VPlateSet),
+                    flash_on_health_loss.before(VPlateSet),
+                ),
             );
     }
 }
@@ -1019,6 +1051,116 @@ mod tests {
             None,
             "an entry of 0 is off, whatever its spelling"
         );
+    }
+
+    /// The driver's hand-over of the queued hits: what [`drive_vplates`] does with them.
+    fn hand_over(app: &mut App) {
+        let guids = std::mem::take(&mut app.world_mut().resource_mut::<PlateFlashes>().0);
+        let mut script = app
+            .world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        for guid in guids {
+            script.flash_nameplate(guid);
+        }
+    }
+
+    /// A plate's name goes red for a unit whose health fell (`0x6046f0` at `0x604764`, old above
+    /// new, signed) or that a combat-log hit named ([`PlateFlashes`]); a rise, a unit-less field and
+    /// a unit with no plate flash nothing.
+    #[test]
+    fn a_health_drop_or_a_logged_hit_flashes_the_units_plate() {
+        use benilla_protocol::field::FIELD_UNIT_HEALTH;
+        use benilla_protocol::messages::ObjectType;
+        const WOLF: u64 = 0x1001;
+        const BEAR: u64 = 0x1002;
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        script
+            .run(
+                r#"NAMEPLATE_FONT = "Fonts\FRIZQT__.TTF"
+                WorldFrame = CreateFrame("WorldFrame", "WorldFrame") WorldFrame:SetAllPoints()"#,
+            )
+            .unwrap();
+        let state = |key| PlateState {
+            key,
+            top_centre: (500.0, 400.0),
+            health: 30.0,
+            max_health: 40.0,
+            bar_colour: [1.0, 0.0, 0.0],
+            name: "Wolf".into(),
+            level: Some(12),
+            skull: false,
+            level_colour: [1.0, 1.0, 0.0],
+            raid_icon: None,
+            alpha: 255,
+            lit: false,
+            hovered: false,
+        };
+        let geometry = PlateGeometry {
+            width: 128.0,
+            height: 32.0,
+            bar_off_x: 4.0,
+            bar_off_y: 4.0,
+            bar_width: 103.0,
+            bar_height: 9.0,
+            level_off_x: 11.8,
+            level_off_y: 9.1,
+            skull_size: 12.8,
+            raid_size: 25.6,
+            name_height: 12.8,
+            level_height: 11.0,
+            shadow_offset: 1.0,
+        };
+        script.sync_nameplates(geometry, &[state(WOLF), state(BEAR)]);
+        let mut app = App::new();
+        app.add_message::<crate::net::FieldChanged>()
+            .init_resource::<PlateFlashes>()
+            .insert_non_send_resource(script)
+            .add_systems(Update, flash_on_health_loss);
+        let colour = |app: &App, plate: u32| {
+            app.world()
+                .non_send_resource::<benilla_ui::script::UiScript>()
+                .eval::<f64>(&format!(
+                    "local children = {{ WorldFrame:GetChildren() }} \
+                     local _, _, name = children[{plate}]:GetRegions() \
+                     local r, g, b = name:GetTextColor() return g"
+                ))
+                .map(|g| g.round())
+                .unwrap()
+        };
+        let edge = |guid, index, old, new| crate::net::FieldChanged {
+            at: crate::lanes::stamp(),
+            entity: Entity::PLACEHOLDER,
+            guid,
+            kind: ObjectType::Unit,
+            index,
+            old,
+            new,
+        };
+        // Both plates read white: green is 1.
+        assert_eq!((colour(&app, 1), colour(&app, 2)), (1.0, 1.0));
+
+        // A rise (signed: -16 to 5 is one), and a drop on a field that is not the health: nothing.
+        app.world_mut()
+            .write_message(edge(WOLF, FIELD_UNIT_HEALTH, 10, 20));
+        app.world_mut()
+            .write_message(edge(WOLF, FIELD_UNIT_HEALTH, 0xFFFF_FFF0, 5));
+        app.world_mut()
+            .write_message(edge(WOLF, FIELD_UNIT_HEALTH + 1, 20, 10));
+        app.update();
+        hand_over(&mut app);
+        assert_eq!(colour(&app, 1), 1.0);
+
+        // A drop flashes the wolf's plate alone, red having no green.
+        app.world_mut()
+            .write_message(edge(WOLF, FIELD_UNIT_HEALTH, 20, 10));
+        app.update();
+        hand_over(&mut app);
+        assert_eq!((colour(&app, 1), colour(&app, 2)), (0.0, 1.0));
+
+        // A logged hit names the bear; a unit with no plate is ignored.
+        app.world_mut().resource_mut::<PlateFlashes>().0 = vec![0x9999, BEAR];
+        hand_over(&mut app);
+        assert_eq!((colour(&app, 1), colour(&app, 2)), (0.0, 0.0));
     }
 
     #[test]

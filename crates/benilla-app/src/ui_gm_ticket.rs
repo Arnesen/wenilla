@@ -8,8 +8,9 @@
 //! (`GMTicketHandler.cpp:91,106-113`), and a third `CMSG_GMTICKET_UPDATETEXT` in one world tick
 //! trips its anti-flood kick (`WorldSession.cpp:1316-1342`).
 //!
-//! `GMSURVEY_DISPLAY` is not fired: vmangos never sends its trigger, `SMSG_GM_TICKET_STATUS_UPDATE`
-//! status 3, and the survey window (`Blizzard_GMSurveyUI`) is not built.
+//! `SMSG_GM_TICKET_STATUS_UPDATE` is cmangos's; vmangos never sends it. Its status 2 fires the
+//! no-ticket `UPDATE_TICKET` and status 3 `GMSURVEY_DISPLAY`, which `HelpFrame` hears
+//! (`HelpFrame.xml:744`, `HelpFrame.lua:391`).
 
 use benilla_ui::script::{GmTicketIntent, GmTicketWrite, ScriptValue, UnservedSend};
 use bevy::prelude::*;
@@ -18,6 +19,7 @@ use benilla_assets::coords::bevy_to_wow;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
+use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_dialog_verbs::DialogLane;
 use crate::ui_script::{UiFeed, VmMemo};
 
@@ -90,19 +92,31 @@ fn feed_gm_ticket(
 }
 
 /// `SMSG_GMTICKET_GETTICKET`'s `UPDATE_TICKET` (`0x5e4527`), fired for every answer, an unchanged
-/// one too, as the window re-polls `GetGMTicket()` every 10 minutes.
-fn ticket_answer(lane: &mut DialogLane, ticket: Option<&benilla_protocol::messages::GmTicket>) {
+/// one too, as the window re-polls `GetGMTicket()` every 10 minutes. Status 0 shows
+/// `ERR_TICKET_DB_ERROR` first (`0x5e44fb`-`0x5e4509`), then the no-ticket answer like any other
+/// status but 6.
+fn ticket_answer(
+    lane: &mut DialogLane,
+    errors: &UiErrorKeys,
+    status: u32,
+    ticket: Option<&benilla_protocol::messages::GmTicket>,
+) {
+    if status == 0 {
+        errors.push(UiError::key("ERR_TICKET_DB_ERROR"));
+    }
     lane.event("UPDATE_TICKET", update_ticket_args(ticket));
 }
 
-/// `SMSG_GMTICKET_DELETETICKET`'s result 9 (`0x5e4606`): `UPDATE_TICKET` with `%d%s`, 0 and `""`
-/// (`0x5e461d`).
-fn deleted(lane: &mut DialogLane, code: u32) {
+/// `SMSG_GMTICKET_DELETETICKET` (`0x5e4606`): result 9 fires `UPDATE_TICKET` with `%d%s`, 0 and
+/// `""` (`0x5e461d`); any other result shows `ERR_TICKET_DB_ERROR` (`0x5e4635`).
+fn deleted(lane: &mut DialogLane, errors: &UiErrorKeys, code: u32) {
     if code == 9 {
         lane.event(
             "UPDATE_TICKET",
             vec![ScriptValue::Int(0), ScriptValue::Str(String::new())],
         );
+    } else {
+        errors.push(UiError::key("ERR_TICKET_DB_ERROR"));
     }
 }
 
@@ -118,22 +132,50 @@ fn status_answer(lane: &mut DialogLane, status: i32) {
 
 /// `UPDATE_TICKET`'s arguments: category, text, the three day figures, assigned, opened. The wire
 /// has the text first and the reference's handler reorders as it fires, so the decoder keeps wire
-/// order. No ticket is a single `0`: `HelpFrameOpenTicket_OnEvent` tests `arg1 and arg1 ~= 0`
-/// (`HelpFrame.lua:403`), and its else branch resets the form (`:468-475`).
+/// order. `HelpFrameOpenTicket_OnEvent` tests `arg1 and arg1 ~= 0` (`HelpFrame.lua:403`), and its
+/// else branch resets the form (`:468-475`).
 fn update_ticket_args(ticket: Option<&benilla_protocol::messages::GmTicket>) -> Vec<ScriptValue> {
     let Some(t) = ticket else {
-        return vec![ScriptValue::Int(0)];
+        return no_ticket_args();
     };
     vec![
         ScriptValue::Int(i64::from(t.category)),
         ScriptValue::Str(t.text.clone()),
-        // Days, unclamped: a negative figure is the server's "unknown", which the window shows as
-        // `GM_TICKET_UNAVAILABLE` (`HelpFrame.lua:442`).
-        ScriptValue::Number(f64::from(t.ticket_age)),
+        // The first figure, below 0 stored as 0, NaN and -0 passing (`0x5e4568`-`0x5e4578`: a
+        // `fcomp` against 0.0, then `jp` over the store); it is `ticket_age`, which the window
+        // subtracts from the wait estimate. The other two stay signed: a negative is the server's
+        // "unknown", shown as `GM_TICKET_UNAVAILABLE` (`HelpFrame.lua:442`).
+        ScriptValue::Number(f64::from(if t.ticket_age < 0.0 {
+            0.0
+        } else {
+            t.ticket_age
+        })),
         ScriptValue::Number(f64::from(t.oldest_ticket_age)),
         ScriptValue::Number(f64::from(t.update_time)),
         ScriptValue::Int(i64::from(t.assigned_to_gm)),
         ScriptValue::Int(i64::from(t.opened_by_gm)),
+    ]
+}
+
+/// The no-ticket `UPDATE_TICKET` (`0x5e450c`, `0x5e7945`): seven dwords 0, `""`, -1, -1, -1, 0, 0
+/// under the format `%d%s%f%f%f%d%d` (`0x8603e4`), which reads ten. A `%f` takes eight bytes
+/// (`fld qword` at `0x704fe3`), so arg3 is `0xFFFFFFFFFFFFFFFF`, a NaN, and arg4
+/// `0x00000000FFFFFFFF`, a denormal; the bits are kept, so `tostring` reads `-1.#QNAN`. Arg5's
+/// high half and both `%d` are read from past the pushed arguments: on the fetch path (esp at
+/// `0x5e450c`) the handler's saved edi, saved esi and its local `[ebp-0x9b8]`, on status 2
+/// (`0x5e7945`) the saved ebp, the return address into the dispatcher and the handler's first
+/// argument.
+///
+/// Deviation: those three are stack residue, so benilla sends 0 for each.
+fn no_ticket_args() -> Vec<ScriptValue> {
+    vec![
+        ScriptValue::Int(0),
+        ScriptValue::Str(String::new()),
+        ScriptValue::Number(f64::from_bits(u64::MAX)),
+        ScriptValue::Number(f64::from_bits(0xFFFF_FFFF)),
+        ScriptValue::Number(0.0),
+        ScriptValue::Int(0),
+        ScriptValue::Int(0),
     ]
 }
 
@@ -312,7 +354,7 @@ pub(crate) mod net {
 
     use crate::net::NetHandlerApp;
 
-    use super::{DialogLane, GmTicketState};
+    use super::{DialogLane, GmTicketState, UiError, UiErrorKeys};
 
     /// Register the ticket's handlers, called from [`super::UiGmTicketPlugin`].
     pub(super) fn register(app: &mut App) {
@@ -328,9 +370,9 @@ pub(crate) mod net {
 
     /// Every GETTICKET answer, asked for or pushed after a GM's `.ticket` command
     /// (`GMTicketMgr.cpp:153-159`): the wire does not tell them apart.
-    fn on_ticket(In(ev): In<SessionEvent>, mut lane: ResMut<DialogLane>) {
-        if let SessionEvent::GmTicket { ticket } = ev {
-            super::ticket_answer(&mut lane, ticket.as_deref());
+    fn on_ticket(In(ev): In<SessionEvent>, mut lane: ResMut<DialogLane>, errors: Res<UiErrorKeys>) {
+        if let SessionEvent::GmTicket { status, ticket } = ev {
+            super::ticket_answer(&mut lane, &errors, status, ticket.as_deref());
         }
     }
 
@@ -341,31 +383,42 @@ pub(crate) mod net {
     }
 
     /// `SMSG_GM_TICKET_STATUS_UPDATE`, which vmangos never sends; cmangos does, so it is parsed.
-    fn on_status_update(In(ev): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+    fn on_status_update(
+        In(ev): In<SessionEvent>,
+        mut ticket: ResMut<GmTicketState>,
+        mut lane: ResMut<DialogLane>,
+    ) {
         if let SessionEvent::GmTicketStatusUpdate { status } = ev {
-            status_update(status, &mut ticket);
+            status_update(status, &mut ticket, &mut lane);
         }
     }
 
     /// The create and update responses, which no 1.12 FrameXML handler reads.
-    fn on_written(In(ev): In<SessionEvent>, mut ticket: ResMut<GmTicketState>) {
+    fn on_written(
+        In(ev): In<SessionEvent>,
+        mut ticket: ResMut<GmTicketState>,
+        errors: Res<UiErrorKeys>,
+    ) {
         match ev {
-            SessionEvent::GmTicketCreated { response } => {
-                write_response("create", response, 2, &mut ticket)
-            }
-            SessionEvent::GmTicketUpdated { response } => {
-                write_response("update", response, 4, &mut ticket)
+            SessionEvent::GmTicketCreated { response }
+            | SessionEvent::GmTicketUpdated { response } => {
+                write_response(response, &mut ticket, &errors)
             }
             _ => {}
         }
     }
 
     /// `SMSG_GMTICKET_DELETETICKET` (`0x5e4606`): result 9, deleted, signals `UPDATE_TICKET`
-    /// with `%d%s` over 0 and `""` (`0x5e461d`), the window's no-ticket answer.
-    fn on_deleted(In(ev): In<SessionEvent>, mut lane: ResMut<DialogLane>) {
+    /// with `%d%s` over 0 and `""` (`0x5e461d`), the window's no-ticket answer; any other result
+    /// shows `ERR_TICKET_DB_ERROR`.
+    fn on_deleted(
+        In(ev): In<SessionEvent>,
+        mut lane: ResMut<DialogLane>,
+        errors: Res<UiErrorKeys>,
+    ) {
         if let SessionEvent::GmTicketDeleted { response: code } = ev {
-            response("delete", code);
-            super::deleted(&mut lane, code);
+            debug!("gm ticket: delete answered {code}");
+            super::deleted(&mut lane, &errors, code);
         }
     }
 
@@ -374,43 +427,44 @@ pub(crate) mod net {
         ticket.clear_session();
     }
 
-    /// `SMSG_GMTICKET_CREATE` 2 (created) and `SMSG_GMTICKET_UPDATETEXT` 4 (saved) re-ask for the
-    /// ticket, as the reference engine does at `0x5e4479`. Other codes are logged only: which
-    /// `ERR_TICKET_*` string the reference shows for each is untraced.
+    /// `SMSG_GMTICKET_CREATE` and `SMSG_GMTICKET_UPDATETEXT` share one arm of `0x5e38c0`
+    /// (`0x5e4432`, table `0x5e4d30`): 2 and 4 re-ask for the ticket (`0x5e4479`), 1 shows
+    /// `ERR_TICKET_ALREADY_EXISTS` (`0x5e448e`), 3 `ERR_TICKET_CREATE_ERROR` (`0x5e44ab`), 5
+    /// `ERR_TICKET_UPDATE_ERROR` (`0x5e44c8`), whichever opcode carried the code; others do nothing.
     pub(crate) fn write_response(
-        what: &str,
         response: u32,
-        success: u32,
         ticket: &mut super::GmTicketState,
+        errors: &UiErrorKeys,
     ) {
-        if response == success {
-            debug!("gm ticket: {what} landed ({response}) — re-asking for the ticket");
-            ticket.note_write_landed();
-        } else {
-            debug!("gm ticket: {what} answered {response}");
+        match response {
+            2 | 4 => {
+                debug!("gm ticket: write landed ({response}) — re-asking for the ticket");
+                ticket.note_write_landed();
+            }
+            1 => errors.push(UiError::key("ERR_TICKET_ALREADY_EXISTS")),
+            3 => errors.push(UiError::key("ERR_TICKET_CREATE_ERROR")),
+            5 => errors.push(UiError::key("ERR_TICKET_UPDATE_ERROR")),
+            other => debug!("gm ticket: write answered {other}"),
         }
     }
 
-    /// `SMSG_GM_TICKET_STATUS_UPDATE`: 1 (updated) re-asks, the reference's `0x5e7932`; 2 (closed)
-    /// shows on the next poll; 3 (survey offered) is logged, as the survey window is not built.
-    pub(crate) fn status_update(status: u32, ticket: &mut super::GmTicketState) {
+    /// `SMSG_GM_TICKET_STATUS_UPDATE` (`0x5e78f0`): 1 (updated) re-asks, `0x5e7932`; 2 (closed)
+    /// fires the no-ticket `UPDATE_TICKET` at once, `0x5e7945`-`0x5e7960`; 3 (survey offered)
+    /// fires `GMSURVEY_DISPLAY`, event 0x21a with no arguments (`0x5e7976`); others do nothing.
+    pub(crate) fn status_update(
+        status: u32,
+        ticket: &mut super::GmTicketState,
+        lane: &mut DialogLane,
+    ) {
         match status {
             1 => {
                 debug!("gm ticket: a GM updated the ticket — re-asking");
                 ticket.note_write_landed();
             }
-            2 => debug!("gm ticket: a GM closed the ticket"),
-            3 => {
-                debug!("gm ticket: a GM survey was offered — the survey window is deferred")
-            }
+            2 => lane.event("UPDATE_TICKET", super::update_ticket_args(None)),
+            3 => lane.event("GMSURVEY_DISPLAY", Vec::new()),
             other => debug!("gm ticket: unknown status update {other}"),
         }
-    }
-
-    /// `SMSG_GMTICKET_DELETETICKET`: logged only, as the reference's `0x5e4479` re-asks on create
-    /// and update alone.
-    pub(crate) fn response(what: &str, response: u32) {
-        debug!("gm ticket: {what} answered {response}");
     }
 }
 
@@ -579,10 +633,42 @@ mod tests {
         assert_eq!(args[6], ScriptValue::Int(1), "arg7 openedByGM");
     }
 
-    /// The window's form reset hangs on `arg1 and arg1 ~= 0`.
+    /// The window's form reset hangs on `arg1 and arg1 ~= 0`; an addon reads the reference's
+    /// seven arguments, the floats as the format `%d%s%f%f%f%d%d` reads the pushed dwords.
     #[test]
-    fn the_no_ticket_answer_is_a_single_zero() {
-        assert_eq!(update_ticket_args(None), vec![ScriptValue::Int(0)]);
+    fn the_no_ticket_answer_carries_the_references_seven_arguments() {
+        let args = update_ticket_args(None);
+        assert_eq!(args.len(), 7);
+        assert_eq!(args[0], ScriptValue::Int(0));
+        assert_eq!(args[1], ScriptValue::Str(String::new()));
+        let float = |i: usize| match args[i] {
+            ScriptValue::Number(n) => n,
+            ref other => panic!("arg{} is {other:?}", i + 1),
+        };
+        assert_eq!(float(2).to_bits(), u64::MAX, "(-1, -1) read as one double");
+        assert_eq!(
+            float(3).to_bits(),
+            0xFFFF_FFFF,
+            "(-1, 0) read as one double"
+        );
+    }
+
+    /// `0x5e4568`: a negative first figure is stored as 0; NaN and -0 pass, the others untouched.
+    #[test]
+    fn a_negative_ticket_age_reaches_lua_as_zero() {
+        let age = |v: f32| {
+            let mut t = ticket();
+            t.ticket_age = v;
+            match update_ticket_args(Some(&t))[2] {
+                ScriptValue::Number(n) => n,
+                ref other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(age(-3.5), 0.0);
+        assert_eq!(age(-3.5).to_bits(), 0.0f64.to_bits(), "+0, not -0");
+        assert!(age(f32::NAN).is_nan());
+        assert_eq!(age(-0.0).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(age(2.0), 2.0);
     }
 
     /// The window's `arg4 < 0 or arg5 < 0` test shows "unavailable".
@@ -601,33 +687,82 @@ mod tests {
     fn each_answer_signals_its_update_ticket() {
         let t = ticket();
         let mut lane = DialogLane::default();
+        let errors = UiErrorKeys::default();
         for _ in 0..2 {
-            ticket_answer(&mut lane, Some(&t));
+            ticket_answer(&mut lane, &errors, 6, Some(&t));
         }
-        ticket_answer(&mut lane, None);
-        let ticket = |args| DialogSignal::Event("UPDATE_TICKET".into(), args);
-        assert_eq!(
-            lane.take(),
-            [
-                ticket(update_ticket_args(Some(&t))),
-                ticket(update_ticket_args(Some(&t))),
-                ticket(vec![ScriptValue::Int(0)]),
-            ]
-        );
+        ticket_answer(&mut lane, &errors, 10, None);
+        // The no-ticket answer carries a NaN, which never equals itself: compare its shape.
+        let signals = lane.take();
+        let [first, second, none] = signals.as_slice() else {
+            panic!("{signals:?}");
+        };
+        let ticket = DialogSignal::Event("UPDATE_TICKET".into(), update_ticket_args(Some(&t)));
+        assert_eq!((first, second), (&ticket, &ticket));
+        let DialogSignal::Event(name, args) = none else {
+            panic!("{none:?}");
+        };
+        assert_eq!((name.as_str(), args.len()), ("UPDATE_TICKET", 7));
     }
 
     /// The reference's `0x5e4479` re-ask; a refusal has nothing new to fetch.
     #[test]
     fn a_landed_write_makes_the_engine_reask_and_a_refused_one_does_not() {
         let mut state = GmTicketState::default();
-        net::write_response("create", 2, 2, &mut state);
-        net::write_response("update", 4, 4, &mut state);
+        let errors = UiErrorKeys::default();
+        // One arm serves both opcodes: 2 and 4 re-ask whichever carried them.
+        net::write_response(2, &mut state, &errors);
+        net::write_response(4, &mut state, &errors);
         assert_eq!(state.take_reasks(), 2, "one re-ask per landed write");
         assert_eq!(state.take_reasks(), 0, "drained means drained");
+        assert!(errors.is_empty(), "a landed write shows no error");
 
-        net::write_response("create", 3, 2, &mut state); // CREATE_ERROR
-        net::write_response("update", 5, 4, &mut state); // UPDATE_ERROR
+        for refused in [1, 3, 5] {
+            net::write_response(refused, &mut state, &errors);
+        }
         assert_eq!(state.take_reasks(), 0, "a refusal has nothing to fetch");
+    }
+
+    fn keys(errors: &UiErrorKeys) -> Vec<&'static str> {
+        errors.take().into_iter().map(|e| e.key).collect()
+    }
+
+    /// The shared arm `0x5e4432` shows 1, 3 and 5 as `ERR_TICKET_ALREADY_EXISTS`,
+    /// `ERR_TICKET_CREATE_ERROR` and `ERR_TICKET_UPDATE_ERROR` (table `0x5e4d30`); every other
+    /// code is silent.
+    #[test]
+    fn a_refused_ticket_write_shows_its_error() {
+        let mut state = GmTicketState::default();
+        let errors = UiErrorKeys::default();
+        for code in [0, 1, 2, 3, 4, 5, 6, 9, 10] {
+            net::write_response(code, &mut state, &errors);
+        }
+        assert_eq!(
+            keys(&errors),
+            [
+                "ERR_TICKET_ALREADY_EXISTS",
+                "ERR_TICKET_CREATE_ERROR",
+                "ERR_TICKET_UPDATE_ERROR"
+            ]
+        );
+    }
+
+    /// `0x5e44fb`: status 0 shows `ERR_TICKET_DB_ERROR` before the no-ticket event; the other
+    /// non-6 statuses fire the event alone.
+    #[test]
+    fn a_ticket_fetch_status_zero_shows_the_db_error() {
+        let mut lane = DialogLane::default();
+        let errors = UiErrorKeys::default();
+        ticket_answer(&mut lane, &errors, 0, None);
+        assert_eq!(keys(&errors), ["ERR_TICKET_DB_ERROR"]);
+        assert_eq!(lane.take().len(), 1, "the no-ticket event follows");
+        for status in [10, 1, 7] {
+            ticket_answer(&mut lane, &errors, status, None);
+        }
+        assert!(errors.is_empty());
+        let t = ticket();
+        ticket_answer(&mut lane, &errors, 6, Some(&t));
+        assert!(errors.is_empty());
     }
 
     /// vmangos sends only 0 or 1, so no live run reaches the window's -1 arm.
@@ -649,8 +784,13 @@ mod tests {
     #[test]
     fn a_deleted_ticket_signals_the_no_ticket_answer() {
         let mut lane = DialogLane::default();
-        deleted(&mut lane, 8);
-        deleted(&mut lane, 9);
+        let errors = UiErrorKeys::default();
+        deleted(&mut lane, &errors, 8);
+        // Any other result is the DB error and fires nothing (`0x5e4635`).
+        assert_eq!(keys(&errors), ["ERR_TICKET_DB_ERROR"]);
+        assert!(lane.take().is_empty());
+        deleted(&mut lane, &errors, 9);
+        assert!(errors.is_empty());
         assert_eq!(
             lane.take(),
             [DialogSignal::Event(
@@ -658,6 +798,35 @@ mod tests {
                 vec![ScriptValue::Int(0), ScriptValue::Str(String::new())]
             )]
         );
+    }
+
+    /// `0x5e78f0`: status 2 fires the no-ticket `UPDATE_TICKET` and 3 `GMSURVEY_DISPLAY`; 1
+    /// re-asks and fires nothing; anything outside 1 to 3 is ignored.
+    #[test]
+    fn a_closed_ticket_and_an_offered_survey_fire_their_events() {
+        let mut state = GmTicketState::default();
+        let mut lane = DialogLane::default();
+        for status in [0, 4, 1] {
+            net::status_update(status, &mut state, &mut lane);
+        }
+        assert!(lane.take().is_empty(), "1 re-asks and the rest do nothing");
+        assert_eq!(state.take_reasks(), 1);
+
+        net::status_update(2, &mut state, &mut lane);
+        net::status_update(3, &mut state, &mut lane);
+        let signals = lane.take();
+        let [closed, survey] = signals.as_slice() else {
+            panic!("{signals:?}");
+        };
+        assert!(matches!(
+            closed,
+            DialogSignal::Event(name, args) if name == "UPDATE_TICKET" && args.len() == 7
+        ));
+        assert_eq!(
+            survey,
+            &DialogSignal::Event("GMSURVEY_DISPLAY".into(), Vec::new())
+        );
+        assert_eq!(state.take_reasks(), 0);
     }
 
     #[test]
