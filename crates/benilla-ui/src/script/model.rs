@@ -758,6 +758,9 @@ pub(crate) struct Model {
     /// apart from `drag` as in the reference: a `StartMoving` or `StartSizing` outlives the button,
     /// since mouse-up's auto-stop skips a Lua drag.
     pub(crate) moving: Option<super::object::FrameMove>,
+    /// The strata of the frames whose rect a resolve stored anew, bit per [`crate::order::Strata::index`]: each
+    /// such store runs `0x764a20` (`0x76b648`), which [`super::UiScript::resolve_layout`] applies.
+    pub(crate) rects_moved: u16,
     /// `SetLayoutMode`'s value, the root's `+0xcf8` (0 at start, `0x7642a5`): while non-zero, a
     /// press with Control or Alt held is a layout drag (`0x766301`).
     pub(crate) layout_mode: i32,
@@ -1604,6 +1607,7 @@ impl Model {
             drag_registered: HashMap::new(),
             drag: None,
             moving: None,
+            rects_moved: 0,
             layout_mode: 0,
             european_numbers: false,
             locale: 0,
@@ -1845,9 +1849,7 @@ impl Model {
         {
             return;
         }
-        let changed = self.arena.frame(h).is_some_and(|f| f.scale != scale);
-        self.arena.set_scale(h, scale);
-        if changed {
+        if self.arena.set_scale(h, scale, force) {
             // The effective scale cascades down the subtree, an input of each frame's node.
             self.touch_layout_subtree(h);
             self.touch_measure_all();
@@ -2359,6 +2361,7 @@ impl Model {
     /// The layout step of a write to region `rh`'s shown bit that `set_region_hidden` could not
     /// wrap, given whether it drew before.
     pub(crate) fn note_region_draw(&mut self, rh: RegionHandle, drew: bool) {
+        self.note_region_registered(rh, drew, false);
         let now = self.region_draws(rh);
         if drew == now || self.region_owner_loading(rh) {
             return;
@@ -2367,6 +2370,16 @@ impl Model {
             self.undefer_region(rh);
         } else {
             self.defer_region(rh);
+        }
+    }
+
+    /// The draw place of region `rh` after a write that may register it (`0x77fcb0`), given
+    /// whether it drew before and whether the write unregistered it first (a new layer,
+    /// `0x77fdb1`): one that draws now and did not, or was relinked, takes its layer list's tail
+    /// (`0x76a860`). The load window does not gate the link, only the deferral (`0x77fcd7`).
+    pub(crate) fn note_region_registered(&mut self, rh: RegionHandle, drew: bool, relinked: bool) {
+        if self.region_draws(rh) && (!drew || relinked) {
+            self.arena.restamp_region(rh);
         }
     }
 

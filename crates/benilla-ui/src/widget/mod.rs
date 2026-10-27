@@ -211,6 +211,9 @@ pub struct Frame {
     /// The same for the wheel bucket (kind 3): at the link or, on a linked frame, at the bit's
     /// own enable (`0x76af00`).
     pub wheel_stamp: u64,
+    /// The same for the mouse bucket (kind 2), the hover sweep's list (`0x7661f2`): at the link
+    /// or, on a linked frame, at the bit's own enable (`0x76af00`).
+    pub mouse_stamp: u64,
     /// `SetClampedToScreen`, geometry flags `0x10`: `0x767a20` shifts the rect back on screen.
     /// Every GameTooltip is born with it here; the stock tooltips get it from their template,
     /// `GameTooltipTemplate.xml:3`.
@@ -236,6 +239,10 @@ pub struct Frame {
     /// `resizable` `0x200`, all set by `0x76a3c0`). It raises nothing; `CSimpleTop::Raise`
     /// (`0x7650f0`) raises the nearest toplevel self-or-ancestor of a clicked or shown frame.
     pub toplevel: bool,
+    /// Flag `0x10` of `[frame+0xb4]`: a toplevel frame overlapped by a frame at its level or above
+    /// in its stratum, as a checked raise (`0x7651a3`) or the draw pass (`0x765851`) last found
+    /// it. Only the unchecked raise of a held move reads it (`0x7651ac`).
+    pub overlapped: bool,
     /// Flag `0x2000` of `[frame+0xb4]`: the frame is in a scroll child's subtree, so the flat draw
     /// pass skips it (`0x7659df`) and its ScrollFrame draws it; the hit test clips it to its first
     /// ancestor without the flag (`0x76b034`). [`WidgetArena::set_scroll_flags`] writes it.
@@ -245,7 +252,11 @@ pub struct Frame {
     pub scroll_root: bool,
     /// This frame's own scale (`ownScale +0xb8`, default 1.0).
     pub scale: f32,
-    /// `layoutScale` = `parentEffective * ownScale`, ε-gated (`0x76ac90`).
+    /// The parent scale (`+0xbc`, default 1.0): the parent's layout scale as the child walk last
+    /// passed it (`0x76ac50`), kept even when this frame refused it.
+    pub parent_scale: f32,
+    /// The layout scale (`+0x7c`), `parent_scale * scale` as `0x76ac90` last stored it; never 0,
+    /// which the layout refuses (`0x768366`).
     pub effective_scale: f32,
     /// A later client's `ignoreParentScale`, not 1.12: nothing sets it.
     pub ignore_parent_scale: bool,
@@ -278,7 +289,9 @@ pub struct Region {
     /// The engine's own order within a layer, which only the EditBox caret sets, to draw over the
     /// text; 1.12 gives Lua and XML no sub-level (`0x76a860`, `0x79a780`).
     pub sub_level: i8,
-    /// The index within the owner frame, the last within-layer draw tiebreak.
+    /// The place in its owner's layer list, the last within-layer draw tiebreak: taken at each
+    /// registration (`0x77fcb0` → `0x76a860`, a tail link the layer is drawn from the head of,
+    /// `0x76b3a0`), so the region registered last draws last in its layer.
     pub decl_seq: u32,
     /// `Region:SetParent(nil)`: unlinked and not drawn, but not destroyed (`0x77fd10` with a null
     /// parent). The owner's `regions` keeps it so `destroy` frees it; `SetParent(frame)` relinks.
@@ -312,12 +325,17 @@ pub struct WidgetArena {
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
     next_insertion: u32,
-    /// The next [`Frame::char_stamp`] / [`Frame::key_stamp`] / [`Frame::wheel_stamp`].
+    /// The next [`Frame::char_stamp`] / [`Frame::key_stamp`] / [`Frame::wheel_stamp`] /
+    /// [`Frame::mouse_stamp`].
     next_kb_stamp: u64,
     /// Each stratum's level bound, the reference's `bucket+0x8`: one above the highest level a
     /// visible frame has linked at since the last compaction set it. It starts at 0 and only a
     /// visible link grows it ([`Self::link_bound`]); nothing else lowers it but the compaction.
     level_bound: [u32; Strata::ALL.len()],
+    /// Bit `n` set: stratum `n`'s levels are dirty (the record's `+0x4`), set by a link
+    /// (`0x764780`) and a frame's rect change (`0x764a36`), so the next draw pass recomputes the
+    /// overlap bit of its toplevel frames (`0x7657d0`).
+    levels_dirty: u16,
     /// The next [`Frame::created`].
     next_created: u64,
     /// How many times the link stamps were renumbered at the cap, so a reader holding stamps can
@@ -381,6 +399,7 @@ impl WidgetArena {
             next_insertion: 0,
             next_kb_stamp: 0,
             level_bound: [0; Strata::ALL.len()],
+            levels_dirty: 0,
             next_created: 0,
             renumbers: 0,
             link_log: None,
@@ -475,6 +494,7 @@ impl WidgetArena {
             f.char_stamp = stamp;
             f.key_stamp = stamp;
             f.wheel_stamp = stamp;
+            f.mouse_stamp = stamp;
             linked = Some((f.strata, f.level));
             self.next_insertion += 1;
             if let Some(log) = &mut self.link_log {
@@ -492,6 +512,18 @@ impl WidgetArena {
     fn link_bound(&mut self, strata: Strata, level: u16) {
         let bound = &mut self.level_bound[strata.index() as usize];
         *bound = (*bound).max(u32::from(level) + 1);
+        // The add marks the levels dirty (`0x764901`).
+        self.levels_dirty |= 1 << strata.index();
+    }
+
+    /// Mark the strata of `mask` (bit per [`Strata::index`]) as having dirty levels.
+    pub(crate) fn mark_levels_dirty(&mut self, mask: u16) {
+        self.levels_dirty |= mask;
+    }
+
+    /// The strata whose levels are dirty, cleared, as the draw pass clears each (`0x765872`).
+    pub(crate) fn take_levels_dirty(&mut self) -> u16 {
+        std::mem::take(&mut self.levels_dirty)
     }
 
     /// Start recording every link into a bucket, for the update walk (`0x765650`), which must see
@@ -584,6 +616,7 @@ impl WidgetArena {
             char_stamp: kb_stamp,
             key_stamp: kb_stamp,
             wheel_stamp: kb_stamp,
+            mouse_stamp: kb_stamp,
             clamped_to_screen: matches!(kind, FrameKind::GameTooltip),
             hit_rect_insets: [crate::layout::Len::Script(0.0); 4],
             movable: false,
@@ -598,9 +631,11 @@ impl WidgetArena {
             ),
             user_placed: false,
             toplevel: false,
+            overlapped: false,
             scroll_member,
             scroll_root: false,
             scale,
+            parent_scale,
             effective_scale: parent_scale * scale,
             ignore_parent_scale: false,
             wow_id: 0,
@@ -762,13 +797,14 @@ impl WidgetArena {
         Some(handle)
     }
 
-    /// The next declaration seq on `owner`, the region's link position. At the draw key's cap the
-    /// frame's regions renumber from 0 in link order (`regions` ascends by seq), so a frame that
-    /// rebuilds regions for ever, a backdrop set on every show, keeps its order and never
-    /// outgrows the key.
+    /// The next declaration seq on `owner`, the region's place in its layer list. At the draw
+    /// key's cap the frame's regions renumber from 0 in their current order, so a frame that
+    /// rebuilds or re-registers regions for ever, a backdrop set on every show, keeps its order
+    /// and never outgrows the key.
     pub(crate) fn take_decl(&mut self, owner: FrameHandle) -> Option<u32> {
         if self.frame(owner)?.next_decl >= crate::order::DECL_CAP {
-            let regions = self.frame(owner)?.regions.clone();
+            let mut regions = self.frame(owner)?.regions.clone();
+            regions.sort_by_key(|&rh| self.region(rh).map_or(0, |r| r.decl_seq));
             let mut next = 0;
             for rh in regions {
                 if let Some(r) = self.region_mut(rh) {
@@ -782,6 +818,19 @@ impl WidgetArena {
         let d = f.next_decl;
         f.next_decl += 1;
         Some(d)
+    }
+
+    /// Register `rh` in its owner's layer list again (`0x77fcb0` → `0x76a860`): it takes the
+    /// list's tail and draws over the rest of its layer.
+    pub(crate) fn restamp_region(&mut self, rh: RegionHandle) {
+        let Some(owner) = self.region(rh).map(|r| r.owner) else {
+            return;
+        };
+        if let Some(d) = self.take_decl(owner) {
+            if let Some(r) = self.region_mut(rh) {
+                r.decl_seq = d;
+            }
+        }
     }
 
     /// Free one region, as `CSimpleHTML::SetText` deletes the last parse's blocks (`0x78a580`)

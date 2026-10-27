@@ -80,10 +80,17 @@ pub(super) fn link_region(
         // the region keeps its rect until the resolve reaches it.
         model.unsettle_region(rh);
     }
-    if let Some(r) = model.arena.region_mut(rh) {
-        r.draw_layer = layer;
-    }
+    let relayered = model
+        .arena
+        .region_mut(rh)
+        .map(|r| std::mem::replace(&mut r.draw_layer, layer) != layer)
+        .unwrap_or(false);
     model.relink_region_layout(rh, drew, old_loading, moved, Some(shown));
+    // A new owner's link took the tail already; the same owner registers again on a start or on a
+    // new layer, which unregisters first (`0x77fda5`-`0x77fdbb`).
+    if !moved {
+        model.note_region_registered(rh, drew, relayered);
+    }
 }
 
 /// Apply a Button state machine's writes to the regions' shown bit, the one `Show`/`Hide` write.
@@ -959,7 +966,7 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
     let me = model.region_id(rh);
     let owner = region_owner_id(&mut model, rh);
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, owner)?;
-    let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
+    let (point, rel_point, x, y) = (p.point, p.rel_point(&who)?, p.x, p.y);
 
     // The frame's store and its unchanged-anchor test (`0x767c70`), which queues no resolve.
     let units = model.layout_units();
