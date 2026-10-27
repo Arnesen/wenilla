@@ -193,7 +193,9 @@ mod statusbar;
 mod stdlib;
 /// An mlua error's bare Lua message, the one value the error handler is called with.
 pub use stdlib::lua_message;
-pub(crate) use stdlib::{execute_buffer, run_under_error_function};
+pub(crate) use stdlib::{
+    call_global_under_error_function, execute_buffer, run_under_error_function,
+};
 mod summon;
 mod talent;
 mod taxi;
@@ -257,7 +259,7 @@ pub use battlefield_queue::{
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
 pub use binder::BinderCall;
-pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
+pub use binding_abi::{ftol, record_float, s_str_to_float, s_str_to_int};
 pub use calls::{spell_owner, ItemCallback, NearestMode, QueuedCall, RecordAsk, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, JoinedChannel, RecruitmentPlan, ZoneChannelRow};

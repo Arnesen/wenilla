@@ -315,6 +315,8 @@ fn on_worldport(
     player: Option<Res<crate::player::Player>>,
     selection: Option<ResMut<crate::target::Selection>>,
     owed_releases: Option<ResMut<crate::target::OwedReleases>>,
+    place: crate::ui_party::net::SnapshotPlace,
+    transforms: Query<&Transform>,
 ) {
     if let SessionEvent::Worldport {
         map_id,
@@ -330,6 +332,8 @@ fn on_worldport(
             &mut group,
             &b.index,
             &b.stores,
+            &place,
+            &|e| transforms.get(e).ok().copied(),
             &b.names,
             script.as_deref(),
             &b.net,

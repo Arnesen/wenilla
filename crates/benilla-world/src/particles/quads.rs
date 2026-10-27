@@ -43,6 +43,8 @@ pub(super) fn spin_angle(spin: f32, age: f32, phase: u32) -> f32 {
 pub(super) struct CamBasis {
     pub(crate) right: Vec3,
     pub(crate) up: Vec3,
+    /// The eye, the translation the particle matrix subtracts (`-+0x23c`, `0x7b3e41`).
+    pub(crate) pos: Vec3,
 }
 
 /// How a cloud's stored coordinates reach the world (the two modes on [`super::Particle`]).
@@ -60,14 +62,34 @@ pub(super) struct DrawFrame {
 
 /// One particle's world-space quad centre, shared by [`expand_quads`] and the depth dump.
 pub(super) fn particle_center(frame: &DrawFrame, placement: &Transform, p: &Particle) -> Vec3 {
+    stored_to_world(frame, placement, p.pos)
+}
+
+/// A point in a cloud's stored coordinates, in the world.
+fn stored_to_world(frame: &DrawFrame, placement: &Transform, v: Vec3) -> Vec3 {
     if frame.anchored {
         // World mode (`0x10` clear): no `rt+0x1fc` fold (`0x7b3f48`), only the ride frame,
         // `A · T · S` (`0x7b3f4f`); off a transport `A` is null, the store world (`0x7b3f95`).
-        frame.ride.to_world(p.pos)
+        frame.ride.to_world(v)
     } else {
         // Model mode (`0x10` set): the live emitter matrix, re-applied every frame (`0x7b3efb`).
-        placement.transform_point(wow_to_bevy([p.pos.x, p.pos.y, p.pos.z]))
+        placement.transform_point(wow_to_bevy([v.x, v.y, v.z]))
     }
+}
+
+/// The view-depth column of the particle matrix (`0xcf5b68`, the stored frame then minus the eye
+/// then the view, `0x7b3e41`-`0x7b3fc7`): `m02`, `m12`, `m22` and `m32`, a stored point's depth
+/// along the view's forward axis.
+fn depth_column(frame: &DrawFrame, placement: &Transform, cam: &CamBasis) -> [f32; 4] {
+    let forward = cam.up.cross(cam.right);
+    let origin = stored_to_world(frame, placement, Vec3::ZERO);
+    let axis = |v: Vec3| (stored_to_world(frame, placement, v) - origin).dot(forward);
+    [
+        axis(Vec3::X),
+        axis(Vec3::Y),
+        axis(Vec3::Z),
+        (origin - cam.pos).dot(forward),
+    ]
 }
 
 /// The twinklePercent draw gate; must match [`expand_quads`]'s `0x7b2adc` skip.
@@ -91,6 +113,49 @@ pub(super) fn particle_half(
         size_scale
     };
     def.over_life.sample(u_age).size * def.twinkle(noise) * scale
+}
+
+/// The order `0x7b3a10` writes a sorted cloud in, given each particle's view depth in live-list
+/// order: pushed onto a 1-based binary heap, sifted up while not below its parent (`0x7b3ac2`),
+/// then popped root first, the last entry sifted down toward the larger child, the right one on a
+/// tie (`0x7b3b87`), while it is below that child (`0x7b3b9c`). So the farthest comes first. The
+/// x87 compares count an unordered pair as below (`test ah,1`).
+fn depth_order(depths: impl Iterator<Item = f32>) -> Vec<usize> {
+    let below = |a: f32, b: f32| a.partial_cmp(&b).is_none_or(std::cmp::Ordering::is_lt);
+    // Slot 0 is the heap's unused root parent.
+    let mut heap: Vec<(f32, usize)> = vec![(0.0, usize::MAX)];
+    for (i, depth) in depths.enumerate() {
+        heap.push((depth, i));
+        let mut at = heap.len() - 1;
+        while at > 1 && !below(depth, heap[at >> 1].0) {
+            heap[at] = heap[at >> 1];
+            at >>= 1;
+        }
+        heap[at] = (depth, i);
+    }
+    let mut order = Vec::with_capacity(heap.len() - 1);
+    while heap.len() > 1 {
+        order.push(heap[1].1);
+        let last = heap.pop().expect("a heap entry");
+        let n = heap.len() - 1;
+        if n == 0 {
+            break;
+        }
+        let mut at = 1;
+        while at <= n >> 1 {
+            let mut child = at * 2;
+            if child < n && !below(heap[child + 1].0, heap[child].0) {
+                child += 1;
+            }
+            if !below(last.0, heap[child].0) {
+                break;
+            }
+            heap[at] = heap[child];
+            at = child;
+        }
+        heap[at] = last;
+    }
+    order
 }
 
 /// Expand one pool into the shared stream: world-space quads, corners in perimeter order for the
@@ -134,7 +199,25 @@ pub(super) fn expand_quads(
             (cy * inv_rows, (cy + 1.0) * inv_rows),
         )
     };
-    for p in particles {
+    // A sorted emitter writes its particles back to front (`0x7b3a1b`), every other one in its
+    // live-list order (`0x7b3bf2`); between clouds, each draw record's anchor sorts it.
+    let (mut by_depth, mut in_pool);
+    let ordered: &mut dyn Iterator<Item = &Particle> = if def.sorted() {
+        // `0x7b3a5b`: `((m22·z + m12·y) + m02·x) + m32` over the stored position, in that order.
+        let [m02, m12, m22, m32] = depth_column(frame, placement, cam);
+        by_depth = depth_order(
+            particles
+                .iter()
+                .map(|p| m22 * p.pos.z + m12 * p.pos.y + m02 * p.pos.x + m32),
+        )
+        .into_iter()
+        .map(|i| &particles[i]);
+        &mut by_depth
+    } else {
+        in_pool = particles.iter();
+        &mut in_pool
+    };
+    for p in ordered {
         let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
         // The twinklePercent gate (`0x7b2adc`): below 1, a sample above it draws no quad.
         if def.twinkle_percent < 1.0 && noise > def.twinkle_percent {
@@ -151,9 +234,6 @@ pub(super) fn expand_quads(
         // `size` is the half-extent (corners ±1.0, `0x7b2d0c`), times the gated twinkle and the
         // flagged instance scale; a twinkle range with min == max burns steady.
         let half = size * def.twinkle(noise) * scale;
-        // Deviation: quads keep pool order within a cloud, without the reference's back-to-front
-        // sort (`0x7b3a10`), because only an alpha-blended cloud can show the order; between
-        // clouds, each draw record's anchor sorts it.
         let mut push_quad = |corners: [Vec3; 4], quv: [[f32; 2]; 4]| {
             for (c, t) in corners.iter().zip(quv) {
                 out.push(EffectVertex {
@@ -237,7 +317,7 @@ pub(super) fn expand_quads(
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_quads, spin_angle, CamBasis, DrawFrame, Particle};
+    use super::{depth_order, expand_quads, spin_angle, CamBasis, DrawFrame, Particle};
     use bevy::prelude::{Quat, Transform, Vec3};
 
     /// The `0x7b2dda` negate: only a negative angle on a bit-5 particle flips.
@@ -252,6 +332,89 @@ mod tests {
         );
         assert_eq!(spin_angle(3.0, 0.5, 0x1f), 1.5);
         assert_eq!(spin_angle(0.0, 0.5, 0xff), 0.0);
+    }
+
+    /// The heap of `0x7b3a10`: the deepest first, and equal depths in its own order, which is
+    /// neither the live list's nor its reverse once a sift moves them.
+    #[test]
+    fn the_depth_order_is_the_references_heap() {
+        assert_eq!(depth_order([1.0, 5.0, 3.0].into_iter()), [1, 2, 0]);
+        assert_eq!(depth_order([1.0; 3].into_iter()), [2, 1, 0]);
+        assert_eq!(depth_order([2.0, 1.0, 2.0, 2.0].into_iter()), [3, 0, 2, 1]);
+        assert!(depth_order(std::iter::empty()).is_empty());
+    }
+
+    /// File flag 0x2 (runtime 0x10, `0x7b3a1b`) writes the cloud back to front; without it the
+    /// quads keep the pool's order.
+    #[test]
+    fn a_sorted_emitter_writes_its_farthest_particle_first() {
+        let at = |z: f32| Particle {
+            pos: Vec3::new(0.0, 0.0, z),
+            vel: Vec3::ZERO,
+            age: 0.0,
+            life: 1.0,
+            phase: 0,
+            fresh: false,
+            quat: Quat::IDENTITY,
+            angvel: Vec3::ZERO,
+        };
+        // The camera looks down -Z: -5 is the farthest.
+        let pool = [at(-1.0), at(-5.0), at(-3.0)];
+        let cam = CamBasis {
+            right: Vec3::X,
+            up: Vec3::Y,
+            pos: Vec3::ZERO,
+        };
+        let frame = DrawFrame {
+            anchored: true,
+            ride: crate::ride_frame::StoredFrame::default(),
+            alpha: 1.0,
+            size_scale: 1.0,
+        };
+        let depths = |flags: u32| {
+            let mut def = crate::particles::tests::plain_def();
+            def.flags = flags;
+            let mut out = Vec::new();
+            expand_quads(&def, &pool, &frame, &Transform::IDENTITY, &cam, &mut out);
+            out.chunks(4).map(|q| q[0].pos[2]).collect::<Vec<_>>()
+        };
+        assert_eq!(depths(0x2), [-5.0, -3.0, -1.0], "back to front");
+        assert_eq!(depths(0), [-1.0, -5.0, -3.0], "pool order");
+    }
+
+    /// The key is the view depth with the eye's translation in it (`m32`, `0x7b3a9a`), rounded
+    /// as a single: 10 000 yd from the eye two particles a ulp apart tie, and the heap pops a tie
+    /// in its own order, the later push first.
+    #[test]
+    fn the_depth_key_folds_the_eye_in_before_it_rounds() {
+        let at = |z: f32| Particle {
+            pos: Vec3::new(0.0, 0.0, z),
+            vel: Vec3::ZERO,
+            age: 0.0,
+            life: 1.0,
+            phase: 0,
+            fresh: false,
+            quat: Quat::IDENTITY,
+            angvel: Vec3::ZERO,
+        };
+        let pool = [at(0.5), at(0.500_000_06)];
+        let cam = CamBasis {
+            right: Vec3::X,
+            up: Vec3::Y,
+            pos: Vec3::new(0.0, 0.0, 10_000.0),
+        };
+        let frame = DrawFrame {
+            anchored: true,
+            ride: crate::ride_frame::StoredFrame::default(),
+            alpha: 1.0,
+            size_scale: 1.0,
+        };
+        let mut def = crate::particles::tests::plain_def();
+        def.flags = 0x2;
+        let mut out = Vec::new();
+        expand_quads(&def, &pool, &frame, &Transform::IDENTITY, &cam, &mut out);
+        let z: Vec<f32> = out.chunks(4).map(|q| q[0].pos[2]).collect();
+        assert_eq!(z, [0.500_000_06, 0.5]);
     }
 
     /// The reference folds `emitter+0x1a8`, the model's `CM2Model+0x19c`, into the alpha byte alone
@@ -273,6 +436,7 @@ mod tests {
         let cam = CamBasis {
             right: Vec3::X,
             up: Vec3::Y,
+            pos: Vec3::ZERO,
         };
         let shoot = |alpha| {
             let frame = DrawFrame {
