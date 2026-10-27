@@ -123,6 +123,7 @@ pub(super) fn client() -> Loot {
             ERR_LOOT_NO_UI = "ERR_LOOT_NO_UI"
             ERR_LOOT_DIDNT_KILL = "ERR_LOOT_DIDNT_KILL"
             YOU_LOOT_MONEY = "You loot %s"
+            LOOT_MONEY_SPLIT = "Your share of the loot is %s."
             GOLD = "Gold" SILVER = "Silver" COPPER = "Copper"
             SEEN = {}
             local f = CreateFrame("Frame")
@@ -316,6 +317,63 @@ fn a_roll_or_master_rows_click_answers_inside_it() {
     click(&mut l, 2);
     assert_eq!(seen(&mut l), "OPEN_MASTER_LOOT_LIST");
     assert!(sent(&l).is_empty());
+}
+
+/// `SMSG_LOOT_ALL_PASSED` and `SMSG_LOOT_ROLL_WON` both run `ClearLootRollState` (`0x61b5dd`,
+/// `0x61b97c` → `0x5ebcf0`), which zeroes the type of the open source's row: the next click on it
+/// takes, where the pending row refused. Another source's packet, or another slot's, frees nothing.
+#[test]
+fn a_resolved_roll_frees_the_open_row() {
+    let packet = |won: bool, guid: u64, slot: u32| {
+        if won {
+            SessionEvent::LootRollWon(benilla_protocol::messages::LootRollWon {
+                looted_target: guid,
+                item_slot: slot,
+                item_id: LINEN,
+                random_property_id: 0,
+                suffix_factor: 0,
+                winner: THRALL,
+                roll_number: 50,
+                roll_type: 2,
+            })
+        } else {
+            SessionEvent::LootAllPassed(benilla_protocol::messages::LootAllPassed {
+                looted_target: guid,
+                item_slot: slot,
+                item_id: LINEN,
+                random_property_id: 0,
+                suffix_factor: 0,
+            })
+        }
+    };
+    for won in [false, true] {
+        let mut l = client();
+        let (mut first, mut second) = (row(0, LINEN), row(1, WOOL));
+        first.slot_type = slot_type::ROLL_ONGOING;
+        second.slot_type = slot_type::ROLL_ONGOING;
+        open(&mut l, CORPSE, 1, 0, vec![first, second]);
+        let _ = (seen(&mut l), sent(&l));
+        packets(&mut l, vec![packet(won, GONE, 0), packet(won, CORPSE, 7)]);
+        click(&mut l, 1);
+        assert_eq!(
+            seen(&mut l),
+            "UI_ERROR_MESSAGE:ERR_LOOT_ROLL_PENDING",
+            "won: {won}"
+        );
+        packets(&mut l, vec![packet(won, CORPSE, 0)]);
+        let _ = seen(&mut l);
+        click(&mut l, 1);
+        assert!(
+            matches!(sent(&l)[..], [ClientCommand::AutostoreLootItem { slot: 0 }]),
+            "won: {won}"
+        );
+        click(&mut l, 2);
+        assert_eq!(
+            seen(&mut l),
+            "UI_ERROR_MESSAGE:ERR_LOOT_ROLL_PENDING",
+            "the other row"
+        );
+    }
 }
 
 /// `CloseLoot` closes inside its call (`0x4c2ec0` → `0x48f200` → `0x4c1cb0`): the release is out,
@@ -874,6 +932,29 @@ fn a_replaced_sessions_close_keeps_the_next_copiers_end() {
         matches!(sent(&l)[..], [ClientCommand::LootRelease { guid: CORPSE }]),
         "the old session's release"
     );
+    let world = l.app.world_mut();
+    world
+        .resource_mut::<Items>()
+        .insert_template(UNCACHED, Some(crate::items::test_template("Silk Cloth")));
+    world.resource_scope(|world, mut loot: Mut<LootState>| {
+        loot.row_answered(world.resource::<Items>())
+    });
+    feed(&mut l);
+    assert_eq!(seen(&mut l), "LOOT_OPENED");
+}
+
+/// A row another member takes before its item record answers stops the window waiting: the
+/// window opens on the rows left, where 1.12.1's count stays above 0 and the corpse never opens
+/// (`ClearLootRow 0x4c1f00` lowers nothing), a deviation `records_pending` records.
+#[test]
+fn a_row_cleared_while_its_record_is_pending_does_not_hold_the_window_shut() {
+    const UNCACHED: u32 = 40_000;
+    let mut l = client();
+    open(&mut l, CORPSE, 1, 0, vec![row(0, LINEN), row(1, UNCACHED)]);
+    assert_eq!(seen(&mut l), "", "the copier waits on the record");
+    packets(&mut l, vec![SessionEvent::LootRemoved { slot: 1 }]);
+    feed(&mut l);
+    assert_eq!(seen(&mut l), "LOOT_SLOT_CLEARED:2");
     let world = l.app.world_mut();
     world
         .resource_mut::<Items>()

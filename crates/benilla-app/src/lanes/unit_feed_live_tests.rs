@@ -330,6 +330,25 @@ fn a_language_learn_signals_at_its_packet() {
     );
 }
 
+/// The signal is the spell registrar's alone, never a diff of the known languages: a removal
+/// fires nothing (`0x4b2c50`), nor does a skill line arriving after its spell, and a learn of a
+/// language already known fires again (`0x4b2659`).
+#[test]
+fn only_a_language_learn_signals_never_a_removal_or_a_skill_line() {
+    let mut c = client();
+    let learn = |spell_id| vec![SessionEvent::SpellLearned { spell_id }];
+    c.frame(vec![learn(COMMON)]);
+    assert_eq!(c.seen(), ["LANGUAGE_LIST_CHANGED"]);
+    c.frame(vec![vec![SessionEvent::SpellRemoved { spell_id: COMMON }]]);
+    assert_eq!(c.seen(), Vec::<String>::new(), "an unlearn");
+    c.frame(vec![vec![values(ME, &[(SKILL_1, 0)])]]);
+    c.frame(vec![vec![values(ME, &[(SKILL_1, 98)])]]);
+    assert_eq!(c.seen(), Vec::<String>::new(), "a skill line");
+    c.frame(vec![learn(COMMON)]);
+    c.frame(vec![learn(COMMON)]);
+    assert_eq!(c.seen(), ["LANGUAGE_LIST_CHANGED", "LANGUAGE_LIST_CHANGED"]);
+}
+
 /// A unit created in the frame reads its real distance before the scene's propagation has run:
 /// the host composes its position from its `Transform` at the call, so the create's own packet
 /// left it where it stands, not at the origin.
@@ -484,4 +503,49 @@ fn getter_cost() {
             eprintln!("{getter}(\"target\") live={live}: {ns:.0} ns a call");
         }
     }
+}
+
+/// A transfer releases no target, so the cascade's `SelectTarget(0)` (`0x490927`) clears whatever
+/// the guid still names, with its send, ahead of `PLAYER_ENTERING_WORLD` (`0x490965`) and signalled
+/// once; the port itself sends and signals nothing.
+#[test]
+fn the_arrival_clears_the_target_before_entering_the_world() {
+    let mut c = client();
+    c.eval::<()>(
+        true,
+        "local f = CreateFrame('Frame') f:RegisterEvent('PLAYER_TARGET_CHANGED') \
+         f:SetScript('OnEvent', function() table.insert(Seen, event) end)",
+    );
+    c.frame(vec![]);
+    let _ = c.seen();
+    let selected = |c: &Client| c.app.world().resource::<crate::target::Selection>().guid;
+    assert_eq!(selected(&c), Some(WOLF));
+    c.frame(vec![vec![SessionEvent::Worldport {
+        map_id: 1,
+        position: [0.0; 3],
+        orientation: 0.0,
+        needs_ack: true,
+    }]]);
+    assert_eq!(selected(&c), Some(WOLF), "the port releases no target");
+    assert_eq!(c.seen(), Vec::<String>::new());
+    let _ = c.sent.try_iter().count();
+    let unit = [(FIELD_UNIT_HEALTH, 100), (FIELD_UNIT_MAXHEALTH, 100)];
+    c.frame(vec![vec![created(
+        ME,
+        EntityKind::Player,
+        &[
+            unit[0],
+            unit[1],
+            (TEMPLATE, HUMAN),
+            (BYTES_0, 1),
+            (SKILL_1, 98),
+        ],
+    )]]);
+    c.frame(vec![]);
+    assert_eq!(c.seen(), ["PLAYER_TARGET_CHANGED", "PLAYER_ENTERING_WORLD"]);
+    assert_eq!(selected(&c), None);
+    assert!(c
+        .sent
+        .try_iter()
+        .any(|s| matches!(s, ClientCommand::SetSelection { guid: 0 })));
 }

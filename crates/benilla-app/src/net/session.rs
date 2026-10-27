@@ -46,9 +46,9 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::Disconnected, on_disconnected)
         .net_handler(K::Teleport, on_mover_edge)
         .net_handler(K::KnockBack, on_mover_edge)
-        .net_handler(K::ClientControl, on_mover_edge)
+        .net_handler(K::ClientControl, on_client_control)
         .net_handler(K::Worldport, on_worldport)
-        .net_handler(K::TransferPending, on_transfer)
+        .net_handler(K::TransferPending, on_transfer_pending)
         .net_handler(K::TransferAborted, on_transfer)
         .net_handler(K::TimeSpeed, on_clock)
         .net_handler(K::GameSpeedSet, on_clock)
@@ -297,11 +297,46 @@ fn on_mover_edge(In(ev): In<SessionEvent>, mut e: Edges, b: Bridge) {
             counter,
             launch,
         } => knock_back(guid, counter, launch, &b.self_guid, &mut e.knockbacks),
-        SessionEvent::ClientControl { mover, allow_move } => {
-            e.client_control
-                .write(ClientControlMessage { mover, allow_move });
-        }
         _ => {}
+    }
+}
+
+/// `SMSG_CLIENT_CONTROL_UPDATE` (`0x5fa6b1` → `SetPlayerControl 0x4958e0`), judged by the
+/// controller later. For our own mover the fall of the flag `[0xb4b3e4]` drops the cursor's payload
+/// and the cast (`0x4958e8`-`0x495901` → `0x495920`) ahead of `PLAYER_CONTROL_LOST` (`0x49590b`); a
+/// store that changes nothing does nothing (`0x4958e6`). The controller stores the flag past the
+/// drain, so `stored` follows the packets of this frame, which it has not yet applied.
+fn on_client_control(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    frame: Res<bevy::diagnostic::FrameCount>,
+    mut stored: Local<Option<(u32, bool)>>,
+    // The flag and our guid are the host's too, so they sit in the set it shares with the cast.
+    mut vm: crate::script_calls::VmWith<(
+        crate::spell::SelfCancel<'static>,
+        Res<'static, SelfGuid>,
+        Res<'static, crate::player::OwnControlLost>,
+    )>,
+) {
+    let SessionEvent::ClientControl { mover, allow_move } = ev else {
+        return;
+    };
+    e.client_control
+        .write(ClientControlMessage { mover, allow_move });
+    let fell = {
+        let (_, self_guid, own) = vm.own();
+        if self_guid.0 != Some(mover) {
+            return;
+        }
+        let down = match *stored {
+            Some((at, down)) if at == frame.0 => down,
+            _ => own.0,
+        };
+        *stored = Some((frame.0, !allow_move));
+        !allow_move && !down
+    };
+    if fell {
+        crate::spell::drop_hold(&mut vm, |(mut cancel, ..)| cancel.abort_cast());
     }
 }
 
@@ -315,7 +350,6 @@ fn on_worldport(
     view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>,
     player: Option<Res<crate::player::Player>>,
     selection: Option<ResMut<crate::target::Selection>>,
-    owed_releases: Option<ResMut<crate::target::OwedReleases>>,
     place: crate::ui_party::net::SnapshotPlace,
     transforms: Query<&Transform>,
 ) {
@@ -344,27 +378,12 @@ fn on_worldport(
             log.records(&before, &group.stats);
         }
         log_teardown(view_log, &b);
-        // The transfer frees every object with no release (`0x467700` → `0x467800`), and the
-        // reference's own clear is the arrival's `SetSelection(0, 0)` (`0x490927`), which benilla
-        // does not run: the selected unit's object is torn down here as its release would.
-        let mut selection = selection;
-        if let Some(guid) = selection.as_ref().and_then(|s| s.guid) {
-            if b.index.0.contains_key(&guid) {
-                let held = |g: u64| {
-                    b.index
-                        .0
-                        .get(&g)
-                        .and_then(|e| b.stores.get(*e).ok())
-                        .map(|s| &s.0)
-                };
-                let me = b.self_guid.0;
-                crate::target::unit_released(
-                    selection.as_mut(),
-                    owed_releases.map(|o| o.into_inner()),
-                    guid,
-                    || crate::target::raid_member_or_pet(&group, guid, me, &held),
-                );
-            }
+        // The transfer frees every object with no release (`0x467700` → `0x467800`): the selection
+        // keeps its guid, its object gone, until the arrival's `SelectTarget(0)` (`0x490927`)
+        // clears it (the unit feed's world-enter turn).
+        if let Some(mut selection) = selection {
+            selection.target = None;
+            selection.lit = None;
         }
         worldport(
             map_id,
@@ -383,15 +402,27 @@ fn on_worldport(
     }
 }
 
+/// The handler `0x401900` reaches `0x495920` on both of its arms (`0x40194c`), ahead of the
+/// loading screen: the cursor's payload and the cast are dropped.
+fn on_transfer_pending(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    mut vm: crate::script_calls::VmWith<crate::spell::SelfCancel<'static>>,
+) {
+    if let SessionEvent::TransferPending {
+        map_id,
+        transport_entry,
+        from_map,
+    } = ev
+    {
+        crate::spell::drop_hold(&mut vm, |mut cancel| cancel.abort_cast());
+        transfer_pending(map_id, transport_entry, from_map, &mut e.transfer);
+    }
+}
+
 fn on_transfer(In(ev): In<SessionEvent>, mut e: Edges) {
-    match ev {
-        SessionEvent::TransferPending {
-            map_id,
-            transport_entry,
-            from_map,
-        } => transfer_pending(map_id, transport_entry, from_map, &mut e.transfer),
-        SessionEvent::TransferAborted { reason } => transfer_aborted(reason, &mut e.transfer),
-        _ => {}
+    if let SessionEvent::TransferAborted { reason } = ev {
+        transfer_aborted(reason, &mut e.transfer);
     }
 }
 

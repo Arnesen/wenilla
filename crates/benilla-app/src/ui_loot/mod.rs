@@ -614,6 +614,18 @@ impl LootState {
         self.window.source
     }
 
+    /// `ClearLootRollState` (`0x5ebcf0`), from `SMSG_LOOT_ALL_PASSED` (`0x61b5dd`) and
+    /// `SMSG_LOOT_ROLL_WON` (`0x61b97c`): the row at `slot` of the open source `guid` goes back to
+    /// the type 0 its click re-reads (`0x4c28a9` → `0x5ebce0`), so the freed item loots.
+    pub(crate) fn roll_resolved(&mut self, guid: u64, slot: u8) {
+        if self.window.source != Some(guid) {
+            return;
+        }
+        if let Some(row) = self.window.items.iter_mut().find(|i| i.slot == slot) {
+            row.slot_type = benilla_protocol::messages::slot_type::ALLOW_LOOT;
+        }
+    }
+
     /// `LootHasContents` (`0x4c2a70`): the source resolves as any object (`0x4c2a8c`, mask 1) and
     /// has money above 0 or a row left.
     fn has_contents(&self, objects: &crate::net::Objects) -> bool {
@@ -643,7 +655,11 @@ impl LootState {
 
     /// `0xb71b44` above 0: a row's item record is still being fetched, counted from the copier
     /// (`0x4c1e77`) until its callback (`0x4c2ac0`); a negative answer releases the row, as
-    /// [`templates_outstanding`] has it.
+    /// [`templates_outstanding`] has it. Deviation: a row cleared meanwhile stops counting, where
+    /// `ClearLootRow` (`0x4c1f00`) cancels its callback (`0x4c1f52`) and never lowers the count
+    /// (its writers are `0x4c1def`, `0x4c1e94` and `0x4c2af6` alone), so in 1.12.1 a group
+    /// member's take of an uncached item before the answer leaves that corpse's window shut until
+    /// the next loot response resets the count (`0x4c1def`), and ours opens.
     fn records_pending(&self, items: &Items) -> bool {
         let w = &self.window;
         w.items.iter().any(|it| {
