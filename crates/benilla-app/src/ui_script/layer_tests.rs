@@ -384,8 +384,8 @@ fn the_dev_commands_are_host_rows_in_a_dev_build_alone() {
 
 /// The `/errors` log collects off the Lua error handler, ahead of the stock `_ERRORMESSAGE`
 /// (`BasicControls.xml:16`), which still shows the `ScriptErrors` dialog: an addon's runtime error,
-/// an error in one of the layer's own handlers, and one raised in the stock load before the layer
-/// loaded (the engine hands caught errors to the handler after the load).
+/// an error in one of the layer's own handlers, and one raised before any handler was set, which
+/// the host hands the log once the layer loads and the dialog never shows.
 #[test]
 fn the_error_log_collects_off_the_error_handler() {
     benilla_formats::wow_data_or_skip!();
@@ -397,7 +397,7 @@ fn the_error_log_collects_off_the_error_handler() {
         pre:SetScript("OnClick", function() error("before the layer") end)
         pre:Click()
     "#;
-    let (mut s, failures) = production_load_with("errlog", false, before, |root| {
+    let (s, failures) = production_load_with("errlog", false, before, |root| {
         let dir = root.join("ZZErr");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ZZErr.toc"), "## Interface: 11200\nerr.lua\n").unwrap();
@@ -417,7 +417,6 @@ fn the_error_log_collects_off_the_error_handler() {
     s.run("BenillaOptionsFrame_UpdateScale = function() error('a layer boom') end")
         .unwrap();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
-    s.dispatch_script_errors_to_handler();
 
     let rows: Vec<String> = s
         .eval(
@@ -437,13 +436,15 @@ fn the_error_log_collects_off_the_error_handler() {
         "the stock handler still runs after the log"
     );
     let shown: String = s.eval("return ScriptErrors_Message:GetText()").unwrap();
+    // Raised before any handler was set: the error function found the slot at -1 (`0x703b45`)
+    // and the runner popped the message (`0x704e82`), so the dialog never heard it; the log has it
+    // from the host's hand-off.
     assert!(
-        shown.contains("before the layer"),
-        "the first error shows: {shown}"
+        shown.contains("an addon boom") && !shown.contains("before the layer"),
+        "the first error heard shows: {shown}"
     );
     // A repeat is one row with a count.
     s.run("ZZErrButton:Click() ZZErrButton:Click()").unwrap();
-    s.dispatch_script_errors_to_handler();
     assert_eq!(
         s.eval::<i64>(
             "for _, row in ipairs(BenillaScriptLog.rows) do \

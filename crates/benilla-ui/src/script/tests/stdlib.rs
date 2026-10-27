@@ -948,7 +948,8 @@ fn seterrorhandler_keeps_the_top_value() {
              return table.concat({tostring(r1), tostring(r2), tostring(r3), tostring(r4)}, " ")"#),
         "true true nil 5"
     );
-    // Argument 1 must be a function, whatever follows it.
+    // Argument 1 must be a function, whatever follows it. The 5 is cleared first: a raise runs it.
+    s.run("seterrorhandler(function() end, nil)").unwrap();
     for call in [
         "seterrorhandler()",
         "seterrorhandler(nil)",
@@ -973,7 +974,6 @@ fn a_cleared_error_handler_is_not_called() {
          b:Click()",
     )
     .unwrap();
-    s.dispatch_script_errors_to_handler();
     assert_eq!(s.eval::<i32>("return table.getn(caught)").unwrap(), 0);
     // A held value that is no function is called all the same, and the call raises: as the error
     // function of a running call it recurses to `error in error handling` (`0x6f65cf`), and for a
@@ -985,18 +985,36 @@ fn a_cleared_error_handler_is_not_called() {
          b:Click()",
     )
     .unwrap();
-    s.dispatch_script_errors_to_handler();
     let errors = s.take_errors().join("|");
     assert!(
-        errors.contains("error handler itself failed: runtime error: error in error handling"),
-        "{errors}"
+        errors.contains("again — error handler failed: error in error handling"),
+        "the host log keeps the message and the handler's failure: {errors}"
     );
-    s.report_syntax_error("log", "bad chunk");
-    s.dispatch_script_errors_to_handler();
+    s.run("x = = 1").expect_err("a compile failure");
     let errors = s.take_errors().join("|");
     assert!(
-        errors
-            .contains("error handler itself failed: runtime error: attempt to call a number value"),
+        errors.contains(
+            "unexpected symbol near `=' — error handler failed: attempt to call a number value"
+        ),
         "{errors}"
     );
+}
+
+/// The error function answers the held handler's result (`0x703b6d`, `lua_call(1, 1)`), which is
+/// what a status reads (`0x704b7f`); with the slot at -1, the message itself (`0x703b45`).
+#[test]
+fn the_error_function_answers_the_handlers_result() {
+    let s = script();
+    let f: mlua::Function = s.eval("return function() error('raw', 0) end").unwrap();
+    let h = crate::script::stdlib::error_function(s.lua()).expect("installed");
+    let answer = || {
+        let e = f.call_under::<()>(&h, ()).expect_err("raised");
+        e.lua_value(s.lua())
+    };
+    assert_eq!(answer().unwrap().to_string().unwrap(), "raw");
+    s.run("seterrorhandler(function(m) return 'replaced ' .. m end)")
+        .unwrap();
+    assert_eq!(answer().unwrap().to_string().unwrap(), "replaced raw");
+    s.run("seterrorhandler(function(m) end)").unwrap();
+    assert!(answer().is_none_or(|v| v.is_nil()));
 }

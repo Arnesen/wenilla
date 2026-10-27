@@ -193,6 +193,7 @@ mod statusbar;
 mod stdlib;
 /// An mlua error's bare Lua message, the one value the error handler is called with.
 pub use stdlib::lua_message;
+pub(crate) use stdlib::{execute_buffer, run_under_error_function};
 mod summon;
 mod talent;
 mod taxi;
@@ -619,6 +620,9 @@ pub const SCREEN: crate::layout::Handle = 0;
 // UiScript: the public host
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// The budget aborts' messages waiting for the error function ([`UiScript::set_instruction_budget`]).
+struct BudgetAborts(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
 /// The Lua scripting host: owns the VM, whose `Model` lives in `lua.app_data`. Its `impl` blocks
 /// sit beside their concerns: [`extract`], [`tick`], [`editbox::seam`], [`layout`] and [`pointer`].
 pub struct UiScript {
@@ -899,9 +903,21 @@ impl UiScript {
     /// session's first frame. Deviation: the client's Lua has no such bound, as nothing sets a
     /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that
     /// never ends hangs it.
+    ///
+    /// An abort runs no error handler, so its message waits and is handed to the error function
+    /// when the budget is disarmed, as a compile failure is (`0x704b42`), once per arming: the
+    /// player's `ScriptErrors` names the runaway loop.
     pub fn set_instruction_budget(&self, budget: u64) {
         let used = self.instructions.clone();
         used.store(0, std::sync::atomic::Ordering::Relaxed);
+        let aborts = match self.lua.app_data_ref::<BudgetAborts>() {
+            Some(a) => a.0.clone(),
+            None => {
+                let a = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                self.lua.set_app_data(BudgetAborts(a.clone()));
+                a
+            }
+        };
         let _ = self.lua.set_hook(
             mlua::HookTriggers {
                 every_nth_instruction: Some(INSTRUCTION_HOOK_STEP),
@@ -913,10 +929,14 @@ impl UiScript {
                     std::sync::atomic::Ordering::Relaxed,
                 ) + u64::from(INSTRUCTION_HOOK_STEP);
                 if n > budget {
-                    return Err(mlua::Error::runtime(format!(
+                    let message = format!(
                         "benilla: instruction budget exhausted after {n} VM instructions — \
                          treating this as a non-terminating loop"
-                    )));
+                    );
+                    if n - u64::from(INSTRUCTION_HOOK_STEP) <= budget {
+                        aborts.borrow_mut().push(message.clone());
+                    }
+                    return Err(mlua::Error::runtime(message));
                 }
                 Ok(mlua::VmState::Continue)
             },
@@ -926,6 +946,16 @@ impl UiScript {
     /// Remove the instruction budget; the counter keeps its value for [`Self::instructions_used`].
     pub fn clear_instruction_budget(&self) {
         self.lua.remove_hook();
+        let waiting = self
+            .lua
+            .app_data_ref::<BudgetAborts>()
+            .map(|a| std::mem::take(&mut *a.0.borrow_mut()))
+            .unwrap_or_default();
+        for message in waiting {
+            host::unheld(&self.lua, || {
+                stdlib::call_error_function(&self.lua, message.as_bytes())
+            });
+        }
     }
 
     /// VM instructions since the last [`Self::set_instruction_budget`], to the resolution of
@@ -1151,14 +1181,12 @@ impl UiScript {
         self.run_chunk_named(chunk, "(chunk)")
     }
 
-    /// Run a chunk under the name the 1.12 client gives it ([`addon_chunk_name`] for addon files).
+    /// Run a chunk under the name the 1.12 client gives it ([`addon_chunk_name`] for addon files),
+    /// as a file runs (`0x704ae0`): its error, or its compile failure, reaches the Lua error
+    /// handler before this returns it.
     pub fn run_chunk_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
         host::unheld(&self.lua, || {
-            self.lua
-                .load(crate::source::chunk(chunk))
-                .set_name(name)
-                .set_mode(mlua::ChunkMode::Text)
-                .exec()
+            execute_buffer(&self.lua, crate::source::chunk(chunk), name, |_| {})
         })
     }
 
@@ -1627,56 +1655,6 @@ impl UiScript {
     /// Drain the non-fatal host warnings, for the host to log.
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().warnings)
-    }
-
-    /// Report a script error the host caught outside the VM's dispatch (an addon file that failed
-    /// to compile or raised at file scope): it joins the handler-dispatch queue and the retained
-    /// log, not `errors`, since the caller has already logged it. `log` is the decorated text the
-    /// log keeps; `handler` is the one value the error handler is called with, the bare Lua
-    /// message as `lua_pcall` leaves it (`0x703b40`).
-    pub fn report_script_error(&self, log: &str, handler: &str) {
-        self.report_error(log, model::HandlerArg::Text(handler.to_string()));
-    }
-
-    /// [`Self::report_script_error`] for a chunk that failed to compile.
-    pub fn report_syntax_error(&self, log: &str, handler: &str) {
-        self.report_error(log, model::HandlerArg::Syntax(handler.to_string()));
-    }
-
-    fn report_error(&self, log: &str, arg: model::HandlerArg) {
-        // A Load row, not an Error one: to the player a file scope that raised and a missing file
-        // are the same fact, the addon is not running.
-        diagnostics::record_load_failure(&self.lua, log);
-        self.model_mut().pending_error_dispatch.push(arg);
-    }
-
-    /// Hand each queued script error to the Lua error handler, as the reference's catch closure
-    /// (`0x703b40`) calls the one `seterrorhandler` (`0x702900`) holds, read from its slot and not
-    /// through the `geterrorhandler` global; FrameXML installs `_ERRORMESSAGE`, the ScriptErrors
-    /// dialog (`BasicControls.xml:16`). With none installed the error stays on the host channel,
-    /// [`UiScript::errors`], alone; a handler that raises is recorded there only and stops the
-    /// batch, so the path cannot recurse.
-    pub fn dispatch_script_errors_to_handler(&mut self) {
-        let pending = std::mem::take(&mut self.model_mut().pending_error_dispatch);
-        if pending.is_empty() {
-            return;
-        }
-        let Some(handler) = stdlib::error_handler(&self.lua) else {
-            return;
-        };
-        for arg in pending {
-            let compile = arg.is_compile();
-            let ran = host::unheld(&self.lua, || {
-                arg.value(&self.lua)
-                    .and_then(|v| stdlib::call_error_handler(&self.lua, &handler, v, compile))
-            });
-            if let Err(e) = ran {
-                self.model_mut()
-                    .errors
-                    .push(format!("error handler itself failed: {e}"));
-                break;
-            }
-        }
     }
 
     /// Register a named [`FontObject`] (a resolved `<Font>`), its block replaced by `font` and the
