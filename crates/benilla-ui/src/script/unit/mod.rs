@@ -1,8 +1,8 @@
-//! The `Unit*` bindings. The app pushes each token's [`UnitState`] every frame through
-//! [`UiScript::set_unit`], and the units a `target` chain ends on by guid through
-//! [`UiScript::set_unit_by_guid`]; the globals read that plain data, which keeps this crate free of
-//! the ECS, and a held unit's own descriptor fields off its object through the lent host
-//! ([`read_object`]). Every predicate answers the number `1` or nil, never a Lua boolean.
+//! The `Unit*` bindings. A getter resolves its token and reads the unit through the lent host as
+//! it runs ([`UnitStateQuery`], [`read_object`]), which keeps this crate free of the ECS; with no
+//! host free to ask it reads the [`UnitState`] snapshots the app pushes per token
+//! ([`UiScript::set_unit`]) and per guid ([`UiScript::set_unit_by_guid`]). Every predicate answers
+//! the number `1` or nil, never a Lua boolean.
 
 use std::borrow::Cow;
 
@@ -419,8 +419,9 @@ impl super::UiScript {
     /// Push, or clear with `None`, the snapshot of a unit a `target` chain can end on, by guid. A
     /// token with a hop that no push names (`"party1target"`, `"raid3targettarget"`) resolves
     /// through [`UnitGuids`] to a guid and reads that guid's entry, the reference's order
-    /// (`0x515970`, then each getter's object lookup `0x468460`); the guids to cover are
-    /// [`Self::chain_end_guids`]. A token without a hop reads its own push, not this.
+    /// (`0x515970`, then each getter's object lookup `0x468460`), with no host free to ask; the
+    /// app pushes none, as its getters read the unit through the host ([`UnitStateQuery`]). A
+    /// token without a hop reads its own push, not this.
     pub fn set_unit_by_guid(&mut self, guid: u64, state: Option<UnitState>) {
         let mut model = self.model_mut();
         match state {
@@ -438,23 +439,9 @@ impl super::UiScript {
         self.model_ref().pushed_unit(token).cloned()
     }
 
-    /// The snapshot pushed for `guid`, as [`Self::set_unit_by_guid`] left it.
-    pub fn unit_view_by_guid(&self, guid: u64) -> Option<UnitState> {
-        self.model_ref().units_by_guid.get(&guid).cloned()
-    }
-
     /// The unit-token resolver's inputs as last pushed ([`Self::set_unit_guids`]).
     pub fn unit_guids_view(&self) -> UnitGuids {
         self.model_ref().unit_guids.clone()
-    }
-
-    /// The guids the chains a script can spell end on ([`UnitGuids::chain_ends`]), each once: the
-    /// units whose snapshots [`Self::set_unit_by_guid`] serves.
-    pub fn chain_end_guids(&self) -> Vec<u64> {
-        let mut ends: Vec<u64> = self.model_ref().unit_guids.chain_ends().collect();
-        ends.sort_unstable();
-        ends.dedup();
-        ends
     }
 
     /// Push the player's copper (`PLAYER_FIELD_COINAGE`), read by `GetMoney`.
@@ -601,12 +588,28 @@ pub(crate) fn check_unit_token(token: &Option<String>) -> mlua::Result<()> {
 }
 
 /// The state of the unit `token` names, as a getter reads it at the call: the guid the resolver
-/// names now ([`resolve::live_parsed`]: `0x515970` reads the objects inside the call), with the
-/// snapshot pushed under the token while that names the same unit, else what the getters read for
-/// the guid ([`Model::unit_of_guid`]); `None` for nobody. With no host free to ask (a glue VM, or a
-/// call's apply under way), or for a token that reads no object, the snapshot's answer
-/// ([`Model::snapshot_unit`]).
+/// names now ([`resolve::live_parsed`]: `0x515970` reads the objects inside the call), then that
+/// unit as the lent host reads it now ([`UnitStateQuery`]); a group token's, the pet's or the
+/// mouseover's own push while it names the same unit; `None` for nobody. A host that declines, or
+/// none free to ask (a glue VM, or a call's apply under way), or a token that reads no object,
+/// reads the snapshots: the token's push while it names the same unit, else what the getters read
+/// for the guid ([`Model::unit_of_guid`]), else [`Model::snapshot_unit`].
 pub(crate) fn view<'m>(lua: &Lua, model: &'m Model, token: &str) -> Option<Cow<'m, UnitState>> {
+    view_as(lua, model, token, false)
+}
+
+/// [`view`] for a reader that takes the held unit's own fields off the object through the host
+/// ([`read_object`], [`read_identity`], [`read_record`]): a held unit is its guid and the legs
+/// [`UnitHeldQuery`] answers, with nothing built or copied; an unheld one is [`view`]'s.
+pub(crate) fn view_held<'m>(
+    lua: &Lua,
+    model: &'m Model,
+    token: &str,
+) -> Option<Cow<'m, UnitState>> {
+    view_as(lua, model, token, true)
+}
+
+fn view_as<'m>(lua: &Lua, model: &'m Model, token: &str, thin: bool) -> Option<Cow<'m, UnitState>> {
     let snapshot = model.snapshot_unit(token);
     let UnitTokenParse::Unit { base, hops } = parse_unit_token(token) else {
         return snapshot.map(Cow::Borrowed);
@@ -614,10 +617,53 @@ pub(crate) fn view<'m>(lua: &Lua, model: &'m Model, token: &str) -> Option<Cow<'
     let Some(live) = resolve::live_parsed(lua, &model.unit_guids, base, hops) else {
         return snapshot.map(Cow::Borrowed);
     };
+    // `"player"`, `"target"`, `"npc"` and every chain read the unit live; the other tokens' pushes
+    // are their own families' feeds', which carry what the group rows and the pet bar add.
+    let reads_live =
+        hops > 0 || matches!(base, UnitBase::Player | UnitBase::Target | UnitBase::Npc);
     match (snapshot, live) {
-        (Some(pushed), guid) if pushed.guid == guid.unwrap_or(0) => Some(Cow::Borrowed(pushed)),
+        (Some(pushed), guid)
+            if pushed.guid == guid.unwrap_or(0) && (guid.is_none() || !reads_live) =>
+        {
+            Some(Cow::Borrowed(pushed))
+        }
         (_, None) => None,
-        (_, Some(guid)) => {
+        (snapshot, Some(guid)) => {
+            let query = UnitStateQuery {
+                guid,
+                player: base == UnitBase::Player && hops == 0,
+            };
+            if thin {
+                if let Some(UnitHeld::Held {
+                    is_player,
+                    reaction,
+                }) = super::live::ask(lua, &UnitHeldQuery(query))
+                {
+                    return Some(Cow::Owned(UnitState {
+                        exists: true,
+                        has_object: true,
+                        is_connected: true,
+                        guid,
+                        is_player,
+                        reaction,
+                        ..Default::default()
+                    }));
+                }
+            }
+            match super::live::ask(lua, &query) {
+                Some(UnitStateAnswer::Held(state)) => return Some(Cow::Owned(state)),
+                Some(UnitStateAnswer::Unheld(state)) => {
+                    let row = model.unit_guids.roster_token(guid);
+                    return Some(match row.and_then(|t| model.pushed_unit(&t)) {
+                        Some(pushed) => Cow::Borrowed(pushed),
+                        None => Cow::Owned(state),
+                    });
+                }
+                None => {}
+            }
+            if let Some(pushed) = snapshot.filter(|p| p.guid == guid) {
+                return Some(Cow::Borrowed(pushed));
+            }
             // The object lookup each getter makes after the resolver (`0x468460`), held as a unit:
             // `UnitExists`' slot 22 answers 0 for a game object or an item (`0x515fee`), the
             // objects named apart ([`ObjectNameQuery`]).
@@ -691,7 +737,7 @@ pub(crate) fn read_object<T>(
     f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> T,
 ) -> Option<T> {
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let unit = view(lua, &model, token)?;
+    let unit = view_held(lua, &model, token)?;
     let unit: &UnitState = &unit;
     let mut f = Some(f);
     let mut out = None;
@@ -721,7 +767,7 @@ pub(crate) fn read_identity<T>(
     f: impl FnOnce(&UnitState, &dyn UnitIdentityRead) -> T,
 ) -> Option<T> {
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let unit = view(lua, &model, token)?;
+    let unit = view_held(lua, &model, token)?;
     let unit: &UnitState = &unit;
     let mut f = Some(f);
     let mut out = None;
@@ -799,6 +845,7 @@ mod resolve;
 mod selection_read;
 #[cfg(test)]
 mod selection_tests;
+mod state_read;
 #[cfg(test)]
 mod tests;
 
@@ -813,5 +860,6 @@ pub use resolve::{
 };
 pub(crate) use resolve::{token_guid, with_live_objects, LiveGlobals};
 pub use selection_read::{ObjectNameQuery, SelectionGlobals, SelectionQuery};
+pub use state_read::{UnitHeld, UnitHeldQuery, UnitStateAnswer, UnitStateQuery};
 
 pub(super) use bindings::install;

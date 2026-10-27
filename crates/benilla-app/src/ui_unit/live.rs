@@ -1,6 +1,7 @@
-//! The unit getters' reads at the call that no unit snapshot carries, the call host's half of
-//! their questions: the six relation verbs' functions over the units as of the call
-//! ([`benilla_ui::script::RelationQuery`]), the range verbs' reach
+//! The unit getters' reads at the call, the call host's half of their questions: the unit a
+//! token resolves to ([`benilla_ui::script::UnitStateQuery`]), the units the by-name walk offers
+//! ([`benilla_ui::script::HeldCandidatesQuery`]), the six relation verbs' functions over the units
+//! as of the call ([`benilla_ui::script::RelationQuery`]), the range verbs' reach
 //! ([`benilla_ui::script::UnitReachQuery`]), the item use's control exemption
 //! ([`benilla_ui::script::ControlBypassQuery`]) and the language walk
 //! ([`benilla_ui::script::KnownLanguagesQuery`], [`benilla_ui::script::DefaultLanguageQuery`]).
@@ -12,12 +13,28 @@ use bevy::prelude::*;
 
 use benilla_ui::script::live::LiveAsk;
 use benilla_ui::script::{
-    ControlBypassQuery, DefaultLanguageQuery, KnownLanguagesQuery, RelationQuery, UnitReach,
-    UnitReachQuery, UnitRelations,
+    ControlBypassQuery, DefaultLanguageQuery, HeldCandidatesQuery, KnownLanguagesQuery,
+    LiveCandidate, LiveCandidates, RelationQuery, UnitHeld, UnitHeldQuery, UnitReach,
+    UnitReachQuery, UnitRelations, UnitStateAnswer, UnitStateQuery,
 };
 
-use crate::net::{ObjectStore, SelfPlayer};
-use crate::target::{RelUnit, RelationWorld, Relations, UnitLookup};
+use crate::names::NameCache;
+use crate::net::{Guid, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
+use crate::target::{Candidacy, NameSearch, RelUnit, RelationWorld, Relations, UnitLookup};
+
+/// What a unit's state reads beside its descriptor and the relation inputs: the tables, the name
+/// and creature caches, the roster's raid marks and the guild cache; each absent in a harness
+/// without its plugin, where the getters read their snapshots.
+#[derive(SystemParam)]
+pub(crate) struct StateSources<'w, 's> {
+    tables: super::SnapshotTables<'w>,
+    names: Option<Res<'w, NameCache>>,
+    group: Option<Res<'w, crate::ui_party::GroupState>>,
+    guild: Option<Res<'w, crate::ui_guild::GuildState>>,
+    /// Every object by its guid, the units the by-name walk offers among them.
+    objects: Query<'w, 's, (Entity, &'static Guid)>,
+}
 
 /// What the unit getters read as they run beside the objects themselves.
 #[derive(SystemParam)]
@@ -35,6 +52,7 @@ pub(crate) struct UnitFeedLive<'w, 's> {
     skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     languages: Option<Res<'w, super::LanguagesRes>>,
     default_languages: Option<Res<'w, super::DefaultLanguagesRes>>,
+    state: StateSources<'w, 's>,
 }
 
 impl UnitFeedLive<'_, '_> {
@@ -148,6 +166,149 @@ impl UnitFeedLive<'_, '_> {
     }
 }
 
+impl UnitFeedLive<'_, '_> {
+    /// The unit `q` names as of here, built as its snapshot is: the active player as `"player"`
+    /// reads it, any other held unit as a token naming it does, a guid held by nothing as what
+    /// the client knows of it; `None` for a guid held as no unit, or without the sources.
+    fn unit_state(&self, q: &UnitStateQuery) -> Option<UnitStateAnswer> {
+        let src = &self.state;
+        let (names, group, guild) = (
+            src.names.as_deref()?,
+            src.group.as_deref()?,
+            src.guild.as_deref()?,
+        );
+        let entity = self
+            .index
+            .as_deref()
+            .and_then(|i| i.0.get(&q.guid).copied());
+        // The object lookup each getter makes after the resolver (`0x468460`).
+        let Some(store) = self.stores.at(q.guid, entity) else {
+            let tables = src.tables.unit_names();
+            return Some(UnitStateAnswer::Unheld(super::unheld_state(
+                names, group, q.guid, tables,
+            )));
+        };
+        // A game object or an item exists for nobody (`0x515fee`) and is named apart.
+        if !store.is_unit() {
+            return None;
+        }
+        let rel = self.rel();
+        let me = self.me();
+        if q.player {
+            let mut s = super::player_snapshot(
+                store,
+                q.guid,
+                &src.tables,
+                names,
+                Ask::Read,
+                group,
+                rel.factions,
+                crate::ui_guild::cached_unit_guild(&store.0, guild),
+            );
+            s.is_pvp_ffa = me
+                .as_ref()
+                .is_some_and(|me| super::pvp_free_for_all(&rel, me));
+            return Some(UnitStateAnswer::Held(s));
+        }
+        let object = |guid: u64| {
+            let entity = self.index.as_deref().and_then(|i| i.0.get(&guid).copied());
+            self.stores.at(guid, entity)
+        };
+        let held = super::held::HeldUnits {
+            names,
+            commands: None,
+            group,
+            self_store: self.player().map(|(_, s)| s),
+            unit_names: src.tables.unit_names(),
+            types: src.tables.types(names),
+            rel,
+            me,
+            tooltip: super::tooltip_facts::TooltipSources {
+                names,
+                catalog: src.tables.catalog(),
+                object: &object,
+                study: src.tables.study(),
+            },
+            guild,
+        };
+        // The name as the cache holds it: `UnitName` asks a miss inside its own call.
+        let name = names
+            .resolve_unit(q.guid, Some(store), Ask::Read)
+            .map(str::to_string);
+        Some(UnitStateAnswer::Held(held.state_named(store, q.guid, name)))
+    }
+
+    /// Whether `q` names a unit held as of here, with the legs a reader takes beside the object:
+    /// built from the descriptor and the relation inputs alone, nothing copied; `None` for a guid
+    /// held as no unit.
+    fn unit_held(&self, q: &UnitStateQuery) -> Option<UnitHeld> {
+        let entity = self
+            .index
+            .as_deref()
+            .and_then(|i| i.0.get(&q.guid).copied());
+        let Some(store) = self.stores.at(q.guid, entity) else {
+            return Some(UnitHeld::Unheld);
+        };
+        if !store.is_unit() {
+            return None;
+        }
+        // `"player"` carries no reaction toward itself; any other token the unit's toward us
+        // (`0x5167e0`), plus one.
+        let reaction = if q.player {
+            0
+        } else {
+            let unit = self.relations.unit_of(q.guid, store);
+            super::unit_reaction(&self.rel(), &unit, self.me().as_ref())
+        };
+        Some(UnitHeld::Held {
+            is_player: q.player || benilla_protocol::guid::is_player(q.guid),
+            reaction,
+        })
+    }
+
+    /// The units `0x493aa0`'s object pass offers as of here (typemask 8, a cached name, no query
+    /// sent), each measured from the active player at the call; none without an active player
+    /// (`0x493ae0`), `None` without the name cache.
+    fn candidates(&self) -> Option<LiveCandidates> {
+        let names = self.state.names.as_deref()?;
+        let Some((me_entity, _)) = self.player() else {
+            return Some(LiveCandidates::default());
+        };
+        let origin = self.position(me_entity);
+        let (rel, me) = (self.rel(), self.me());
+        let held = origin
+            .into_iter()
+            .flat_map(|origin| {
+                self.state.objects.iter().filter_map(move |(entity, guid)| {
+                    let guid = guid.0;
+                    let Candidacy::Named(name) = NameSearch::AnyUnit.candidacy(names, guid) else {
+                        return None;
+                    };
+                    let at = self.position(entity)?;
+                    // Held as a unit as of here (typemask 8): one a later packet creates is not.
+                    let store = self.stores.at(guid, Some(entity)).filter(|s| s.is_unit())?;
+                    let unit = self.relations.unit_of(guid, store);
+                    Some(LiveCandidate {
+                        guid,
+                        name: name.to_string(),
+                        dist2: at.distance_squared(origin),
+                        is_player: benilla_protocol::guid::is_player(guid),
+                        assistable_alive: crate::target::assistable_alive(
+                            &rel,
+                            me.as_ref(),
+                            Some((&unit, store)),
+                        ),
+                    })
+                })
+            })
+            .collect();
+        Some(LiveCandidates {
+            active_player: true,
+            held,
+        })
+    }
+}
+
 impl UnitLookup for UnitFeedLive<'_, '_> {
     fn unit(&self, guid: u64) -> Option<RelUnit> {
         if self.relations.me_guid() == Some(guid) {
@@ -190,7 +351,10 @@ impl UnitRelations for UnitFeedLive<'_, '_> {
 
 impl crate::script_calls::live::LiveFamily for UnitFeedLive<'_, '_> {
     fn answer(&mut self, ask: &mut LiveAsk<'_>) -> bool {
-        ask.answer(|q: &RelationQuery| Some(q.answer(&*self)))
+        ask.answer(|q: &UnitHeldQuery| self.unit_held(&q.0))
+            || ask.answer(|q: &UnitStateQuery| self.unit_state(q))
+            || ask.answer(|_: &HeldCandidatesQuery| self.candidates())
+            || ask.answer(|q: &RelationQuery| Some(q.answer(&*self)))
             || ask.answer(|q: &UnitReachQuery| Some(self.reach(q.0)))
             || ask.answer(|q: &ControlBypassQuery| Some(self.exempts(q.0)))
             || ask.answer(|_: &KnownLanguagesQuery| self.known_languages())
@@ -211,11 +375,38 @@ pub(crate) fn eval_lent_calls<T: benilla_ui::mlua::FromLuaMulti>(
     world: &mut World,
     chunk: &str,
 ) -> (T, Vec<benilla_ui::script::ScriptCall>) {
+    lend(world, chunk, false)
+}
+
+/// [`eval_lent_calls`] with the unit objects and the selection's and the interaction's globals
+/// read through the host too, as the resolver reads them in game.
+#[cfg(test)]
+pub(crate) fn eval_lent_objects<T: benilla_ui::mlua::FromLuaMulti>(
+    world: &mut World,
+    chunk: &str,
+) -> (T, Vec<benilla_ui::script::ScriptCall>) {
+    lend(world, chunk, true)
+}
+
+#[cfg(test)]
+fn lend<T: benilla_ui::mlua::FromLuaMulti>(
+    world: &mut World,
+    chunk: &str,
+    objects: bool,
+) -> (T, Vec<benilla_ui::script::ScriptCall>) {
+    use crate::script_calls::live::LiveFamily;
     use benilla_ui::script::{CallHost, CallTail, ScriptCall, UiScript};
     use bevy::ecs::system::SystemState;
 
+    type Lent<'w, 's> = (
+        UnitFeedLive<'w, 's>,
+        crate::script_calls::live::UnitLive<'w, 's>,
+        crate::target::SelectionLive<'w, 's>,
+    );
+
     struct Host<'a, 'w, 's> {
-        live: &'a mut UnitFeedLive<'w, 's>,
+        live: &'a mut Lent<'w, 's>,
+        objects: bool,
         calls: Vec<ScriptCall>,
     }
 
@@ -225,15 +416,42 @@ pub(crate) fn eval_lent_calls<T: benilla_ui::mlua::FromLuaMulti>(
             None
         }
 
+        fn read_unit_object(
+            &mut self,
+            guid: u64,
+            read: &mut dyn FnMut(&dyn benilla_ui::script::UnitObjectRead),
+        ) -> bool {
+            self.objects && self.live.1.read(guid, read)
+        }
+
+        fn read_unit_identity(
+            &mut self,
+            guid: u64,
+            read: &mut dyn FnMut(&dyn benilla_ui::script::UnitIdentityRead),
+        ) -> bool {
+            self.objects && self.live.1.read_identity(guid, read)
+        }
+
+        fn read_unit_tokens(
+            &mut self,
+            read: &mut dyn FnMut(&dyn benilla_ui::script::UnitTokenObjects),
+        ) -> bool {
+            if self.objects {
+                self.live.1.read_tokens(read);
+            }
+            self.objects
+        }
+
         fn read_live(&mut self, ask: &mut LiveAsk<'_>) -> bool {
-            crate::script_calls::live::LiveFamily::answer(self.live, ask)
+            self.live.0.answer(ask) || (self.objects && self.live.2.answer(ask))
         }
     }
 
     let mut script = world.remove_non_send_resource::<UiScript>().expect("a VM");
-    let mut state = SystemState::<UnitFeedLive>::new(world);
+    let mut state = SystemState::<Lent>::new(world);
     let mut host = Host {
         live: &mut state.get(world),
+        objects,
         calls: Vec::new(),
     };
     let answer = script.hosted(&mut host, |s| s.eval::<T>(chunk).expect("the chunk runs"));
