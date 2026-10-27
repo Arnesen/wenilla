@@ -1127,7 +1127,7 @@ fn a_rename_evicts_by_the_units_pet_number_for_any_unit() {
             },
             ..Default::default()
         })
-        .add_systems(Update, feed_pet_unit);
+        .init_resource::<crate::field_watch::NoticeLane>();
     let (tx, rx) = crossbeam_channel::unbounded();
     // Kept alive for the run: a dropped receiver would fail the name query.
     std::mem::forget(rx);
@@ -1152,17 +1152,6 @@ fn a_rename_evicts_by_the_units_pet_number_for_any_unit() {
     };
     let pet = spawn(PET, 55, ME as u32);
     let other = spawn(OTHER, 66, 0x99);
-    let script = benilla_ui::script::UiScript::new().unwrap();
-    script
-        .run(
-            r#"RENAMED = 0
-            local f = CreateFrame("Frame")
-            f:RegisterEvent("LOCALPLAYER_PET_RENAMED")
-            f:SetScript("OnEvent", function() RENAMED = RENAMED + 1 end)"#,
-        )
-        .unwrap();
-    app.insert_non_send_resource(script);
-    app.update();
 
     for e in [pet, other] {
         crate::net::apply_fields_for_test(
@@ -1171,7 +1160,8 @@ fn a_rename_evicts_by_the_units_pet_number_for_any_unit() {
             ObjectFields::from_pairs(&[(STAMP, 2)]),
         );
     }
-    app.update();
+    // The update packet's end, which runs the name stamp's watch on each edge.
+    crate::field_callbacks::run_written(app.world_mut());
     let names = app.world().resource::<crate::names::NameCache>();
     let named = |e: Entity, guid: u64| {
         let store = app.world().get::<ObjectStore>(e).unwrap();
@@ -1193,11 +1183,48 @@ fn a_rename_evicts_by_the_units_pet_number_for_any_unit() {
     );
     assert_eq!(by_bits(OTHER).as_deref(), Some("Eight"));
     let renamed = app
-        .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .world()
+        .resource::<crate::field_watch::NoticeLane>()
+        .iter()
+        .filter(|n| {
+            **n == crate::field_watch::FieldNotice::Global {
+                id: crate::field_watch::id::LOCALPLAYER_PET_RENAMED,
+            }
+        })
+        .count();
+    assert_eq!(renamed, 1, "only our own pet's rename signals");
+
+    // The notices fired into a listening VM: the id names `LOCALPLAYER_PET_RENAMED`.
+    app.init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>();
+    let script = benilla_ui::script::UiScript::new().unwrap();
+    script
+        .run(
+            r#"RENAMED = 0
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("LOCALPLAYER_PET_RENAMED")
+            f:SetScript("OnEvent", function() RENAMED = RENAMED + 1 end)"#,
+        )
+        .unwrap();
+    app.insert_non_send_resource(script);
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .run_system_once(
+            |mut sink: crate::ui_action::MessageSink,
+             mut lane: ResMut<crate::field_watch::NoticeLane>,
+             mut vm: NonSendMut<benilla_ui::script::UiScript>| {
+                for n in lane.drain() {
+                    crate::ui_unit::field_events::fire(&mut vm, &mut sink, n);
+                }
+            },
+        )
+        .unwrap();
+    let heard = app
+        .world()
+        .non_send_resource::<benilla_ui::script::UiScript>()
         .eval::<i64>("return RENAMED")
         .unwrap();
-    assert_eq!(renamed, 1, "only our own pet's rename signals");
+    assert_eq!(heard, 1, "one LOCALPLAYER_PET_RENAMED reaches the listener");
 }
 
 /// Us, held as `me` and summoning `pet`: `"pet"` names our `UNIT_FIELD_SUMMON` (`0x515a6e`).
