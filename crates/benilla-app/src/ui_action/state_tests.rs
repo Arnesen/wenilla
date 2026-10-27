@@ -988,9 +988,7 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
     );
     events(&mut app); // the first push's own signal
 
-    app.world_mut()
-        .resource_mut::<crate::player::OwnControlLost>()
-        .0 = true;
+    set_control_in_place(&mut app, true);
     app.update();
     assert_eq!(
         lit(&app),
@@ -999,9 +997,7 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
     );
     assert_eq!(events(&mut app), 1, "the cache change signals the bar once");
 
-    app.world_mut()
-        .resource_mut::<crate::player::OwnControlLost>()
-        .0 = false;
+    set_control_in_place(&mut app, false);
     app.update();
     assert_eq!(lit(&app), [true, true, true], "control back, all lit again");
     assert_eq!(events(&mut app), 1);
@@ -1207,6 +1203,22 @@ fn frame(app: &mut App) -> Vec<String> {
     heard
 }
 
+/// Our own `[0xb4b3e4]` stored and its usable refresh run, as `SMSG_CLIENT_CONTROL_UPDATE`'s handler
+/// stores it and the notice lane refreshes inside the packet (`0x4958ea`, `0x4958fc`, `0x495910`).
+fn set_control_in_place(app: &mut App, lost: bool) {
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = lost;
+    app.world_mut()
+        .run_system_once(
+            |mut states: super::ActionStates, mut script: NonSendMut<UiScript>| {
+                states.usable_refresh(&mut script).fire(&mut script);
+            },
+        )
+        .expect("the refresh runs as a one-shot system");
+}
+
 /// `IsActionInRange` (`0x4e56f0`) runs the pre-check `0x6e4440` on the selection, which compares
 /// the distance only when a relation the spell's targets name admits the target, then answers 1
 /// only for a first implicit target in the table at `0x4e57cc`. A Fireball (enemy, 6) is 0 past
@@ -1372,12 +1384,12 @@ fn an_item_slot_is_current_while_its_items_cast_is_in_flight() {
 }
 
 /// Every caller of the usable refresh `0x4b31c0` signals `SPELL_UPDATE_USABLE` (`0x4b3246`),
-/// with `ACTIONBAR_UPDATE_USABLE` ahead of it only when a slot's pair changed: the target's select
-/// and clear (`0x493892`, `0x493a69`) and the control flag (`0x4958fc`, `0x495910`), which the
-/// feed hears once a frame, and a held global cooldown's start (`0x6e2e85`) and the start or
-/// removal of a spell's records (`0x6e3076`), which the cooldown lane signals at each. The field
-/// watchers' callers refresh inside their packets (`crate::field_watch`), so a descriptor change
-/// alone signals nothing here.
+/// with `ACTIONBAR_UPDATE_USABLE` ahead of it only when a slot's pair changed: a held global
+/// cooldown's start (`0x6e2e85`) and the start or removal of a spell's records (`0x6e3076`), which
+/// the cooldown lane signals at each. The selection's select and clear refresh inside
+/// `SetSelection` (`0x493892`, `0x493a69`), and the field watchers and the control flag inside
+/// their packets (`crate::field_watch`), so a descriptor, a selection or a flag the feed sees
+/// change signals nothing here.
 #[test]
 fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
     let mut app = feed_app(&[], Spells::empty_for_tests(), 5.0);
@@ -1393,15 +1405,14 @@ fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
     assert!(frame(&mut app).is_empty(), "a power change the feed sees");
 
     select(&mut app, Some(OTHER));
-    assert_eq!(frame(&mut app), USABLE, "the select");
-    assert!(frame(&mut app).is_empty(), "the same target again");
+    assert!(frame(&mut app).is_empty(), "the select its call refreshes");
     select(&mut app, None);
-    assert_eq!(frame(&mut app), USABLE, "the clear");
+    assert!(frame(&mut app).is_empty(), "the clear");
 
     app.world_mut()
         .resource_mut::<crate::player::OwnControlLost>()
         .0 = true;
-    assert_eq!(frame(&mut app), USABLE, "control lost");
+    assert!(frame(&mut app).is_empty(), "the flag its packet refreshes");
 
     let now = Instant::now();
     let gcd = |attributes: u32| SpellDisplay {
@@ -1428,16 +1439,6 @@ fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
         .resource_mut::<Cooldowns>()
         .clear_spell(1784);
     assert_eq!(frame(&mut app), USABLE, "a clear");
-
-    select(&mut app, Some(OTHER));
-    app.world_mut()
-        .resource_mut::<crate::player::OwnControlLost>()
-        .0 = false;
-    assert_eq!(
-        frame(&mut app),
-        USABLE,
-        "two callers in one frame, one signal"
-    );
 }
 
 /// A refresh that changes a slot's pair signals `ACTIONBAR_UPDATE_USABLE` (`0x4e5c53`) and then
@@ -1454,9 +1455,7 @@ fn a_refresh_that_changes_a_slot_signals_the_bar_then_the_spells() {
         &["ACTIONBAR_UPDATE_USABLE", "SPELL_UPDATE_USABLE"],
     );
     frame(&mut app);
-    app.world_mut()
-        .resource_mut::<crate::player::OwnControlLost>()
-        .0 = true;
+    set_control_in_place(&mut app, true);
     assert_eq!(
         frame(&mut app),
         ["ACTIONBAR_UPDATE_USABLE", "SPELL_UPDATE_USABLE"]
@@ -1481,8 +1480,7 @@ fn usable_reader_app() -> App {
         .non_send_resource::<UiScript>()
         .run(
             "HEARD = {} local f = CreateFrame('Frame') \
-             for _, e in ipairs({'PLAYER_CONTROL_LOST', 'PLAYER_CONTROL_GAINED', \
-                 'SPELL_UPDATE_USABLE', 'PLAYER_TARGET_CHANGED'}) do f:RegisterEvent(e) end \
+             f:RegisterEvent('SPELL_UPDATE_USABLE') \
              f:SetScript('OnEvent', function() \
                  if event == 'SPELL_UPDATE_USABLE' then \
                      event = event .. ' control=' .. tostring(HasFullControl()) \
@@ -1497,41 +1495,8 @@ fn usable_reader_app() -> App {
     app
 }
 
-/// Sets whether the player has lost control, as `SMSG_CLIENT_CONTROL_UPDATE` reports it.
-fn set_control_lost(app: &mut App, lost: bool) {
-    app.world_mut()
-        .resource_mut::<crate::player::OwnControlLost>()
-        .0 = lost;
-}
-
-/// `SetPlayerControl` (`0x4958e0`) stores the flag (`0x4958ea`) and signals
-/// `PLAYER_CONTROL_LOST`/`GAINED` (`0x4958f7`, `0x49590b`) before its usable refresh (`0x4958fc`,
-/// `0x495910`): the refresh's handlers hear it after the edge and read the stored flag.
-#[test]
-fn a_usable_handler_hears_the_control_edge_first_and_reads_its_flag() {
-    let mut app = usable_reader_app();
-    set_control_lost(&mut app, true);
-    assert_eq!(
-        frame(&mut app),
-        [
-            "PLAYER_CONTROL_LOST",
-            "SPELL_UPDATE_USABLE control=nil target=nil health=100",
-        ]
-    );
-    set_control_lost(&mut app, false);
-    assert_eq!(
-        frame(&mut app),
-        [
-            "PLAYER_CONTROL_GAINED",
-            "SPELL_UPDATE_USABLE control=1 target=nil health=100",
-        ]
-    );
-}
-
-/// `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`) before
-/// `PLAYER_TARGET_CHANGED` (`0x49389c`), as a release does (`0x4939d3`, `0x493a69`,
-/// `0x493a73`): a usable handler reads this frame's target and health, and the target's event
-/// comes after it.
+/// `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`), as a release does
+/// (`0x4939d3`, `0x493a69`): a usable handler of the refresh reads this frame's target and health.
 #[test]
 fn a_usable_handler_reads_this_frames_target_and_health() {
     let mut app = usable_reader_app();
@@ -1544,21 +1509,19 @@ fn a_usable_handler_reads_this_frames_target_and_health() {
             benilla_protocol::ObjectFields::from_pairs(&[(22, 80)]),
             |_, _, _| {},
         );
-    select(&mut app, Some(OTHER));
+    let select_in_place = |app: &mut App, guid| {
+        select(app, guid);
+        frame(app);
+        crate::ui_action::run_watcher_refresh_once(app.world_mut());
+        frame(app)
+    };
     assert_eq!(
-        frame(&mut app),
-        [
-            "SPELL_UPDATE_USABLE control=1 target=1 health=80",
-            "PLAYER_TARGET_CHANGED",
-        ]
+        select_in_place(&mut app, Some(OTHER)),
+        ["SPELL_UPDATE_USABLE control=1 target=1 health=80"]
     );
-    select(&mut app, None);
     assert_eq!(
-        frame(&mut app),
-        [
-            "SPELL_UPDATE_USABLE control=1 target=nil health=80",
-            "PLAYER_TARGET_CHANGED",
-        ]
+        select_in_place(&mut app, None),
+        ["SPELL_UPDATE_USABLE control=1 target=nil health=80"]
     );
 }
 
@@ -1848,10 +1811,8 @@ fn a_bag_query_on_a_missing_record_flushes_when_the_record_lands() {
 
 /// The feed's two halves sit around the unit snapshots, and its signals come ahead of the events
 /// its producers precede. The push half seats the action states before the snapshots, which
-/// `PLAYER_ENTERING_WORLD`'s handlers read. The fire half runs after the snapshots and the
-/// control flag are this frame's: the target is stored (`0x4936e2`) and the control flag stored
-/// and signalled (`0x4958ea`, `0x4958f7`) before the usable refresh (`0x493892`, `0x4958fc`).
-/// It signals before `PLAYER_TARGET_CHANGED` (`0x493892` ahead of `0x49389c`), `UNIT_HEALTH` and
+/// `PLAYER_ENTERING_WORLD`'s handlers read. The fire half runs after the snapshots are this
+/// frame's, and signals before `UNIT_HEALTH` and
 /// `UNIT_MANA` (the type watchers ahead of the object's bridge at one field, `0x46544a`),
 /// `PLAYER_REGEN_DISABLED` (`0x5ff51b` ahead of `0x5ff533`), `PLAYER_COMBO_POINTS` (`0x5ddff0`)
 /// and the form's cast change (`0x5de011` ahead of `0x5de016`). Read off the declared graph; skips
@@ -1900,18 +1861,12 @@ fn the_feed_runs_around_the_snapshots_and_before_the_events_its_producers_preced
         later_than(push).contains(&key("::ui_unit::feed_units")),
         "the push half runs before the unit snapshots"
     );
-    for earlier in ["::ui_unit::feed_units", "::ui_unit::feed_player_control"] {
-        assert!(
-            later_than(key(earlier)).contains(&fire),
-            "the fire half runs after {earlier}"
-        );
-    }
+    assert!(
+        later_than(key("::ui_unit::feed_units")).contains(&fire),
+        "the fire half runs after the unit snapshots"
+    );
     let seen = later_than(fire);
-    for later in [
-        "::ui_unit::fire_unit_events",
-        "::lanes::fire_in_order",
-        "::ui_cast::feed_cast_reports",
-    ] {
+    for later in ["::lanes::fire_in_order", "::ui_cast::feed_cast_reports"] {
         assert!(
             seen.contains(&key(later)),
             "the fire half runs before {later}"

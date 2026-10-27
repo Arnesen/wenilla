@@ -186,8 +186,7 @@ impl ScriptCallHost<'_, '_> {
     /// `SetSelection` (`0x493540`) signals inside whatever runs it: the teardown's
     /// `PET_BAR_UPDATE` (`0x4bd6b4`) before the store and the send, the change's signals before
     /// the re-swing (`0x4938c8`), each point running its listeners there, and what they left
-    /// applied once the turn ends, with the host lent. The unit, action and pet feeds take the
-    /// change as heard.
+    /// applied once the turn ends, with the host lent.
     pub(crate) fn engine_select(&mut self, script: &mut UiScript, select: EngineSelect) {
         #[cfg(test)]
         self.census_probe();
@@ -378,8 +377,7 @@ impl ScriptCallHost<'_, '_> {
     /// signalled, in its order: the release's `PET_BAR_UPDATE` when it called a possessed unit off
     /// (`0x493a18` → `0x4bd6b4`), the usable refresh (`0x493892`, `0x493a69`), then
     /// `PLAYER_TARGET_CHANGED` (`0x49389c`, `0x493a73`), with `"target"` seated for the
-    /// listeners and the script's next line. The unit feed takes the change as heard. Whether
-    /// it signalled.
+    /// listeners and the script's next line. Whether it signalled.
     fn signal_selection(&mut self, script: &mut UiScript, at: &mut Signalled) -> bool {
         let selected = self.appliers.select().selected();
         if selected == at.selected {
@@ -395,7 +393,6 @@ impl ScriptCallHost<'_, '_> {
             states.usable_refresh(script).fire(script);
         }
         script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-        script.announce_selection(selected);
         at.selected = selected;
         at.latched = appliers.pet().attack_latched();
         true
@@ -660,6 +657,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
             latched: appliers.pet().attack_latched(),
             mark: appliers.reports().mark(),
         };
+        let owed_from = appliers.select().owed_mark();
         let mut tail: Option<CallTail> = None;
         // The confirm popup an item pick or a Yes raised, signalled with the call's reports.
         let mut popup = None;
@@ -887,6 +885,11 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::RecordAsk(ask) => appliers.asks().apply(script, ask),
         }
         self.settle_selection(script, &mut at, owed);
+        // A deselect the call's own steps raised, a dead unit's loot close's (`0x48f369`), signals
+        // inside it (`0x493a73`), before the call returns.
+        while let Some(owed) = self.appliers.select().owed_deselect(owed_from) {
+            self.settle_selection(script, &mut at, owed);
+        }
         let appliers = &mut self.appliers;
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.

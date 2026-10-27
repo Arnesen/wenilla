@@ -38,7 +38,7 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
 const FRAME_FINAL_FEEDS: usize = 43;
-const FRAME_FINAL_INPUTS: usize = 237;
+const FRAME_FINAL_INPUTS: usize = 238;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the host's live
@@ -59,15 +59,14 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::player::wire_in::regain_control_on_arrival", &["player::state::OwnControlLost"],
         "gives control back on our own create, which the stance bar's usability walk reads \
-         (`0x6e3dc3`); the reference raises it inside the create (`0x5deb56`)"),
+         (`0x6e3dc3`), and pushes its signals onto the notice lane at its own place; the \
+         reference raises it inside the create (`0x5deb56`), and the arrival it answers is a \
+         system's message, not a handler's"),
     ("::spell::group_relation::publish_group_roster", &["spell::group_relation::GroupRoster"],
         "copies the group's roster, which the relation reads take, once the packets are in"),
     ("::spell::mods::track_class_family", &["spell::mods::SpellModifiers"],
         "keeps the class family the stance bar's usability walk prices a cost through; the \
          reference stores it inside our own create (`0x5debcc` → `0x6e6ca0`)"),
-    ("::swing_refusal::apply_swing_refusals", &["ui_pet::PetAttackLatch"],
-        "holds the attack seam, whose selection release lowers the pet's attack latch \
-         (`0x493a18`); the server's silent stop it runs (`0x625ab8`) reaches no release"),
     ("::transport::compose_riders", &["Transform"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::ui_action::feed::feed_actions", &["ui_action::PlayerActions"],

@@ -10,7 +10,6 @@ use benilla_protocol::SessionEvent;
 
 use super::front_tests::{fix, Fix, ME, OLD};
 use super::{by_name, scan, Selection};
-use crate::creature_anim::SwingMessage;
 use crate::net::{ClientCommand, GuidIndex, ObjectStore};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_party::{GroupState, GROUPTYPE_RAID};
@@ -114,18 +113,10 @@ fn stream_out(f: &mut Fix, guid: u64) {
     );
 }
 
-/// One packet through the handler table, then the drain of the guid-scoped teardowns
+/// One packet through the handler table, whose end runs the guid-scoped teardowns
 /// (`0x493910(guid, 1)`) the packet raised.
 fn deliver(f: &mut Fix, ev: SessionEvent) {
     crate::net::handlers::dispatch(f.app.world_mut(), vec![ev]);
-    let world = f.app.world_mut();
-    world
-        .run_system_once(super::click::clear_target_requests)
-        .expect("the drain runs");
-    // A one-shot reader starts at the oldest message, as the frame's reader does not.
-    world
-        .resource_mut::<Messages<super::DeselectGuid>>()
-        .clear();
 }
 
 /// `SMSG_GROUP_LIST` naming `members` (our subgroup is 0), as the handler table delivers it.
@@ -339,24 +330,9 @@ fn clear_target_ends_a_selection_with_no_object() {
 fn an_attacker_never_replaces_a_selection_with_no_object() {
     let mut f = grouped();
     select_unheld(&mut f, MEMBER);
-    let (me, mob) = (f.app.world().resource::<GuidIndex>().0[&ME], f.mob);
-    f.app
-        .world_mut()
-        .resource_mut::<Messages<SwingMessage>>()
-        .write(SwingMessage {
-            attacker: mob,
-            victim: Some(me),
-            hit_info: 0,
-            victim_state: 1,
-            damage: 1,
-            school: 0,
-            displayed: true,
-            seq: 0,
-        });
-    f.app
-        .world_mut()
-        .run_system_once(scan::auto_acquire)
-        .expect("the acquire runs");
+    let mob = f.mob;
+    super::scan::owe_acquire(f.app.world_mut(), mob, super::scan::Acquire::Attacker);
+    super::scan::run_owed_selects_now(f.app.world_mut());
     assert_eq!(selection(&f), (Some(MEMBER), None));
     assert_eq!(picks(&f), Vec::<u64>::new());
 }

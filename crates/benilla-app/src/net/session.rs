@@ -230,6 +230,13 @@ fn on_logged_out(
     }
 }
 
+/// The selection a session's loss ends, and where its signals are owed.
+#[derive(bevy::ecs::system::SystemParam)]
+struct LostSelection<'w> {
+    selection: Option<ResMut<'w, crate::target::Selection>>,
+    owed: Option<ResMut<'w, crate::target::OwedSelects>>,
+}
+
 /// The bridge's half of the session end; each window's own listener runs after it.
 fn on_disconnected(
     In(ev): In<SessionEvent>,
@@ -237,14 +244,33 @@ fn on_disconnected(
     mut b: Bridge,
     mut released: ResMut<super::objects::Released>,
     view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>,
-    selection: Option<ResMut<crate::target::Selection>>,
+    lost: LostSelection,
 ) {
     if let SessionEvent::Disconnected { reason, end } = ev {
         log_teardown(view_log, &b);
         // Every object goes with no release, kept link or not; the reference has no reconnect,
         // so the selection ends as at the world's teardown, with nothing sent or signalled.
+        //
+        // Deviation: on benilla's unattended reconnect, which the reference lacks, the world's VM
+        // survives the loss, so the clear signals its `PLAYER_TARGET_CHANGED` and usable refresh
+        // as a release's teardown does (`0x493a69`, `0x493a73`), still sending nothing, and the
+        // surviving target frame lets the lost unit go.
+        let LostSelection { selection, owed } = lost;
         if let Some(mut selection) = selection.filter(|s| s.guid.is_some()) {
+            let before = selection.guid;
             crate::target::clear_with_no_world(&mut selection);
+            let reconnects = end == benilla_protocol::SessionEnd::Lost && !super::session_over(end);
+            if let (true, Some(owed)) = (reconnects, owed) {
+                owed.into_inner().push(crate::target::OwedSelect::Signals(
+                    crate::script_calls::EngineSelect {
+                        before,
+                        // No teardown lowers the pet's latch: no `PET_BAR_UPDATE`.
+                        latched: false,
+                        mark: crate::lanes::mark(),
+                        owed: crate::target::SelectDebt::default(),
+                    },
+                ));
+            }
         }
         // The same teardown as `on_logged_out`'s.
         b.reputations.tear_down();
@@ -300,42 +326,48 @@ fn on_mover_edge(In(ev): In<SessionEvent>, mut e: Edges, b: Bridge) {
     }
 }
 
-/// `SMSG_CLIENT_CONTROL_UPDATE` (`0x5fa6b1` → `SetPlayerControl 0x4958e0`), judged by the
-/// controller later. For our own mover the fall of the flag `[0xb4b3e4]` drops the cursor's payload
-/// and the cast (`0x4958e8`-`0x495901` → `0x495920`) ahead of `PLAYER_CONTROL_LOST` (`0x49590b`); a
-/// store that changes nothing does nothing (`0x4958e6`). The controller stores the flag past the
-/// drain, so `stored` follows the packets of this frame, which it has not yet applied.
+/// What [`on_client_control`] holds beside the host: the cast its fall cancels, our guid, the flag,
+/// and the notice lane its signals go on (absent in a harness without the unit feed).
+type ControlSet = (
+    crate::spell::SelfCancel<'static>,
+    Res<'static, SelfGuid>,
+    ResMut<'static, crate::player::OwnControlLost>,
+    Option<ResMut<'static, crate::field_watch::NoticeLane>>,
+);
+
+/// `SMSG_CLIENT_CONTROL_UPDATE` (`0x5fa6b1` → `SetPlayerControl 0x4958e0`), its movement judged by
+/// the controller later. For our own mover a change of the flag `[0xb4b3e4]` is stored here
+/// (`0x4958ea`); its fall drops the cursor's payload and the cast (`0x4958e8`-`0x495901` →
+/// `0x495920`), and the change signals on the notice lane at this packet's place, then runs the
+/// usable refresh (`0x4958f7`/`0x49590b`, `0x4958fc`/`0x495910`). A store that changes nothing does
+/// nothing (`0x4958e6`).
 fn on_client_control(
     In(ev): In<SessionEvent>,
     mut e: Edges,
-    frame: Res<bevy::diagnostic::FrameCount>,
-    mut stored: Local<Option<(u32, bool)>>,
     // The flag and our guid are the host's too, so they sit in the set it shares with the cast.
-    mut vm: crate::script_calls::VmWith<(
-        crate::spell::SelfCancel<'static>,
-        Res<'static, SelfGuid>,
-        Res<'static, crate::player::OwnControlLost>,
-    )>,
+    mut vm: crate::script_calls::VmWith<ControlSet>,
 ) {
     let SessionEvent::ClientControl { mover, allow_move } = ev else {
         return;
     };
     e.client_control
         .write(ClientControlMessage { mover, allow_move });
-    let fell = {
-        let (_, self_guid, own) = vm.own();
-        if self_guid.0 != Some(mover) {
+    {
+        let (_, self_guid, mut own, _) = vm.own();
+        if self_guid.0 != Some(mover) || own.0 == !allow_move {
             return;
         }
-        let down = match *stored {
-            Some((at, down)) if at == frame.0 => down,
-            _ => own.0,
-        };
-        *stored = Some((frame.0, !allow_move));
-        !allow_move && !down
-    };
-    if fell {
+        own.0 = !allow_move;
+    }
+    if !allow_move {
         crate::spell::drop_hold(&mut vm, |(mut cancel, ..)| cancel.abort_cast());
+    }
+    if let (.., Some(mut lane)) = vm.own() {
+        use crate::field_watch::FieldNotice;
+        lane.write(FieldNotice::PlayerControl {
+            in_control: allow_move,
+        });
+        lane.write(FieldNotice::UsableRefresh);
     }
 }
 

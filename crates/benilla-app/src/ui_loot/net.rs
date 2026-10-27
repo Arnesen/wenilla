@@ -25,10 +25,11 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::Disconnected, on_session_end);
 }
 
-/// An admitted response for an object we hold selects a looted unit (`0x5ebc35` → `0x48f3a0`)
-/// before the window opens (`0x4c1cb0`), so the outgoing target's teardown closes a window still
-/// open on it. One for an object we lack shows `ERR_LOOT_DIDNT_KILL` and returns (`0x5ebb33`,
-/// mask 1, `0x5ebb3f`) before the latch (`0x5ebb60`) and the open. One that lands while our own
+/// An admitted response for an object we hold selects a looted unit (`0x5ebc35` → `0x48f3a0`),
+/// signalling at that place, before the window opens (`0x4c1cb0`), so the outgoing target's
+/// teardown closes a window still open on it. One for an object we lack shows
+/// `ERR_LOOT_DIDNT_KILL` and returns (`0x5ebb33`, mask 1, `0x5ebb3f`) before the latch
+/// (`0x5ebb60`) and the open. One that lands while our own
 /// body moves takes the move-start close (`0x5ebc3a`-`0x5ebc51`), which the loot lane runs after
 /// the copier's end, or the drain when the window waits on an item template. A close owed ahead of
 /// it takes the window it found first ([`OwedAhead`]), on the lane ahead of this one's steps. The
@@ -74,7 +75,11 @@ fn on_response(
         "net: loot response {guid:#x} type {loot_type} gold {gold} {} item(s)",
         rows.len()
     );
-    select.select_unit(guid);
+    // Its signals wait for the packet's end, beside the deselects; with no targets, nowhere.
+    match owed.dead.owed_selects() {
+        Some(owed) => select.select_unit_in_packet(guid, owed),
+        None => select.select_unit(guid),
+    }
     let seam = &mut select.seam;
     seam.loot.open(guid, loot_type, gold, rows);
     seam.loot.note_replaced_latch(latch_before);
@@ -769,7 +774,7 @@ mod tests {
         world.insert_resource(LootLatch(Some(LOCKBOX)));
         world.init_resource::<UiErrorKeys>();
         world.init_resource::<crate::net::GuidIndex>();
-        world.init_resource::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>();
+        world.init_resource::<crate::target::OwedSelects>();
         world
     }
 
@@ -908,12 +913,7 @@ mod tests {
         assert_eq!(world.resource::<LootState>().source(), None);
         assert_eq!(world.resource::<LootLatch>().0, None);
         assert!(rx.try_recv().is_err(), "the server's release is not echoed");
-        let asked: Vec<u64> = world
-            .resource_mut::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>()
-            .drain()
-            .map(|d| d.0)
-            .collect();
-        assert_eq!(asked, [CORPSE]);
+        assert_eq!(crate::target::take_owed_deselects(&mut world), [CORPSE]);
 
         // A second release finds nothing open and asks nothing.
         world
@@ -925,11 +925,7 @@ mod tests {
                 },
             )
             .expect("the handler runs as a one-shot system");
-        assert!(world
-            .resource_mut::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>()
-            .drain()
-            .next()
-            .is_none());
+        assert!(crate::target::take_owed_deselects(&mut world).is_empty());
     }
 
     /// Chained loot: A's window is open and `CMSG_LOOT` for B latched B, so the release vmangos
@@ -1088,7 +1084,7 @@ mod tests {
         world.init_resource::<crate::spell::SpellTargeting>();
         world.init_resource::<crate::spell::CursorPicks>();
         world.init_resource::<crate::spell::targeting::EnchantConfirmItem>();
-        world.init_resource::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>();
+        world.init_resource::<crate::target::OwedSelects>();
         world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::player::Player>();
         world.init_resource::<super::super::LootMoveStart>();
@@ -1406,12 +1402,22 @@ mod tests {
         let mut app = stock_app(&[TARGET_UI]);
 
         app.update();
+        target_changed(&mut app);
         assert_eq!(target_frame_name(&app), "Kobold Vermin", "the Tab target");
 
         app.world_mut().resource_mut::<LootLatch>().0 = Some(CORPSE);
         respond(app.world_mut(), CORPSE, 1);
         app.update();
+        target_changed(&mut app);
         assert_eq!(target_frame_name(&app), "Kobold Worker", "the looted body");
+    }
+
+    /// The select's own `PLAYER_TARGET_CHANGED` (`0x49389c`), which no host carries in this
+    /// harness, once the frame's pushes seat the target.
+    fn target_changed(app: &mut App) {
+        app.world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .fire_event("PLAYER_TARGET_CHANGED", vec![]);
     }
 
     /// What [`super::super::drain_loot`] reads beside [`seat_tabbed`]'s, with our body's movement
@@ -1423,11 +1429,7 @@ mod tests {
 
     /// The deselects asked for since the last call.
     fn deselects(world: &mut World) -> Vec<u64> {
-        world
-            .resource_mut::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>()
-            .drain()
-            .map(|d| d.0)
-            .collect()
+        crate::target::take_owed_deselects(world)
     }
 
     /// A response on the corpse with `player` seated, then one drain.
@@ -1784,7 +1786,7 @@ mod tests {
                 (
                     super::super::loot_frame,
                     super::super::drain_loot,
-                    crate::target::click::clear_target_requests,
+                    crate::target::fire_owed_selects_lane,
                 )
                     .chain(),
             );
@@ -1810,6 +1812,7 @@ mod tests {
             for _ in 0..2 {
                 app.update();
             }
+            target_changed(&mut app);
             let releases = rx
                 .try_iter()
                 .filter(|c| matches!(c, ClientCommand::LootRelease { guid } if *guid == CORPSE))

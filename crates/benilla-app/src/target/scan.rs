@@ -16,7 +16,7 @@ use benilla_protocol::{guid, EntityKind};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::creature_anim::{StartTarget, SwingMessage};
+use crate::creature_anim::StartTarget;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetEntity, ObjectStore, SelfPlayer};
 use crate::query_cache::Ask;
@@ -501,7 +501,8 @@ pub(crate) struct Owed {
 }
 
 impl Owed {
-    /// Pay both now, for a writer whose signals have no listeners to run first.
+    /// Pay both now, for a test whose signals have no listeners to run first.
+    #[cfg(test)]
     pub(crate) fn pay(
         self,
         selection: &mut Selection,
@@ -966,54 +967,202 @@ pub(super) fn remember_last_enemy(
     }
 }
 
-/// What asked [`auto_acquire`] for a unit.
+/// What asked for a unit's select inside its packet ([`OwedSelect::Acquire`]).
 #[derive(Clone, Copy, Debug)]
-enum Acquire {
+pub(crate) enum Acquire {
     /// A swing at us (`SMSG_ATTACKERSTATEUPDATE`).
     Attacker,
     /// A spell start aimed at us (`SMSG_SPELL_START`).
     Caster,
 }
 
-/// The two packet acquires, in packet order by their [`crate::creature_anim::PlaySeq`] stamps:
-/// - the ATTACKERSTATEUPDATE self-defence acquire (`0x6259c9`–`0x6259fe`): when we are the victim
-///   and hold no selection, select the attacker, with no counter-attack;
-/// - the spell start's (`0x6e7963`-`0x6e799c`): another unit casting at us, which
-///   [`crate::spell::net::CastAtPlayer`] names, is selected when the active player's object is
-///   held (`0x6e796a`), the caster cannot assist it (`CanAssist 0x6066f0` at `0x6e7973`) and
-///   nothing is selected (`[0xb4e2d8]`, `0x6e7980`). The caster is looked up as a unit
-///   (`0x468460` with mask 8, `0x6e7892`).
-///
-/// Each is `SelectTarget` (`0x6259fe`, `0x6e799c`), whose front may bind the unit to a standing
-/// cursor's cast instead; a packet handler runs in no script, whose gate context passes tag 2.
-/// Each selection signals in place, its listeners running before the next ask is judged
-/// ([`crate::script_calls::ScriptCallHost::engine_select`]).
-pub(super) fn auto_acquire(
-    mut swings: MessageReader<SwingMessage>,
-    mut casts: MessageReader<crate::spell::net::CastAtPlayer>,
-    mut vm: crate::script_calls::VmWith<AcquireSelect<'static, 'static>>,
-) {
-    let Some((me, my_guid)) = vm.own().self_player.single().ok().map(|(e, g)| (e, g.0)) else {
-        return;
-    };
-    let mut asks: Vec<(u64, Entity, Acquire)> = swings
-        .read()
-        .filter(|s| s.victim == Some(me))
-        .map(|s| (s.seq, s.attacker, Acquire::Attacker))
-        .chain(casts.read().map(|c| (c.seq, c.caster, Acquire::Caster)))
-        .collect();
-    asks.sort_by_key(|&(seq, ..)| seq);
-    for (_, unit, why) in asks {
-        let select = vm.own().select(unit, why, my_guid);
-        if let Some(select) = select {
-            vm.engine_select(select, |mut c, owed| {
-                owed.pay(&mut c.selection, &mut c.seam);
-            });
+/// A `SetSelection` a packet's handler owes, at its place in the handler, for the packet's end to
+/// run with the VM held ([`run_owed_selects`]).
+pub(crate) enum OwedSelect {
+    /// The two packet acquires, each `SelectTarget` (`0x6259fe`, `0x6e799c`) as its handler's
+    /// last act on the unit it names:
+    /// - the ATTACKERSTATEUPDATE self-defence acquire (`0x6259c9`–`0x6259fe`): when we are the
+    ///   victim and hold no selection, select the attacker, with no counter-attack;
+    /// - the spell start's (`0x6e7963`-`0x6e799c`): another unit casting at us is selected when
+    ///   the active player's object is held (`0x6e796a`), the caster cannot assist it
+    ///   (`CanAssist 0x6066f0` at `0x6e7973`) and nothing is selected (`[0xb4e2d8]`, `0x6e7980`).
+    ///
+    /// `SelectTarget`'s front may bind the unit to a standing cursor's cast instead; a packet
+    /// handler runs in no script, whose gate context passes tag 2.
+    Acquire(Entity, Acquire),
+    /// The signals of a select its handler committed in place, as it went on: the loot
+    /// response's (`0x48f3a0`).
+    Signals(crate::script_calls::EngineSelect),
+    /// `DeselectGuid` (`0x493910(guid, 1)`), nothing unless `guid` is still the selection
+    /// (`0x493949`), which signals inside itself (`0x493a69`, `0x493a73`) and leaves the
+    /// last-target pair: a dead unit's loot close (`0x48f369`), an old pet's teardown (`0x5e26f7`),
+    /// a group list's or ending's, a release's ([`super::release`]). A handler's runs at its packet's end, a system's or a lane's on
+    /// this queue's lane at its place, a call's inside the call
+    /// ([`crate::script_calls::ScriptCallHost`]).
+    Deselect(u64),
+}
+
+/// The selects the packet's handlers owe, each at its place among what they queued.
+#[derive(Resource, Default)]
+pub(crate) struct OwedSelects(Vec<(crate::lanes::Stamp, OwedSelect)>);
+
+impl OwedSelects {
+    /// Owe `select` here, behind what the handler queued before it.
+    pub(crate) fn push(&mut self, select: OwedSelect) {
+        self.0.push((crate::lanes::stamp(), select));
+    }
+
+    /// Owe the teardown of `guid`'s selection ([`OwedSelect::Deselect`]).
+    pub(crate) fn deselect(&mut self, guid: u64) {
+        self.push(OwedSelect::Deselect(guid));
+    }
+
+    /// Where a call's owed selects begin, for [`Self::take_deselect`].
+    pub(crate) fn mark(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The first deselect owed at `from` or after, taken.
+    pub(crate) fn take_deselect(&mut self, from: usize) -> Option<u64> {
+        let at = (from..self.0.len()).find(|&i| matches!(self.0[i].1, OwedSelect::Deselect(_)))?;
+        match self.0.remove(at).1 {
+            OwedSelect::Deselect(guid) => Some(guid),
+            _ => None,
+        }
+    }
+
+    /// The units the owed acquires name, taken, for a test of a handler that owes them.
+    #[cfg(test)]
+    pub(crate) fn take_acquires(&mut self) -> Vec<Entity> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .filter_map(|(_, s)| match s {
+                OwedSelect::Acquire(unit, _) => Some(unit),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The guids of the deselects owed and not yet run, taken, for a test of a writer that owes them.
+#[cfg(test)]
+pub(crate) fn take_owed_deselects(world: &mut World) -> Vec<u64> {
+    let mut owed = world.get_resource_or_init::<OwedSelects>();
+    std::iter::from_fn(|| owed.take_deselect(0)).collect()
+}
+
+/// The owed selects' lane's head: what a system or a lane owed, as a packet's end runs its
+/// handlers' ([`run_owed_selects`]).
+pub(super) fn peek_owed_selects(world: &World) -> Option<crate::lanes::Stamp> {
+    world
+        .get_resource::<OwedSelects>()?
+        .0
+        .first()
+        .map(|(at, _)| *at)
+}
+
+/// Each owed select `until` admits, run as the firing of its stamp with the host lent, signalling
+/// in place; the lane stops after one whose firing stamped anything, so what it pushed fires next.
+pub(super) fn fire_owed_selects(In(until): In<crate::lanes::Until>, world: &mut World) {
+    loop {
+        let Some(owed) = world.get_resource_mut::<OwedSelects>() else {
+            return;
+        };
+        if !owed.0.first().is_some_and(|(at, _)| until.admits(*at)) {
+            return;
+        }
+        let (at, select) = owed.into_inner().0.remove(0);
+        let ((), moved) = crate::lanes::firing(at, || run_owed_select(world, select));
+        if moved {
+            return;
         }
     }
 }
 
-/// What [`auto_acquire`]'s selects read and write.
+/// The owed selects' lane fired whole, for a test that drives a writer without the lanes.
+#[cfg(test)]
+pub(crate) fn fire_owed_selects_lane(world: &mut World) {
+    while peek_owed_selects(world).is_some() {
+        fire_owed_selects(In(crate::lanes::Until::all()), world);
+    }
+}
+
+/// One owed select on the world, its unit edits applied as it returns.
+fn run_owed_select(world: &mut World, select: OwedSelect) {
+    if let Err(err) = world.run_system_cached_with(owed_select, select) {
+        // A harness without the selection's seams selects nothing.
+        debug!("target: an owed select did not run: {err}");
+    }
+    crate::creature_anim::apply_unit_edits(world);
+}
+
+/// The packet's owed selects, after its handlers, each run as the firing of its stamp with the
+/// world's VM held, so its sends go out in the packet and what it signals is parked on the release
+/// lane at its place ([`super::release::park_signals`]): the reference signals inside the packet
+/// (`0x49389c`, `0x493a73`).
+pub(super) fn run_owed_selects(world: &mut World, _: crate::lanes::Stamp) {
+    let Some(mut owed) = world.get_resource_mut::<OwedSelects>() else {
+        return;
+    };
+    for (at, select) in std::mem::take(&mut owed.0) {
+        crate::lanes::firing(at, || {
+            super::release::park_signals(world, |world| {
+                if let Err(err) = world.run_system_cached_with(owed_select, select) {
+                    // A harness without the selection's seams selects nothing.
+                    debug!("target: an owed select did not run: {err}");
+                }
+            });
+        });
+    }
+}
+
+/// Owe `why`'s select of `unit`, as a handler does, for [`run_owed_selects`] to run.
+#[cfg(test)]
+pub(super) fn owe_acquire(world: &mut World, unit: Entity, why: Acquire) {
+    world
+        .get_resource_or_init::<OwedSelects>()
+        .push(OwedSelect::Acquire(unit, why));
+}
+
+/// [`run_owed_selects`] as a packet's end runs it, for a test of a handler that owes selects.
+#[cfg(test)]
+pub(super) fn run_owed_selects_now(world: &mut World) {
+    run_owed_selects(world, crate::lanes::stamp());
+}
+
+/// One owed select: an acquire's commit and its signals, or a committed select's signals, each
+/// signalling in place ([`crate::script_calls::ScriptCallHost::engine_select`]).
+pub(super) fn owed_select(
+    In(owed): In<OwedSelect>,
+    mut vm: crate::script_calls::VmWith<AcquireSelect<'static, 'static>>,
+) {
+    let select = match owed {
+        OwedSelect::Acquire(unit, why) => {
+            let mut c = vm.own();
+            let Some(my_guid) = c.self_player.single().ok().map(|(_, g)| g.0) else {
+                return;
+            };
+            c.select(unit, why, my_guid)
+        }
+        OwedSelect::Signals(select) => Some(select),
+        OwedSelect::Deselect(guid) => {
+            let mut c = vm.own();
+            if c.selection.guid != Some(guid) {
+                return;
+            }
+            let before = super::click::Standing::of(&c.selection, &c.seam);
+            let send = super::click::clear_owing(&mut c.selection, &mut c.seam);
+            Some(before.owing(Owed { send, swing: None }))
+        }
+    };
+    if let Some(select) = select {
+        vm.engine_select(select, |mut c, owed| {
+            owed.pay(&mut c.selection, &mut c.seam);
+        });
+    }
+}
+
+/// What an owed select reads and writes ([`owed_select`]).
 #[derive(SystemParam)]
 pub(super) struct AcquireSelect<'w, 's> {
     self_player: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,

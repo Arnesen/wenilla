@@ -2,7 +2,9 @@
 //! the resolver reads `[0xb4e2d8]` for `"target"` (`0x515a86`) and `[0xb4e2d0]` for `"npc"`
 //! (`0x515c00`) when it runs. A target's release tears the selection down inside its packet's
 //! handler (`0x5fbb60` → `0x493910` at `0x5fbbe5`), so its `PLAYER_TARGET_CHANGED` (`0x493a73`)
-//! fires at that packet's place among the other packets' events.
+//! fires at that packet's place among the other packets' events. So do the selects a packet
+//! makes: the attacked and cast-at acquires (`0x6259fe`, `0x6e799c`) and the loot response's
+//! (`0x48f3a0`).
 
 use benilla_protocol::{ObjectFields, SessionEvent};
 use benilla_ui::script::UiScript;
@@ -173,8 +175,10 @@ fn a_destroyed_targets_change_fires_at_the_destroy() {
 }
 
 /// A reconnectable loss keeps the client in the world but drops every object with no release:
-/// the selection ends there, as at the world's teardown (`0x4939df`), and the target the
-/// reconnect streams in again is not selected, so nothing names it as `"target"`.
+/// the selection ends there, as at the world's teardown, which returns before the swing stop and
+/// the send (`0x4939df`), and the VM that survives it hears the change, as a release's teardown
+/// signals (`0x493a73`). The target the reconnect streams in again is not selected, so nothing
+/// names it as `"target"`.
 #[test]
 fn a_reconnect_does_not_reseat_the_lost_target() {
     let _lock = crate::local_state::test_env::ENV_LOCK
@@ -182,12 +186,26 @@ fn a_reconnect_does_not_reseat_the_lost_target() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _decl = crate::local_state::test_env::EnvGuard::set("WOW_UNATTENDED", "1");
     let mut app = client();
-    frame(
-        &mut app,
-        vec![SessionEvent::Disconnected {
-            reason: "lost".into(),
-            end: benilla_protocol::SessionEnd::Lost,
-        }],
+    app.world_mut()
+        .non_send_resource::<UiScript>()
+        .run(
+            r#"
+            local g = CreateFrame("Frame")
+            g:RegisterEvent("PLAYER_TARGET_CHANGED")
+            g:SetScript("OnEvent", function() table.insert(Seen, event) end)
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        frame(
+            &mut app,
+            vec![SessionEvent::Disconnected {
+                reason: "lost".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+            }],
+        ),
+        ["PLAYER_TARGET_CHANGED"],
+        "the surviving VM hears the change"
     );
     let s = *app.world().resource::<crate::target::Selection>();
     assert_eq!(
@@ -212,4 +230,194 @@ fn a_reconnect_does_not_reseat_the_lost_target() {
         &mut app,
         r#"return UnitExists("target") == nil"#
     ));
+}
+
+/// Nothing selected and the VM told so, with a spy on the selection's change and the boar's line:
+/// each heard event, the change and the window with the target they read, `UnitHealth("target")`.
+/// The line's listener is not asked: a lane's firing reads the world the frame left until each
+/// packet's lanes fire inside the dispatch.
+fn unselected_with_a_spy(app: &mut App) {
+    select(app, None);
+    frame(app, vec![]);
+    app.world_mut()
+        .non_send_resource::<UiScript>()
+        .run(
+            r#"
+            local g = CreateFrame("Frame")
+            g:RegisterEvent("PLAYER_TARGET_CHANGED")
+            g:RegisterEvent("CHAT_MSG_MONSTER_SAY")
+            g:RegisterEvent("LOOT_OPENED")
+            g:SetScript("OnEvent", function()
+                if event == "CHAT_MSG_MONSTER_SAY" then
+                    table.insert(Seen, event)
+                else
+                    table.insert(Seen, event .. ":" .. tostring(UnitHealth("target")))
+                end
+            end)
+            Seen = {}
+            "#,
+        )
+        .unwrap();
+}
+
+/// The boar's line, which its own packet's handler shows on the chat lane.
+fn boar_says() -> SessionEvent {
+    SessionEvent::Chat(benilla_protocol::messages::ChatMessage {
+        chat_type: benilla_protocol::messages::CHAT_MSG_MONSTER_SAY,
+        language: 0,
+        sender_guid: BOAR,
+        target_guid: 0,
+        sender_name: Some("Boar".into()),
+        channel: None,
+        text: "grr".into(),
+        chat_tag: 0,
+    })
+}
+
+/// The boar's line, its swing at us with nothing selected, and its line again: the swing's handler
+/// selects the boar (`0x6259c9`-`0x6259fe`), so the change's `PLAYER_TARGET_CHANGED` fires at the
+/// swing's place, between the lines' listeners, and reads the boar as the target.
+#[test]
+fn an_attackers_acquire_signals_at_its_swing() {
+    let mut app = client();
+    unselected_with_a_spy(&mut app);
+    let swing = SessionEvent::AttackerState(benilla_protocol::messages::AttackerState {
+        attacker: BOAR,
+        victim: ME,
+        hit_info: 0x2,
+        damage: 3,
+        victim_state: 1,
+        absorb: 0,
+        resist: 0,
+        blocked: 0,
+        melee_spell_id: 0,
+        school: 0,
+    });
+    assert_eq!(
+        frame(&mut app, vec![boar_says(), swing, boar_says()]),
+        [
+            "CHAT_MSG_MONSTER_SAY",
+            "PLAYER_TARGET_CHANGED:50",
+            "CHAT_MSG_MONSTER_SAY"
+        ]
+    );
+    assert_eq!(
+        app.world().resource::<crate::target::Selection>().guid,
+        Some(BOAR)
+    );
+}
+
+/// The boar's line, its cast at us with nothing selected, and its line again: the start's handler
+/// selects the caster as its last act (`0x6e7963`-`0x6e799c`), so `PLAYER_TARGET_CHANGED` fires at
+/// the start's place, between the lines' listeners.
+#[test]
+fn a_casters_acquire_signals_at_its_start() {
+    const FROSTBOLT: u32 = 116;
+    let mut app = client();
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+            FROSTBOLT,
+            benilla_formats::SpellDisplay::default(),
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    unselected_with_a_spy(&mut app);
+    let start = SessionEvent::SpellStart {
+        caster: BOAR,
+        spell_id: FROSTBOLT,
+        cast_flags: 0,
+        cast_time_ms: 3000,
+        target: Some(ME),
+        ammo_display_id: None,
+    };
+    assert_eq!(
+        frame(&mut app, vec![boar_says(), start, boar_says()]),
+        [
+            "CHAT_MSG_MONSTER_SAY",
+            "PLAYER_TARGET_CHANGED:50",
+            "CHAT_MSG_MONSTER_SAY"
+        ]
+    );
+}
+
+/// The boar's line, then a loot response for the boar: the response selects the looted unit
+/// (`0x5ebc35` → `0x48f3a0`) before the window opens (`0x4c1cb0`), so `PLAYER_TARGET_CHANGED`
+/// fires at the response's place, after the line's listener and ahead of `LOOT_OPENED`.
+#[test]
+fn the_loot_responses_select_signals_at_the_response() {
+    let mut app = client();
+    unselected_with_a_spy(&mut app);
+    let response = SessionEvent::LootResponse {
+        guid: BOAR,
+        // Pickpocketing: a server-started window, admitted with no latch.
+        loot_type: 2,
+        gold: 0,
+        items: Vec::new(),
+    };
+    assert_eq!(
+        frame(&mut app, vec![boar_says(), response]),
+        [
+            "CHAT_MSG_MONSTER_SAY",
+            "PLAYER_TARGET_CHANGED:50",
+            "LOOT_OPENED:50"
+        ]
+    );
+}
+
+/// The boar dead, selected and its loot open, then its line, the server's release of the loot and
+/// its line again: the release closes the window (`0x5ec0f3` → `0x48f200`), whose last step
+/// deselects a dead unit (`0x48f369` → `0x493910`), signalling inside it (`0x493a73`), so
+/// `PLAYER_TARGET_CHANGED` fires at the release's place, between the lines' listeners.
+#[test]
+fn a_dead_units_loot_close_signals_its_deselect_at_the_packet() {
+    let mut app = client();
+    frame(&mut app, vec![values(BOAR, &health(0))]);
+    unselected_with_a_spy(&mut app);
+    select(&mut app, Some(BOAR));
+    let world = app.world_mut();
+    world
+        .resource_mut::<crate::ui_loot::LootState>()
+        .open(BOAR, 1, 0, Vec::new());
+    world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(BOAR);
+    let release = SessionEvent::LootReleaseResponse {
+        guid: BOAR,
+        result: 1,
+    };
+    assert_eq!(
+        frame(&mut app, vec![boar_says(), release, boar_says()]),
+        [
+            "CHAT_MSG_MONSTER_SAY",
+            "PLAYER_TARGET_CHANGED:0",
+            "CHAT_MSG_MONSTER_SAY"
+        ]
+    );
+    assert_eq!(
+        app.world().resource::<crate::target::Selection>().guid,
+        None
+    );
+}
+
+/// `CloseLoot()` on a dead unit's window: the close's last step deselects it (`0x4c2ed6` →
+/// `0x48f200` → `0x48f369`), whose `PLAYER_TARGET_CHANGED` (`0x493a73`) runs its listeners inside
+/// the call, before the line after it.
+#[test]
+fn close_loot_on_a_dead_unit_signals_its_deselect_inside_the_call() {
+    let mut app = client();
+    frame(&mut app, vec![values(BOAR, &health(0))]);
+    unselected_with_a_spy(&mut app);
+    select(&mut app, Some(BOAR));
+    let world = app.world_mut();
+    world
+        .resource_mut::<crate::ui_loot::LootState>()
+        .open(BOAR, 1, 0, Vec::new());
+    world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(BOAR);
+    let seen: Vec<String> = hosted(
+        &mut app,
+        r#"CloseLoot() table.insert(Seen, "after") return Seen"#,
+    );
+    assert_eq!(seen, ["PLAYER_TARGET_CHANGED:0", "after"]);
+    assert_eq!(
+        app.world().resource::<crate::target::Selection>().guid,
+        None
+    );
 }

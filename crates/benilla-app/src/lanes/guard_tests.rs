@@ -192,17 +192,10 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Edge,
-        "::ui_unit::feed_units",
-        "the selection's change, `PLAYER_TARGET_CHANGED`",
-    ),
-    (
-        Row::Edge,
         "::ui_action::state::fire_action_events",
-        "the usable refresh `0x4b31c0` (`ACTIONBAR_UPDATE_USABLE`, `SPELL_ACTIVE`, \
-         `SPELL_UPDATE_USABLE`) of the callers outside the field watchers and the cooldown list, \
-         which refresh on their lanes: the selection's select and release where no call made \
-         them (`0x493892`, `0x493a69`) and the control flag (`0x4958fc`, `0x495910`), one pass \
-         a frame over the bar's 120 slots and the reactive list, diffed against the usable \
+        "the usable cache's refresh `0x4e5c00` (`ACTIONBAR_UPDATE_USABLE`) of `EditMacro` \
+         (`0x4f132e`) and `RaiseBagUpdate` (`0x4f9374`), which the reference runs in the call and \
+         in the item watcher's run, one pass a frame over the bar's 120 slots diffed against the \
          cache",
     ),
 ];
@@ -374,9 +367,9 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "net::UnitSpeeds", "net::game_time::ServerTime", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
-        "player::state::StandPending", "spell::cooldowns::Cooldowns", "spell::mods::SpellModifiers",
-        "target::Selection", "ui_action::ActionSlots", "ui_action::PlayerActions",
-        "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
+        "player::state::OwnControlLost", "player::state::StandPending", "spell::cooldowns::Cooldowns",
+        "spell::mods::SpellModifiers", "target::Selection", "ui_action::ActionSlots",
+        "ui_action::PlayerActions", "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
     // The ranged-slot item scales a ranged spell's range, read as the frame left it (#2217).
     ("::spell::targeting::feed_targeting_to_vm", &["items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
@@ -473,8 +466,6 @@ const FILLED_THROUGH_A_READ: &[&str] = &[
 /// in system order, or a system that pushes onto a lane off it at its own place, passes every
 /// check here unseen.
 const READ_ONLY_TO_HANDLERS: &[&str] = &[
-    // The frame's number, which the control packet's handler tells its frame's packets apart by.
-    "::FrameCount",
     // The login pick, which names the character the account-data sections belong to.
     "::glue_session::roster::Roster",
     // `0xb4e314`, which the party snapshot reads; only the zone feed commits it.
@@ -619,7 +610,7 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 35] {
+fn lane_types() -> [TypeId; 36] {
     [
         TypeId::of::<crate::ui_items::feed::BagView>(),
         // The views lane: what each packet changed in the stores.
@@ -642,6 +633,7 @@ fn lane_types() -> [TypeId; 35] {
         TypeId::of::<crate::field_callbacks::FieldCallbacks>(),
         // The release lane: the signals each selection teardown parked, stamped under its release.
         TypeId::of::<crate::target::Releases>(),
+        TypeId::of::<crate::target::OwedSelects>(),
         // The item-text lane: the page-text packets' reads, stamped at their packets.
         TypeId::of::<crate::ui_item_text::ItemTextLane>(),
         // The cooldown lanes: the player's list and the pet's, which log their writes and flushes
@@ -691,7 +683,7 @@ fn lane_types() -> [TypeId; 35] {
 
 /// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
 /// so another lane's read of the same type shows as the state it is.
-fn lane_queue_owners() -> [(&'static str, TypeId); 35] {
+fn lane_queue_owners() -> [(&'static str, TypeId); 36] {
     [
         ("bag view", TypeId::of::<crate::ui_items::feed::BagView>()),
         ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
@@ -719,6 +711,7 @@ fn lane_queue_owners() -> [(&'static str, TypeId); 35] {
             TypeId::of::<crate::field_callbacks::FieldCallbacks>(),
         ),
         ("releases", TypeId::of::<crate::target::Releases>()),
+        ("owed selects", TypeId::of::<crate::target::OwedSelects>()),
         (
             "item text",
             TypeId::of::<crate::ui_item_text::ItemTextLane>(),
@@ -930,6 +923,7 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "list rebuilds",
             "loot",
             "merchant",
+            "owed selects",
             "party",
             "pet cooldowns",
             "quest events",
@@ -1193,24 +1187,11 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 
 /// The systems outside the phase that lend the call host and take a handler queue, firing off it
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
-pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[
-    (
-        "::swing_refusal::apply_swing_refusals",
-        "the server's swing stop `0x5ecac0`, `CancelNextSwingSpells` (`0x6e6f30`) and the \
-         tutorials 0xa and 0xb, which the reference runs inside its packet (`0x625ab8`, \
-         `0x5e7dd0`), off the swing refusals",
-    ),
-    (
-        "::target::scan::auto_acquire",
-        "the attacked and cast-at acquires' `SelectTarget`, which the reference runs inside its \
-         packet (`0x6259fe`, `0x6e799c`), off the swings and the spell starts",
-    ),
-    (
-        "::ui_tradeskill::drain_trade_skill",
-        "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
+pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[(
+    "::ui_tradeskill::drain_trade_skill",
+    "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
          `0x4fd7b0` (`0x6e81e7`), off the cast events",
-    ),
-];
+)];
 
 /// The systems that take a placed queue ([`placed_queues`]) after the dispatch and push onto a
 /// lane, at the item's place or, from their commands, at their own, by a suffix of the system's
@@ -1574,6 +1555,7 @@ const QUEUES_NOT_VIEWS: &[&str] = &[
     "ui_items::EquipErrors",
     "ui_unit::views::ViewLog",
     "ui_items::feed::BagView",
+    "target::scan::OwedSelects",
 ];
 
 /// A type's name as [`READS_FRAME_FINAL`] spells it: the crate's own by its path in the crate, an
