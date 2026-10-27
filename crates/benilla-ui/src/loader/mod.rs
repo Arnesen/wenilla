@@ -105,7 +105,6 @@ pub fn load_into_under(
         status_root,
         report: LoadReport::default(),
         warned: HashSet::new(),
-        deferred_anchors: Vec::new(),
     };
     loader.report.warnings.extend(doc.warnings.iter().cloned());
     loader.load_doc(doc);
@@ -133,7 +132,6 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         status_root: "",
         report: LoadReport::default(),
         warned: HashSet::new(),
-        deferred_anchors: Vec::new(),
     };
 
     let (own_name, parent_name) = loader.frame_names(wrapper);
@@ -143,7 +141,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         own_name.as_deref().unwrap_or("<unnamed>")
     );
 
-    // Diagnostic only: `expand` does not say what kind a template was declared as.
+    // Diagnostic only: the load does not say what kind a template was declared as.
     let mut notes = Vec::new();
     let mut any_resolved = false;
     {
@@ -177,16 +175,16 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
     }
     loader.report.warnings.extend(notes);
 
-    // The XML `inherits=` expansion; its warnings get the `CreateFrame` call as a prefix.
+    // The synthetic node `CreateFrame` hands the XML builder (`0x70628b` → `0x6ee280`); its
+    // warnings get the `CreateFrame` call as a prefix.
     let node = framexml::inherits_node(kind, template);
     let first = loader.report.warnings.len();
-    let expanded = loader.expand(&node);
+    let levels = loader.levels(&node);
     for w in &mut loader.report.warnings[first..] {
         *w = format!("{dbg}: {w}");
     }
-    let levels = loader.levels(&node);
 
-    loader.decorate(&expanded, &levels, wrapper, &self_name, &parent_name, &dbg);
+    loader.decorate(&levels, kind, wrapper, &self_name, &parent_name, &dbg);
 
     loader.report
 }
@@ -263,11 +261,6 @@ struct Loader<'a> {
     pub(super) report: LoadReport,
     /// Warn-once keys.
     pub(super) warned: HashSet<String>,
-    /// Anchors whose named `relativeTo` did not exist yet, applied once the enclosing frame's
-    /// subtree is built: the reference resolves anchors at layout, this loader at `SetPoint`, so a
-    /// target built later waits here (`ClassTrainerFrameTemplates.xml:67` hangs the label off the
-    /// highlight). Each `decorate` drains its own.
-    pub(super) deferred_anchors: Vec<DeferredAnchor>,
 }
 
 /// The nodes an element's `LoadXML` reads, in the order it reads them: the reference merges no
@@ -275,9 +268,8 @@ struct Loader<'a> {
 /// for a frame, `0x76fe5b` for a texture, `0x770f9e` for a FontString), then reads the node's own
 /// attributes and its own first child of each kind (`0x6f2c50`). So an attribute whose rule is
 /// local to a node (`setAllPoints` beside the node's own `<Anchors>`, a `font=` with its own
-/// `<FontHeight>`) is read level by level, the template first and the element last;
-/// [`Loader::expand`]'s merged element serves the rest. The templates are shared with the
-/// registry, not copied.
+/// `<FontHeight>`) is read level by level, the template first and the element last. The templates
+/// are shared with the registry, not copied.
 pub(super) struct Levels<'a> {
     inherited: Vec<std::rc::Rc<Element>>,
     own: &'a Element,
@@ -309,8 +301,8 @@ impl<'l> IntoIterator for &'l Levels<'_> {
     }
 }
 
-/// One `SetPoint` held until its target exists.
-pub(super) struct DeferredAnchor {
+/// One `<Anchor>` as read, before its target is looked up ([`Loader::apply_anchor`]).
+pub(super) struct XmlAnchor {
     pub(super) wrapper: Table,
     /// A region wrapper (`call_region`) rather than a frame's (`call`).
     pub(super) region: bool,
@@ -465,7 +457,7 @@ impl Loader<'_> {
     }
 
     /// A top-level `virtual` element, registered raw (`0x6ee500`, called at `0x6ee1bd` under the
-    /// live context word): `expand` resolves its own `inherits` at instantiation.
+    /// live context word): its own `inherits` is resolved at instantiation ([`Self::levels`]).
     fn register_template(&mut self, el: &Element) {
         // No name, or an empty one (`0x6ee1a9` tests its first byte): `0x871020` at severity 1
         // into the document's record (`0x6ee1c4`-`0x6ee1cf`), and nothing registers.
@@ -546,36 +538,35 @@ impl Loader<'_> {
         }
     }
 
-    /// Resolve `inherits=` against the persistent template registry (`framexml::expand`).
-    pub(super) fn expand(&mut self, el: &Element) -> Element {
-        let model = self.model();
-        let templates = model.framexml_templates.borrow();
-        let mut warns = Vec::new();
-        let out = framexml::expand(el, &*templates, &mut warns);
-        drop(templates);
-        drop(model);
-        self.report.warnings.extend(warns);
-        out
-    }
-
     /// The nodes `raw`'s `LoadXML` reads ([`Levels`]), a frame's or a texture's. The walk stops at
     /// an `inherits` the registry lacks, which the level naming it logs before anything else at
     /// severity 1, `Couldn't find inherited node: %s` (`0x8786a8`; a frame `0x769861`, a texture
     /// `0x76fe60`).
+    ///
+    /// Deviation: a cycle (`A` inherits `B`, `B` inherits `A`) stops at the repeated name with a
+    /// warning. The reference has no guard: its `parent=` walk (`0x6ee390`-`0x6ee3c2`) spins
+    /// forever round a cycle with no `parent=` on it, and where one stops that walk, the level
+    /// recursion (`0x76985c`, and `0x76a092` for the `<Frames>`) overflows the stack.
     pub(super) fn levels<'a>(&mut self, raw: &'a Element) -> Levels<'a> {
-        let (inherited, missed) = {
+        let (inherited, stop) = {
             let model = self.model();
             let templates = model.framexml_templates.borrow();
             let inherited = templates.inherited_levels(raw);
             let first = inherited.first().map_or(raw, |t| &**t);
-            let missed = first
+            let stop = first
                 .attr("inherits")
-                .filter(|n| !n.is_empty() && !templates.contains(n))
-                .map(str::to_string);
-            (inherited, missed)
+                .filter(|n| !n.is_empty())
+                .map(|n| (n.to_string(), templates.contains(n)));
+            (inherited, stop)
         };
-        if let Some(name) = missed {
-            self.status_warning(format!("Couldn't find inherited node: {name}"));
+        match stop {
+            Some((name, false)) => {
+                self.status_warning(format!("Couldn't find inherited node: {name}"))
+            }
+            Some((name, true)) => self.report.warnings.push(format!(
+                "inheritance cycle detected at template '{name}'; skipping this reference"
+            )),
+            None => {}
         }
         Levels {
             inherited,
@@ -748,8 +739,8 @@ impl Loader<'_> {
         font::link_font(&mut model, id, Some(to));
     }
 
-    /// Build one frame element, template-expanded, its nested `<Frames>`, then its `OnLoad`
-    /// (bottom-up, `0x76a060`). `parent` is the lexically enclosing frame, which `parent=`
+    /// Build one frame element (`Instantiate 0x6ee280`): its levels, its nested `<Frames>`, then its
+    /// `OnLoad` (bottom-up, `0x76a060`). `parent` is the lexically enclosing frame, which `parent=`
     /// overrides; `None` when the frame type is unknown, which skips the subtree.
     pub(super) fn materialize(
         &mut self,
@@ -757,8 +748,7 @@ impl Loader<'_> {
         parent: Option<&Table>,
         parent_name: &str,
     ) -> Option<Table> {
-        let expanded = self.expand(raw);
-        let el = &expanded;
+        let el = raw;
         // Only creation lives here: everything after `CreateFrame` is `decorate`, which
         // `apply_template` enters for a frame that already exists.
 
@@ -770,13 +760,27 @@ impl Loader<'_> {
             return None;
         }
 
-        // 1a · `parent=` wins over the lexical parent, unexpanded: `0x6ee280` hands the raw value
-        //      to the by-name lookup `0x76c760` (at `0x6ee3e8`). A miss is logged and stores 0 over
-        //      the default parent (`0x6ee3ef`), so the frame is built parentless (`0x6ee408`); an
-        //      empty `parent=""` keeps the default parent silently (`0x6ee3c7`).
+        // 1a · `parent=` wins over the lexical parent: the node's own, else the first up its
+        //      `inherits` chain (`0x6ee390`-`0x6ee3c4`), a present one ending the walk. `0x6ee280`
+        //      hands the raw value to the by-name lookup `0x76c760` (at `0x6ee3e8`), no `$parent`.
+        //      A miss is logged and stores 0 over the default parent (`0x6ee3ef`), so the frame is
+        //      built parentless (`0x6ee408`); an empty `parent=""` keeps the default parent
+        //      silently (`0x6ee3c7`).
         //      `None`: no attribute, or an empty one. `Some(None)`: a miss, parentless and logged.
-        let attr_parent: Option<Option<Table>> = el
-            .attr("parent")
+        //      The walk is silent: a missing template is the load's to log, after `CreateFrame`
+        //      (`0x769861`, inside slot 8).
+        let parent_attr: Option<String> = raw.attr("parent").map(str::to_string).or_else(|| {
+            let model = self.model();
+            let templates = model.framexml_templates.borrow();
+            let chain = templates.inherited_levels(raw);
+            chain
+                .iter()
+                .rev()
+                .find_map(|n| n.attr("parent"))
+                .map(str::to_string)
+        });
+        let attr_parent: Option<Option<Table>> = parent_attr
+            .as_deref()
             .filter(|name| !name.is_empty())
             .map(|name| {
                 // Only a frame counts: `0x76c760` asks the object at `[0]` for the Frame id
@@ -858,116 +862,129 @@ impl Loader<'_> {
         // `$parent` for its contents; a nameless frame passes its nearest named ancestor on.
         let self_name = resolved_name.as_deref().unwrap_or(parent_name).to_string();
 
+        // The levels the load reads, its first line a missing template's (`0x769861`).
         let levels = self.levels(raw);
-        self.decorate(el, &levels, &wrapper, &self_name, parent_name, &dbg_name);
+        self.decorate(
+            &levels,
+            &el.tag,
+            &wrapper,
+            &self_name,
+            parent_name,
+            &dbg_name,
+        );
         Some(wrapper)
     }
 
     /// Everything a frame element does to an existing frame, from `LoadXML` attributes to its
     /// `OnLoad` (bottom-up, `0x76a060`) and the post-load OnShow; shared by [`Self::materialize`] and
-    /// [`apply_template`]. `el` is the template-expanded element and `levels` the nodes it merges
-    /// ([`Loader::levels`]). `$parent` is `self_name` in this frame's contents and `parent_name` in
-    /// its own anchors (`0x76c5b0`).
-    #[allow(clippy::too_many_arguments)]
+    /// [`apply_template`]. `levels` are the nodes its load reads ([`Loader::levels`]) and `kind` the
+    /// instance's type. `$parent` is `self_name` in this frame's contents and `parent_name` in its
+    /// own anchors (`0x76c5b0`).
     pub(super) fn decorate(
         &mut self,
-        el: &Element,
         levels: &Levels,
+        kind: &str,
         wrapper: &Table,
         self_name: &str,
         parent_name: &str,
         dbg_name: &str,
     ) {
-        // This frame's deferred anchors drain before its OnLoad; a nested frame drains its own.
-        let deferred_mark = self.deferred_anchors.len();
-        // 1c · the pre-load hook opens the frame's load window (`0x7697c2`): until the post-load
-        //      hook, its own OnShow and OnHide fire nothing.
+        // 1 · the pre-load hook (`0x769770`): the own node's `id`, then the frame's load window
+        //      opens (`0x7697c2`): until the post-load hook, its own OnShow and OnHide fire nothing.
+        self.apply_preload_id(levels.own, wrapper, dbg_name);
         crate::script::visibility::set_load_window(self.lua(), wrapper, true);
-        // 2 · LoadXML attributes (`0x769820`).
-        self.apply_attrs(el, levels, wrapper, dbg_name);
-        // 3 · <Size> and 4 · <Anchors>, each level's own (the CLayoutFrame geometry base,
-        //     `0x767800`).
-        for level in levels {
-            self.apply_geometry(level, wrapper, false, parent_name, dbg_name);
-        }
-        // 5 · <Layers> regions (`0x769d70`) and the <Backdrop> plate (`0x77e6c0`), whose nine
-        //     pieces are regions too, in document order: both are arms of the one child loop
-        //     (`0x769b1c`), so the order they link into `GetRegions` is the file's. A template's
-        //     children come first, as its LoadXML runs first. `$parent` in a region name is this
-        //     frame.
-        for child in &el.children {
-            if child.tag.eq_ignore_ascii_case("Layers") {
-                self.apply_layers(child, wrapper, self_name, dbg_name);
-            } else if child.tag.eq_ignore_ascii_case("Backdrop") {
-                self.apply_backdrop(child, wrapper, dbg_name);
-            }
-        }
-        // 5·b · a text frame's `font=`, then its `<FontString>` children, which load into the same
-        //       font (`0x779fcb` before `0x77a220`, `0x78592b` before `0x785af5`, `0x787b3b`
-        //       before `0x787cfe`). Any other frame's direct `<FontString>` builds nothing: the base
-        //       loop (`0x769b27`-`0x769d22`) has no arm for it, and only SimpleHTML's reads one.
-        if ["EditBox", "MessageFrame", "ScrollingMessageFrame"]
-            .iter()
-            .any(|t| el.tag.eq_ignore_ascii_case(t))
-        {
-            self.apply_frame_font(el, wrapper, dbg_name);
-            self.apply_text_font_children(el, wrapper, dbg_name);
-        }
-        // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
-        self.apply_title_region(el, wrapper, self_name, dbg_name);
-        // 5b · per-kind LoadXML extras (EditBox `0x779fb0`), each gated on the element's own tag,
-        //      so a Frame wearing a <Button> template skips the Button steps.
-        self.apply_statusbar(el, wrapper, self_name, dbg_name);
-        self.apply_slider(el, wrapper, self_name, dbg_name);
-        self.apply_colorselect(el, wrapper, self_name, dbg_name);
-        self.apply_button(el, levels, wrapper, self_name, dbg_name);
-        self.apply_editbox(el, wrapper, dbg_name);
-        self.apply_messageframe(el, wrapper, dbg_name);
-        self.apply_simplehtml(el, wrapper, dbg_name);
-        // 6 · per level, the template first (`0x76985c`): its <Scripts> (`0x769ef0`, an arm of the
-        //     base child loop, `0x769d18`), then its Slider or StatusBar values (`0x789580`,
-        //     `0x782ef0`), so the first SetValue's fire (`0x789a1e`-`0x789a44`, `0x783371`) runs
-        //     that level's handler. OnLoad is captured to fire bottom-up below.
+        // 2 · each level's load, the template first (`0x76985c`): its base load (`0x769820`),
+        //     then its type's part, so a Slider's or StatusBar's first SetValue fires
+        //     (`0x789a1e`-`0x789a44`, `0x783371`) with the handler that level's `<Scripts>` set.
+        //     OnLoad is captured to fire bottom-up below.
         let mut onload = None;
         for level in levels {
-            self.apply_scripts(level, wrapper, dbg_name, &mut onload);
-            if el.tag.eq_ignore_ascii_case("Slider") {
-                self.slider_level(level, wrapper, dbg_name);
-            } else if el.tag.eq_ignore_ascii_case("StatusBar") {
-                self.statusbar_level(level, wrapper, dbg_name);
-            }
+            self.load_level(
+                level,
+                kind,
+                wrapper,
+                self_name,
+                parent_name,
+                dbg_name,
+                &mut onload,
+            );
         }
-        // 6b · a ScrollFrame's <ScrollChild> (`0x786bc0`, after the base load `0x769820`): still
-        //      inside the load window, so ahead of every <Frames> child and of our own OnLoad.
-        self.apply_scrollframe(el, wrapper, self_name, dbg_name);
 
-        // 7 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
-        //     <Frames>, whose OnLoads fire before ours (`0x76a060`).
+        // 3 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
+        //     <Frames> (`0x76a060`): per level, the template first, the level's first `<Frames>`
+        //     alone (`0x6f2c50`), each child whole before its next sibling, so their OnLoads fire
+        //     before ours.
         crate::script::visibility::set_load_window(self.lua(), wrapper, false);
-        crate::script::tooltip_post_load(self.lua(), wrapper);
-        for frames_el in children_named(el, "Frames") {
-            for child in &frames_el.children {
-                self.materialize(child, Some(wrapper), self_name);
+        for level in levels {
+            if let Some(frames) = children_named(level, "Frames").next() {
+                for child in &frames.children {
+                    self.materialize(child, Some(wrapper), self_name);
+                }
             }
         }
 
-        // 7c · deferred anchors: every child exists now, as at the reference's layout pass.
-        self.drain_deferred_anchors(deferred_mark);
-        // 8 · this frame's OnLoad, now that its subtree is complete (bottom-up).
+        // 4 · this frame's OnLoad, now that its subtree is complete (bottom-up).
         if let Some(func) = onload {
             self.fire_onload(wrapper, &func, dbg_name);
         }
-        // 9 · and its OnShow, if it is visible now (`0x76a3b3`).
+        // 5 · and its OnShow, if it is visible now (`0x76a3b3`).
         crate::script::visibility::post_load_show(self.lua(), wrapper);
-        // 10 · a Minimap's models, which its post-load override sets after chaining to this one
-        //      (`0x4ee2b0` calls `0x76a2f0` first).
-        self.apply_minimap(el, wrapper, dbg_name);
+        // 6 · the two game-side post-load overrides, each after chaining to this one: a
+        //     GameTooltip's line lookup (`0x529668` calls `0x76a2f0` first), so the lines its own
+        //     `<Frames>`, OnLoad or OnShow made count, and a Minimap's models (`0x4ee2c0`).
+        crate::script::tooltip_post_load(self.lua(), wrapper);
+        if kind.eq_ignore_ascii_case("Minimap") {
+            self.apply_minimap(levels.own, wrapper, dbg_name);
+        }
     }
 
-    /// Apply one anchor, deferring it (when `may_defer`) while its named `relativeTo` is unbuilt.
-    /// A target still missing (`0x878440`) or the object itself (`0x878420`, `0x76797d`) is logged
-    /// and the anchor skipped.
-    pub(super) fn apply_anchor(&mut self, d: DeferredAnchor, may_defer: bool) {
+    /// One level of a frame's `LoadXML` (`CSimpleFrame::LoadXML 0x769820` on `level`, after the
+    /// recursion into its `inherits` level): the node's geometry (`0x76987c` → `0x767800`), its
+    /// anchors resolved now; then its flag attributes (`0x769881`-`0x769b17`); then one child loop
+    /// in document order (`0x769b1c`-`0x769d22`) whose arms are `<TitleRegion>`,
+    /// `<ResizeBounds>`, `<Backdrop>`, `<HitRectInsets>`, `<Layers>` and `<Scripts>`, any other
+    /// tag skipped silently; then the part of `kind`, the instance's type
+    /// ([`Self::typed_level`]). `$parent` is `parent_name` in the frame's own anchors and
+    /// `self_name` in its contents.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn load_level(
+        &mut self,
+        level: &Element,
+        kind: &str,
+        wrapper: &Table,
+        self_name: &str,
+        parent_name: &str,
+        dbg: &str,
+        onload: &mut Option<Function>,
+    ) {
+        self.apply_geometry(level, wrapper, false, parent_name, dbg);
+        self.apply_level_flags(level, wrapper, dbg);
+        for child in &level.children {
+            let is = |t: &str| child.tag.eq_ignore_ascii_case(t);
+            if is("TitleRegion") {
+                self.apply_title_region(child, wrapper, self_name, dbg);
+            } else if is("ResizeBounds") {
+                self.apply_resize_bounds(child, wrapper, dbg);
+            } else if is("Backdrop") {
+                self.apply_backdrop(child, wrapper, dbg);
+            } else if is("HitRectInsets") {
+                self.apply_hit_rect_insets(child, wrapper, dbg);
+            } else if is("Layers") {
+                // `0x769d70`: each region created, named and loaded as it is reached, so it links
+                // into `GetRegions` in the file's order, a template's first.
+                self.apply_layers(child, wrapper, self_name, dbg);
+            } else if is("Scripts") {
+                self.apply_scripts(child, wrapper, dbg, onload);
+            }
+        }
+        self.typed_level(level, kind, wrapper, self_name, dbg);
+    }
+
+    /// Apply one anchor as it is read: a named `relativeTo` is looked up now (`0x767964` →
+    /// `0x76c700`), so a target not yet built is a miss, logged as spelled (`0x878440`, at
+    /// `0x76796d`), and the anchor dropped (`0x76797b`); the object itself (`0x878420`,
+    /// `0x76797d`) is logged and skipped too. Nothing retries it.
+    pub(super) fn apply_anchor(&mut self, d: XmlAnchor) {
         let rel: Value = match d.args.1.as_deref() {
             Some(name) => {
                 match crate::script::object::anchor_args::resolve_xml_relative_to(self.lua(), name)
@@ -980,11 +997,6 @@ impl Loader<'_> {
                             return;
                         }
                         Value::Table(t)
-                    }
-                    // Not built yet: retry once the subtree is complete; a miss then is real.
-                    None if may_defer => {
-                        self.deferred_anchors.push(d);
-                        return;
                     }
                     None => {
                         let raw = &d.rel_raw;
@@ -1005,7 +1017,7 @@ impl Loader<'_> {
                 None => Value::Nil,
             },
         };
-        let DeferredAnchor {
+        let XmlAnchor {
             wrapper,
             region,
             args: (point, _, rel_point),
@@ -1024,14 +1036,6 @@ impl Loader<'_> {
             self.call(&wrapper, "SetPoint", args, &dbg);
         }
         crate::script::xml_layout::offset(self.lua, &wrapper, region, &point, v);
-    }
-
-    /// Apply the anchors deferred since `mark`, in order; a target still missing now warns.
-    pub(super) fn drain_deferred_anchors(&mut self, mark: usize) {
-        let pending: Vec<DeferredAnchor> = self.deferred_anchors.drain(mark..).collect();
-        for d in pending {
-            self.apply_anchor(d, false);
-        }
     }
 
     fn frame_names(&self, wrapper: &Table) -> (Option<String>, String) {
@@ -1191,18 +1195,6 @@ pub(super) fn children_named<'a>(
         .filter(move |c| c.tag.eq_ignore_ascii_case(tag))
 }
 
-/// Iterate an element's direct children whose tag matches any of `tags` (case-insensitively), in
-/// document order. One walk, not one per tag: a Button's label and state fonts each answer to two
-/// tags (`CSimpleButton::LoadXML 0x7788c0`) and each slot is last-wins.
-pub(super) fn children_named_any<'a>(
-    el: &'a Element,
-    tags: &'a [&'a str],
-) -> impl Iterator<Item = &'a Element> {
-    el.children
-        .iter()
-        .filter(move |c| tags.iter().any(|t| c.tag.eq_ignore_ascii_case(t)))
-}
-
 /// Whether a `text=` value is shaped like a GlobalStrings key: `SCREAMING_SNAKE` with a letter, two
 /// characters or more (a one-character `text="X"` is a glyph).
 fn is_global_string_key(s: &str) -> bool {
@@ -1249,6 +1241,8 @@ pub(super) fn tex_coords(tc: &Element) -> (f32, f32, f32, f32) {
 
 #[cfg(test)]
 mod level_tests;
+#[cfg(test)]
+mod order_tests;
 #[cfg(test)]
 mod template_name_tests;
 #[cfg(test)]
