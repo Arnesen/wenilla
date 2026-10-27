@@ -232,8 +232,8 @@ mod tests {
     /// The world: we target `MOB`, which targets party1 (`A`), who targets `BOSS`, which targets
     /// `GONE`; raid2 (`B`) targets `ADD`, our pet `FOE`, and `C` nobody. `LONER` is held and
     /// targets `EXTRA`. The group is a raid of us, `A`, `B` and `C`, all in our subgroup, so the
-    /// three are also party slots 1 to 3. The aura feed, whose resolver inputs the chain feed
-    /// reads, and the chain feed run.
+    /// three are also party slots 1 to 3. The resolver feed, whose inputs the chain feed reads,
+    /// and the chain feed run.
     fn app() -> App {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
@@ -353,8 +353,8 @@ mod tests {
         lent(app, &format!("return {expr}"))
     }
 
-    /// The getters answer for a chain through the feeds that run in the client: the aura feed's
-    /// resolver inputs name the guid, and this feed's snapshot of it answers, so `party1target`,
+    /// The getters answer for a chain through the feeds that run in the client: the resolver
+    /// feed's inputs name the guid, and this feed's snapshot of it answers, so `party1target`,
     /// `raid2target` and `pettarget` read the unit at the end of the chain and any break in the
     /// chain reads nobody. No token names `ADD` or `FOE` but a chain.
     #[test]
@@ -804,10 +804,10 @@ mod tests {
         }
     }
 
-    /// The targeting feed reads the resolver inputs the aura feed pushes in the same frame, so the
-    /// declared order puts the feed after it: read off the schedule graph.
+    /// The targeting feed reads the resolver inputs the resolver's feed pushes in the same frame,
+    /// so the declared order puts the feed after it: read off the schedule graph.
     #[test]
-    fn the_targeting_feed_runs_after_the_aura_feed_it_reads() {
+    fn the_targeting_feed_runs_after_the_resolver_feed_it_reads() {
         use crate::game_plugins::schedule_tests::{census, headless_client, SyncPoints};
 
         let mut app = headless_client();
@@ -823,11 +823,11 @@ mod tests {
                 _ => panic!("exactly one system named `…{suffix}` in Update"),
             }
         };
-        let aura = one("::ui_aura::feed_auras");
+        let guids = one("::ui_aura::feed_unit_guids");
         let feed = "::targeting::feed_targeting_to_vm";
         assert!(
-            c.dependencies.contains(&(aura, one(feed))),
-            "{feed} is declared after feed_auras"
+            c.dependencies.contains(&(guids, one(feed))),
+            "{feed} is declared after feed_unit_guids"
         );
     }
 }

@@ -37,8 +37,8 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 42;
-const FRAME_FINAL_INPUTS: usize = 228;
+const FRAME_FINAL_FEEDS: usize = 41;
+const FRAME_FINAL_INPUTS: usize = 219;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the host's live
@@ -67,9 +67,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
          writes the list as it walks the slots"),
     ("::ui_action::unlearn::clear_unlearned_slots", &["ui_action::PlayerActions"],
         "drains the unlearned spells the bar clears; the known spells are the handlers' alone"),
-    ("::ui_aura::feed_auras", &["ui_aura::AuraFeedMemory"],
-        "rebuilds the raid filter's books and the world entry's player the aura walk reads, and \
-         keeps the clock pair the buff timers map the duration stamps through"),
     ("::ui_battlefield::reset_on_world_enter", &["ui_battlefield::Battlefield"],
         "clears the list and the notices waiting on names at the world-enter cascade \
          (`0x4a9db0`), which the reference runs inside our own player's create (`0x4908c0`)"),
@@ -91,9 +88,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "drains the superseded ranks the bar's macros take; the known spells are the handlers' \
          alone"),
     ("::ui_party::feed::feed_party", &["UiScript"], "a field event's listeners read its push"),
-    ("::ui_pet::drain::arm_owed_pet_gcds", &["ui_pet::PetBar"],
-        "puts the GCDs the pet's sends owe into its list, which the reference arms at the send \
-         (`0x6e58fb`)"),
     ("::ui_pet::unit::feed_pet_unit", &["UiScript"], "a field event's listeners read its push"),
     ("::ui_session::close_npc_session_out_of_range<benilla_app::ui_binder::BinderState>",
         &["ui_binder::BinderState"],

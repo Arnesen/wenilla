@@ -158,14 +158,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::HostHeld,
-        "::ui_pet::PetAttackLatch",
-        "the pet's attack latch, which a new pet's `SMSG_PET_SPELLS` lowers (`0x4bc8ce`) inside \
-         `SetPet`, whose own `PET_BAR_UPDATE` (`0x4bc90c`) fires on the notice lane; the \
-         selection's release and `PetStopAttack`, acting in their calls, hold it in the host, \
-         and the bar's getters read it there",
-    ),
-    (
-        Row::HostHeld,
         "::ui_trade::TradeSession",
         "the trade session, which `feed_trade` fires from; the trade verbs, acting in their \
          calls, hold it in the host",
@@ -229,7 +221,6 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     "::player::state::OwnControlLost",
     "::spell::cast_send::HeldForPick",
     "::spell::cast_send::ScriptCastPermit",
-    "::spell::cast_send::unit_caster::PetGcdsOwed",
     "::spell::cast_send::unit_caster::UnitAttackOwed",
     "::spell::inflight::ActiveChannel",
     "::spell::inflight::AutoRepeatActive",
@@ -278,6 +269,13 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read through the host by the merchant getters, and quiet: its events fire on the merchant
     // lane at their handlers and callbacks.
     "::ui_merchant::MerchantOpen",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: read, and quiet. A new pet's
+    // `SMSG_PET_SPELLS` lowers it inside `SetPet` (`0x4bc8ce`), whose `PET_BAR_UPDATE` (`0x4bc90c`)
+    // fires on the notice lane; `IsPetAttackActive` and the bar's getters read it through the host,
+    // and the selection's release and `PetStopAttack` lower it in their calls. No feed fires off it:
+    // the world entry's pet reset lowers it beside its own `PET_BAR_UPDATE`, which the reset's
+    // change raises, not the latch.
+    "::ui_pet::PetAttackLatch",
     "::ui_petition::GuildRegistrarState",
     "::ui_petition::PetitionRecords",
     // Read through the host by the charter getters, and quiet: its events fire on the charter lane
@@ -379,12 +377,12 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
         "spell::mods::SpellModifiers", "spell::targeting::SpellTargeting", "ui_party::GroupState"]),
-    // Each unit's list reads its store and record as of the drain's place (`ui_unit::views`), and
-    // the buff cache is rebuilt at each packet's watcher; the resolver's inputs, the unit gate's
-    // relations and the world entry's rebuild read as the frame left them.
-    ("::ui_aura::feed_auras", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
-        "net::SelfGuid", "net::reputations::Reputations", "target::Selection",
-        "ui_action::PlayerActions", "ui_party::GroupState", "ui_pet::PetBar"]),
+    // The resolver's guids, pushed before the drain and read with the host lent too: the
+    // mouseover, the group rows past a token's own, the pet records and every row of the field
+    // events' fan-out, which the `UNIT_HAPPINESS` gate reads. The aura getters walk each unit
+    // live, and the world entry's rebuild runs in its cascade (`0x490983`).
+    ("::ui_aura::feed_unit_guids", &["net::GuidIndex", "net::ObjectStore", "target::Selection",
+        "ui_party::GroupState"]),
     // The pet book's sorts, which each pet spell list counts and the derivation follows
     // (`0x4bdae0`): the frame's lists derive once, after the last.
     ("::ui_macro::rebind_macro_spells", &["ui_action::ActionSlots", "ui_action::PlayerActions",
@@ -394,9 +392,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     // reads as the frame left it.
     ("::ui_pet::unit::feed_pet_unit", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
         "net::SelfGuid", "ui_party::GroupState"]),
-    // `UNIT_HAPPINESS`'s edge under its `Deviation:`, the bucket compared as the frame left it.
-    ("::ui_pet_stats::feed_pet_stats", &["net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
-        "ui_pet::PetBar"]),
     ("::ui_cast::feed_cast_reports", &["items::Countdowns", "items::Items", "net::GuidIndex",
         "net::ObjectStore", "spell::inflight::AutoRepeatActive", "spell::inflight::PendingCast",
         "spell::inflight::QueuedMeleeSpell", "spell::targeting::SpellTargeting",
@@ -599,9 +594,10 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::ui_unit::DefaultLanguagesRes",
     // The area under the player, which the host's raid rows read for our own zone (`0xb4e314`).
     "::CurrentArea",
-    // The `raidFilter` books the call host's aura walk reads (`0x4b3870`, `0x4b3920`), which
-    // only the aura feed writes.
-    "::ui_aura::AuraFeedMemory",
+    // The interface clock's pair as the last tick left it, which the call host's buff timers
+    // map each duration stamp through (`0x4e4450`); only the tick's copy and a new VM's seed
+    // write it.
+    "::ui_script::HostClock",
     // The duration packet's stamps (`0x4e4390`), which the call host's buff timers read at the
     // call (`0x4e4450`); a hosted handler reads them, the packet's handler writes them.
     "::ui_aura::AuraDurations",
