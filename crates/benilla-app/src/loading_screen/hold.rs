@@ -34,7 +34,7 @@ use bevy::render::render_resource::SurfaceTexture;
 use bevy::render::renderer::render_system;
 use bevy::render::view::ExtractedWindows;
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSystems};
-use bevy::window::{CursorMoved, PrimaryWindow};
+use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent};
 
 /// Whether this frame is withheld from the window: decided in `PostUpdate` from the settle hold of
 /// a snap that reloads the world ([`crate::player::Player::holds_the_frame`]), and extracted with
@@ -268,6 +268,10 @@ struct HeldInput {
     motion: Deferred<MouseMotion>,
     wheel: Deferred<MouseWheel>,
     moved: Deferred<CursorMoved>,
+    /// The window's stream, which the input records are read from
+    /// ([`crate::ui_script::InputRecords`]): a move, a key, a button or a wheel turn under the
+    /// hold is a record of the first frame shown.
+    window: Deferred<WindowEvent>,
 }
 
 #[derive(SystemParam)]
@@ -278,6 +282,7 @@ struct RawQueues<'w> {
     motion: ResMut<'w, Messages<MouseMotion>>,
     wheel: ResMut<'w, Messages<MouseWheel>>,
     moved: ResMut<'w, Messages<CursorMoved>>,
+    window: Option<ResMut<'w, Messages<WindowEvent>>>,
 }
 
 /// `PreUpdate`, ahead of `InputSystems`: while the frame is held keep the raw input back, and on
@@ -288,10 +293,17 @@ fn defer_input_through_the_hold(
     mut deferred: ResMut<HeldInput>,
     mut queues: RawQueues,
     mut pointer: ResMut<HeldPointer>,
-    mut window: Query<&mut Window, With<PrimaryWindow>>,
+    mut window: Query<(Entity, &mut Window), With<PrimaryWindow>>,
 ) {
     let held = hold.held;
-    if let (true, Ok(mut window)) = (held, window.single_mut()) {
+    if !held {
+        let live = window
+            .single()
+            .ok()
+            .and_then(|(e, w)| w.cursor_position().map(|at| (e, at)));
+        at_the_live_cursor(&mut deferred.window.held, live);
+    }
+    if let (true, Ok((_, mut window))) = (held, window.single_mut()) {
         pointer.live = Some(window.physical_cursor_position());
         // Unchanged, so `changed_windows` does not read it as a warp; handed back in `PostUpdate`.
         window
@@ -305,6 +317,30 @@ fn defer_input_through_the_hold(
     deferred.motion.step(held, &mut queues.motion);
     deferred.wheel.step(held, &mut queues.wheel);
     deferred.moved.step(held, &mut queues.moved);
+    if let Some(window) = queues.window.as_deref_mut() {
+        deferred.window.step(held, window);
+    }
+}
+
+/// The window's stream held through the frozen frames, as the first frame shown reads it. The
+/// reference's records each take the cursor when the window procedure queues them (`0x42dd00`
+/// reads `GetCursorPos`), which is after the load, and the queued moves are one: so the held moves
+/// give way to one move to where the cursor is now, ahead of the held records, which all take it.
+fn at_the_live_cursor(held: &mut Vec<WindowEvent>, live: Option<(Entity, Vec2)>) {
+    if held.is_empty() {
+        return;
+    }
+    held.retain(|e| !matches!(e, WindowEvent::CursorMoved(_)));
+    if let Some((window, position)) = live {
+        held.insert(
+            0,
+            WindowEvent::CursorMoved(CursorMoved {
+                window,
+                position,
+                delta: None,
+            }),
+        );
+    }
 }
 
 /// `PostUpdate`, after every reader: a held frame hands winit's position back, so the window
@@ -468,6 +504,77 @@ mod tests {
         app.update();
         assert!(take_seen(&mut app).is_empty(), "and delivers it once");
     }
+    /// The window's stream waits through the hold with the typed queues, so the input records read
+    /// from it (a move among them, whose walk would fire `OnEnter` under the frozen frame) are the
+    /// first shown frame's, in arrival order. The held moves are one, to where the cursor is when
+    /// the frame is shown, ahead of every held record; what arrives with that frame is as it came.
+    #[test]
+    fn the_window_stream_waits_through_a_held_frame_and_takes_the_live_cursor() {
+        #[derive(Resource, Default)]
+        struct Streamed(Vec<String>);
+        fn read(mut events: MessageReader<WindowEvent>, mut seen: ResMut<Streamed>) {
+            seen.0.extend(events.read().filter_map(|e| match e {
+                WindowEvent::CursorMoved(m) => Some(format!("move {}", m.position.x)),
+                WindowEvent::MouseButtonInput(b) => Some(format!("{:?}", b.state)),
+                _ => None,
+            }));
+        }
+        let moved = |x: f32| {
+            WindowEvent::CursorMoved(CursorMoved {
+                window: Entity::PLACEHOLDER,
+                position: Vec2::new(x, 0.0),
+                delta: None,
+            })
+        };
+        let press = WindowEvent::MouseButtonInput(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .add_message::<KeyboardFocusLost>()
+            .add_message::<MouseButtonInput>()
+            .add_message::<MouseMotion>()
+            .add_message::<MouseWheel>()
+            .add_message::<CursorMoved>()
+            .add_message::<WindowEvent>()
+            .init_resource::<PresentHold>()
+            .init_resource::<HeldInput>()
+            .init_resource::<HeldPointer>()
+            .init_resource::<Streamed>()
+            .add_systems(PreUpdate, defer_input_through_the_hold)
+            .add_systems(Update, read)
+            .add_systems(PostUpdate, hand_back_the_pointer);
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        let seen =
+            |app: &mut App| std::mem::take(&mut app.world_mut().resource_mut::<Streamed>().0);
+
+        app.world_mut().resource_mut::<PresentHold>().held = true;
+        app.world_mut().write_message(moved(1.0));
+        app.world_mut().write_message(press.clone());
+        app.update();
+        app.world_mut().write_message(moved(2.0));
+        app.update();
+        assert!(
+            seen(&mut app).is_empty(),
+            "no record while the frame is held"
+        );
+        app.world_mut().resource_mut::<PresentHold>().held = false;
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(Some(Vec2::new(40.0, 5.0)));
+        app.world_mut().write_message(moved(50.0));
+        app.update();
+        assert_eq!(seen(&mut app), ["move 40", "Pressed", "move 50"]);
+        app.update();
+        assert!(seen(&mut app).is_empty(), "and delivers it once");
+    }
+
     /// The pick and hover read the window's pointer; while the frame is held they read where it
     /// was on the last frame shown, as the reference's pick waits for the queued moves, and the
     /// first frame shown reads where it is now. The window keeps winit's position outside the
