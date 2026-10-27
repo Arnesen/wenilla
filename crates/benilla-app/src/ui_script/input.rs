@@ -113,6 +113,85 @@ impl WorldWheelSlot for WorldSlot<'_, '_> {
     }
 }
 
+/// Where the frame's walk of its records stands: whether it began, the next record, the point the
+/// hover was last walked at, the record it stopped after for that record's world steps
+/// ([`crate::target::world_steps`]), and a right press it stopped ahead of the binding of, for the
+/// world frame's hook ([`crate::target::right_press`]): the press's record and whether a frame
+/// took it.
+#[derive(Resource, Default)]
+pub(crate) struct RecordWalk {
+    begun: bool,
+    next: usize,
+    walked: Option<Vec2>,
+    stopped: Option<super::InputRecord>,
+    hooked: Option<(usize, bool)>,
+    hook_due: bool,
+}
+
+/// Dispatch the frame's input records, each whole and in arrival order (`0x423920` → `0x4239a0` →
+/// `0x4245b0`): the interface's walk of a record and the world frame's binding
+/// ([`feed_ui_input`]), then the world's steps the record made ([`crate::target::world_steps`]),
+/// its world click among them, before the next record. The walk stops after each button record
+/// and after any record whose binding made a click step, and goes on once the world's steps are
+/// done; the click's legs run once more where the records end ([`crate::target::run_world_clicks`]).
+/// A right press stops ahead of its binding as well, for the world frame's hook, and goes on at
+/// the binding.
+///
+/// The input records' world mouse ([`crate::player::WorldMouse`]) follows: the look session, which
+/// adds the armed click's travel, and the command tick.
+pub(crate) fn dispatch_input_records(
+    world: &mut World,
+    mut feed: Local<Option<bevy::ecs::system::SystemId>>,
+) {
+    dispatch(world, &mut feed, true);
+}
+
+/// The world click steps the VM's mouse commands made since the last take, in call order
+/// ([`crate::target::world_steps`]).
+pub(crate) fn take_click_calls(world: &mut World) -> Vec<benilla_ui::script::ClickCall> {
+    world
+        .get_non_send_resource_mut::<UiScript>()
+        .map(|mut s| s.take_click_calls())
+        .unwrap_or_default()
+}
+
+/// [`dispatch_input_records`] without the legs' last run, for a test of the walk over a world
+/// that holds the interface's state alone.
+#[cfg(test)]
+pub(super) fn dispatch_records_alone(
+    world: &mut World,
+    mut feed: Local<Option<bevy::ecs::system::SystemId>>,
+) {
+    dispatch(world, &mut feed, false);
+}
+
+/// The dispatch, the legs' last run when `legs`.
+fn dispatch(world: &mut World, feed: &mut Option<bevy::ecs::system::SystemId>, legs: bool) {
+    let id = *feed.get_or_insert_with(|| world.register_system(feed_ui_input));
+    *world.get_resource_or_init::<RecordWalk>() = RecordWalk::default();
+    crate::target::plate_clicks_first(world);
+    loop {
+        if let Err(err) = world.run_system(id) {
+            debug!("ui_script(input): the walk did not run: {err}");
+            return;
+        }
+        crate::creature_anim::apply_unit_edits(world);
+        let mut walk = world.resource_mut::<RecordWalk>();
+        if std::mem::take(&mut walk.hook_due) {
+            let over_ui = walk.hooked.is_none_or(|(_, over_ui)| over_ui);
+            crate::target::right_press(world, over_ui);
+            continue;
+        }
+        let Some(record) = walk.stopped.take() else {
+            break;
+        };
+        crate::target::world_steps(world, &record);
+    }
+    if legs {
+        crate::target::run_world_clicks(world);
+    }
+}
+
 /// The keyboard and the pasteboard the feed reads and writes, as one param.
 type KeyboardFeed<'w> = (
     Res<'w, ButtonInput<KeyCode>>,
@@ -120,14 +199,16 @@ type KeyboardFeed<'w> = (
     NonSendMut<'w, HostClipboard>,
 );
 
-/// Dispatches the frame's input records ([`super::InputRecords`]) into the UI engine, each whole
-/// and in arrival order, as the reference drains its ring (`0x423920` → `0x4239a0` → `0x4245b0`):
+/// Dispatches the frame's input records ([`super::InputRecords`]) into the UI engine from where
+/// [`RecordWalk`] stands, each whole and in arrival order, as the reference drains its ring
+/// (`0x423920` → `0x4239a0` → `0x4245b0`):
 /// the record's modifiers set, the hover walked where the record was queued (a move's whole
 /// handler, category 0xc, `0x7660d0`), the button's, the key's or the wheel's walk (category 0x10,
 /// `0x7664f0`), then, in the world, the world frame's binding
 /// ([`crate::bindings::WorldFrameBindings`]), all before the next record. Publishes
-/// [`PlayerUiHover`] (the pointer arbiter yields to the UI) and [`UiKeyboardCapture`]. Runs in the
-/// `UiInput` set, before the feeds, the tick and every key reader.
+/// [`PlayerUiHover`] (the pointer arbiter yields to the UI) and [`UiKeyboardCapture`]. It returns
+/// after a record that leaves the world steps to take ([`dispatch_input_records`]), and the next
+/// run goes on from the record after it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn feed_ui_input(
     script: Option<NonSendMut<UiScript>>,
@@ -147,8 +228,11 @@ pub(super) fn feed_ui_input(
     // call.
     mut host: Option<crate::script_calls::ScriptCallHost>,
     mut world_frame: crate::bindings::WorldFrameBindings,
+    mut walk: ResMut<RecordWalk>,
 ) {
     let (keys, capture, clipboard) = (&kbd.0, &mut kbd.1, &mut kbd.2);
+    // The frame's first run: what the frame's records write starts clear.
+    let first = !std::mem::replace(&mut walk.begun, true);
     let in_world = state
         .as_ref()
         .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
@@ -169,10 +253,14 @@ pub(super) fn feed_ui_input(
         &mut pointer.payload_held,
         &mut pointer.presses,
     );
-    click_consumed.0 = false;
-    press_consumed.0 = false;
-    presses.0.clear();
-    capture.consumed.clear();
+    if first {
+        click_consumed.0 = false;
+        press_consumed.0 = false;
+        presses.0.clear();
+        capture.consumed.clear();
+    }
+    let start = walk.next;
+    walk.next = records.iter().count();
     let window = window.single().ok();
     let (mut script, (window, raw_handle)) = match (script, window) {
         (Some(script), Some(window)) => (script, window),
@@ -185,7 +273,7 @@ pub(super) fn feed_ui_input(
             if in_world {
                 let over_ui = hover.0.is_some() || egui_pointer;
                 let mut legs = |mut s: Option<&mut UiScript>| {
-                    for r in records.iter() {
+                    for r in records.iter().skip(start) {
                         match &r.record {
                             super::Record::Button { button, state } => {
                                 if *state == ButtonState::Pressed {
@@ -237,21 +325,31 @@ pub(super) fn feed_ui_input(
         sup: keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight),
     };
     let end = ui_point(window.cursor_position());
+    let walk = &mut *walk;
     let feed = |script: &mut UiScript| {
         // The pick routes the world drop: an object keeps the payload, terrain or sky drops it.
         script.set_world_pick(world_pick);
-        pressed.reconcile(keys);
+        if first {
+            pressed.reconcile(keys);
+            walk.walked = None;
+        }
         // The point the hover was last walked at this pass: a move to it again is ignored, as
         // `0x7660d0` ignores a move to the stored position.
-        let mut walked: Option<Vec2> = None;
+        let walked = &mut walk.walked;
         let mut move_to = |script: &mut UiScript, hover: &mut PlayerUiHover, at: Vec2| {
-            if walked != Some(at) {
-                walked = Some(at);
+            if *walked != Some(at) {
+                *walked = Some(at);
                 hover.0 = hover_walk(script, at);
             }
         };
         capture.typing = script.has_keyboard_focus() || egui_keyboard;
-        for r in records.iter() {
+        for (i, r) in records.iter().enumerate().skip(start) {
+            // A right press the walk stopped ahead of the binding of goes on at the binding, its
+            // interface's walk done.
+            let resumed = walk
+                .hooked
+                .filter(|(at, _)| *at == i)
+                .map(|(_, over_ui)| over_ui);
             // The record's modifiers, as its kind handler left the mask (`0x423d06`), so a
             // click's `IsShiftKeyDown` sees its own state.
             let mods = r.mods;
@@ -264,10 +362,15 @@ pub(super) fn feed_ui_input(
                 move_to(script, hover, at);
             }
             let mut verdict = crate::bindings::KeyVerdict::default();
+            // The world frame's binding leg, unless the record's walk ran it.
+            let mut leg = true;
             // Whose the record's press is: a hovered frame's, the interface's when it consumed the
             // press, the dev overlay's, else the world frame's (`WorldPresses`).
             let mut over_ui = hover.0.is_some() || egui_pointer;
             match &r.record {
+                super::Record::Button { .. } if resumed.is_some() => {
+                    over_ui = resumed.unwrap_or(over_ui);
+                }
                 super::Record::Button { button, state } => {
                     if let (Some(at), Some(name)) = (at, ui_button_name(*button)) {
                         let down = *state == ButtonState::Pressed;
@@ -290,6 +393,12 @@ pub(super) fn feed_ui_input(
                             press_consumed.0 |= took;
                             over_ui |= took;
                         }
+                    } else if *button == MouseButton::Right && *state == ButtonState::Pressed {
+                        // No point to walk at: the world input hook still runs ahead of the world
+                        // frame (`0x492b50`).
+                        let took = script.hook_right_press();
+                        press_consumed.0 |= took;
+                        over_ui |= took;
                     }
                     if *state == ButtonState::Pressed {
                         presses.0.push((*button, over_ui));
@@ -305,7 +414,7 @@ pub(super) fn feed_ui_input(
                     };
                     feed_wheel(script, at, *up, &mut slot);
                     // Its world frame's leg ran inside the walk.
-                    continue;
+                    leg = false;
                 }
                 super::Record::Key(ev) => {
                     // ── Keyboard capture gate ── read after the records before it (a click may
@@ -348,8 +457,25 @@ pub(super) fn feed_ui_input(
                     };
                 }
             }
+            // A right press the world frame may take stops here for its hook, which runs ahead of
+            // the binding (`0x483c62`, `0x483c93`). One the world input hook ate (`0x492b50`)
+            // never reaches the world frame, in a look session or not.
+            let right_press = matches!(
+                r.record,
+                super::Record::Button {
+                    button: MouseButton::Right,
+                    state: ButtonState::Pressed,
+                }
+            );
+            if in_world && right_press && resumed.is_none() && !script.press_hooked() {
+                walk.next = i;
+                walk.hooked = Some((i, over_ui));
+                walk.hook_due = true;
+                payload_held.0 = script.cursor_payload().is_some();
+                return;
+            }
             // The world frame, last in the walk, inside the same record.
-            if in_world {
+            if in_world && leg {
                 world_frame_leg(
                     &mut world_frame,
                     Some(&mut *script),
@@ -358,6 +484,19 @@ pub(super) fn feed_ui_input(
                     over_ui,
                     &layout,
                 );
+            }
+            // The world's steps of a button record, or of one whose binding made a click step,
+            // run before the next record: the walk returns to its driver here.
+            let button = matches!(r.record, super::Record::Button { .. });
+            if in_world && (button || script.has_click_calls()) && i + 1 < records.iter().count() {
+                walk.next = i + 1;
+                walk.stopped = Some(r.clone());
+                // The payload-held mirror, which the click's legs gate on.
+                payload_held.0 = script.cursor_payload().is_some();
+                return;
+            }
+            if in_world && (button || script.has_click_calls()) {
+                walk.stopped = Some(r.clone());
             }
         }
         // The modifiers as the frame's records leave them, which the tick's scripts read, and the

@@ -64,7 +64,7 @@ pub(crate) struct InputRecords {
 }
 
 impl InputRecords {
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &InputRecord> {
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &InputRecord> {
         self.records.iter()
     }
 }

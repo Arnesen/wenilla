@@ -11,11 +11,17 @@ use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;
 
+mod arm;
+pub(crate) use arm::{
+    plate_clicks_first, right_press, run_world_clicks, world_steps, ClickArm, WorldClickLegs,
+};
 mod by_name;
 // `pub(crate)` for the chest live probe, which drives the mouse's own `click::resolve_go_action`.
 pub(crate) mod click;
 #[cfg(test)]
 mod click_order_tests;
+#[cfg(test)]
+mod record_click_tests;
 // `pub(crate)` for the hover inspector, which runs the cursor's `cursor_mode::go_highlightable`.
 pub(crate) mod cursor_mode;
 mod died;
@@ -196,8 +202,9 @@ impl Default for PickOcclusion {
     }
 }
 
-/// The pick latched on the button's down edge, which a world click of either button acts on: the
-/// reference picks once per press (`0x481f00`) into the WorldFrame (state `+0x350`, guid `+0x358`,
+/// The pick latched at the press, which a world click of either button acts on: the reference
+/// picks once per press, as the mouse command arms the click (`0x514810` → `0x481f00`), into the
+/// WorldFrame (state `+0x350`, guid `+0x358`,
 /// point `+0x360`, distance `+0x36c`), so a drag can orbit the camera and still select. The hover
 /// is another matter: the reference blanks it during freelook (`0x483e80` sets `[wf+0x38c]&2`).
 #[derive(Resource, Default, Clone, Copy)]
@@ -227,34 +234,6 @@ impl PressPick {
     }
 }
 
-/// Latch the frame's pick as a press begins. It runs at the head of the world's clicks, after the
-/// look session engaged on the press frame and before [`hover::update_hover`] refreshes the
-/// hover, so what stands here is last frame's pick at the same cursor, the press's.
-pub(crate) fn latch_press_pick(
-    buttons: Res<ButtonInput<MouseButton>>,
-    hovered: Res<Hovered>,
-    object: Res<HoveredObject>,
-    occlusion: Res<PickOcclusion>,
-    cursor: Res<cursor_mode::WorldCursor>,
-    attack_fork: Res<cursor_mode::AttackFork>,
-    mut press: ResMut<PressPick>,
-) {
-    // Either button's down edge arms a pick (`0x514810`, clickModes 1 and 2); a chord does not
-    // re-latch, as `0x51481a` refuses to arm while the other button is held.
-    let left = buttons.just_pressed(MouseButton::Left) && !buttons.pressed(MouseButton::Right);
-    let right = buttons.just_pressed(MouseButton::Right) && !buttons.pressed(MouseButton::Left);
-    if !(left || right) {
-        return;
-    }
-    *press = PressPick {
-        hovered: *hovered,
-        object: *object,
-        occlusion: *occlusion,
-        cursor: *cursor,
-        attack_fork: *attack_fork,
-    };
-}
-
 /// Whether the hovered GameObject, not the character pick, is what a click acts on. The reference
 /// makes one pick over all CGObjects; benilla makes two and keeps the GameObject only when strictly
 /// nearer. A corpse or a refused pick holds the ground as a unit does.
@@ -276,11 +255,6 @@ pub(crate) struct SelectionRadius(pub(crate) f32);
 /// or [`CombatFlash`] order after it, or they can read last frame's verdict.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TargetUpdate;
-
-/// The world's clicks, among the frame's input records ahead of the net drain: the press's pick,
-/// the selects and the interacts a click makes ([`TargetPlugin`]). [`TargetUpdate`] follows it.
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct WorldClicks;
 
 /// `deselectOnClick`, 1.12's CVar behind the "Sticky Targeting" checkbox, which shows it inverted
 /// (`UIOptionsFrame.lua:250`). On by default, as in the reference: an empty-world click clears the
@@ -335,6 +309,8 @@ impl Plugin for TargetPlugin {
             .init_resource::<PickOcclusion>()
             .init_resource::<hover_probe::ProbeAim>()
             .init_resource::<PressPick>()
+            .init_resource::<ClickArm>()
+            .init_resource::<hover::StickyPicks>()
             .init_resource::<WorldCursor>()
             .init_resource::<cursor_mode::AttackFork>()
             .init_resource::<CombatFlash>()
@@ -353,35 +329,22 @@ impl Plugin for TargetPlugin {
                     (ring::load_factions, scan::load_creature_types).after(AssetSet::Open),
                 ),
             )
-            // The world's clicks among the frame's input records, after the mouse's, whose release
-            // settles the click tests, and ahead of the packets, as the reference's world-frame
-            // handlers run in the window input (`0x423920` at `0x420d23`): a click acts on the
-            // world as the last frame left it, its pick the last frame's, and a unit this frame's
-            // packets remove is clicked first. In order: the press's pick, the right press's legs,
-            // the payload, the selects, the cursor's commits, the right-click's action, the binds
-            // of the units the selects parked and the interacts.
-            .configure_sets(
-                Update,
-                WorldClicks
-                    .after(crate::player::WorldMouse)
-                    .before(WorldStage::Net),
-            )
+            // The click's legs, which each record that clicked runs before the next record
+            // ([`world_steps`]), and the frame's records' end once more, ahead of the packets, as
+            // the reference's world-frame handlers run in the window input (`0x423920` at
+            // `0x420d23`): a click acts on the world as the last frame left it, and a unit this
+            // frame's packets remove is clicked first. In the dispatcher's order (`0x481f60`): the
+            // payload, the selects, the cursor's commits, the right-click's action, the binds of
+            // the units the selects parked and the interacts.
+            .edit_schedule(WorldClickLegs, |legs| {
+                legs.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+            })
             .add_systems(
-                Update,
+                WorldClickLegs,
                 (
-                    // The latch first: what stands is the last frame's pick at the same cursor.
-                    latch_press_pick,
-                    // The right press's two legs of the reference's OnMouseDown hook (`0x492c20`),
-                    // the targeting cancel and the repair-mode reset, before the frame time's
-                    // cursor drive, so the press frame already reads both modes cleared.
-                    (
-                        crate::spell::targeting::cancel_targeting_on_right_press,
-                        // It lends the call host, whose casts read the player's outdoors answer:
-                        // the last re-place's, as a key or action-button cast in `UiInput` reads
-                        // it, and as the client's bit does.
-                        crate::ui_merchant::end_repair_mode_on_right_press,
-                    ),
-                    // It lends the call host too, after the repair-mode reset.
+                    // It lends the call host, whose casts read the player's outdoors answer: the
+                    // last re-place's, as a key or action-button cast in `UiInput` reads it, and as
+                    // the client's bit does.
                     click::world_right_click_payload,
                     // The world click's trade leg, ahead of the select in the same click
                     // (`0x4925d0`); then a plate click replayed as a click, then the select that
@@ -394,7 +357,7 @@ impl Plugin for TargetPlugin {
                         .chain(),
                     // After the gated select, which must read the targeting mode before a commit
                     // clears it. The pending spell feeds only one of the two legs, so their mutual
-                    // order is free. Each reads the last frame's cursor verdict, the pick's.
+                    // order is free. Each reads the press's pick.
                     crate::spell::targeting::commit_ground_cast_on_click,
                     crate::spell::targeting::commit_object_cast_on_click,
                     click::act_on_right_click,
@@ -412,8 +375,7 @@ impl Plugin for TargetPlugin {
                     // reference's dispatchers try them (`0x5f35c0`, `0x5f06dc` → `0x6e5a90`).
                     crate::ui_action::drain_click_casts,
                 )
-                    .chain()
-                    .in_set(WorldClicks),
+                    .chain(),
             )
             // The frame time's half, after the controller's step and the stream: the picks, the
             // cursor, a walk's arrival, the non-mouse selection writers, then the flash and the
@@ -517,79 +479,5 @@ mod tests {
         assert!(!go_is_nearest(&refused(4.0), &obj(true, 10.0)));
         assert!(!go_is_nearest(&refused(5.0), &obj(true, 5.0)));
         assert!(go_is_nearest(&refused(10.0), &obj(true, 4.0)));
-    }
-
-    /// A drag blanks the live hover for its whole length, and a click at its end must still act on
-    /// what the press was over.
-    #[test]
-    fn the_press_latch_outlives_the_hover_a_drag_clears() {
-        let mut world = World::new();
-        world.init_resource::<Hovered>();
-        world.init_resource::<HoveredObject>();
-        world.init_resource::<PickOcclusion>();
-        world.init_resource::<cursor_mode::WorldCursor>();
-        world.init_resource::<cursor_mode::AttackFork>();
-        world.init_resource::<PressPick>();
-        world.init_resource::<ButtonInput<MouseButton>>();
-        let id = world.register_system(latch_press_pick);
-
-        // A boar under the cursor, and the cursor classified as Attack over it.
-        const BOAR: u64 = 0xB0A2;
-        world.resource_mut::<Hovered>().guid = Some(BOAR);
-        world.resource_mut::<cursor_mode::WorldCursor>().kind = cursor_mode::CursorKind::Attack;
-
-        // Press left: the latch takes the pick.
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        world.run_system(id).unwrap();
-        assert_eq!(world.resource::<PressPick>().hovered.guid, Some(BOAR));
-        assert!(world.resource::<PressPick>().attack(), "Attack rode along");
-
-        // The drag begins: the look session blanks the live hover.
-        *world.resource_mut::<Hovered>() = Hovered::default();
-        world.resource_mut::<ButtonInput<MouseButton>>().clear();
-        world.run_system(id).unwrap();
-        assert_eq!(
-            world.resource::<PressPick>().hovered.guid,
-            Some(BOAR),
-            "the release must still know what the press was over"
-        );
-    }
-
-    /// The reference refuses to arm while another button is down (`0x51481a`) and kills the
-    /// pending click (`0x514ac1`), so neither release of a both-button run selects.
-    #[test]
-    fn a_chord_does_not_relatch_the_pick() {
-        let mut world = World::new();
-        world.init_resource::<Hovered>();
-        world.init_resource::<HoveredObject>();
-        world.init_resource::<PickOcclusion>();
-        world.init_resource::<cursor_mode::WorldCursor>();
-        world.init_resource::<cursor_mode::AttackFork>();
-        world.init_resource::<PressPick>();
-        world.init_resource::<ButtonInput<MouseButton>>();
-        let id = world.register_system(latch_press_pick);
-
-        const FIRST: u64 = 0x1111;
-        const SECOND: u64 = 0x2222;
-        world.resource_mut::<Hovered>().guid = Some(FIRST);
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        world.run_system(id).unwrap();
-        assert_eq!(world.resource::<PressPick>().hovered.guid, Some(FIRST));
-
-        // Right joins while left is still held, over something else entirely.
-        world.resource_mut::<Hovered>().guid = Some(SECOND);
-        let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
-        buttons.clear(); // drop last frame's just_pressed, keep `pressed`
-        buttons.press(MouseButton::Right);
-        world.run_system(id).unwrap();
-        assert_eq!(
-            world.resource::<PressPick>().hovered.guid,
-            Some(FIRST),
-            "the chord's second press must not steal the latch"
-        );
     }
 }

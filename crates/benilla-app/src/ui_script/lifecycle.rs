@@ -1111,6 +1111,15 @@ pub(crate) fn run_pending_reload(world: &mut World) {
         // worldport's run from their own packets.
         crate::ui_quest::world_enter_cascade(world);
         world.write_message(crate::net::WorldEnterCascadeMessage);
+        // Its release of every command (`0x49093c` → `0x5144c0`): the shutdown's leave cleared
+        // the once-per-world latch (`0x490c20`, `0x490a8d`), so the cascade runs whole. The new
+        // VM's mouse commands start clear; the look session's channels and the armed click go.
+        if let Some(mut rig) = world.get_resource_mut::<crate::player::CameraControl>() {
+            rig.world_mouse.release_all();
+        }
+        if let Some(mut arm) = world.get_resource_mut::<crate::target::ClickArm>() {
+            arm.disarm();
+        }
     }
 }
 
