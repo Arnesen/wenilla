@@ -13,7 +13,8 @@
 //! Deviation: the engine's own pushes (the world-enter sync, the explored areas, the landmark
 //! sources, the catalog) queue `WORLD_MAP_UPDATE` for the next frame's tick and fire only on a
 //! change, where the reference fires in place from the handler that moved the data: the app's
-//! feeds run after the frame's tick.
+//! feeds run after the frame's tick. A world-state packet's signal is the exception, which the
+//! world-state lane fires at the packet's place.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -579,6 +580,15 @@ impl super::UiScript {
         }
         model.worldmap.landmark_sources = sources;
         refresh_landmarks(&mut model);
+    }
+
+    /// [`Self::set_world_map_landmark_sources`] for the rebuild a world-state packet makes, which
+    /// signals `WORLD_MAP_UPDATE` itself at the packet's place (`0x48fa0d` into `0x4a6cdf`): the
+    /// list is rebuilt now and nothing is queued.
+    pub fn rebuild_world_map_landmarks(&mut self, sources: Vec<WorldMapLandmarkSource>) {
+        let mut model = self.model_mut();
+        model.worldmap.landmark_sources = sources;
+        model.worldmap.landmarks = build_landmarks(&model);
     }
 
     /// Pushes the per-frame feed: the player's zone, the projected positions and the facing.

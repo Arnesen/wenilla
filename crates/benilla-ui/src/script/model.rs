@@ -431,8 +431,9 @@ pub(crate) struct Model {
     pub(crate) ready_check: party::ReadyCheckState,
     /// Saved raid lockouts from `SMSG_RAID_INSTANCE_INFO`, which outlive any roster change.
     pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
-    /// `SetRaidRosterSelection`'s raid row index, client-side only.
-    pub(crate) raid_selection: i64,
+    /// `SetRaidRosterSelection`'s member guid (`[0xb713e8]`), client-side only; 0 selects none.
+    /// A `/reload` carries it into the next VM ([`super::UiScript::take_raid_selection`]).
+    pub(crate) raid_selection: u64,
     /// `GetTime()`'s session seconds, which only the host moves ([`super::UiScript::tick`],
     /// [`super::UiScript::set_now`]); off `_G`, as the reference's clock is the OS tick count.
     pub(crate) now: f64,
@@ -1194,9 +1195,14 @@ impl Model {
             .unwrap_or_else(|| std::rc::Rc::new(super::NoNameLists))
     }
 
-    /// The text a `SetText` stores (`0x771d80` with its expand flag): the separator pass
-    /// `0x771c50` while `SetEuropeanNumbers` holds the switch (`0x771d9f`), else the text itself.
+    /// The text a `SetText` stores (`0x771d80` with its expand flag): the grammar escapes `|1` and
+    /// `|2` rewritten (`0x7716f0`, no locale gate), then the separator pass `0x771c50` while
+    /// `SetEuropeanNumbers` holds the switch (`0x771d9f`).
     pub(crate) fn localized_text(&self, text: String) -> String {
+        let text = match crate::strings::expand_grammar_escapes(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(rewritten) => rewritten,
+        };
         if self.european_numbers {
             crate::strings::swap_number_separators(&text)
         } else {

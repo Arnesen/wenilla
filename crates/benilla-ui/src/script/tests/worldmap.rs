@@ -902,3 +902,29 @@ fn world_loc_map_position_projects_through_the_host() {
         );
     }
 }
+
+/// A world-state packet's rebuild leaves its `WORLD_MAP_UPDATE` to the packet's own signal
+/// (`0x48fa0d` into `0x4a6cdf`): the list is rebuilt and nothing is queued.
+#[test]
+fn a_packet_rebuild_replaces_the_landmarks_and_queues_nothing() {
+    let mut s = script();
+    s.run(
+        r#"
+        seen = 0
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("WORLD_MAP_UPDATE")
+        f:SetScript("OnEvent", function() seen = seen + 1 end)
+        "#,
+    )
+    .unwrap();
+    let source = |name: &str| WorldMapLandmarkSource {
+        name: name.into(),
+        description: String::new(),
+        map: 0,
+        pos: (0.2, 0.2),
+        icons: [Some(6); 3],
+    };
+    s.rebuild_world_map_landmarks(vec![source("The Inn")]);
+    s.tick(0.0);
+    assert_eq!(s.eval::<i64>("return seen").unwrap(), 0);
+}

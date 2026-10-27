@@ -31,18 +31,11 @@ pub(crate) struct WorldStateUiState {
 }
 
 impl super::UiScript {
-    /// Push the readout's rows, queuing `UPDATE_WORLD_STATES` (event `0x20e`) on any change.
-    /// Deviation: the reference fires it only after an init rebuild (`0x48fa12`) or a zone-defense
-    /// channel flip (`0x49bdd6`); we fire on a value change too, because our rows are resolved
-    /// values its Lua would re-read live.
+    /// Push the readout's rows. The reference signals `UPDATE_WORLD_STATES` on its triggers (a
+    /// packet, the defense flip: `0x48fa12`, `0x49bdd6`), not on a changed value, and the app's
+    /// world-state lane does; this signals nothing.
     pub fn set_world_state_ui(&mut self, rows: Vec<WorldStateUiView>) {
-        let mut model = self.model_mut();
-        if model.worldstate.rows != rows {
-            model.worldstate.rows = rows;
-            model
-                .pending_events
-                .push(("UPDATE_WORLD_STATES".to_string(), Vec::new()));
-        }
+        self.model_mut().worldstate.rows = rows;
     }
 }
 
