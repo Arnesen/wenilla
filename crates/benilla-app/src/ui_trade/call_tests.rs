@@ -26,8 +26,7 @@ const JERKY: u64 = 0x4000_0000_0000_0a02;
 struct Trade {
     app: App,
     rx: Receiver<ClientCommand>,
-    /// The trade feed and the drop's system, registered once so their memories persist.
-    feed: SystemId,
+    /// The drop's system, registered once so its memory persists.
     drop: SystemId,
     click: SystemId,
 }
@@ -109,7 +108,6 @@ fn client() -> Trade {
         )
         .expect("the recorder installs");
     app.world_mut().insert_non_send_resource(script);
-    let feed = app.world_mut().register_system(super::feed_trade);
     let drop = app
         .world_mut()
         .register_system(crate::ui_action::drop_item::drop_item_on_unit);
@@ -119,7 +117,6 @@ fn client() -> Trade {
     Trade {
         app,
         rx,
-        feed,
         drop,
         click,
     }
@@ -175,15 +172,19 @@ fn run_system(t: &mut Trade, id: SystemId) {
     t.app.world_mut().run_system(id).expect("the system runs");
 }
 
-/// The server's `status`, through the handler table, then the feed.
+/// The server's `status`, through the handler table, then the lanes.
 fn status(t: &mut Trade, status: TradeStatus) {
     crate::net::handlers::dispatch(
         t.app.world_mut(),
         vec![SessionEvent::TradeStatus { status }],
     );
+    drain(t);
+}
+
+/// What the handlers left, applied, then every lane fired, as the drain fires them.
+fn drain(t: &mut Trade) {
     t.app.world_mut().flush();
-    let feed = t.feed;
-    run_system(t, feed);
+    crate::lanes::fire_in_order(t.app.world_mut());
 }
 
 /// A trade Bob asked for and we accepted, its window open.
@@ -227,7 +228,7 @@ fn the_trade_verbs_send_inside_their_calls() {
 }
 
 /// `0x4bf230(1)` signals `TRADE_ACCEPT_UPDATE` with both flags, ours first, inside the call
-/// (`0x4bf260`); the feed that follows does not announce the same change again.
+/// (`0x4bf260`); the lanes that follow do not announce the same change again.
 #[test]
 fn an_accept_signals_inside_its_call_once() {
     let mut t = client();
@@ -238,12 +239,11 @@ fn an_accept_signals_inside_its_call_once() {
         "TRADE_ACCEPT_UPDATE(1,0) "
     );
     let _ = heard(&mut t);
-    let feed = t.feed;
-    run_system(&mut t, feed);
+    drain(&mut t);
     assert_eq!(
         heard(&mut t),
         "",
-        "the feed does not repeat the call's signal"
+        "the lanes do not repeat the call's signal"
     );
 }
 
@@ -553,7 +553,7 @@ fn an_enchant_on_the_partners_bare_item_casts_at_once() {
 
 /// A trade we started by dropping coins (`0x5d3f80`) folds them in as it opens and fires
 /// `PLAYER_TRADE_MONEY` once (`0x4bf630`), `PLAYER_MONEY` (`0x4bf63a`), then `TRADE_SHOW`; the cache of our money takes the
-/// offer (`0x4bf62b`), so no later feed fires it again.
+/// offer (`0x4bf62b`), so no later status fires it again.
 #[test]
 fn a_drop_started_trade_folds_held_coins_with_one_money_signal() {
     let mut t = client();
@@ -575,9 +575,8 @@ fn a_drop_started_trade_folds_held_coins_with_one_money_signal() {
         eval::<(i64, i64)>(&mut t, "return GetCursorMoney(), GetPlayerTradeMoney()"),
         (0, 300)
     );
-    let feed = t.feed;
-    run_system(&mut t, feed);
-    assert_eq!(heard(&mut t), "", "the feed's money diff saw the fold");
+    drain(&mut t);
+    assert_eq!(heard(&mut t), "", "the fold fires once");
 }
 
 /// The open leg sends before it clears the cursor: the coins' offer (`0x5d4500` at `0x4bf608`)
@@ -799,8 +798,7 @@ fn partner_gold(t: &mut Trade, gold: u32) {
             }),
         }],
     );
-    let feed = t.feed;
-    run_system(t, feed);
+    drain(t);
 }
 
 /// The money signals come from a status's compare (`0x4bf2b0`), not from our own edit: an offer
@@ -813,8 +811,7 @@ fn the_money_signals_follow_a_status_not_our_edit() {
     let mut t = client();
     open_with_bob(&mut t);
     run(&mut t, "SetTradeMoney(500)");
-    let feed = t.feed;
-    run_system(&mut t, feed);
+    drain(&mut t);
     assert_eq!(heard(&mut t), "", "our edit signals nothing");
     partner_gold(&mut t, 0);
     assert_eq!(
@@ -1096,8 +1093,7 @@ fn an_emptied_own_slot_signals_before_the_accept_drop() {
             }),
         }],
     );
-    let feed = t.feed;
-    run_system(&mut t, feed);
+    drain(&mut t);
     assert_eq!(
         heard(&mut t),
         "TRADE_PLAYER_ITEM_CHANGED(1,nil) TRADE_ACCEPT_UPDATE(0,0) "
@@ -1111,8 +1107,7 @@ fn code_13_signals_the_purse_over_zeroed_offers() {
     let mut t = client();
     open_with_bob(&mut t);
     run(&mut t, "SetTradeMoney(500)");
-    let feed = t.feed;
-    run_system(&mut t, feed);
+    drain(&mut t);
     run(
         &mut t,
         r#"READ = nil
@@ -1123,4 +1118,301 @@ fn code_13_signals_the_purse_over_zeroed_offers() {
     assert_eq!(eval::<i64>(&mut t, "return GetPlayerTradeMoney()"), 500);
     status(&mut t, TradeStatus::Unknown13);
     assert_eq!(eval::<i64>(&mut t, "return READ"), 0);
+}
+
+/// `TRADE_UPDATE` has one producer, the getters' record callback `0x4c0340` (`0x4c034f`): an
+/// offer or gold change signals its slot and money events and nothing else, and a getter that
+/// finds an unanswered template is called back once per call when the record lands, to a handler
+/// that reads it answered through the host. A getter that hits is never called back.
+#[test]
+fn trade_update_comes_only_from_a_landed_record_a_getter_asked_for() {
+    use crate::item_watch::ItemNotice;
+    const SWORD: u32 = 4306;
+    let mut t = client();
+    run(
+        &mut t,
+        r#"UPDATES, SLOTS, SEEN = 0, 0, {}
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("TRADE_UPDATE")
+        f:RegisterEvent("TRADE_TARGET_ITEM_CHANGED")
+        f:SetScript("OnEvent", function()
+            if event == "TRADE_UPDATE" then
+                UPDATES = UPDATES + 1
+                table.insert(SEEN, tostring((GetTradeTargetItemInfo(1))))
+            else
+                SLOTS = SLOTS + 1
+            end
+        end)"#,
+    );
+    open_with_bob(&mut t);
+    let counts = |t: &mut Trade| eval::<(i64, i64)>(t, "return UPDATES, SLOTS");
+    let offer = |t: &mut Trade, gold: u32| {
+        let mut theirs = [None; benilla_protocol::messages::TRADE_SLOT_COUNT];
+        theirs[0] = Some(benilla_protocol::messages::TradeItem {
+            entry: SWORD,
+            display_id: 0,
+            count: 1,
+            wrapped: false,
+            gift_creator: 0,
+            perm_enchant: 0,
+            creator: 0,
+            charges: 0,
+            suffix_factor: 0,
+            random_prop_id: 0,
+            lock_id: 0,
+            max_durability: 0,
+            durability: 0,
+        });
+        crate::net::handlers::dispatch(
+            t.app.world_mut(),
+            vec![SessionEvent::TradeStatusExtended {
+                state: Box::new(benilla_protocol::messages::TradeStatusExtended {
+                    their_window: true,
+                    sequence: 7,
+                    flag: 7,
+                    gold,
+                    enchant_spell_id: 0,
+                    slots: theirs,
+                }),
+            }],
+        );
+        drain(t);
+    };
+    offer(&mut t, 0);
+    offer(&mut t, 900);
+    assert_eq!(
+        counts(&mut t),
+        (0, 1),
+        "the slot event once, and no TRADE_UPDATE for the offer or the gold"
+    );
+
+    // Two getter calls on the unanswered slot register two callbacks (`0x55bbb3`).
+    run(
+        &mut t,
+        "GetTradeTargetItemInfo(1) GetTradeTargetItemInfo(1)",
+    );
+    drain(&mut t);
+    assert_eq!(
+        counts(&mut t).0,
+        0,
+        "nothing signals until the record lands"
+    );
+
+    // The record lands as the object handlers write it: the cache, then one notice per waiter.
+    let waiting = {
+        let mut items = t.app.world_mut().resource_mut::<crate::items::Items>();
+        items.insert_template(SWORD, Some(crate::items::test_template("Iron Sword")));
+        items.take_trade_waiters(SWORD)
+    };
+    assert_eq!(waiting, 2, "one per call");
+    for _ in 0..waiting {
+        t.app
+            .world_mut()
+            .resource_mut::<crate::item_lane::ItemLane>()
+            .push(crate::item_watch::Run {
+                notice: Some(ItemNotice::TradeRecord { entry: SWORD }),
+                signals: Vec::new(),
+                ..Default::default()
+            });
+    }
+    drain(&mut t);
+    assert_eq!(
+        counts(&mut t),
+        (2, 1),
+        "one TRADE_UPDATE per registered callback, and no slot event: the landing changed the \
+         row, not the offer (`0x4bf2b0` runs on a status)"
+    );
+    assert_eq!(
+        eval::<Vec<String>>(&mut t, "return SEEN"),
+        ["Iron Sword", "Iron Sword"],
+        "the handler reads the answered row"
+    );
+
+    // Answered now, a getter asks nothing and nothing signals.
+    run(&mut t, "GetTradeTargetItemInfo(1)");
+    drain(&mut t);
+    assert_eq!(counts(&mut t).0, 2);
+    assert_eq!(
+        t.app
+            .world_mut()
+            .resource_mut::<crate::items::Items>()
+            .take_trade_waiters(SWORD),
+        0
+    );
+}
+
+/// The money and the item getters read the session at the call: our offer the instant
+/// `SetTradeMoney` stores it, inside the same chunk, and a `TRADE_CLOSED` handler both offers as
+/// the close left them, the money zeroed by the ending status (`0x5d4884`) and ours behind the
+/// cleared cell (`0x4c0706`).
+#[test]
+fn the_getters_read_the_session_inside_the_calls_and_the_close() {
+    let mut t = client();
+    open_with_bob(&mut t);
+    assert_eq!(
+        eval::<i64>(&mut t, "SetTradeMoney(500) return GetPlayerTradeMoney()"),
+        500
+    );
+    run(&mut t, "PickupContainerItem(0, 1) ClickTradeButton(1)");
+    run(
+        &mut t,
+        r#"CLOSED = {}
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("TRADE_CLOSED")
+        f:SetScript("OnEvent", function()
+            table.insert(CLOSED, tostring((GetTradePlayerItemInfo(1))) .. "/" ..
+                GetPlayerTradeMoney())
+        end)"#,
+    );
+    status(&mut t, TradeStatus::Complete);
+    let closed: Vec<String> = eval(&mut t, "return CLOSED");
+    assert!(!closed.is_empty());
+    assert!(
+        closed.iter().all(|c| c == "Linen Cloth/0"),
+        "the handler read {closed:?}"
+    );
+}
+
+/// A close core run by a handler while the lane still holds an earlier packet's signals waits
+/// behind them ([`super::lane::close_step`]): the accept, then the close and its line.
+#[test]
+fn a_close_fires_behind_the_lanes_earlier_items() {
+    let mut t = client();
+    open_with_bob(&mut t);
+    run(
+        &mut t,
+        r#"local f = CreateFrame("Frame")
+        f:RegisterEvent("TRADE_CLOSED")
+        f:SetScript("OnEvent", function() HEARD = HEARD .. event .. " " end)"#,
+    );
+    crate::net::handlers::dispatch(
+        t.app.world_mut(),
+        vec![
+            SessionEvent::TradeStatus {
+                status: TradeStatus::Accept,
+            },
+            SessionEvent::TradeStatus {
+                status: TradeStatus::Complete,
+            },
+        ],
+    );
+    t.app.world_mut().flush();
+    assert_eq!(heard(&mut t), "", "nothing fired in the handlers");
+    drain(&mut t);
+    assert_eq!(
+        heard(&mut t),
+        "TRADE_ACCEPT_UPDATE(0,1) TRADE_CLOSED TRADE_CLOSED "
+    );
+}
+
+/// One frame's `OPEN_WINDOW` then `CANCELED` on a trade a drop started: the open places the held
+/// item at its packet (`0x4bf652`-`0x4bf6fa`, locked in our table), and the cancel after it
+/// unlocks it (`0x4bf837`), shuts the cell (`0x4bf516`) and sends its `CMSG_CANCEL_TRADE` after
+/// the placement's packet (`0x4bf527`): the item ends unlocked, and no longer in a trade.
+#[test]
+fn a_cancel_behind_a_drop_started_open_undoes_what_the_open_placed() {
+    let mut t = client();
+    run(&mut t, "PickupContainerItem(0, 1)");
+    let _ = sent(&t);
+    t.app
+        .world_mut()
+        .resource_mut::<super::TradeSession>()
+        .initiate(BOB, true);
+    crate::net::handlers::dispatch(
+        t.app.world_mut(),
+        vec![
+            SessionEvent::TradeStatus {
+                status: TradeStatus::OpenWindow,
+            },
+            SessionEvent::TradeStatus {
+                status: TradeStatus::Canceled,
+            },
+        ],
+    );
+    drain(&mut t);
+    let order: Vec<&str> = sent(&t)
+        .iter()
+        .filter_map(|c| match c {
+            ClientCommand::SetTradeItem { .. } => Some("place"),
+            ClientCommand::CancelTrade => Some("cancel"),
+            _ => None,
+        })
+        .collect();
+    // The partner holds the latch, so the release runs the core once more inside it (`0x493365`).
+    assert_eq!(
+        order,
+        ["place", "cancel", "cancel"],
+        "the cancels follow the placement"
+    );
+    assert!(
+        !t.app
+            .world()
+            .non_send_resource::<UiScript>()
+            .item_locked(CLOTH),
+        "the cancel unlocks what the open placed"
+    );
+    // An entry's arrival unlocks the item unless it sits in an open trade (`0x4bfd20`), which
+    // tests the cell first: shut, it frees the item the table still names.
+    run(&mut t, "PickupContainerItem(0, 1)");
+    let mut vm = t.app.world_mut().non_send_resource_mut::<UiScript>();
+    vm.unlock_entry_items(&[CLOTH]);
+    assert!(!vm.item_locked(CLOTH), "the window is shut");
+}
+
+/// `CLOSE_WINDOW` unlocks, prints its line, then runs the close core (`0x4bf87e`, `0x4bf88e`,
+/// `0x4bf89c`): the line's message ahead of `TRADE_CLOSED`, the cancel's and the complete's after.
+#[test]
+fn close_window_prints_its_line_before_the_close() {
+    let mut t = client();
+    open_with_bob(&mut t);
+    run(
+        &mut t,
+        r#"ERR_TRADE_BAG_FULL = "full" ERR_TRADE_CANCELLED = "cancelled"
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("TRADE_CLOSED") f:RegisterEvent("UI_ERROR_MESSAGE")
+        f:RegisterEvent("UI_INFO_MESSAGE")
+        f:SetScript("OnEvent", function()
+            HEARD = HEARD .. event .. "(" .. tostring(arg1) .. ") "
+        end)"#,
+    );
+    status(
+        &mut t,
+        TradeStatus::CloseWindow {
+            result: 4,
+            side: 1,
+            item_limit_category: 0,
+        },
+    );
+    assert_eq!(
+        heard(&mut t),
+        "UI_ERROR_MESSAGE(full) TRADE_CLOSED(nil) TRADE_CLOSED(nil) "
+    );
+    open_with_bob(&mut t);
+    status(&mut t, TradeStatus::Canceled);
+    assert!(
+        heard(&mut t).ends_with("TRADE_CLOSED(nil) UI_INFO_MESSAGE(cancelled) "),
+        "the cancel's line follows its close"
+    );
+}
+
+/// `InitiateTrade` with the partner's name cached prints `ERR_INITIATE_TRADE_S` inside its call
+/// (`0x5d4042` → `0x496720`), a chat-surface line whose `CHAT_MSG_SYSTEM` the composer fires at
+/// once (`0x49a870`), ahead of the chunk's next line.
+#[test]
+fn a_cached_initiate_prints_its_line_inside_the_call() {
+    let mut t = client();
+    run(
+        &mut t,
+        r#"ERR_INITIATE_TRADE_S = "Requested to trade with %s."
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("CHAT_MSG_SYSTEM")
+        f:SetScript("OnEvent", function() HEARD = HEARD .. event .. "(" .. arg1 .. ") " end)
+        HEARD = ""
+        InitiateTrade("target")
+        HEARD = HEARD .. "next""#,
+    );
+    assert_eq!(
+        heard(&mut t),
+        "CHAT_MSG_SYSTEM(Requested to trade with Bob.) next"
+    );
 }
