@@ -583,8 +583,12 @@ fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
 /// The active-mover global (`0xc4da98`) by guid, as [`crate::player`] seats it: the claimed
 /// foreign mover, else our own, and none while control is lost (`0x5fa600` zeroes it).
 fn active_mover(sc: &Scene) -> Option<u64> {
-    let player = sc.player.as_ref().filter(|p| !p.control_lost)?;
-    player.foreign_mover.or(sc.self_guid.0)
+    sc.player.as_ref()?;
+    let lock = sc.mover_lock.as_deref().copied().unwrap_or_default();
+    if lock.control_lost {
+        return None;
+    }
+    lock.foreign_mover.or(sc.self_guid.0)
 }
 
 /// A near-objects block (`0x467230`): each listed released object but our own player comes back
@@ -790,6 +794,10 @@ fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<N
     let Some(e) = sc.index.0.remove(&guid) else {
         return;
     };
+    // The unit's destructor zeroes the active mover it names (`0x5fb631`-`0x5fb655`).
+    if let Some(mover) = sc.mover.as_deref_mut() {
+        mover.forget(guid);
+    }
     bag_write(&mut sc, guid, None);
     // An item has no model to fade, so it goes now with its countdown cells.
     if benilla_protocol::guid::is_item(guid) {
@@ -857,6 +865,10 @@ fn release(sc: &mut Scene, guid: u64) {
     let Some(e) = sc.index.0.remove(&guid) else {
         return;
     };
+    // `CGUnit_C::Release` zeroes the active mover it names (`0x5fbc26`-`0x5fbc3b` → `0x6006b0`).
+    if let Some(mover) = sc.mover.as_deref_mut() {
+        mover.forget(guid);
+    }
     bag_write(sc, guid, None);
     let kept = sc
         .stores
@@ -903,7 +915,12 @@ fn release(sc: &mut Scene, guid: u64) {
 
 /// The end of the packet: the notify pass over every block (`0x46522d`-`0x46528b`), then each
 /// brought-back object's vtable slot 3 (`0x465290`-`0x4652ff`).
-fn on_update_end(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<NonSend<UiScript>>) {
+fn on_update_end(
+    In(ev): In<SessionEvent>,
+    mut sc: Scene,
+    script: Option<NonSend<UiScript>>,
+    mut arrival: super::arrival::Arrival,
+) {
     let SessionEvent::ObjectUpdateEnd = ev else {
         return;
     };
@@ -944,7 +961,7 @@ fn on_update_end(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<NonSend
             // values block above does; benilla's [`notify`] fires nothing for either.
             Notify::Create { guid, kind } => {
                 if unshown.remove(&guid) {
-                    create_hook(&mut sc, guid, kind, script.as_deref());
+                    create_hook(&mut sc, guid, kind, script.as_deref(), &mut arrival);
                 } else {
                     let moved = copies.get(&guid).unwrap_or(&none);
                     let block = Notified::new(Sent::All, moved);
@@ -1169,9 +1186,16 @@ fn mirror_guild(sc: &mut Scene) {
 /// object's record: an item's record set-up (`0x5d8400` → `0x5d8300`); a unit's `PostInit`
 /// (`0x5fb880`), whose display resolve asks a creature's record (`0x60afb0`, at `0x60b15b`); a
 /// player's (`0x5debe0`), its name (`0x5dec12` → `0x609210`) and guild tag (`0x5dec19`) ahead of another
-/// player's party record (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`); a game
-/// object's template (`0x5f7c40`, at `0x5f7d81`), whose lockId decides use-vs-cast.
-fn create_hook(sc: &mut Scene, guid: u64, kind: Created, script: Option<&UiScript>) {
+/// player's party record (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`), and for
+/// the active player its arrival last (`0x5dec7b`, [`super::arrival`]); a game object's template
+/// (`0x5f7c40`, at `0x5f7d81`), whose lockId decides use-vs-cast.
+fn create_hook(
+    sc: &mut Scene,
+    guid: u64,
+    kind: Created,
+    script: Option<&UiScript>,
+    arrival: &mut super::arrival::Arrival,
+) {
     let Some(fields) = sc
         .index
         .0
@@ -1229,6 +1253,8 @@ fn create_hook(sc: &mut Scene, guid: u64, kind: Created, script: Option<&UiScrip
             sc.group.member_object(guid, true);
             if sc.self_guid.0 != Some(guid) {
                 compare_party_record(sc, guid, &fields, script);
+            } else {
+                super::arrival::arrive(sc, arrival, guid, &fields);
             }
         }
         Created::World(EntityKind::Unit) => {

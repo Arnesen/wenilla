@@ -23,9 +23,10 @@ use super::motion::{
 };
 use super::{
     ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp, ObjectStore,
-    RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
+    RemoteMotion, SelfGuid, SelfPlayer, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
 
+mod arrival;
 mod update;
 
 pub(crate) use update::{release_unheld, Listed, ReleasePending, Released};
@@ -149,6 +150,10 @@ pub(crate) struct Scene<'w, 's> {
     worn_pins: Query<'w, 's, &'static mut crate::entities::WornPins>,
     /// The viewer's zone and the objects' positions a party member's snapshot stores (`0x5f0880`).
     place: crate::ui_party::net::SnapshotPlace<'w, 's>,
+    /// The active mover, which its unit's release and destroy zero.
+    mover: Option<ResMut<'w, super::MoverClaim>>,
+    /// Who we drive and whether we may, which our own arrival gives back.
+    mover_lock: Option<ResMut<'w, crate::player::MoverLock>>,
 }
 
 /// The item watchers' reads of the scene ([`crate::item_watch::Watch`]).
@@ -725,6 +730,11 @@ fn object_create(
             }
             if let Some(s) = walk {
                 entity.insert(s);
+            }
+            // Our own player is the active one from its write: the reference finds it by its guid
+            // (`0x468550`), here by the tag, given in the same commands as the entity.
+            if sc.self_guid.0 == Some(guid) {
+                entity.insert(SelfPlayer);
             }
             let e = entity.id();
             sc.index.0.insert(guid, e);
