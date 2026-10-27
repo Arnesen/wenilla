@@ -316,19 +316,23 @@ pub fn parse(text: &str) -> Result<ParsedDocument, Error> {
                 None => warnings.push("<Include> without a file attribute; skipped".to_string()),
             }
         } else if tag.eq_ignore_ascii_case("Script") {
-            match attr_ci(child, "file") {
-                Some(file) => items.push(TopLevel::Script(ScriptRef::File(file))),
-                None => items.push(TopLevel::Script(ScriptRef::Inline {
-                    body: direct_text(child),
+            // The file runs first (`0x6ee0d4`), then a non-empty body, file or no file
+            // (`0x6ee0d9`-`0x6ee10f`).
+            let body = direct_text(child);
+            let file = attr_ci(child, "file");
+            let has_file = file.is_some();
+            if let Some(file) = file {
+                items.push(TopLevel::Script(ScriptRef::File(file)));
+            }
+            if !has_file || !body.is_empty() {
+                items.push(TopLevel::Script(ScriptRef::Inline {
+                    body,
                     line: inline_start_line(&doc, child),
-                })),
+                }));
             }
         } else if tag.eq_ignore_ascii_case("Font") {
-            let el = element_from_node(child);
-            if el.name().is_none() {
-                warnings.push("<Font> without a name attribute".to_string());
-            }
-            items.push(TopLevel::Font(el));
+            // An unnamed one is kept: the loader reports it where the reference does.
+            items.push(TopLevel::Font(element_from_node(child)));
         } else {
             let el = element_from_node(child);
             if el.attr_is_true("virtual") {
@@ -472,25 +476,13 @@ pub fn expand(
     templates: &dyn Inheritable,
     warnings: &mut Vec<String>,
 ) -> Element {
-    expand_known(element, templates, &|_| false, warnings)
-}
-
-/// [`expand`], skipping without a warning an `inherits` that `is_font` claims: a
-/// `<FontString inherits="GameFontNormalSmall">` takes a font, applied later, not a template.
-pub fn expand_known(
-    element: &Element,
-    templates: &dyn Inheritable,
-    is_font: &dyn Fn(&str) -> bool,
-    warnings: &mut Vec<String>,
-) -> Element {
     let mut active = HashSet::new();
-    expand_inner(element, templates, is_font, warnings, &mut active)
+    expand_inner(element, templates, warnings, &mut active)
 }
 
 fn expand_inner(
     element: &Element,
     templates: &dyn Inheritable,
-    is_font: &dyn Fn(&str) -> bool,
     warnings: &mut Vec<String>,
     active: &mut HashSet<String>,
 ) -> Element {
@@ -510,17 +502,12 @@ fn expand_inner(
             ));
             continue;
         }
+        // A miss is the loader's to log, level by level ([`Templates::inherited_levels`]).
         let Some(template) = templates.find(name) else {
-            // A font object is not an unknown template; it is applied after this.
-            if !is_font(name) {
-                warnings.push(format!(
-                    "unknown template '{name}' referenced by inherits; skipping"
-                ));
-            }
             active.remove(name);
             continue;
         };
-        let expanded_template = expand_inner(template, templates, is_font, warnings, active);
+        let expanded_template = expand_inner(template, templates, warnings, active);
         active.remove(name);
         base = Some(match base {
             None => expanded_template,
@@ -761,6 +748,27 @@ print(x)</Script>
         }
     }
 
+    /// A `<Script file>` with a body is the file, then the body (`0x6ee0d4`, `0x6ee10f`).
+    #[test]
+    fn a_script_file_with_a_body_keeps_both_in_order() {
+        let doc = parse(
+            r#"<Ui>
+                <Script file="Foo.lua">Ran = true</Script>
+            </Ui>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            doc.items,
+            [
+                TopLevel::Script(ScriptRef::File("Foo.lua".to_string())),
+                TopLevel::Script(ScriptRef::Inline {
+                    body: "Ran = true".to_string(),
+                    line: 2,
+                }),
+            ]
+        );
+    }
+
     #[test]
     fn virtual_registers_as_template_non_virtual_as_instance() {
         let doc = parse(
@@ -834,11 +842,9 @@ print(x)</Script>
         let mut warnings = Vec::new();
         let expanded = expand(inst, &templates, &mut warnings);
 
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].contains("A, B"),
-            "the warning must name the literal it looked up: {warnings:?}"
-        );
+        // The miss is the loader's to log, by the literal it looked up.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(templates.find("A, B").is_none());
 
         // The element loads with its own content only.
         assert_eq!(expanded.attr("alpha"), Some("1.0"));
@@ -854,7 +860,7 @@ print(x)</Script>
         };
         let mut w2 = Vec::new();
         let expanded = expand(padded, &templates, &mut w2);
-        assert_eq!(w2.len(), 1, "{w2:?}");
+        assert!(w2.is_empty(), "{w2:?}");
         assert!(
             expanded.children.is_empty(),
             "picked up A despite the spaces"

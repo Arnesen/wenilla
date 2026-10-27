@@ -194,7 +194,8 @@ mod stdlib;
 /// An mlua error's bare Lua message, the one value the error handler is called with.
 pub use stdlib::lua_message;
 pub(crate) use stdlib::{
-    call_global_under_error_function, execute_buffer, run_under_error_function,
+    call_global_under_error_function, execute_buffer, execute_buffer_reported,
+    run_under_error_function,
 };
 mod summon;
 mod talent;
@@ -356,7 +357,7 @@ pub use video_pairs::VIDEO_PAIR_CVARS;
 pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
-pub(crate) use font_block::{face_loads, own_font_lua, SAME_FONT_HEIGHT};
+pub(crate) use font_block::{face_loads, font_size_loads, own_font_lua, SAME_FONT_HEIGHT};
 pub use inspect::{InspectCall, UnitReach, UnitReachQuery, VisibleSlotQuery};
 pub use instance::InstanceCall;
 pub use item_stats::{

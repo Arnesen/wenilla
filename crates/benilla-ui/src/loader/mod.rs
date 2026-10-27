@@ -38,8 +38,9 @@ pub struct LoadReport {
     /// Issues that dropped nothing, and the document layer's parse warnings. An unknown frame type
     /// drops its node yet lands here: the reference logs it and goes on (`0x6ee356`).
     pub warnings: Vec<String>,
-    /// Failures the reference raises on: a handler that fails to compile, a method call that
-    /// errors, a malformed included document.
+    /// Failures the reference raises on: a handler that errors as it fires (`OnLoad`), a method
+    /// call that errors, a malformed included document. A handler that fails to compile is none:
+    /// the reference reports nothing until it fires (`0x704c87`-`0x704c9f`).
     pub errors: Vec<String>,
     /// `<Include file=>` and `<Script file=>` paths the provider lacks. The reference logs
     /// `"Couldn't open %s"` (`0x6edaa0`, `0x846ff4`) or `"Error loading %s"` (`0x872e50`) and goes
@@ -334,12 +335,21 @@ impl Loader<'_> {
     }
 
     /// Run a file chunk (bytes, as on disk) in the one global state, named after its path. The
-    /// name matters: unnamed, mlua's `#[track_caller]` `load` names it after this Rust line.
-    fn run(&self, chunk: &[u8], path: &str) -> mlua::Result<()> {
+    /// name matters: unnamed, mlua's `#[track_caller]` `load` names it after this Rust line. A file
+    /// runs with the document's status (`0x704bc0`), so a compile or run failure is also a
+    /// severity-2 line of it, the message alone (`0x704b31`, `0x704b8d`); an inline body has none.
+    fn run(&mut self, chunk: &[u8], path: &str) -> mlua::Result<()> {
         // The reference's file chunk name, `"@%s"` (`0x8716e0`, `0x704bc0`; a file name to
         // `luaO_chunkid 0x6f5c40`), with `\` separators as in `crate::script::addon_chunk_name`,
         // over the install path: an addon's files sit under `Interface\AddOns\`.
-        self.run_named(chunk, &format!("@{}", self.status_path(path)))
+        let name = format!("@{}", self.status_path(path));
+        crate::script::execute_buffer_reported(self.lua, chunk, name, |_| {}).map_err(
+            |(e, line)| {
+                let line = String::from_utf8_lossy(&line).into_owned();
+                self.report.status.report(status::FAILURE, line);
+                e
+            },
+        )
     }
 
     /// Run a chunk under a complete chunk name, for a producer whose name is not a path, as
@@ -540,23 +550,33 @@ impl Loader<'_> {
     pub(super) fn expand(&mut self, el: &Element) -> Element {
         let model = self.model();
         let templates = model.framexml_templates.borrow();
-        // A font object in an inherit chain is skipped, not warned as an unknown template.
-        let is_font = |name: &str| model.fonts.id(name).is_some();
         let mut warns = Vec::new();
-        let out = framexml::expand_known(el, &*templates, &is_font, &mut warns);
+        let out = framexml::expand(el, &*templates, &mut warns);
         drop(templates);
         drop(model);
         self.report.warnings.extend(warns);
         out
     }
 
-    /// The nodes `raw`'s `LoadXML` reads ([`Levels`]).
-    pub(super) fn levels<'a>(&self, raw: &'a Element) -> Levels<'a> {
-        let inherited = self
-            .model()
-            .framexml_templates
-            .borrow()
-            .inherited_levels(raw);
+    /// The nodes `raw`'s `LoadXML` reads ([`Levels`]), a frame's or a texture's. The walk stops at
+    /// an `inherits` the registry lacks, which the level naming it logs before anything else at
+    /// severity 1, `Couldn't find inherited node: %s` (`0x8786a8`; a frame `0x769861`, a texture
+    /// `0x76fe60`).
+    pub(super) fn levels<'a>(&mut self, raw: &'a Element) -> Levels<'a> {
+        let (inherited, missed) = {
+            let model = self.model();
+            let templates = model.framexml_templates.borrow();
+            let inherited = templates.inherited_levels(raw);
+            let first = inherited.first().map_or(raw, |t| &**t);
+            let missed = first
+                .attr("inherits")
+                .filter(|n| !n.is_empty() && !templates.contains(n))
+                .map(str::to_string);
+            (inherited, missed)
+        };
+        if let Some(name) = missed {
+            self.status_warning(format!("Couldn't find inherited node: {name}"));
+        }
         Levels {
             inherited,
             own: raw,
@@ -581,7 +601,12 @@ impl Loader<'_> {
     /// re-declared (`0x783870`, `0x7839ab`), loads the node ([`Self::load_font_node`]) and is
     /// published whether or not its own font was refused.
     pub(super) fn do_font(&mut self, el: &Element) {
-        let Some(name) = el.name().map(str::to_string) else {
+        // No name, or an empty one (`0x6ee143` tests its first byte): `0x87104c` at severity 1
+        // (`0x6ee162`), and no font is made.
+        let Some(name) = el.name().filter(|n| !n.is_empty()).map(str::to_string) else {
+            let line = "Unnamed font node at top level";
+            self.report.status.report(status::WARNING, line);
+            self.report.warnings.push(line.to_string());
             return;
         };
         let id = self.model().fonts.named(&name);
@@ -637,8 +662,9 @@ impl Loader<'_> {
                 let monochrome = el.attr("monochrome").is_some_and(|v| !v.is_empty());
                 // The font the node already holds (the path ignoring case, the height within 2⁻²²,
                 // the same flags) is kept as spelled and still clears the bit (`0x783e17`-`0x783e5d`
-                // → `0x783ea9`); any other loads first (`0x783e7c`). A file that fails is logged
-                // (`0x87a4c8`) and the node goes on to `spacing`, keeping what it follows.
+                // → `0x783ea9`); any other loads first (`0x783e7c`), which also refuses a height of
+                // a screen or more. A load that fails is logged (`0x87a4c8`) and the node goes on
+                // to `spacing`, keeping what it follows.
                 let mut model = self.model();
                 let u = model.layout_units();
                 let fo = &model.fonts.get(id).block;
@@ -650,7 +676,9 @@ impl Loader<'_> {
                         (h.script(u) - height.script(u)).abs() < crate::script::SAME_FONT_HEIGHT
                     })
                     && (fo.outline, fo.monochrome) == (outline, monochrome);
-                if held || crate::script::face_loads(&model, path) {
+                let loads = crate::script::font_size_loads(u, height.layout(u))
+                    && crate::script::face_loads(&model, path);
+                if held || loads {
                     font::set(&mut model, id, FontMask::FONT, |fo| {
                         if !held {
                             fo.font = Some(path.to_string());
@@ -738,9 +766,7 @@ impl Loader<'_> {
         //     miss logs `"Unknown frame type: %s"` (`0x871124`, at `0x6ee356`), builds nothing for
         //     the node and goes on to the next sibling. Only the Lua door raises.
         if crate::script::object::registered_frame_kind(self.lua(), &el.tag).is_none() {
-            self.report
-                .warnings
-                .push(format!("Unknown frame type: {}", el.tag));
+            self.status_warning(format!("Unknown frame type: {}", el.tag));
             return None;
         }
 
@@ -761,10 +787,8 @@ impl Loader<'_> {
                         .is_ok_and(|id| self.model().id_to_frame.contains_key(&id))
                 });
                 if hit.is_none() {
-                    // The reference's wording (`0x8710f0`).
-                    self.report
-                        .warnings
-                        .push(format!("Couldn't find frame parent: {name}"));
+                    // `0x8710f0` at severity 1 (`0x6ee3fa`).
+                    self.status_warning(format!("Couldn't find frame parent: {name}"));
                 }
                 hit
             });
@@ -893,15 +917,26 @@ impl Loader<'_> {
         self.apply_title_region(el, wrapper, self_name, dbg_name);
         // 5b · per-kind LoadXML extras (EditBox `0x779fb0`), each gated on the element's own tag,
         //      so a Frame wearing a <Button> template skips the Button steps.
-        self.apply_statusbar(el, levels, wrapper, self_name, dbg_name);
-        self.apply_slider(el, levels, wrapper, self_name, dbg_name);
+        self.apply_statusbar(el, wrapper, self_name, dbg_name);
+        self.apply_slider(el, wrapper, self_name, dbg_name);
         self.apply_colorselect(el, wrapper, self_name, dbg_name);
         self.apply_button(el, levels, wrapper, self_name, dbg_name);
         self.apply_editbox(el, wrapper, dbg_name);
         self.apply_messageframe(el, wrapper, dbg_name);
         self.apply_simplehtml(el, wrapper, dbg_name);
-        // 6 · <Scripts> handlers (`0x769ef0`); OnLoad is captured to fire bottom-up below.
-        let onload = self.apply_scripts(el, wrapper, dbg_name);
+        // 6 · per level, the template first (`0x76985c`): its <Scripts> (`0x769ef0`, an arm of the
+        //     base child loop, `0x769d18`), then its Slider or StatusBar values (`0x789580`,
+        //     `0x782ef0`), so the first SetValue's fire (`0x789a1e`-`0x789a44`, `0x783371`) runs
+        //     that level's handler. OnLoad is captured to fire bottom-up below.
+        let mut onload = None;
+        for level in levels {
+            self.apply_scripts(level, wrapper, dbg_name, &mut onload);
+            if el.tag.eq_ignore_ascii_case("Slider") {
+                self.slider_level(level, wrapper, dbg_name);
+            } else if el.tag.eq_ignore_ascii_case("StatusBar") {
+                self.statusbar_level(level, wrapper, dbg_name);
+            }
+        }
         // 6b · a ScrollFrame's <ScrollChild> (`0x786bc0`, after the base load `0x769820`): still
         //      inside the load window, so ahead of every <Frames> child and of our own OnLoad.
         self.apply_scrollframe(el, wrapper, self_name, dbg_name);

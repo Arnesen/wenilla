@@ -2069,3 +2069,118 @@ fn every_rel_reader_keeps_its_layout_length() {
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// The frame load faults go to the load status at severity 1, in the reference's words: an
+/// `inherits` miss at any level (`0x769861`, a texture's `0x76fe60`, `0x8786a8`), an unknown type
+/// (`0x6ee35f`, `0x871124`), a missing `parent=` (`0x6ee3fa`, `0x8710f0`), an unknown strata
+/// naming the frame (`0x76999c`, `0x878658`), and a stray child of `<Layers>` or a `<Layer>`
+/// (`0x769de6`, `0x769eb6`, `0x8786e0`).
+#[test]
+fn frame_load_faults_reach_the_load_status() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="MidLevel" virtual="true" inherits="NoSuchRoot"/>
+            <Frame name="MissesOwn" inherits="NoSuchTemplate"/>
+            <Frame name="MissesDeep" inherits="MidLevel"/>
+            <Bogus name="NotAFrame"/>
+            <Frame name="Orphan" parent="NoSuchParent"/>
+            <Frame name="Strata" frameStrata="BACKGROUND "/>
+            <Frame frameStrata="NOPE"/>
+            <Frame name="Strays">
+                <Layers>
+                    <Layer><Texture name="StrayTex" inherits="NoSuchTexture"/><Bad/></Layer>
+                    <Junk/>
+                </Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    for line in [
+        "Couldn't find inherited node: NoSuchTemplate",
+        "Couldn't find inherited node: NoSuchRoot",
+        "Unknown frame type: Bogus",
+        "Couldn't find frame parent: NoSuchParent",
+        "Frame Strata: Unknown frame strata: BACKGROUND ",
+        "Frame <unnamed>: Unknown frame strata: NOPE",
+        "Couldn't find inherited node: NoSuchTexture",
+        "Frame Strays: Unknown child node in Layer element: Bad",
+        "Frame Strays: Unknown child node in Layers element: Junk",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+    assert_eq!(
+        report.status.lines().len(),
+        9,
+        "{:?}",
+        report.status.lines()
+    );
+    assert!(s
+        .eval::<bool>("return MissesDeep ~= nil and StrayTex ~= nil")
+        .unwrap());
+}
+
+/// `0x769820` reads the flags on each level, template first (`0x76985c`): an empty one is skipped
+/// (`cmp byte [eax],0`), an unknown strata leaves the template's (`0x769968`-`0x7699ad`), and
+/// `enableMouse`/`enableKeyboard` only enable (`0x769aaf`, `0x769adb`).
+#[test]
+fn frame_flags_apply_level_by_level() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="FlagTemplate" virtual="true" hidden="true" frameStrata="HIGH"
+                   enableMouse="true" enableKeyboard="true" movable="true" alpha="0.5"/>
+            <Frame name="EmptyOver" inherits="FlagTemplate" hidden="" frameStrata="" alpha=""/>
+            <Frame name="FalseOver" inherits="FlagTemplate" enableMouse="false"
+                   enableKeyboard="false" movable="false" frameStrata="BOGUS"/>
+        </Ui>"#,
+    );
+    let got: String = s
+        .eval(
+            r#"return table.concat({ tostring(EmptyOver:IsShown()), EmptyOver:GetFrameStrata(),
+                string.format("%.2f", EmptyOver:GetAlpha()), tostring(FalseOver:IsMouseEnabled()),
+                tostring(FalseOver:IsKeyboardEnabled()), tostring(FalseOver:IsMovable()),
+                FalseOver:GetFrameStrata() }, ",")"#,
+        )
+        .unwrap();
+    assert_eq!(got, "nil,HIGH,0.50,1,1,nil,HIGH");
+    assert!(has_line(
+        &report,
+        "Frame FalseOver: Unknown frame strata: BOGUS"
+    ));
+}
+
+/// Each level sets its `<Scripts>` before its typed values (`0x769d18` → `0x769ef0`, then
+/// `0x789656`, `0x7896a2`; StatusBar `0x783270`, `0x783371`), and the first SetValue always fires
+/// (`0x789a1e`-`0x789a44`): a `defaultValue` beside an OnValueChanged runs it at load, ahead of
+/// OnLoad, and a template's level runs the template's handler.
+#[test]
+fn a_default_value_fires_the_levels_on_value_changed_at_load() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Slider name="SlideTemplate" virtual="true" minValue="0" maxValue="10"
+                    defaultValue="2">
+                <Scripts><OnValueChanged>Seen = (Seen or "") .. "t" .. arg1 .. ","</OnValueChanged></Scripts>
+            </Slider>
+            <Slider name="Slide" inherits="SlideTemplate" minValue="0" maxValue="10"
+                    defaultValue="5">
+                <Scripts>
+                    <OnValueChanged>Seen = (Seen or "") .. "i" .. arg1 .. ","</OnValueChanged>
+                    <OnLoad>Seen = (Seen or "") .. "load,"</OnLoad>
+                </Scripts>
+            </Slider>
+            <StatusBar name="Bar" minValue="0" maxValue="4" defaultValue="3">
+                <Scripts><OnValueChanged>BarSeen = arg1</OnValueChanged></Scripts>
+            </StatusBar>
+        </Ui>"#,
+    );
+    assert_eq!(s.eval::<String>("return Seen").unwrap(), "t2,i5,load,");
+    assert_eq!(s.eval::<f64>("return BarSeen").unwrap(), 3.0);
+}
