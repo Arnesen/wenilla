@@ -85,6 +85,9 @@ pub(crate) struct QuestCells {
     pub(crate) required: Vec<QuestRewardItem>,
     /// `0xbe0830`, the reward spell's id.
     pub(crate) reward_spell: u32,
+    /// `0xbe081c`, the last panel's quest id (0 for a greeting), stored by every panel
+    /// (`0x500d6e`) and zeroed at world enter (`0x500b01`).
+    pub(crate) quest: u32,
 }
 
 impl QuestCells {
@@ -97,6 +100,12 @@ impl QuestCells {
         };
         // `0x500ef0` and `0x501070` store the title as sent, an empty one as `" "` (`0x501008`).
         let title = |t: &str| if t.is_empty() { " " } else { t }.to_string();
+        self.quest = match view {
+            QuestView::Greeting(_) => 0,
+            QuestView::Detail(d) => d.quest_id,
+            QuestView::Progress(p) => p.quest_id,
+            QuestView::Reward(o) => o.quest_id,
+        };
         let st = &mut self.state;
         match view {
             QuestView::Greeting(l) => {
@@ -241,7 +250,15 @@ impl QuestGiver {
     }
 
     /// Open (or replace) the window with a fresh wire view for `npc`, its texts through `expand`.
-    fn open_expanded(&mut self, npc: u64, view: QuestView, expand: &dyn Fn(&str) -> String) {
+    /// Answers whether the reward panel owes the quest-list-complete chime: the setter compares
+    /// the quest id with the last panel's before storing it (`0x500d36`-`0x500d3c`).
+    fn open_expanded(
+        &mut self,
+        npc: u64,
+        view: QuestView,
+        expand: &dyn Fn(&str) -> String,
+    ) -> bool {
+        let chime = matches!(&view, QuestView::Reward(o) if o.quest_id == self.cells.quest);
         if let QuestView::Greeting(list) = &view {
             self.pools = QuestPools::of(list);
         }
@@ -252,6 +269,7 @@ impl QuestGiver {
         // (`0x500d8c`) on every panel publish.
         self.acted = false;
         self.chosen_reward = 0;
+        chime
     }
 
     /// Whether the cell `[0xbe0810]` holds a source.
@@ -493,6 +511,52 @@ struct PanelMacros<'w, 's> {
     stores: Query<'w, 's, &'static ObjectStore>,
     states: Option<Res<'w, crate::world_state::WorldStates>>,
     unit_names: crate::ui_unit::NameTables<'w>,
+    /// The 2D cues `PlaySoundByName` plays, absent in a harness without sound.
+    sounds: Option<Res<'w, crate::sound::MessageSounds>>,
+}
+
+/// The reward panel's chime (`0x841530`, played at `0x500d43`).
+const QUEST_LIST_COMPLETE_SOUND: &str = "igQuestListComplete";
+
+/// Whether the object store holds `guid` as a unit, a game object or an item (`0x468460`, then
+/// the type tests at `0x500c16`-`0x500c35`: `TYPEMASK_UNIT` 0x8, `_GAMEOBJECT` 0x20, `_ITEM` 0x2).
+pub(crate) fn giver_held(world: &World, guid: u64) -> bool {
+    const GIVER_TYPES: u32 = 0x8 | 0x20 | 0x2;
+    world
+        .resource::<crate::net::GuidIndex>()
+        .0
+        .get(&guid)
+        .and_then(|&e| world.get::<ObjectStore>(e))
+        .and_then(|s| s.0.object_type_mask())
+        .is_some_and(|mask| mask & GIVER_TYPES != 0)
+}
+
+/// Make `guid` a held unit for a test that opens a panel on it, keeping the object it already
+/// has (`TYPEMASK_OBJECT | _UNIT`).
+#[cfg(test)]
+pub(crate) fn hold_for_test(world: &mut World, guid: u64) {
+    let fields = benilla_protocol::ObjectFields::from_pairs(&[(2, 0x9)]);
+    world.init_resource::<crate::net::GuidIndex>();
+    let held = world
+        .resource::<crate::net::GuidIndex>()
+        .0
+        .get(&guid)
+        .copied();
+    match held {
+        Some(e) => match world.get_mut::<ObjectStore>(e) {
+            // A unit, a game object or an item it already is stays as it is.
+            Some(mut store) if store.0.object_type_mask().is_none_or(|m| m & 0x2a == 0) => {
+                store.0.merge(fields)
+            }
+            Some(_) => {}
+            None => {
+                world.entity_mut(e).insert(ObjectStore(fields));
+            }
+        },
+        None => {
+            crate::items::test_spawn_object(world, guid, fields);
+        }
+    }
 }
 
 /// A panel's open (`0x500bd0`, every panel packet's): the latch first, with no test of the cell
@@ -501,6 +565,12 @@ struct PanelMacros<'w, 's> {
 /// and the cell (`0x500d86`); then the panel's event at the setter's end (`0x500ee5`,
 /// `0x50105d`, `0x501120`), on the lane at this packet.
 pub(crate) fn open_panel(world: &mut World, npc: u64, view: QuestView) {
+    // The setter resolves its giver first and ends when none is held as a unit, a game object or
+    // an item (`0x500bf1`-`0x500c35` → `0x500d96`): no panel, no cell store, no cue.
+    if !giver_held(world, npc) {
+        debug!("ui_quest: no panel — giver {npc:#x} is not held");
+        return;
+    }
     crate::ui_session::register(world, npc);
     let panel = match &view {
         QuestView::Greeting(_) => QuestPanel::Greeting,
@@ -519,7 +589,14 @@ pub(crate) fn open_panel(world: &mut World, npc: u64, view: QuestView) {
             subject: subject.as_ref(),
             states: m.states.as_deref().unwrap_or(&none),
         };
-        giver.open_expanded(npc, view, &|t| crate::npc_text::substitute(t, &ctx));
+        let chime = giver.open_expanded(npc, view, &|t| crate::npc_text::substitute(t, &ctx));
+        // The reward panel after its quest's progress panel plays `igQuestListComplete` at the
+        // setter (`0x500d3e`-`0x500d43`, `PlaySoundByName` `0x458030`).
+        if chime {
+            if let Some(sounds) = m.sounds.as_deref() {
+                sounds.push_cue(QUEST_LIST_COMPLETE_SOUND);
+            }
+        }
         // The frame reads `UnitName("npc")` at the panel's event (`QuestFrame.lua:63`), which
         // looks the giver up with a callback (`0x5171b8`); its landing fires nothing.
         if let (Some(names), Some(commands)) = (m.names.as_deref(), m.commands.as_deref()) {
@@ -1025,6 +1102,7 @@ mod tests {
     fn panel_events_queue_per_publish_and_item_updates_per_callback() {
         let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
         app.insert_non_send_resource(UiScript::new().unwrap());
+        hold_for_test(app.world_mut(), 0x42);
         let detail = |app: &mut App, choice| {
             open_panel(app.world_mut(), 0x42, detail(100, "", vec![triple(choice)]))
         };
@@ -1062,5 +1140,105 @@ mod tests {
         );
         land(&mut app, 903);
         assert!(lane(&mut app).is_empty(), "the callbacks are spent");
+    }
+
+    /// The setter resolves its giver first (`0x500bf1`-`0x500c35`) and ends when none is held as
+    /// a unit, a game object or an item (`0x500d96`): no panel, no cell store, no cue.
+    #[test]
+    fn a_panel_for_a_giver_not_held_opens_nothing() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.init_resource::<crate::sound::MessageSounds>();
+        hold_for_test(app.world_mut(), 0x42);
+        // A corpse (type mask 0x80) is held, but is no giver.
+        crate::items::test_spawn_object(
+            app.world_mut(),
+            0x44,
+            benilla_protocol::ObjectFields::from_pairs(&[(2, 0x81)]),
+        );
+        open_panel(
+            app.world_mut(),
+            0x42,
+            progress("Bring it.", Vec::new(), true),
+        );
+        lane(&mut app);
+        for gone in [0x43, 0x44] {
+            // Quest 100 is the progress panel's: held, this reward would play the chime.
+            open_panel(app.world_mut(), gone, reward(100));
+            open_panel(app.world_mut(), gone, reward(101));
+            let giver = app.world().resource::<QuestGiver>();
+            assert_eq!(giver.npc, Some(0x42), "{gone:#x}: the open panel stays");
+            assert_eq!(giver.cells.quest, 100, "{gone:#x}: no cell store");
+            assert!(lane(&mut app).is_empty(), "{gone:#x}: no event");
+            assert!(
+                app.world()
+                    .resource::<crate::sound::MessageSounds>()
+                    .take_cues()
+                    .is_empty(),
+                "{gone:#x}: no cue"
+            );
+        }
+    }
+
+    fn reward(quest_id: u32) -> QuestView {
+        QuestView::Reward(QuestOfferReward {
+            npc: 0x42,
+            quest_id,
+            title: "A Threat Within".into(),
+            offer_text: "Well done.".into(),
+            auto_finish: 1,
+            choices: Vec::new(),
+            rewards: Vec::new(),
+            money: 0,
+            quest_flags: 0,
+            reward_spell: 0,
+        })
+    }
+
+    /// The reward panel's setter plays `igQuestListComplete` when its quest id equals the last
+    /// panel's (`0x500d36`-`0x500d43`): the progress panel's Continue, not a reward panel on its
+    /// own, a different quest's, or one after the world-enter reset (`0x500b01`).
+    #[test]
+    fn a_reward_after_its_quests_progress_panel_plays_the_completion_chime() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.init_resource::<crate::sound::MessageSounds>();
+        hold_for_test(app.world_mut(), 0x42);
+        let cues = |app: &mut App| {
+            app.world()
+                .resource::<crate::sound::MessageSounds>()
+                .take_cues()
+        };
+        let chime = vec![QUEST_LIST_COMPLETE_SOUND];
+        open_panel(app.world_mut(), 0x42, reward(100));
+        assert!(cues(&mut app).is_empty(), "no panel before it");
+        open_panel(
+            app.world_mut(),
+            0x42,
+            progress("Bring it.", Vec::new(), true),
+        );
+        open_panel(app.world_mut(), 0x42, reward(100));
+        assert_eq!(cues(&mut app), chime, "the reward after its progress panel");
+        open_panel(app.world_mut(), 0x42, reward(100));
+        assert_eq!(
+            cues(&mut app),
+            chime,
+            "any panel of the same quest before it"
+        );
+        open_panel(
+            app.world_mut(),
+            0x42,
+            progress("Bring it.", Vec::new(), true),
+        );
+        open_panel(app.world_mut(), 0x42, reward(101));
+        assert!(cues(&mut app).is_empty(), "another quest's reward");
+        open_panel(
+            app.world_mut(),
+            0x42,
+            progress("Bring it.", Vec::new(), true),
+        );
+        app.world_mut().resource_mut::<QuestGiver>().world_enter();
+        open_panel(app.world_mut(), 0x42, reward(100));
+        assert!(cues(&mut app).is_empty(), "the world entry zeroes the id");
     }
 }
