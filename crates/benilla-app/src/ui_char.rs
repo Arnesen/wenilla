@@ -71,11 +71,8 @@ impl Plugin for UiCharPlugin {
                 (
                     // A `BAG_UPDATE` handler may read the bag item's own row
                     // (`GetInventoryItemLink("player", ContainerIDToInventoryID(bag))`): the lanes'
-                    // drain and the world-enter cascade both follow this push. Before the bag feed:
-                    // left to the VM pass, the pair links through one more command barrier
-                    // ([`crate::vm_pass`]).
+                    // drain and the world-enter cascade both follow this push.
                     feed_char
-                        .before(crate::ui_items::feed::feed_containers)
                         .in_set(UiFeed)
                         .in_set(crate::ui_unit::field_events::FieldEventPushes),
                     feed_skill_tiers.in_set(UiFeed),
@@ -796,9 +793,9 @@ pub(crate) fn feed_char(
         let (memo, vm_reset) = feed.vm.get_reset(script);
 
         let Some(store) = inv.self_store.iter().next() else {
-            // No self store is no data, not an empty inventory: it happens in the logout frames,
-            // where `PLAYER_LOGOUT` handlers still read equipment, so nothing is cleared (the next
-            // session starts a fresh VM).
+            // No self store is no data, not an empty inventory, so the copy stays: the getters
+            // that take a unit answer nothing while no active player is held (`0x4944c9`), and the
+            // next session starts a fresh VM.
             return;
         };
 

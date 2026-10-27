@@ -192,14 +192,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Edge,
-        "::ui_items::locks::apply_item_releases",
-        "the item source's two unlocks a loot close owes (`0x48f2bd`, `0x4c1d36`) and the copier's \
-         ending's (`0x5ebc35` → `0x4c1d36`), taken off the loot session, a lane's type the queue \
-         check skips: `close_interaction` serves the packets' closes and the calls' and clicks' \
-         alike, so they move when it does",
-    ),
-    (
-        Row::Edge,
         "::ui_action::state::fire_action_events",
         "the usable cache's refresh `0x4e5c00` (`ACTIONBAR_UPDATE_USABLE`) of `EditMacro` \
          (`0x4f132e`) and `RaiseBagUpdate` (`0x4f9374`), which the reference runs in the call and \
@@ -409,11 +401,8 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::ObjectStore", "spell::inflight::AutoRepeatActive", "spell::inflight::PendingCast",
         "spell::inflight::QueuedMeleeSpell", "spell::targeting::SpellTargeting",
         "ui_action::cast_lines::CastFailRedisplays"]),
-    ("::ui_items::locks::apply_item_releases", &["items::Countdowns", "net::GuidIndex",
-        "net::ObjectStore", "ui_loot::LootState"]),
-    ("::ui_items::feed::feed_containers", &["items::Countdowns", "items::Items", "names::NameCache",
-        "net::GuidIndex", "net::ObjectStore", "spell::cooldowns::Cooldowns",
-        "ui_petition::PetitionRecords"]),
+    // The locks of the objects that went, forgotten as the frame left the index.
+    ("::ui_items::locks::forget_gone_item_locks", &["net::GuidIndex"]),
     ("::ui_items::feed::feed_item_stats", &["items::Items", "net::HomeBind", "net::ObjectStore",
         "spell::mods::SpellModifiers"]),
     ("::ui_auction::feed_auction", &["items::Items", "names::NameCache",
@@ -478,6 +467,9 @@ const FILLED_THROUGH_A_READ: &[&str] = &[
 /// in system order, or a system that pushes onto a lane off it at its own place, passes every
 /// check here unseen.
 const READ_ONLY_TO_HANDLERS: &[&str] = &[
+    // `ItemBagFamily.dbc`, which the inventory refusal's handler names a bag's family by
+    // (`0x5ede00`).
+    "::ui_items::ItemBagFamilies",
     // The login pick, which names the character the account-data sections belong to.
     "::glue_session::roster::Roster",
     // `0xb4e314`, which the party snapshot reads; only the zone feed commits it.
@@ -624,9 +616,8 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 36] {
+fn lane_types() -> [TypeId; 35] {
     [
-        TypeId::of::<crate::ui_items::feed::BagView>(),
         // The views lane: what each packet changed in the stores.
         TypeId::of::<crate::ui_unit::views::ViewLog>(),
         TypeId::of::<crate::field_watch::NoticeLane>(),
@@ -697,9 +688,8 @@ fn lane_types() -> [TypeId; 36] {
 
 /// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
 /// so another lane's read of the same type shows as the state it is.
-fn lane_queue_owners() -> [(&'static str, TypeId); 36] {
+fn lane_queue_owners() -> [(&'static str, TypeId); 35] {
     [
-        ("bag view", TypeId::of::<crate::ui_items::feed::BagView>()),
         ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
         (
             "field notices",
@@ -917,7 +907,6 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
         lanes,
         [
             "auction house",
-            "bag view",
             "bank",
             "battlefield",
             "cast reports",
@@ -1568,7 +1557,6 @@ const QUEUES_NOT_VIEWS: &[&str] = &[
     "ui_party::feed::PartyLane",
     "ui_items::EquipErrors",
     "ui_unit::views::ViewLog",
-    "ui_items::feed::BagView",
     "target::scan::OwedSelects",
 ];
 
@@ -1747,7 +1735,6 @@ pub(super) const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "ui_action::cast_lines::CastFailRedisplays"]),
     ("item watchers", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "ui_trade::TradeSession"]),
-    ("equip errors", &["items::Countdowns", "items::Items", "net::GuidIndex", "net::ObjectStore"]),
     ("auction house", &["items::Items", "names::NameCache", "net::SelfGuid",
         "ui_auction::AuctionOpen"]),
     // The master-loot candidates placed and named off the raid roster's subgroups as the frame

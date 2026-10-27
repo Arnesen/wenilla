@@ -145,7 +145,7 @@ fn client() -> App {
             for _, e in ipairs({"BAG_UPDATE", "BAG_CLOSED", "BAG_OPEN", "ITEM_LOCK_CHANGED",
                     "PLAYERBANKSLOTS_CHANGED", "PLAYER_MONEY", "PLAYER_COMBO_POINTS",
                     "ACTIONBAR_SLOT_CHANGED", "UNIT_INVENTORY_CHANGED", "UI_ERROR_MESSAGE",
-                    "CHAT_MSG_MONSTER_SAY"}) do
+                    "CHAT_MSG_MONSTER_SAY", "LOOT_CLOSED"}) do
                 f:RegisterEvent(e)
             end
             f:SetScript("OnEvent", function()
@@ -401,6 +401,50 @@ fn an_inventory_refusal_shows_and_unlocks_at_its_packet() {
     );
 }
 
+/// A refusal for a specialised bag names the bag's family as its handler finds the bag
+/// (`0x5e3a1e` → `0x5ede00`), not as a later packet of the frame leaves the seat.
+#[test]
+fn a_wrong_bag_refusal_names_the_bag_its_packet_found() {
+    let mut app = client();
+    let world = app.world_mut();
+    world.insert_resource(crate::ui_items::ItemBagFamilies(
+        benilla_formats::ItemBagFamilyCatalog::from_names(std::collections::HashMap::from([(
+            1,
+            "Arrows".to_string(),
+        )])),
+    ));
+    world.resource_mut::<crate::items::Items>().insert_template(
+        BAG_ID,
+        Some(benilla_protocol::messages::ItemInfo {
+            stackable: 1,
+            bag_family: 1,
+            ..crate::items::test_template("Quiver")
+        }),
+    );
+    world
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            "ERR_WRONG_BAG_TYPE = 'Wrong bag.' \
+             ERR_WRONG_BAG_TYPE_SUBCLASS = 'Only %s can be placed in that.'",
+        )
+        .unwrap();
+    let refused = SessionEvent::InventoryFailure {
+        reason: 16,
+        required_level: None,
+        item_guid: 0,
+        item2_guid: 0,
+        bag_slot: 19,
+    };
+    let lines: Vec<String> = frame(&mut app, vec![refused, values(ME, &seat(19, 0))])
+        .into_iter()
+        .filter(|e| e.starts_with("UI_ERROR_MESSAGE"))
+        .collect();
+    assert_eq!(
+        lines,
+        ["UI_ERROR_MESSAGE:Only Arrows can be placed in that."]
+    );
+}
+
 /// A refused sale unlocks the item it names inside its handler (`0x5dd26b`).
 #[test]
 fn a_refused_sales_unlock_fires_at_its_packet() {
@@ -436,6 +480,40 @@ fn a_loot_refusals_unlock_fires_at_its_packet() {
     assert_eq!(
         frame(&mut app, vec![refused(), combo(0)]),
         ["ITEM_LOCK_CHANGED:nil", "PLAYER_COMBO_POINTS:nil"]
+    );
+}
+
+/// A window open on an item of ours, the potions, as an opened lockbox's is, latched; what the
+/// open signalled is spent.
+fn loot_open_on_the_potions(app: &mut App) {
+    let world = app.world_mut();
+    world
+        .resource_mut::<crate::ui_loot::LootState>()
+        .open(POTIONS, 1, 0, Vec::new());
+    world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(POTIONS);
+    let _ = frame(app, Vec::new());
+}
+
+/// The server's release of a window open on an item closes it inside its handler (`0x5ec090` →
+/// `0x48f200`): the close's `UnlockItem` (`0x48f2bd`), the teardown's (`0x4c1d36`), then the
+/// teardown's `LOOT_CLOSED` (`0x4c1dac`), between the packets around it.
+#[test]
+fn a_released_item_windows_two_unlocks_fire_at_its_packet() {
+    let mut app = client();
+    loot_open_on_the_potions(&mut app);
+    let released = SessionEvent::LootReleaseResponse {
+        guid: POTIONS,
+        result: 1,
+    };
+    assert_eq!(
+        frame(&mut app, vec![combo(2), released, combo(0)]),
+        [
+            "PLAYER_COMBO_POINTS:nil",
+            "ITEM_LOCK_CHANGED:nil",
+            "ITEM_LOCK_CHANGED:nil",
+            "LOOT_CLOSED:nil",
+            "PLAYER_COMBO_POINTS:nil"
+        ]
     );
 }
 
@@ -476,5 +554,259 @@ fn a_restacks_events_and_a_chat_line_keep_their_packets_order() {
             "BAG_UPDATE:0",
             "CHAT_MSG_MONSTER_SAY:Grr"
         ]
+    );
+}
+
+/// `chunk` on the VM with the host lent, as a getter runs inside a frame.
+fn hosted_eval<T: benilla_ui::mlua::FromLuaMulti>(app: &mut App, chunk: &str) -> T {
+    crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
+        s.expect("a VM").eval::<T>(chunk).expect("runs")
+    })
+}
+
+/// A bag getter reads the bags as its listener's packet left them (`GetContainerItemInfo` finds
+/// the slot in the player's list at the call, `0x6228a0`): the potions leave the backpack's first
+/// seat and come back in one frame, and each seat's `BAG_UPDATE` reads its own packet's seat, not
+/// the frame's last.
+#[test]
+fn a_bag_updates_listener_reads_the_seat_its_packet_left() {
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            Seen = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("BAG_UPDATE")
+            f:SetScript("OnEvent", function()
+                if arg1 == 0 then
+                    table.insert(Seen, GetContainerItemLink(0, 1) and "held" or "empty")
+                end
+            end)
+            "#,
+        )
+        .unwrap();
+    frame(
+        &mut app,
+        vec![
+            values(ME, &seat(23, 0)),
+            combo(2),
+            values(ME, &seat(23, POTIONS)),
+        ],
+    );
+    let seen: Vec<String> = hosted_eval(&mut app, "return Seen");
+    assert_eq!(seen, ["empty", "held"]);
+}
+
+/// What the text `expr` reads before the logout, and then inside a `PLAYER_LOGOUT` handler as the
+/// logout runs it: `SMSG_LOGOUT_COMPLETE` and the disconnect through the handler table, which
+/// free the objects, then the session's end, whose shutdown signals the event with the host lent.
+fn before_and_at_logout(app: &mut App, expr: &str) -> (String, String) {
+    use bevy::ecs::system::RunSystemOnce;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    app.world_mut()
+        .run_system_once(crate::ui_char::feed_char)
+        .unwrap();
+    let before: String = hosted_eval(app, &format!("return {expr}"));
+    let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = seen.clone();
+    {
+        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let note = script
+            .lua()
+            .create_function(move |_, text: String| {
+                sink.borrow_mut().push(text);
+                Ok(())
+            })
+            .unwrap();
+        script.lua().globals().set("Note", note).unwrap();
+        script
+            .run(&format!(
+                "local f = CreateFrame('Frame') f:RegisterEvent('PLAYER_LOGOUT') \
+                 f:SetScript('OnEvent', function() \
+                     local ok, v = pcall(function() return {expr} end) \
+                     Note(ok and v or ('raised ' .. tostring(v))) \
+                 end)"
+            ))
+            .unwrap();
+    }
+    frame(
+        app,
+        vec![
+            SessionEvent::LoggedOut,
+            SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            },
+        ],
+    );
+    let world = app.world_mut();
+    let held = world
+        .query_filtered::<(), With<crate::net::SelfPlayer>>()
+        .iter(world)
+        .count();
+    assert_eq!(held, 0, "the avatar is gone");
+    assert!(
+        world.resource::<crate::net::GuidIndex>().0.is_empty(),
+        "every object is gone"
+    );
+    crate::ui_script::end_ui_session(world);
+    let at = seen.borrow().clone();
+    assert_eq!(at.len(), 1, "one PLAYER_LOGOUT: {at:?}");
+    (before, at[0].clone())
+}
+
+/// A logout's shutdown finds no bags: `SMSG_LOGOUT_COMPLETE` (`0x5aaeb0`) tears the game down
+/// through `0x401ee0`, which destroys the object manager (`0x402011` → `0x467700`, storing 0 at
+/// `0xb41414`, `0x46771e`) before the interface shutdown (`0x402039` → `0x491180` →
+/// `0x490bd0`), so `PLAYER_LOGOUT` (`0x490c2a`) runs with no active player (`0x468550`), and
+/// `GetContainerNumSlots` returns 0 for every bag (`0x4f95ab`).
+#[test]
+fn the_logouts_shutdown_reads_no_bags() {
+    let mut app = client();
+    let (before, at) = before_and_at_logout(
+        &mut app,
+        "tostring(((function() local _, n = GetContainerItemInfo(0, 1) return n end)())) .. ' ' .. \
+         GetContainerNumSlots(0) .. ' ' .. GetContainerNumSlots(1) .. ' ' .. \
+         tostring((GetContainerItemLink(1, 1)))",
+    );
+    assert!(before.starts_with("1 16 4 |c"), "{before}");
+    assert_eq!(at, "nil 0 0 nil");
+}
+
+/// The same shutdown finds no inventory: the slot getters ask `CanReadUnitInventory`
+/// (`0x4c8ca7`), which finds no active player (`0x4944af` → `0x468460`, false at `0x4944c9`), so
+/// `GetInventoryItemLink` returns nothing (`0x4c8cae` → `0x4c8c56`). `UnitName("player")` reads
+/// the selected character's name, no object (`0x51708c` → `0x5abdc0`), and `UnitHealth`
+/// finds no unit, 0.
+#[test]
+fn the_logouts_shutdown_reads_no_inventory_but_the_name() {
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .set_player_record(benilla_ui::script::PlayerRecord {
+            name: "Onehunter".into(),
+            ..Default::default()
+        });
+    frame(
+        &mut app,
+        vec![values(
+            ME,
+            &[(benilla_protocol::field::FIELD_UNIT_HEALTH, 70)],
+        )],
+    );
+    let (before, at) = before_and_at_logout(
+        &mut app,
+        "tostring((GetInventoryItemLink('player', 20))) .. ' ' .. \
+         tostring((UnitName('player'))) .. ' ' .. UnitHealth('player')",
+    );
+    assert!(before.starts_with("|c"), "{before}");
+    assert!(before.ends_with(" Onehunter 70"), "{before}");
+    assert_eq!(at, "nil Onehunter 0");
+}
+
+/// A spy on `PLAYER_COMBO_POINTS` that records `chunk`'s answer at each firing, as text.
+fn spy_at_combo(app: &mut App, chunk: &str) {
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(&format!(
+            r#"AtCombo = {{}}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_COMBO_POINTS")
+            f:SetScript("OnEvent", function()
+                table.insert(AtCombo, tostring(({chunk})))
+            end)"#
+        ))
+        .unwrap();
+}
+
+/// A bag's slot array as its packet left it: the linen moved out of the bag's first slot in one
+/// frame and back in the next, behind a combo packet. The combo's listener finds the slot empty,
+/// as the reference's `GetContainerItemLink` reads the bag object's slot at the call (`0x4f997f`
+/// → `0x6228a0`), not the later packet's.
+#[test]
+fn a_bags_slot_reads_as_its_packet_left_it() {
+    let mut app = client();
+    let lo = FIELD_CONTAINER_SLOT_1;
+    let moved: Vec<(u16, u32)> = guid_pair(lo, 0)
+        .into_iter()
+        .chain(guid_pair(lo + 2, INNER))
+        .collect();
+    frame(&mut app, vec![values(BAG, &moved)]);
+    spy_at_combo(&mut app, "GetContainerItemLink(1, 1)");
+    let back: Vec<(u16, u32)> = guid_pair(lo, INNER)
+        .into_iter()
+        .chain(guid_pair(lo + 2, 0))
+        .collect();
+    frame(&mut app, vec![combo(2), values(BAG, &back)]);
+    let seen: Vec<String> = hosted_eval(&mut app, "return AtCombo");
+    assert_eq!(seen, ["nil"]);
+    let now: Option<String> = hosted_eval(&mut app, "return GetContainerItemLink(1, 1)");
+    assert!(now.is_some(), "the frame's end reads the linen back");
+}
+
+/// An item's stack count as its packet left it (`ITEM_FIELD_STACK_COUNT`, `0x4f9742`): a combo
+/// packet ahead of a restack reads the old count.
+#[test]
+fn a_stack_count_reads_as_its_packet_left_it() {
+    let mut app = client();
+    spy_at_combo(
+        &mut app,
+        "(function() local _, n = GetContainerItemInfo(0, 1) return n end)()",
+    );
+    frame(
+        &mut app,
+        vec![
+            combo(2),
+            values(POTIONS, &[(FIELD_ITEM_STACK_COUNT, 5)]),
+            combo(0),
+        ],
+    );
+    let seen: Vec<String> = hosted_eval(&mut app, "return AtCombo");
+    assert_eq!(seen, ["1", "5"]);
+}
+
+/// A bank bag's slot array as its packet left it, with the banker open: linen put into the bank
+/// bag's first slot behind a combo packet is not there to the combo's listener (`0x4f93e0` finds
+/// the bag by its seat `PLAYER_FIELD_BANKBAG_SLOT_1`, `0x6228a0` reads its slot).
+#[test]
+fn a_bank_bags_slot_reads_as_its_packet_left_it() {
+    const BANK_BAG: u64 = 0x4000_0000_0000_0047;
+    const BANK_LINEN: u64 = 0x4000_0000_0000_0048;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .set_bank(Some(benilla_ui::script::BankState::default()));
+    let mut pairs = vec![(2, 0x7), (FIELD_OBJECT_ENTRY, BAG_ID), (48, 4)];
+    pairs.extend(guid_pair(6, ME));
+    pairs.extend(guid_pair(8, ME));
+    let bank_bag = SessionEvent::ItemCreate {
+        guid: BANK_BAG,
+        container: true,
+        fields: ObjectFields::from_pairs(&pairs).into_created(ObjectType::Container),
+    };
+    frame(
+        &mut app,
+        vec![
+            bank_bag,
+            item(BANK_LINEN, LINEN, BANK_BAG),
+            values(ME, &seat(63, BANK_BAG)),
+        ],
+    );
+    spy_at_combo(&mut app, "GetContainerItemLink(5, 1)");
+    frame(
+        &mut app,
+        vec![
+            combo(2),
+            values(BANK_BAG, &guid_pair(FIELD_CONTAINER_SLOT_1, BANK_LINEN)),
+        ],
+    );
+    let seen: Vec<String> = hosted_eval(&mut app, "return AtCombo");
+    assert_eq!(seen, ["nil"]);
+    let now: Option<String> = hosted_eval(&mut app, "return GetContainerItemLink(5, 1)");
+    assert!(
+        now.is_some(),
+        "the frame's end reads the linen in the bank bag"
     );
 }

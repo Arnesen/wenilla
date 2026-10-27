@@ -37,8 +37,8 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 43;
-const FRAME_FINAL_INPUTS: usize = 238;
+const FRAME_FINAL_FEEDS: usize = 42;
+const FRAME_FINAL_INPUTS: usize = 228;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the host's live
@@ -87,10 +87,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
     ("::ui_instance::track_instance_state", &["ui_instance::InstanceState"],
         "latches the dungeon just left once the map the transfer lands on is known, which the \
          reference latches inside the map load and the packet (`0x464ff0`, `0x49e6ac`)"),
-    ("::ui_items::feed::feed_item_stats", &["items::Items"],
-        "takes the item cache's fresh and dropped records as it pushes them"),
-    ("::ui_items::feed::feed_random_properties", &["items::RandomProperties"],
-        "writes the random-suffix table as it pushes it, once per VM"),
     ("::ui_macro::rebind_macro_spells", &["ui_action::PlayerActions"],
         "drains the superseded ranks the bar's macros take; the known spells are the handlers' \
          alone"),

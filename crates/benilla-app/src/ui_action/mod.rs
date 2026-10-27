@@ -458,10 +458,10 @@ impl Plugin for UiActionPlugin {
                         .after(crate::ui_macro::MacroBindings)
                         .after(ranks::normalize_action_ranks)
                         .before(feed::feed_actions),
-                    // Our player's arrival recount, after the server's unlocks.
+                    // Our player's arrival recount, after the dead objects' locks go.
                     recount::recount_item_actions
                         .in_set(UnitFeed)
-                        .after(crate::ui_items::locks::apply_item_releases)
+                        .after(crate::ui_items::locks::forget_gone_item_locks)
                         .before(feed::feed_actions),
                     // Before the aura feed, whose `raidFilter` verdicts rebuild off the book
                     // when `PlayerActions` moves, so a book this pass settles is read this frame.
@@ -470,14 +470,11 @@ impl Plugin for UiActionPlugin {
                         .before(crate::ui_aura::AuraEvents),
                     // A seat: the world-enter events' handlers read the slots' state, which the
                     // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
-                    // After the macros' bound spells, which a macro slot resolves through. After the
-                    // bag feed, a seat too: left to the VM pass, the pair links through one more
-                    // command barrier ([`crate::vm_pass`]).
+                    // After the macros' bound spells, which a macro slot resolves through.
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .in_set(crate::ui_unit::WorldEnterSeats)
                         .after(crate::player::ControlRestore)
-                        .after(crate::ui_items::feed::feed_containers)
                         .after(crate::ui_macro::MacroBindings)
                         .after(feed::feed_actions),
                     // After the unit snapshots, which its handlers read (the target stored at
