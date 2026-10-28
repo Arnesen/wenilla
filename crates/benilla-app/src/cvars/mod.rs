@@ -8,15 +8,16 @@
 //!   [`inert::INERT`] the reference's other script-visible ones, which `GetCVar` and `SetCVar`
 //!   would otherwise raise on. A row's default is the reference's, and
 //!   [`table::Registered::reference`] says where it stands against it.
-//! - The change callback is a Bevy observer on [`CvarChanged`], beside the knob it writes; the
-//!   registry applies nothing itself. A callback that can refuse a write is also the row's
+//! - The change callbacks are plain functions beside the knobs they write, run together by
+//!   [`callbacks::CvarCallbacks`]: inside a Lua verb's call for its writes ([`CvarSteps`]), and for a move
+//!   triggered as [`CvarChanged`]; the registry applies nothing itself. A callback that can refuse a write is also the row's
 //!   [`CvarCheck`], which the registry and the VM's mirror run before storing.
 //! - A latched row's write is staged in [`Row::pending`] until [`Cvars::commit_latched`], the
 //!   reference's `0x639ec0` inside `RestartGx`. A stage never committed is what the save writes,
 //!   as the reference's `SaveConfig` takes the latched text first (`rec+0x38`, `0x63da27`), so it
 //!   applies at the next launch.
-//! - Boot folds `benilla-config/config.toml` in and fires the observers before anything after
-//!   [`CvarLoad`]; each frame drains the VM's writes in and pushes the registry's out; a dirty
+//! - Boot folds `benilla-config/config.toml` in and runs the callbacks before anything after
+//!   [`CvarLoad`]; each frame drains the VM writes no call took in and pushes the registry's out; a dirty
 //!   registry saves after one quiet second or at exit, writing only values off their default and
 //!   keeping unknown keys verbatim.
 //!
@@ -31,6 +32,7 @@ use bevy::prelude::*;
 use crate::ui_script::VmMemo;
 use benilla_ui::script::{CvarCheck, CvarWrite, SeededCvar, UiScript};
 
+mod callbacks;
 #[cfg(test)]
 mod deviations_doc;
 mod inert;
@@ -38,6 +40,7 @@ mod listing;
 #[cfg(test)]
 mod reference_table;
 mod table;
+pub(crate) use callbacks::CvarSteps;
 pub(crate) use listing::list_rank;
 pub(crate) use listing::reference_help;
 #[cfg(test)]
@@ -69,13 +72,13 @@ impl CvarChanged {
         self.name.eq_ignore_ascii_case(name)
     }
 
-    /// The lowercased name, as observers' `match` arms spell it.
+    /// The lowercased name, as the callbacks' `match` arms spell it.
     pub(crate) fn key(&self) -> String {
         self.name.to_ascii_lowercase()
     }
 
     /// The new value as the record's float (`rec+0x24`, `SStrToFloat` at `0x63e130`): text that
-    /// is no number reads as 0, and a string row's observer reads [`Self::new`].
+    /// is no number reads as 0, and a string row's callback reads [`Self::new`].
     pub(crate) fn num(&self) -> f32 {
         record_float(&self.new)
     }
@@ -159,7 +162,7 @@ pub(crate) struct Cvars {
     /// A change since the last save; `last_change` drives the one-quiet-second debounce.
     dirty: bool,
     last_change: Option<Instant>,
-    /// Lines change callbacks and observers printed to the console (`0x63cb50`), which go to the
+    /// Lines the rows' checks and change callbacks printed to the console (`0x63cb50`), which go to the
     /// log, as the reference's go to a console screen nobody has open.
     console: Vec<String>,
     /// The CVars Lua's `RegisterCVar` created this process, the reference's `[0xb4e3c8]`: kept
@@ -433,10 +436,11 @@ impl Cvars {
     /// stage (`+0x38`). So the value reaches `GetCVar` and the save, and the knob at the next
     /// launch.
     ///
-    /// Deviation: for a row that is not latched the observers fire, where the reference runs no
-    /// callback here (`0x63dff0`, `0x63e010`), because a knob moves only through its
-    /// [`CvarChanged`] observer, which also stands in for the reference's direct reads of the
-    /// record; without it knob and value would disagree until the next write.
+    /// Deviation: for a row that is not latched the change callback runs, inside the call that
+    /// restored it, where the reference runs no callback here (`0x63dff0`, `0x63e010`), because a
+    /// knob moves only through its callback ([`callbacks::CvarCallbacks`]), which also stands in
+    /// for the reference's direct reads of the record; without it knob and value would disagree
+    /// until the next write.
     fn restore_from_vm(&mut self, name: &str, value: &str) -> SetOutcome {
         let Some(i) = self.slot(name) else {
             warn!("cvar {name}: not registered — restore ignored");
@@ -460,8 +464,8 @@ impl Cvars {
 
     /// Follow a value the engine already applied, for a second spelling of one knob
     /// (`WorldDetail`/`frillDensity`): the row moves, persists and reaches the mirror, but no
-    /// observer fires, since a full write would queue an event that lands a flush late and wins
-    /// stale. Returns whether the row moved.
+    /// callback runs, since a full write would run the other spelling's callback, which would
+    /// re-derive the knob from the mirrored, rounded value. Returns whether the row moved.
     pub(crate) fn mirror(&mut self, name: &str, value: &str) -> bool {
         let Some(i) = self.slot(name) else {
             warn!("cvar {name}: not registered — mirror ignored");
@@ -515,7 +519,7 @@ impl Cvars {
     }
 
     /// The session owns this row: it is never saved and the file's entry is left alone. `value` is
-    /// what it answers this session; `None` marks it without moving it. No observer fires: the knob
+    /// what it answers this session; `None` marks it without moving it. No callback runs: the knob
     /// already read the env.
     pub(crate) fn own_for_session(&mut self, name: &str, value: Option<&str>) {
         let key = name.to_ascii_lowercase();
@@ -585,7 +589,7 @@ impl Cvars {
             // value and its answer is not tested: the file is read before these rows are
             // registered (`0x402375`), and `CVar::Register` on the record it made calls the
             // callback and ignores the result (`0x63dc58`), so the value stands. A refusing
-            // callback applied nothing, so no observer fires for it.
+            // callback applied nothing, so its callback does not run for it.
             let applies = verdict.is_none_or(|verdict| {
                 self.console.extend(verdict.lines);
                 verdict.accept
@@ -672,7 +676,7 @@ impl Cvars {
         !self.console.is_empty()
     }
 
-    /// A line an observer prints to the console, such as `spellEffectLevel`'s "Spell effect level
+    /// A line a change callback prints to the console, such as `spellEffectLevel`'s "Spell effect level
     /// set to %d." (`0x689537`-`0x689554`); logged with the callbacks' at the next sync.
     pub(crate) fn print(&mut self, line: String) {
         self.console.push(line);
@@ -847,17 +851,18 @@ pub(crate) struct CvarPlugin;
 impl Plugin for CvarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Cvars>()
+            .add_observer(callbacks::on_cvar_changed)
             .add_systems(
                 Startup,
                 (load_config, publish_filter_policy)
                     .chain()
                     .in_set(CvarLoad),
             )
-            // After the tick, so a `SetCVar` from this frame reaches the registry and its observers
+            // After the tick, so a write no call took reaches the registry and its callbacks
             // before the frame's drains; `video::drain_restart_gx` orders after this so the commit
-            // finds the stage. Before the world's input stage, so the observers run ahead of the
-            // camera's controller: the reference calls the change callback inside the call
-            // (`CVar::Set` `0x63df50`, `0x63df7d`).
+            // finds the stage. Before the world's input stage, so the callbacks run ahead of the
+            // camera's controller. A Lua verb's write ran them inside its call (`CVar::Set`
+            // `0x63df50`, `0x63df7d`).
             .add_systems(
                 Update,
                 sync_cvars
@@ -865,7 +870,7 @@ impl Plugin for CvarPlugin {
                     .before(benilla_world::schedule::WorldStage::Input),
             )
             // And after the input records' calls, ahead of the world's mouse, whose look session
-            // reads the knobs their observers write.
+            // reads the knobs their callbacks write.
             .add_systems(
                 Update,
                 sync_input_cvars
@@ -949,8 +954,8 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
     out
 }
 
-/// Startup: mark what the session owns, fold `config.toml` in (no file means all defaults) and fire
-/// the observers now, so everything after [`CvarLoad`] finds its knob written. The VM does not
+/// Startup: mark what the session owns, fold `config.toml` in (no file means all defaults) and run
+/// the callbacks now, so everything after [`CvarLoad`] finds its knob written. The VM does not
 /// exist yet; [`sync_cvars`] seeds its mirror.
 fn load_config(world: &mut World) {
     let session = session_values(world);
@@ -1037,35 +1042,14 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
     }
 }
 
-/// After the UI's input pass and its bindings: drain the writes their calls made into the registry,
-/// push the registry's writes into the mirror and trigger the accepted moves, so the observers
-/// (the look's rates, the camera's dynamics) run before the world's mouse reads their knobs, as
-/// the reference's `CVar::Set` (`0x63df50`) calls the change callback inside the call
-/// (`0x63df7d`). A new VM is seeded by [`sync_cvars`], which drains its writes first as well.
-pub(crate) fn sync_input_cvars(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut cvars: ResMut<Cvars>,
-    mut commands: Commands,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
-            cvars.drain_vm(script);
-            cvars.log_console_lines();
-        }
-        if cvars.has_outbox() {
-            for (name, value) in cvars.take_outbox() {
-                script.set_cvar_host(&name, &value);
-            }
-        }
-        if cvars.has_events() {
-            for event in cvars.take_events() {
-                commands.trigger(event);
-            }
-        }
-    })
+/// After the UI's input pass and its bindings: take in the writes no call took, run their
+/// callbacks and push the registry's writes into the mirror, so the look's rates and the camera's
+/// dynamics have moved before the world's mouse reads them. A Lua verb's write ran its callback
+/// inside its call already ([`CvarSteps`]), as the reference's `CVar::Set` (`0x63df50`) calls it
+/// inside the write (`0x63df7d`). A new VM is seeded by [`sync_cvars`], which drains its writes
+/// first as well.
+pub(crate) fn sync_input_cvars(mut vm: crate::script_calls::VmWith<CvarSteps<'static>>) {
+    vm.turn(|script, mut steps| steps.sync(script))
 }
 
 /// The device's multisample formats as `GetMultisampleFormats` lists them; none before
@@ -1089,17 +1073,18 @@ pub(crate) fn multisample_formats(
         .unwrap_or_default()
 }
 
-/// Per frame: seed a new VM's mirror, drain its registrations and writes into the registry, push
-/// the registry's writes into the mirror, and trigger every accepted move.
+/// Per frame: seed a new VM's mirror, take in the registrations and the writes no call took, run
+/// their callbacks and push the registry's writes into the mirror.
 pub(crate) fn sync_cvars(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut cvars: ResMut<Cvars>,
+    mut vm: crate::script_calls::VmWith<CvarSteps<'static>>,
     adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
     msaa_formats: Option<Res<benilla_world::view::MsaaFormats>>,
     mut seeded: Local<VmMemo<bool>>,
-    mut commands: Commands,
 ) {
-    hosted_vm.run(|script| {
+    vm.turn(|script, mut steps| {
+        let Some(cvars) = steps.cvars() else {
+            return;
+        };
         // The live render backend; absent headless, where the registered `""` stands.
         if let Some(adapter) = adapter.as_deref() {
             let backend = adapter.backend.to_str();
@@ -1107,29 +1092,17 @@ pub(crate) fn sync_cvars(
                 cvars.own_for_session("gxApi", Some(backend));
             }
         }
-        if cvars.has_console_lines() {
-            cvars.log_console_lines();
-        }
         let Some(script) = script else {
             // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
-            if cvars.has_outbox() {
-                cvars.take_outbox();
-            }
-            if cvars.has_events() {
-                for event in cvars.take_events() {
-                    commands.trigger(event);
-                }
-            }
+            steps.sync(None);
             return;
         };
-        // The VM's writes before the seed: an addon's `SetCVar` at load is already queued, and
-        // seeding first would overwrite the mirror with the older value. Read before taking, so a
-        // quiet frame never deref-muts the registry.
-        if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
-            cvars.drain_vm(script);
-            cvars.log_console_lines();
-        }
         if seeded.claim(script) {
+            // The VM's writes before the seed: an addon's `SetCVar` at load is already queued, and
+            // seeding first would overwrite the mirror with the older value.
+            if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
+                cvars.drain_vm(script);
+            }
             cvars.seed_vm(script);
             if cvars.has_outbox() {
                 cvars.take_outbox(); // the seed just carried everything
@@ -1153,23 +1126,14 @@ pub(crate) fn sync_cvars(
                 hardware_cursor: true,
             });
         }
-        if cvars.has_outbox() {
-            for (name, value) in cvars.take_outbox() {
-                script.set_cvar_host(&name, &value);
-            }
-        }
-        if cvars.has_events() {
-            for event in cvars.take_events() {
-                commands.trigger(event);
-            }
-        }
+        steps.sync(Some(script));
     })
 }
 
 /// Fold the dying VM's last writes into the registry. Called from the shutdown
 /// ([`crate::ui_script::SessionEnd::Shutdown`]) after its events (a `PLAYER_LOGOUT` handler may
 /// `SetCVar`, and the reference keeps that write) and before the VM is replaced, so a final-frame
-/// write is not lost to the next VM's seed. The observers fire here.
+/// write is not lost to the next VM's seed. The callbacks run here.
 pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
     // No registry: a test or stripped world without the plugin.
     if !world.contains_resource::<Cvars>() {
@@ -1675,8 +1639,32 @@ mod tests {
         assert!(res::<VideoConfig>(&app).maximize, "the commit applies it");
     }
 
+    /// A move marks only the knob its callback writes: the other callbacks see the event but take
+    /// their knobs mutably only in the arm that writes them.
     #[test]
-    fn the_observers_apply_every_arm() {
+    fn a_move_marks_only_the_knob_its_callback_writes() {
+        let mut app = cvar_app();
+        let click = |app: &App| {
+            app.world()
+                .get_resource_change_ticks::<crate::target::ClickConfig>()
+                .expect("the knob")
+                .changed
+        };
+        let sound = |app: &App| {
+            app.world()
+                .get_resource_change_ticks::<SoundConfig>()
+                .expect("the knob")
+                .changed
+        };
+        let (click_before, sound_before) = (click(&app), sound(&app));
+        app.world_mut().increment_change_tick();
+        apply(&mut app, "deselectOnClick", "0");
+        assert_ne!(click(&app), click_before, "its own knob moved");
+        assert_eq!(sound(&app), sound_before, "another knob stays unmarked");
+    }
+
+    #[test]
+    fn the_callbacks_apply_every_arm() {
         let mut app = cvar_app();
         apply(&mut app, "MusicVolume", "0.7");
         assert_eq!(res::<SoundConfig>(&app).music, 0.7);
@@ -2735,7 +2723,7 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// A client with a real CVar host: every knob resource an observer writes, every observer,
+    /// A client with a real CVar host: every knob resource a callback writes, the callbacks,
     /// [`CvarPlugin`] and a VM for the mirror.
     fn cvar_app() -> App {
         let mut app = App::new();
@@ -2792,88 +2780,11 @@ mod tests {
             .init_resource::<crate::game_tip::GameTipSetting>()
             .init_resource::<crate::player::Approach>()
             .add_plugins(CvarPlugin);
-        for observer in ALL_OBSERVERS {
-            observer(&mut app);
-        }
         app.insert_non_send_resource(UiScript::new().unwrap());
         app
     }
 
-    /// Every CVar observer in the crate; a new one is a line here and an `add_observer` in its
-    /// plugin.
-    const ALL_OBSERVERS: &[fn(&mut App)] = &[
-        |app| {
-            app.add_observer(crate::player::approach_on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::sound::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_script::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::video::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::player::camera::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::player::camera_dynamics::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::target::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::spell::cast_target::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::combat_text::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_chat::combat::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_loot::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::nameplates::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::game_tip::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::text_filter::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::chat_bubble::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_guild::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_trade::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::minimap::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::portrait::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::perf::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::realmlist::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_gamma::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::world_backdrop::on_cvar);
-        },
-    ];
-
-    /// A host write, its latch committed at once, and its observers run before this returns.
+    /// A host write, its latch committed at once, and its callbacks run before this returns.
     fn apply(app: &mut App, name: &str, value: &str) -> SetOutcome {
         let world = app.world_mut();
         let (outcome, events) = {
@@ -2948,8 +2859,8 @@ mod tests {
     }
 
     /// `ConsoleExec(line)` as the typed `/console` runs it: on a VM seeded from the app's registry,
-    /// its writes drained back and their observers run; the console lines the callbacks and the
-    /// observers printed.
+    /// its writes drained back and their callbacks run; the console lines the checks and the
+    /// callbacks printed.
     fn console_exec(app: &mut App, line: &str) -> Vec<String> {
         let world = app.world_mut();
         let mut script = UiScript::new().unwrap();
@@ -3010,7 +2921,7 @@ mod tests {
     }
 
     /// A reset of a latched row moves the record, not the device: `GetCVar` and the save take
-    /// it, no observer fires, and a stage it found stays staged and is what the file holds.
+    /// it, no callback runs, and a stage it found stays staged and is what the file holds.
     #[test]
     fn a_latched_reset_moves_the_value_and_not_the_window() {
         let mut app = cvar_app();
@@ -3147,7 +3058,7 @@ mod tests {
 
     /// The string-valued rows, a closed list, each default checked on its own terms: `realmName`
     /// and `accountName` (the reference's registered `""`, `0x882748`) and `gxApi` are empty until
-    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their observers' parsers
+    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their callbacks' parsers
     /// ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]).
     #[test]
     fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
@@ -3635,7 +3546,7 @@ mod tests {
         }
         assert!(
             orphans.is_empty(),
-            "registered rows nothing in the source reads (an observer arm, a `cvars.get`, or a \
+            "registered rows nothing in the source reads (a callback's arm, a `cvars.get`, or a \
              `LUA_ONLY` entry with its stock reader): {orphans:?}"
         );
         for (name, _) in LUA_ONLY {
