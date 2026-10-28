@@ -8,8 +8,8 @@
 //! `0x4bf452`, `0x4bf487`, `0x4bf4ab`, `0x4bf4d6`); and the initiate's name callback
 //! (`0x5d40ca`). A handler queues its item here, stamped where it runs, and the getters its
 //! listeners call read the trade through the host ([`super::live`]). A close run while the lane
-//! holds an earlier item queues its VM half and its send here too ([`close_step`]), so it
-//! undoes the VM's open after the open has run.
+//! holds an earlier item, or at a packet, queues its VM half here too ([`close_step`]), so it
+//! undoes the VM's open after the open has run; its send goes out at once.
 
 use std::collections::VecDeque;
 
@@ -61,6 +61,17 @@ pub(crate) enum TradeEvent {
     Closed,
     /// The close core's `CMSG_CANCEL_TRADE` (`0x4bf527` → `0x5d4310`).
     Cancel,
+    /// A request's answer from the ladder (`0x4bf720`): `CMSG_BEGIN_TRADE`, `CMSG_BUSY_TRADE` or
+    /// `CMSG_IGNORE_TRADE`, held behind a close still parked on the lane ([`TradeLane::answer`]).
+    Answer(Answer),
+}
+
+/// A request's answer ([`TradeEvent::Answer`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Begin,
+    Busy,
+    Ignore,
 }
 
 /// The trade lane's queue.
@@ -79,6 +90,23 @@ impl TradeLane {
 
     fn head(&self) -> Option<Stamp> {
         self.events.front().map(|(s, _)| *s)
+    }
+
+    /// Send a request's answer (`0x4bf720`): now, or behind a close's signals still parked here,
+    /// whose listeners' `CloseTrade` sends its cancel inside the close in the reference
+    /// (`0x4bf4fb` → `0x4bf527`), ahead of the next packet's answer.
+    pub(crate) fn answer(&mut self, commands: &NetCommands, answer: Answer) {
+        let closing = self.events.iter().any(|(_, e)| {
+            matches!(
+                e,
+                TradeEvent::Closed | TradeEvent::Done(_) | TradeEvent::Unlock { .. }
+            )
+        });
+        if closing {
+            self.push(TradeEvent::Answer(answer));
+        } else if let Some(command) = send_of(&TradeEvent::Answer(answer)) {
+            let _ = commands.0.send(command);
+        }
     }
 
     /// What the queued items signal, in order, taking them.
@@ -126,6 +154,9 @@ fn send_of(event: &TradeEvent) -> Option<ClientCommand> {
     match event {
         TradeEvent::Unaccept => Some(ClientCommand::UnacceptTrade),
         TradeEvent::Cancel => Some(ClientCommand::CancelTrade),
+        TradeEvent::Answer(Answer::Begin) => Some(ClientCommand::BeginTrade),
+        TradeEvent::Answer(Answer::Busy) => Some(ClientCommand::BusyTrade),
+        TradeEvent::Answer(Answer::Ignore) => Some(ClientCommand::IgnoreTrade),
         _ => None,
     }
 }
@@ -157,7 +188,7 @@ fn fire_trade(
         };
         let ((), moved) = crate::lanes::firing(at, || match event {
             TradeEvent::Show { partner, purse } => open(&mut vm, &leg, partner, purse),
-            TradeEvent::Unaccept | TradeEvent::Cancel => {
+            TradeEvent::Unaccept | TradeEvent::Cancel | TradeEvent::Answer(_) => {
                 if let Some(command) = send_of(&event) {
                     let _ = leg.commands.0.send(command);
                 }
@@ -220,9 +251,14 @@ fn fire(script: &mut UiScript, sink: &mut MessageSink, event: TradeEvent) {
         }
         TradeEvent::Line(line) => show_line(script, sink, &line),
         TradeEvent::Unlock { .. } | TradeEvent::Done(_) | TradeEvent::Closed => {
-            close_vm(script, &event)
+            crate::ui_session::in_parked_close(crate::ui_session::NpcWindow::Trade, || {
+                close_vm(script, &event)
+            })
         }
-        TradeEvent::Show { .. } | TradeEvent::Unaccept | TradeEvent::Cancel => {}
+        TradeEvent::Show { .. }
+        | TradeEvent::Unaccept
+        | TradeEvent::Cancel
+        | TradeEvent::Answer(_) => {}
     }
 }
 
@@ -346,11 +382,20 @@ pub(super) fn close_waits(world: &World) -> bool {
     crate::lanes::waits_behind(world.get_resource::<TradeLane>().and_then(TradeLane::head))
 }
 
-/// One step of a close: queued on the lane when the close `waits` ([`close_waits`]), so the VM
-/// undoes its open after the open has run and the cancel follows the open's own sends; else run
-/// now, its signals fired with the host lent.
+/// One step of a close: its VM half queued on the lane when the close `waits` ([`close_waits`]),
+/// so the VM undoes its open after the open has run, its listeners re-entering the close as the
+/// session it closed ([`crate::ui_session::in_parked_close`]); else run now, its signals fired with
+/// the host lent. A send goes out now, inside the handler as the reference's `CMSG_CANCEL_TRADE`
+/// does (`0x4bf527`), ahead of a later packet's `CMSG_BEGIN_TRADE`; only an open still on the
+/// lane holds it back, as that open's own placement sends there (`0x4bf652`-`0x4bf6fa`) and the
+/// cancel follows them.
 pub(super) fn close_step(world: &mut World, waits: bool, event: TradeEvent) {
-    if waits {
+    let opening = world.get_resource::<TradeLane>().is_some_and(|lane| {
+        lane.events
+            .iter()
+            .any(|(_, e)| matches!(e, TradeEvent::Show { .. }))
+    });
+    if waits && (send_of(&event).is_none() || opening) {
         if let Some(mut lane) = world.get_resource_mut::<TradeLane>() {
             lane.push(event);
             return;
