@@ -73,7 +73,6 @@ pub(crate) fn close_core(world: &mut World) {
         }
         if world.resource::<BankOpen>().is_open() {
             world.resource_mut::<BankOpen>().clear();
-            crate::ui_session::note_closed(world, NpcWindow::Bank);
             crate::ui_session::with_script(world, |script| script.set_bank(None));
         }
     });
@@ -146,15 +145,14 @@ impl BankSteps<'_, '_> {
         self.open.as_deref().and_then(|o| o.banker)
     }
 
-    /// The close core's clear of the cell (`0x4f84f2`), and the VM's purchase row with it:
-    /// whether a banker was stored.
-    pub(crate) fn clear_banker(&mut self, script: &mut UiScript) -> bool {
+    /// The close core's clear of the cell (`0x4f84f2`), and the VM's purchase row with it, when a
+    /// banker is stored.
+    pub(crate) fn clear_banker(&mut self, script: &mut UiScript) {
         let Some(open) = self.open.as_deref_mut().filter(|o| o.is_open()) else {
-            return false;
+            return;
         };
         open.clear();
         script.set_bank(None);
-        true
     }
 
     /// `PurchaseSlot()` (`0x4f86b0`) inside its call: nothing without the active player
