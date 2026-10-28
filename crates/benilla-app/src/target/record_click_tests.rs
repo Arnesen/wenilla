@@ -24,6 +24,8 @@ const ME: u64 = 0x10;
 /// A spell whose cursor wants a ground point.
 const BLIZZARD: u32 = 10;
 const MOB: u64 = 0xF130_0000_0031_0001;
+/// A second unit, off the camera's ray, whose plate a test lays over the mob.
+const PLATED: u64 = 0xF130_0000_0032_0002;
 
 /// Over the left half's button, which targets us on its `OnClick`.
 const ON_BUTTON: Vec2 = Vec2::new(100.0, 400.0);
@@ -117,6 +119,15 @@ fn client_bound(wtf: &str) -> App {
                     CameraOrSelectOrMoveStart();
                     CameraOrSelectOrMoveStop();
                 </Binding>
+                <Binding name="PROBEKEYACTION">
+                    TurnOrActionStart();
+                    TurnOrActionStop();
+                </Binding>
+                <Binding name="PROBEKEYREAD">
+                    CameraOrSelectOrMoveStart();
+                    CameraOrSelectOrMoveStop();
+                    LOG = LOG .. tostring(UnitName("target")) .. ";"
+                </Binding>
                 <Binding name="PROBETHENBUTTON" runOnUp="true">
                     if ( keystate == "down" ) then
                         CameraOrSelectOrMoveStart();
@@ -162,6 +173,7 @@ fn client_bound(wtf: &str) -> App {
     for ev in crate::net::wire([
         created(ME, EntityKind::Player, ObjectType::Player, 0x19),
         created(MOB, EntityKind::Unit, ObjectType::Unit, 0x9),
+        created(PLATED, EntityKind::Unit, ObjectType::Unit, 0x9),
         SessionEvent::ObjectUpdateEnd,
     ]) {
         inbound.send(ev).unwrap();
@@ -381,17 +393,8 @@ fn a_ui_click_after_the_release_in_one_body_lands_after_the_world_click() {
     assert_eq!(target(&app), Some(ME), "the button's target came last");
 }
 
-/// A key whose binding arms and releases the click in one body, with no press of the mouse's to
-/// trace the pick at, clicks what is under the cursor: the pick is traced where the key's record
-/// returns, and the release that waited for it applies there.
-#[test]
-fn a_key_bound_click_selects_under_the_cursor() {
-    let mut app = client_bound(
-        "bind BUTTON1 CAMERAORSELECTORMOVE\r\nbind BUTTON2 TURNORACTION\r\nbind F PROBEKEYCLICK\r\n",
-    );
-    aim(&mut app);
-    move_to(&mut app, ON_MOB);
-    app.update();
+/// A press of the F key, in its window message and its typed one.
+fn press_f(app: &mut App) {
     let ev = bevy::input::keyboard::KeyboardInput {
         key_code: KeyCode::KeyF,
         logical_key: bevy::input::keyboard::Key::Character("f".into()),
@@ -403,8 +406,282 @@ fn a_key_bound_click_selects_under_the_cursor() {
     app.world_mut().write_message(ev.clone());
     app.world_mut()
         .write_message(WindowEvent::KeyboardInput(ev));
+}
+
+/// The client with F bound to `command`.
+fn client_with_f(command: &str) -> App {
+    client_bound(&format!(
+        "bind BUTTON1 CAMERAORSELECTORMOVE\r\nbind BUTTON2 TURNORACTION\r\nbind F {command}\r\n"
+    ))
+}
+
+/// The name `UnitName("target")` answers now, which is the mob's.
+fn target_name(app: &App) -> String {
+    let name: String = app
+        .world()
+        .non_send_resource::<UiScript>()
+        .eval(r#"return tostring(UnitName("target"))"#)
+        .unwrap();
+    assert_ne!(name, "nil");
+    name
+}
+
+/// A key whose binding arms and releases the click in one body, with no press of the mouse's,
+/// clicks what is under the cursor.
+#[test]
+fn a_key_bound_click_selects_under_the_cursor() {
+    let mut app = client_with_f("PROBEKEYCLICK");
+    aim(&mut app);
+    move_to(&mut app, ON_MOB);
+    app.update();
+    press_f(&mut app);
     app.update();
     assert_eq!(target(&app), Some(MOB), "the key's click selected the mob");
+}
+
+/// A key's binding body picks inside `CameraOrSelectOrMoveStart` (`0x5141ae` → `ArmClick
+/// 0x514810` → `0x481f00`), at the cursor the last mouse event left (`0x481f1d`), and the stop
+/// dispatches inside its call: the body's next line reads the mob.
+#[test]
+fn a_key_bound_click_reads_its_target_on_the_next_line() {
+    let mut app = client_with_f("PROBEKEYREAD");
+    aim(&mut app);
+    move_to(&mut app, ON_MOB);
+    app.update();
+    press_f(&mut app);
+    app.update();
+    assert_eq!(target(&app), Some(MOB));
+    let name = target_name(&app);
+    assert_eq!(
+        log(&app),
+        format!("{name};"),
+        "the line after the stop read the mob"
+    );
+}
+
+/// A chest, beside us.
+const CHEST: u64 = 0xF110_0000_0000_00D4;
+/// Over the world, where the chest's pick box stands.
+const ON_CHEST: Vec2 = Vec2::new(700.0, 600.0);
+
+/// A chest (type 3) where we stand, its drawn pick box on the camera's ray through [`ON_CHEST`],
+/// five yards out, then `frames` frames run, so its part's stream edge is behind the click.
+fn chest(app: &mut App, frames: usize) -> Entity {
+    let world = app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    let (tf, gt) = (
+        *world.get::<Transform>(me).expect("our body"),
+        *world.get::<GlobalTransform>(me).expect("our body"),
+    );
+    let store = crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (2, 0x21),
+        (21, 3),
+    ]));
+    let chest = world
+        .spawn((
+            crate::net::Guid(CHEST),
+            crate::net::NetEntity {
+                kind: EntityKind::GameObject,
+                display_id: None,
+                scale: 1.0,
+            },
+            tf,
+            gt,
+            store,
+        ))
+        .id();
+    world.resource_mut::<GuidIndex>().0.insert(CHEST, chest);
+    let mut q = world.query_filtered::<(&Camera, &GlobalTransform), With<WorldCamera>>();
+    let (camera, cam_tf) = q.single(world).expect("the world camera");
+    let ray = camera
+        .viewport_to_world(cam_tf, ON_CHEST)
+        .expect("the camera projects");
+    let at = ray.origin + *ray.direction * 5.0;
+    world.spawn((
+        ChildOf(chest),
+        benilla_world::interact::GoPickPart,
+        benilla_world::interact::PickBox,
+        Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)),
+        GlobalTransform::from_translation(at),
+        ViewVisibility::HIDDEN,
+    ));
+    for _ in 0..frames {
+        app.update();
+    }
+    // Drawn this frame: the box's visibility, which the frame's end resets headless.
+    let world = app.world_mut();
+    let mut parts =
+        world.query_filtered::<&mut ViewVisibility, With<benilla_world::interact::GoPickPart>>();
+    use bevy::camera::visibility::SetViewVisibility;
+    for mut vis in parts.iter_mut(world) {
+        vis.set_visible();
+    }
+    chest
+}
+
+/// Whether the client sent the chest's use.
+fn used_chest(app: &App) -> bool {
+    app.world()
+        .resource::<Sent>()
+        .0
+        .try_iter()
+        .any(|c| matches!(c, crate::net::ClientCommand::GameObjUse { guid: CHEST }))
+}
+
+/// A right click on a chest whose model streamed in frames ago uses it: the press's pick reads
+/// the GameObject pick set every frame keeps, not one only a pick's own run rebuilds.
+#[test]
+fn a_right_click_uses_a_chest_streamed_in_frames_ago() {
+    let mut app = client("CAMERAORSELECTORMOVE");
+    aim(&mut app);
+    chest(&mut app, 3);
+    right_click_at(&mut app, ON_CHEST);
+    app.update();
+    assert!(used_chest(&app), "the click used the chest");
+}
+
+/// A key's `TurnOrActionStart`/`Stop` over a chest whose model streamed in frames ago uses it,
+/// the arm's in-call pick reading the same set.
+#[test]
+fn a_key_bound_action_uses_a_chest_streamed_in_frames_ago() {
+    let mut app = client_with_f("PROBEKEYACTION");
+    aim(&mut app);
+    move_to(&mut app, ON_CHEST);
+    app.update();
+    chest(&mut app, 3);
+    press_f(&mut app);
+    app.update();
+    assert!(used_chest(&app), "the key's click used the chest");
+}
+
+/// [`PLATED`]'s plate shown over [`ON_MOB`] and hovered there, as the walk and the plate hover's
+/// seed after the tick leave a still cursor on it.
+fn plate_over_mob(app: &mut App) {
+    use benilla_ui::script::{PlateGeometry, PlateState};
+    let state = PlateState {
+        key: PLATED,
+        // The plate hangs below its top centre; [`ON_MOB`] is (900, 168) in the root's y-up units.
+        top_centre: (900.0, 180.0),
+        health: 100.0,
+        max_health: 100.0,
+        bar_colour: [1.0, 0.0, 0.0],
+        name: "Plated".into(),
+        level: Some(1),
+        skull: false,
+        level_colour: [1.0, 1.0, 0.0],
+        raid_icon: None,
+        alpha: 255,
+        lit: false,
+        hovered: false,
+    };
+    let geometry = PlateGeometry {
+        width: 128.0,
+        height: 32.0,
+        bar_off_x: 4.0,
+        bar_off_y: 4.0,
+        bar_width: 103.0,
+        bar_height: 9.0,
+        level_off_x: 11.8,
+        level_off_y: 9.1,
+        skull_size: 12.8,
+        raid_size: 25.6,
+        name_height: 12.8,
+        level_height: 11.0,
+        shadow_offset: 1.0,
+    };
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script
+            .run(r#"NAMEPLATE_FONT = "Fonts\FRIZQT__.TTF" WorldFrame:SetAllPoints()"#)
+            .unwrap();
+        script.resolve();
+        script.sync_nameplates(geometry, &[state]);
+        script.resolve();
+        script.mouse_move(900.0, 168.0);
+        assert_eq!(
+            script.hovered_nameplate(),
+            Some(PLATED),
+            "the plate holds the hover"
+        );
+    }
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .run_system_once(crate::vplates::seed_plate_hover)
+        .unwrap();
+}
+
+/// A key's click picks the world under the cursor, never a plate over it: `PickAtCursor`
+/// (`0x481190`) traces the terrain and the world frame's drawn objects (`0x480df0`, `0x480a50`)
+/// and asks no interface frame. A plate takes only its own press (`0x7cb910`).
+#[test]
+fn a_key_bound_click_under_a_plate_selects_the_world_under_it() {
+    let mut app = client_with_f("PROBEKEYCLICK");
+    aim(&mut app);
+    move_to(&mut app, ON_MOB);
+    app.update();
+    plate_over_mob(&mut app);
+    press_f(&mut app);
+    app.update();
+    assert_eq!(target(&app), Some(MOB), "the key's click selected the mob");
+}
+
+/// A button over the mob whose `OnClick` runs `body`, and a recorder of `PLAYER_TARGET_CHANGED`.
+fn button_over_mob(app: &mut App, body: &str) {
+    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    script
+        .run(&format!(
+            r#"local c = CreateFrame("Button", "OverMobButton")
+            c:SetPoint("BOTTOMLEFT", 850, 118) c:SetWidth(100) c:SetHeight(100)
+            c:EnableMouse(true)
+            c:SetScript("OnClick", function() {body} end)
+            local e = CreateFrame("Frame")
+            e:RegisterEvent("PLAYER_TARGET_CHANGED")
+            e:SetScript("OnEvent", function() LOG = LOG .. "changed;" end)"#
+        ))
+        .expect("the button builds");
+    script.resolve();
+}
+
+/// A button's `OnClick` that arms and releases the click picks at the cursor its click left, the
+/// world under the button, inside the arm's call: the handler's next line reads the mob.
+#[test]
+fn a_buttons_click_handler_reads_its_world_clicks_target() {
+    let mut app = client("CAMERAORSELECTORMOVE");
+    aim(&mut app);
+    button_over_mob(
+        &mut app,
+        r#"CameraOrSelectOrMoveStart() CameraOrSelectOrMoveStop()
+        LOG = LOG .. tostring(UnitName("target")) .. ";""#,
+    );
+    click_at(&mut app, ON_MOB);
+    app.update();
+    assert_eq!(target(&app), Some(MOB));
+    let name = target_name(&app);
+    assert_eq!(
+        log(&app),
+        format!("changed;{name};"),
+        "the handler read the mob"
+    );
+}
+
+/// The select inside the handler's `CameraOrSelectOrMoveStop` signals `PLAYER_TARGET_CHANGED` in
+/// place (`0x514b70` → `0x481f60` → `SetSelection`), before the handler's next line.
+#[test]
+fn a_buttons_click_handler_sees_the_target_change_inside_it() {
+    let mut app = client("CAMERAORSELECTORMOVE");
+    aim(&mut app);
+    button_over_mob(
+        &mut app,
+        r#"CameraOrSelectOrMoveStart() CameraOrSelectOrMoveStop() LOG = LOG .. "after;""#,
+    );
+    click_at(&mut app, ON_MOB);
+    app.update();
+    assert_eq!(target(&app), Some(MOB));
+    assert_eq!(
+        log(&app),
+        "changed;after;",
+        "the change fired inside the handler"
+    );
 }
 
 /// A press at a new position picks what is under the press: the frame's hover stood beside the

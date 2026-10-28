@@ -16,8 +16,8 @@ pub(crate) use crate::script_calls::{
     error_lines, record_error_lines, release_click, take_error_lines,
 };
 pub(crate) use arm::{
-    begin_records, plate_clicks_first, run_world_clicks, trace_press, world_steps, ClickArm,
-    ClickLegs, WorldClickLegs,
+    begin_records, plate_clicks_first, right_press_hook, run_world_clicks, world_steps, ArmTracer,
+    ClickArm, ClickLegs, WorldClickLegs,
 };
 mod by_name;
 // `pub(crate)` for the chest live probe, which drives the mouse's own `click::resolve_go_action`.
@@ -315,6 +315,14 @@ impl Plugin for TargetPlugin {
             .init_resource::<PressPick>()
             .init_resource::<ClickArm>()
             .init_resource::<hover::StickyPicks>()
+            .init_resource::<hover::GoPickable>()
+            // The GameObject pick set, kept ahead of the frame's input records and the hover.
+            .add_systems(
+                Update,
+                hover::track_go_pick_parts
+                    .before(crate::ui_script::UiInput)
+                    .before(hover::update_hovered_object),
+            )
             .init_resource::<WorldCursor>()
             .init_resource::<cursor_mode::AttackFork>()
             .init_resource::<CombatFlash>()
