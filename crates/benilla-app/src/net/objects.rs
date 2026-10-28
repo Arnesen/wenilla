@@ -52,6 +52,8 @@ pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
     update::register(app);
     app.net_handler(K::ItemTemplate, on_item)
+        // Next, so the stationery rebuild reads the record the cache now holds.
+        .net_handler(K::ItemTemplate, on_paper_record)
         .net_handler(K::ItemTime, on_item)
         .net_handler(K::ItemEnchantTime, on_item)
         .net_handler(K::MoveTimeSkipped, on_move_time_skipped)
@@ -177,6 +179,19 @@ fn item_watch<'a, 'w, 's>(
     }
 }
 
+/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`'s stationery callbacks (`0x4acbf0`), a record or a refusal,
+/// registered right after [`on_item`] so the rebuild they may run (`0x4acbf8`) reads the record
+/// [`on_item`] just cached ([`crate::ui_mail::StationeryRebuild::answered`]).
+fn on_paper_record(
+    In(ev): In<SessionEvent>,
+    paper: Option<crate::ui_mail::StationeryRebuild>,
+    items: Res<Items>,
+) {
+    if let (SessionEvent::ItemTemplate { entry, .. }, Some(mut paper)) = (ev, paper) {
+        paper.answered(entry, &items);
+    }
+}
+
 /// Items past their create block: `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, whose refusal the next
 /// create or entry change of that entry asks again; and the lifetime and enchant countdowns,
 /// written into the item's own [`crate::items::Countdowns`].
@@ -193,8 +208,8 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             // getters' (`0x4c0340`), the ammo getters' (`0x4c84f0`), the parked swaps'
             // (`0x5e1020`) and auto-equips' (`0x5e17a0`), the vendor rows' (`0x4fada0`,
             // `0x4fb570`), the trainer rows' (`0x4d9140`, `0x4d9db0`), the questgiver rows'
-            // (`0x5018c0`), the mail rows' and notices' (`0x4af0a0`, `0x4ad010`) and the auction
-            // notices' lines (`0x4cd190`).
+            // (`0x5018c0`), the mail rows' and notices' (`0x4af0a0`, `0x4ad010`), the mail
+            // attachment's (`0x4ae710`) and the auction notices' lines (`0x4cd190`).
             let callbacks = sc.items.take_callbacks(entry);
             for callback in callbacks {
                 use crate::items::RecordCallback as Cb;
@@ -279,6 +294,13 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
                             crate::ui_auction::message_answered(auction, house, &sc.items, entry);
                         }
                     }
+                    // `MAIL_SEND_INFO_UPDATE` for a ready record only (`0x4ae716`, `0x4ae71f`).
+                    Cb::SendMail if answered => {
+                        if let Some(lane) = sc.mail.as_mut() {
+                            lane.push(crate::ui_mail::MailEvent::SendInfoUpdate);
+                        }
+                    }
+                    Cb::SendMail => {}
                 }
             }
             // The combat log's callback for its held lines (`0x6294b0`), which writes each one

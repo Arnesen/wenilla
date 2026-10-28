@@ -1,11 +1,12 @@
 //! The mail bindings. The getters read the mailbox cell, the inbox rows, the pending-mail time,
 //! the usable stationery and the packages through the lent host at the call ([`MailBoxQuery`],
-//! [`MailRowQuery`], [`NewMailQuery`], [`StationeryQuery`], [`PackageQuery`]), as the reference's
-//! read the session's records as they run (`0x4aeb90`, `0x4aebc0`, `0x4afea0`, `0x4ae1f0`,
-//! `0x4ae430`); the VM's own copy ([`super::UiScript::set_mail`] and its siblings) answers only
-//! with no host, which only a test sets. A getter's lookup that misses asks inside its call, with
-//! the callback that signals `MAIL_INBOX_UPDATE` when the record lands ([`MailLookup`]). Each verb
-//! past its guards hands the host its call ([`MailCall`]), which sends inside it. Indices are
+//! [`MailRowQuery`], [`NewMailQuery`], [`StationeryQuery`], [`StationeryTextureQuery`],
+//! [`PackageQuery`]), as the reference's read the session's records as they run (`0x4aeb90`,
+//! `0x4aebc0`, `0x4afea0`, `0x4ae1f0`, `0x4ae3f0`, `0x4ae430`); the VM's own copy
+//! ([`super::UiScript::set_mail`] and its siblings) answers only with no host, which only a test
+//! sets. A getter's lookup that misses asks inside its call, with the callback that signals
+//! `MAIL_INBOX_UPDATE` when the record lands ([`MailLookup`]). Each verb past its guards hands the
+//! host its call ([`MailCall`]), which sends inside it. Indices are
 //! 1-based, as `MailFrame.lua` uses them.
 
 use mlua::{Lua, MultiValue, Value};
@@ -248,11 +249,25 @@ impl LiveQuery for NewMailQuery {
     type Answer = bool;
 }
 
-/// The usable stationery list (`0x4ad970`), in the picker's order, as of the call.
-pub struct StationeryQuery;
+/// The usable stationery list as its last rebuild left it (`0x4ad970`), in the picker's order.
+/// `rebuild` rebuilds it first while no paper's item is awaited, as `GetNumStationeries` does
+/// (`0x4ae1f6`-`0x4ae202`); every other reader takes it as it stands.
+pub struct StationeryQuery {
+    pub rebuild: bool,
+}
 
 impl LiveQuery for StationeryQuery {
     type Answer = Vec<StationeryView>;
+}
+
+/// The Stationery store's texture for `id` (`[row+0x8]`), indexed by id (`0xc0d710`): `None`
+/// for an id with no row.
+pub struct StationeryTextureQuery {
+    pub id: u32,
+}
+
+impl LiveQuery for StationeryTextureQuery {
+    type Answer = Option<String>;
 }
 
 /// `Package.dbc`'s rows, in file order (`0x4ae430`, `0x4ae450`).
@@ -304,9 +319,10 @@ pub(super) fn row_now(lua: &Lua, model: &Model, index: usize) -> Option<MailInbo
     }
 }
 
-/// The usable stationery now: the host's answer, else the VM's copy.
-fn stationeries_now(lua: &Lua, model: &Model) -> Vec<StationeryView> {
-    ask(lua, &StationeryQuery).unwrap_or_else(|| model.mail_stationeries.clone())
+/// The usable stationery as last rebuilt, first rebuilt when `rebuild` ([`StationeryQuery`]): the
+/// host's answer, else the VM's copy.
+fn stationeries_now(lua: &Lua, model: &Model, rebuild: bool) -> Vec<StationeryView> {
+    ask(lua, &StationeryQuery { rebuild }).unwrap_or_else(|| model.mail_stationeries.clone())
 }
 
 /// The packages: the host's answer, else the VM's copy.
@@ -460,7 +476,7 @@ fn mail_ready(lua: &Lua, model: &Model) -> bool {
 fn send_price(lua: &Lua, model: &Model) -> u32 {
     let paper = (model.mail_stationery != 0)
         .then(|| {
-            stationeries_now(lua, model)
+            stationeries_now(lua, model, false)
                 .into_iter()
                 .find(|r| r.id == model.mail_stationery)
         })
@@ -1104,7 +1120,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             // Off the snapshot, a whole-stack pickup records no count, so the size comes from the
             // source slot.
-            // The template's lookup (`0x4ae604`) misses with nothing to read (`0x4ae60e`).
             let held = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.mail_send_item.clone().map(|it| {
@@ -1120,21 +1135,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             // The attached object and its record as the call runs: its stack (`0x4ae68e`) and its
             // record's fields.
-            let item = held.and_then(|(guid, count, snapshot)| {
-                let read = read_live(lua, Some(ItemKey::Object(guid)), |item| {
-                    let name = item.name();
-                    let quality = item.quality();
-                    let count = item.stack_count().unwrap_or(count);
-                    quality.map(|q| (name, item.texture(), item.inventory_type(), q, count))
-                })
-                .unwrap_or_else(|| snapshot.map(|(n, t, i, q)| (n, t, i, q, count)));
-                read.map(|(name, texture, inventory_type, quality, count)| {
-                    let quality = match inventory_type {
-                        0 => -1,
-                        _ => i64::from(quality),
-                    };
-                    (name, texture, count, quality)
-                })
+            let item = match held {
+                None => None,
+                Some((guid, count, snapshot)) => {
+                    let read = read_live(lua, Some(ItemKey::Object(guid)), |item| {
+                        let name = item.name();
+                        let quality = item.quality();
+                        let count = item.stack_count().unwrap_or(count);
+                        quality.map(|q| (name, item.texture(), item.inventory_type(), q, count))
+                    })
+                    .unwrap_or_else(|| snapshot.map(|(n, t, i, q)| (n, t, i, q, count)));
+                    // The record's lookup misses with nothing to read (`0x4ae60e`), and keeps the
+                    // callback `0x4ae710` for an object the engine holds
+                    // ([`super::RecordAsk::SendMailItem`]).
+                    if read.is_none() {
+                        super::calls::ask(lua, super::RecordAsk::SendMailItem(guid))?;
+                    }
+                    read
+                }
+            };
+            let item = item.map(|(name, texture, inventory_type, quality, count)| {
+                let quality = match inventory_type {
+                    0 => -1,
+                    _ => i64::from(quality),
+                };
+                (name, texture, count, quality)
             });
             let Some((name, texture, count, quality)) = item else {
                 return Ok(MultiValue::from_vec(vec![
@@ -1178,15 +1203,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── The stationery family ──
-    // The reference rebuilds the list (`0x4ad970`) in `GetNumStationeries` (`0x4ae1f0`) while no
-    // paper's record is awaited, and at the last one's answer (`0x4acbf8`); each getter here reads
-    // it as of its call.
+    // The reference rebuilds the list (`0x4ad970`) at the world-enter init (`0x4acbd7`), at the
+    // last awaited paper's answer (`0x4acbf8`) and in `GetNumStationeries` (`0x4ae1f0`) while no
+    // paper's record is awaited; every other getter reads it as last rebuilt.
 
     g.set(
         "GetNumStationeries",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(stationeries_now(lua, &model).len() as i64)
+            Ok(stationeries_now(lua, &model, true).len() as i64)
         })?,
     )?;
 
@@ -1202,7 +1227,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?;
             let list = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                stationeries_now(lua, &model)
+                stationeries_now(lua, &model, false)
             };
             let row = usize::try_from(index)
                 .ok()
@@ -1235,7 +1260,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?;
             let list = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                stationeries_now(lua, &model)
+                stationeries_now(lua, &model, false)
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.mail_stationery = usize::try_from(index)
@@ -1247,21 +1272,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `GetSelectedStationeryTexture()` (`0x4ae3f0`): nil for no selection or an unknown id.
+    // `GetSelectedStationeryTexture()` (`0x4ae3f0`): the selection (`0xb6efb4`) read in the
+    // Stationery store by id (`0xc0d710`, `0x4ae409`), whether or not the paper is usable now;
+    // nil for no selection, a negative id or one past the store's bound (`0x4ae3f5`-`0x4ae401`)
+    // and an id with no row (`0x4ae40c`). With no host, the VM's copy of the usable list.
     g.set(
         "GetSelectedStationeryTexture",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let id = model.mail_stationery;
-            let tex = (id != 0)
+            let tex = ((id as i32) > 0)
                 .then(|| {
-                    stationeries_now(lua, &model)
-                        .into_iter()
-                        .find(|r| r.id == id)
+                    ask(lua, &StationeryTextureQuery { id }).unwrap_or_else(|| {
+                        model
+                            .mail_stationeries
+                            .iter()
+                            .find(|r| r.id == id)
+                            .map(|r| r.texture.clone())
+                    })
                 })
                 .flatten();
             Ok(match tex {
-                Some(row) => Value::String(lua.create_string(&row.texture)?),
+                Some(texture) => Value::String(lua.create_string(&texture)?),
                 None => Value::Nil,
             })
         })?,

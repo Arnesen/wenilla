@@ -261,6 +261,8 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // callbacks' events go on the mail lane at their handlers.
     "::ui_mail::MailOpen",
     "::ui_mail::pending::MailPending",
+    // Read through the host by the stationery getters, and quiet: its rebuilds signal nothing.
+    "::ui_mail::stationery::UsableStationery",
     // Read through the host by the merchant getters, and quiet: its events fire on the merchant
     // lane at their handlers and callbacks.
     "::ui_merchant::MerchantOpen",
@@ -403,7 +405,7 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_items::feed::feed_item_stats", &["items::Items", "net::HomeBind", "net::ObjectStore",
         "spell::mods::SpellModifiers"]),
     ("::ui_auction::reset_auction_on_world_enter", &["ui_auction::AuctionOpen"]),
-    ("::ui_mail::send_query_next_mail_time_on_enter", &["items::Items", "ui_mail::MailOpen",
+    ("::ui_mail::send_query_next_mail_time_on_enter", &["ui_mail::MailOpen",
         "ui_mail::pending::MailPending"]),
     ("::ui_item_text::feed_item_text", &["go_templates::GameObjectTemplates", "items::Countdowns",
         "items::Items", "names::NameCache", "net::GuidIndex", "net::ObjectStore",
@@ -458,6 +460,9 @@ const FILLED_THROUGH_A_READ: &[&str] = &[
 /// in system order, or a system that pushes onto a lane off it at its own place, passes every
 /// check here unseen.
 const READ_ONLY_TO_HANDLERS: &[&str] = &[
+    // The usable stationery list, whose first paper the list parse gives a row with none
+    // (`0x4ad565`); the paper callback's handler writes it, through its own `ResMut`.
+    "::ui_mail::stationery::UsableStationery",
     // `ItemBagFamily.dbc`, which the inventory refusal's handler names a bag's family by
     // (`0x5ede00`).
     "::ui_items::ItemBagFamilies",

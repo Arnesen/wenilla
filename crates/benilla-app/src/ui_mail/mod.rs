@@ -33,6 +33,7 @@ mod lane;
 mod live;
 mod net;
 mod pending;
+mod stationery;
 #[cfg(test)]
 mod verb_tests;
 mod verbs;
@@ -40,6 +41,7 @@ mod verbs;
 pub(crate) use lane::{MailEvent, MailLane};
 pub(crate) use live::MailLive;
 pub(crate) use pending::MailPending;
+pub(crate) use stationery::{StationeryRebuild, UsableStationery};
 pub(crate) use verbs::MailVerbs;
 
 /// `checked` mask bits (vmangos `Mail.h`): READ, RETURNED, COPIED.
@@ -255,14 +257,24 @@ pub(crate) fn close_core(world: &mut World) {
 /// attachment's lock in the VM the sweep runs in (`0x4acdd6`); then the mailbox is forgotten with
 /// no `MAIL_CLOSED`, no interaction release and no refresh (`0x4acd5f`-`0x4acd6b`), the `cl`
 /// arm the close button's `0x4acd71` skips to. The latch still names the mailbox, which the
-/// sweep's interaction close then finds no window for.
-pub(crate) fn close_mail_on_leave_world(mut vm: VmWith<ResMut<'static, MailOpen>>) {
+/// sweep's interaction close then finds no window for. Then each paper's wait is cancelled
+/// (`0x4acc15`-`0x4acc2d`).
+pub(crate) fn close_mail_on_leave_world(
+    mut vm: VmWith<(
+        ResMut<'static, MailOpen>,
+        Option<ResMut<'static, UsableStationery>>,
+    )>,
+) {
     vm.run(|script| {
         if let Some(script) = script {
             script.reset_compose_tab_silently();
         }
     });
-    vm.own().clear();
+    let (mut mail, usable) = vm.own();
+    mail.clear();
+    if let Some(mut usable) = usable {
+        usable.cancel_waits();
+    }
 }
 
 pub(crate) struct UiMailPlugin;
@@ -273,6 +285,7 @@ impl Plugin for UiMailPlugin {
         net::register(app);
         app.init_resource::<MailOpen>()
             .init_resource::<MailPending>()
+            .init_resource::<UsableStationery>()
             .add_latched_window::<MailOpen>()
             .add_sweep_leg(SweepLeg::Mail, close_mail_on_leave_world)
             .add_systems(
@@ -289,6 +302,12 @@ impl Plugin for UiMailPlugin {
                     // The cascade's order: the time query, this, then the battlefield status.
                     send_query_next_mail_time_on_enter
                         .after(crate::net::send_query_time)
+                        .in_set(UiFeed),
+                    // Inside the init: the papers' lookups after the time query and ahead of the
+                    // init's own query (`0x4acbba`, `0x4acbdc`).
+                    stationery::count_papers_on_enter
+                        .after(crate::net::send_query_time)
+                        .before(send_query_next_mail_time_on_enter)
                         .in_set(UiFeed),
                 ),
             );
@@ -310,25 +329,19 @@ fn step_pending_mail(
 /// The mail init (`0x4acb10`, called at `0x4909f6`) at each world-enter cascade, which a login, a
 /// cross-map worldport and a `/reload` all run: the mailbox, the rows, the list throttle
 /// (`0x4acb7d`) and the request lock (`0x4acb82`) start over, every stationery's item is looked up
-/// with a callback (`0x4acbba`), then it stamps "no mail" (`0x4acb87`) and sends
-/// `MSG_QUERY_NEXT_MAIL_TIME` (`0x4acbdc`), after the time query and before the battlefield status.
+/// with a callback (`0x4acbba`, [`stationery::count_papers_on_enter`]), then it stamps "no mail"
+/// (`0x4acb87`) and sends `MSG_QUERY_NEXT_MAIL_TIME` (`0x4acbdc`), after the time query and before
+/// the battlefield status.
 pub(crate) fn send_query_next_mail_time_on_enter(
     mut vm: VmWith<MailSession>,
     mut cascades: MessageReader<WorldEnterCascadeMessage>,
     commands: Res<NetCommands>,
-    items: Option<Res<Items>>,
-    stationery: Option<Res<Stationery>>,
 ) {
     vm.turn(|script, (mut mail, mut pending)| {
         if cascades.read().next().is_some() {
             mail.clear_session();
             if let Some(script) = script {
                 script.reset_mail_world_state();
-            }
-            if let Some(items) = items.as_deref() {
-                for row in stationery.iter().flat_map(|s| s.0.rows()) {
-                    items.template(row.item, 0, Ask::Event(&commands));
-                }
             }
             pending.on_query_sent();
             let _ = commands.0.send(ClientCommand::QueryNextMailTime);
@@ -611,7 +624,7 @@ type MailSession = (ResMut<'static, MailOpen>, ResMut<'static, MailPending>);
 /// `0x4ada90`'s order: carried first (`0x4adab5`-`0x4adae7`), then the lower buy price, signed
 /// (`0x4adb81`), then the name, ASCII case folded (`SStrCmpI` at `0x4adba6`). A carried paper has
 /// no `cost`. The templates are only read (`0x4ada51`): the mail init asks for them
-/// ([`send_query_next_mail_time_on_enter`]).
+/// ([`stationery::count_papers_on_enter`]). Only the rebuild runs it ([`StationeryRebuild`]).
 pub(super) fn stationeries(
     catalog: &Stationery,
     store: Option<&benilla_protocol::ObjectFields>,
@@ -1831,7 +1844,6 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<MailOpen>()
             .init_resource::<MailPending>()
-            .init_resource::<crate::net::GuidIndex>()
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx))
             .add_message::<WorldEnterCascadeMessage>()
@@ -1843,7 +1855,14 @@ mod tests {
                     flags: 1,
                 }],
             )))
-            .add_systems(Update, send_query_next_mail_time_on_enter);
+            .add_systems(
+                Update,
+                (
+                    stationery::count_papers_on_enter,
+                    send_query_next_mail_time_on_enter,
+                )
+                    .chain(),
+            );
         app.world_mut().spawn((
             SelfPlayer,
             crate::net::Guid(7),

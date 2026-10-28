@@ -476,3 +476,300 @@ fn the_walk_away_close_fires_ahead_of_the_frames_pending_crossing() {
     c.frame(vec![]);
     assert_eq!(c.seen(), ["MAIL_CLOSED:nil", "UPDATE_PENDING_MAIL:nil"]);
 }
+
+/// An item object of ours, `guid` of `entry` stacked `stack`, created and seated in the
+/// backpack's first slot, its record left to the cache.
+fn carry(c: &mut Client, guid: u64, entry: u32, stack: u32) {
+    use benilla_protocol::field::FIELD_ITEM_STACK_COUNT;
+    use benilla_protocol::messages::ObjectType;
+    c.frame(vec![vec![SessionEvent::ItemCreate {
+        guid,
+        container: false,
+        fields: benilla_protocol::ObjectFields::from_pairs(&[
+            (2, 0x3),
+            (3, entry),
+            (6, ME as u32),
+            (8, ME as u32),
+            (FIELD_ITEM_STACK_COUNT, stack),
+        ])
+        .into_created(ObjectType::Item),
+    }]]);
+    seat_in_backpack(c, guid);
+    c.frame(vec![]);
+}
+
+/// The backpack's first slot set to `guid`, 0 for empty, in our store with no packet.
+fn seat_in_backpack(c: &mut Client, guid: u64) {
+    use benilla_protocol::field::FIELD_PLAYER_INV_SLOT_HEAD;
+    let world = c.app.world_mut();
+    let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+    let slot = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23;
+    world
+        .get_mut::<crate::net::ObjectStore>(me)
+        .expect("our store")
+        .0
+        .merge(benilla_protocol::ObjectFields::from_pairs(&[
+            (slot, guid as u32),
+            (slot + 1, (guid >> 32) as u32),
+        ]));
+}
+
+const fn item_guid(low: u64) -> u64 {
+    (benilla_protocol::guid::HIGH_ITEM as u64) << 48 | low
+}
+
+/// `GetSendMailItem` on an attachment whose record the cache lacks answers the miss and keeps the
+/// callback `0x4ae710` (`0x4ae604`), one per call; the record's answer signals
+/// `MAIL_SEND_INFO_UPDATE` at its packet (`0x4ae71f`), and the getter then reads it.
+#[test]
+fn an_attachment_whose_record_lands_later_signals_the_send_info_update() {
+    let mut c = client();
+    carry(&mut c, item_guid(1), WOOL, 3);
+    c.eval::<()>(
+        true,
+        r#"Infos = 0
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("MAIL_SEND_INFO_UPDATE")
+        f:SetScript("OnEvent", function() Infos = Infos + 1 end)
+        PickupContainerItem(0, 1) ClickSendMailItemButton() Infos = 0"#,
+    );
+    let read = "local n, _, c = GetSendMailItem() return tostring(n) .. '/' .. c";
+    assert_eq!(
+        c.eval::<String>(true, read),
+        "nil/0",
+        "the record is missing"
+    );
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: WOOL,
+        info: Some(Box::new(crate::items::test_template("Wool Cloth"))),
+    }]]);
+    assert_eq!(c.eval::<i64>(true, "return Infos"), 1, "one per call");
+    assert_eq!(c.eval::<String>(true, read), "Wool Cloth/3");
+}
+
+/// The attachment's lookup sits behind its object's (`0x468460`, `0x4ae5e1`): with the object
+/// gone, `GetSendMailItem` asks for no record, where with it held a refused record is asked
+/// again. The destroy itself asks once, for the bar's recount.
+#[test]
+fn an_attachment_whose_object_is_gone_asks_no_record() {
+    let mut c = client();
+    carry(&mut c, item_guid(1), WOOL, 3);
+    c.eval::<()>(true, "PickupContainerItem(0, 1) ClickSendMailItemButton()");
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: WOOL,
+        info: None,
+    }]]);
+    c.sent();
+    let asks = |c: &mut Client| {
+        c.eval::<()>(true, "GetSendMailItem()");
+        c.sent()
+            .iter()
+            .filter(|s| s.starts_with("ItemQuery"))
+            .count()
+    };
+    assert_eq!(asks(&mut c), 1, "a held object's refused record is asked");
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: WOOL,
+        info: None,
+    }]]);
+    // The destroy's own ask: our item's deactivate recounts the bar for its entry
+    // (`0x5d8798` → `0x4e5c70`), whose count looks the record up with guid 0 (`0x4e6d78`).
+    c.frame(vec![vec![SessionEvent::ObjectDestroyed(item_guid(1))]]);
+    assert_eq!(
+        c.sent(),
+        [format!(
+            "{:?}",
+            ClientCommand::ItemQuery {
+                entry: WOOL,
+                guid: 0
+            }
+        )]
+    );
+    // Refused again, so a lookup would send.
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: WOOL,
+        info: None,
+    }]]);
+    assert!(c.sent().is_empty());
+    assert_eq!(asks(&mut c), 0, "a gone object asks nothing");
+}
+
+/// The store a carried paper's row, 5, names, and its item.
+const PAPER_ROW: u32 = 5;
+const PAPER: u32 = 9_311;
+
+/// The client carrying one paper whose record the cache holds, with the Stationery store of its
+/// one row, which only a carried paper makes usable.
+fn carrying_paper() -> Client {
+    let mut c = client();
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_mail::Stationery(
+        benilla_formats::StationeryCatalog::from_rows(vec![benilla_formats::StationeryRow {
+            id: PAPER_ROW,
+            item: PAPER,
+            texture: "PAPER".into(),
+            flags: 0,
+        }]),
+    ));
+    world
+        .resource_mut::<crate::items::Items>()
+        .insert_template(PAPER, Some(crate::items::test_template("Plain Paper")));
+    carry(&mut c, item_guid(1), PAPER, 1);
+    c
+}
+
+/// `GetSelectedStationeryTexture` reads the Stationery store by the selected id (`0xc0d710`,
+/// `[row+0x8]` at `0x4ae410`), not the usable list: a paper selected, then used up and gone from
+/// the rebuilt list, still answers its texture.
+#[test]
+fn a_selected_paper_no_longer_usable_still_answers_its_texture() {
+    let mut c = carrying_paper();
+    assert_eq!(
+        c.eval::<String>(
+            true,
+            "local n = GetNumStationeries() SelectStationery(1) return n .. '/' .. tostring(GetSelectedStationeryTexture())"
+        ),
+        "1/PAPER"
+    );
+    seat_in_backpack(&mut c, 0);
+    c.frame(vec![]);
+    assert_eq!(
+        c.eval::<String>(
+            true,
+            "return GetNumStationeries() .. '/' .. tostring(GetSelectedStationeryTexture())"
+        ),
+        "0/PAPER"
+    );
+}
+
+/// The usable list is rebuilt only at its three places (`0x4ad970`): the world-enter init when no
+/// paper's item is awaited (`0x4acbd7`), the last awaited item's answer (`0x4acbf8`) and
+/// `GetNumStationeries` while none is (`0x4ae202`). A paper picked up or used between them changes
+/// no getter until the next.
+#[test]
+fn a_paper_picked_up_between_rebuilds_changes_nothing_until_the_next() {
+    const FREE_ROW: u32 = 6;
+    const FREE: u32 = 9_312;
+    let mut c = carrying_paper();
+    seat_in_backpack(&mut c, 0);
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_mail::Stationery(
+        benilla_formats::StationeryCatalog::from_rows(vec![
+            benilla_formats::StationeryRow {
+                id: PAPER_ROW,
+                item: PAPER,
+                texture: "PAPER".into(),
+                flags: 0,
+            },
+            benilla_formats::StationeryRow {
+                id: FREE_ROW,
+                item: FREE,
+                texture: "FREE".into(),
+                flags: 1,
+            },
+        ]),
+    ));
+    // The init finds the paper's record and misses the free one's, so one is awaited and the
+    // list is not rebuilt.
+    world.write_message(crate::net::WorldEnterCascadeMessage);
+    c.frame(vec![]);
+    let read = "local n = GetNumStationeries() return n .. '/' .. tostring(GetStationeryInfo(1))";
+    let first = "return tostring(GetStationeryInfo(1))";
+    seat_in_backpack(&mut c, item_guid(1));
+    c.frame(vec![]);
+    assert_eq!(
+        c.eval::<String>(true, read),
+        "0/nil",
+        "a paper picked up while one is awaited"
+    );
+    // The awaited answer rebuilds, the paper carried.
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: FREE,
+        info: Some(Box::new(crate::items::test_template("Free Paper"))),
+    }]]);
+    assert_eq!(c.eval::<String>(true, first), "Plain Paper");
+    // Used up: the getters that do not rebuild read the list as it stood.
+    seat_in_backpack(&mut c, 0);
+    c.frame(vec![]);
+    assert_eq!(c.eval::<String>(true, first), "Plain Paper");
+    assert_eq!(c.eval::<String>(true, read), "1/Free Paper");
+}
+
+/// Each `GetSendMailItem` call before the record answers keeps its own callback `0x4ae710`
+/// (dedupe flag 0, `0x4ae5ea`), while the cache sends the one query in flight: two calls, one
+/// query, two `MAIL_SEND_INFO_UPDATE` at the answer (`0x4ae71f`).
+#[test]
+fn two_attachment_reads_before_the_answer_send_one_query_and_two_updates() {
+    let mut c = client();
+    carry(&mut c, item_guid(1), WOOL, 3);
+    c.eval::<()>(
+        true,
+        r#"Infos = 0
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("MAIL_SEND_INFO_UPDATE")
+        f:SetScript("OnEvent", function() Infos = Infos + 1 end)
+        PickupContainerItem(0, 1) ClickSendMailItemButton() Infos = 0"#,
+    );
+    c.sent();
+    c.eval::<()>(true, "GetSendMailItem() GetSendMailItem()");
+    let queries = c
+        .sent()
+        .into_iter()
+        .filter(|s| s.starts_with("ItemQuery"))
+        .count();
+    assert_eq!(queries, 1, "one query in flight");
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: WOOL,
+        info: Some(Box::new(crate::items::test_template("Wool Cloth"))),
+    }]]);
+    assert_eq!(c.eval::<i64>(true, "return Infos"), 2, "one per call");
+}
+
+/// The leave-world step cancels each paper's callback and leaves the count set
+/// (`0x4acc15`-`0x4acc2d`): a late answer neither counts down nor rebuilds, and
+/// `GetNumStationeries` rebuilds nothing while the count stands, until the next world-enter init
+/// starts it over.
+#[test]
+fn leaving_the_world_cancels_the_paper_waits() {
+    use bevy::ecs::system::RunSystemOnce;
+    const FREE: u32 = 9_312;
+    let mut c = client();
+    c.app
+        .world_mut()
+        .insert_resource(crate::ui_mail::Stationery(
+            benilla_formats::StationeryCatalog::from_rows(vec![benilla_formats::StationeryRow {
+                id: 6,
+                item: FREE,
+                texture: "FREE".into(),
+                flags: 1,
+            }]),
+        ));
+    c.app
+        .world_mut()
+        .write_message(crate::net::WorldEnterCascadeMessage);
+    c.frame(vec![]);
+    c.app
+        .world_mut()
+        .run_system_once(crate::ui_mail::close_mail_on_leave_world)
+        .expect("the sweep leg runs");
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: FREE,
+        info: Some(Box::new(crate::items::test_template("Free Paper"))),
+    }]]);
+    let read = "local first = tostring(GetStationeryInfo(1)) \
+        return first .. '/' .. GetNumStationeries()";
+    assert_eq!(
+        c.eval::<String>(true, read),
+        "nil/0",
+        "the late answer counts nothing"
+    );
+    c.app
+        .world_mut()
+        .write_message(crate::net::WorldEnterCascadeMessage);
+    c.frame(vec![]);
+    assert_eq!(
+        c.eval::<String>(true, read),
+        "Free Paper/1",
+        "the next init starts over"
+    );
+}
