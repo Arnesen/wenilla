@@ -33,10 +33,11 @@ pub(crate) use feed::{
 };
 #[cfg(test)]
 pub(crate) use feed::{fire_party_lane, PartyLane};
-pub(crate) use feed::{GroupSources, PARTY_PET_TOKENS, PARTY_TOKENS, RAID_PET_TOKENS, RAID_TOKENS};
 pub(crate) use live::RosterLive;
-pub(crate) use pets::Roster;
-pub(crate) use records::{record_notices, roster_aura_slots_in};
+pub(crate) use records::{
+    party_record, record_notices, roster_aura_slots_in, seat_member_record, seat_pet_record,
+    GroupAsOf,
+};
 
 pub(crate) struct UiPartyPlugin;
 
@@ -59,10 +60,9 @@ impl Plugin for UiPartyPlugin {
             .add_systems(
                 Update,
                 (
-                    // Ahead of the field events, whose handlers read the group tokens.
-                    feed::feed_party
-                        .in_set(UiFeed)
-                        .in_set(crate::ui_unit::field_events::FieldEventPushes),
+                    // The group tokens read at the call (`crate::ui_unit::live`); the roster
+                    // push is the no-host fallback, and a fresh VM's catch-up is stamped here.
+                    feed::feed_party.in_set(UiFeed),
                     feed::drain_party.in_set(crate::ui_script::UiDrain),
                 ),
             );
@@ -235,6 +235,10 @@ pub(crate) enum GroupSignal {
     ReadyCheck,
     /// One member's answer, relayed to the leader (`0x4ba3f9`, `0x4ba405`).
     ReadyCheckAnswer { guid: u64, ready: bool },
+    /// The raid rebuild's ready-check leg, at its end (`0x4bac5a`-`0x4bacb9`): the rows it wrote
+    /// carry the pending flags, and with a member `gone` (the count at `0x4ba825`) the check
+    /// closes for its leader once no row is both pending and online.
+    RaidRebuilt { gone: bool },
     /// `UPDATE_INSTANCE_INFO`, once per `SMSG_RAID_INSTANCE_INFO` (`0x49e1a7`, straight from
     /// `0x49e08e` when empty), with the list: `RaidFrame.lua:43` ignores the first, so the Raid
     /// Info button is decided on the second.
@@ -309,12 +313,13 @@ impl SignalLog {
         self.aged = self.base;
     }
 
-    /// Every entry but the lines, which leaves the log empty.
+    /// Every entry but the lines and the raid rebuild's ready-check leg, which leaves the log
+    /// empty.
     #[cfg(test)]
     pub(crate) fn take_events(&mut self) -> Vec<GroupSignal> {
         self.take()
             .into_iter()
-            .filter(|s| !matches!(s, GroupSignal::Line(_)))
+            .filter(|s| !matches!(s, GroupSignal::Line(_) | GroupSignal::RaidRebuilt { .. }))
             .collect()
     }
 
@@ -507,6 +512,7 @@ impl GroupState {
             // (`0x5e6e6f`-`0x5e6e9c`).
             let own_row = (!members.is_empty()).then(|| self_guid.unwrap_or(0));
             let new_rows: Vec<u64> = members.iter().map(|m| m.guid).chain(own_row).collect();
+            let gone = raid_held && self.raid_rows().any(|g| !new_rows.contains(&g));
             // Onto a held roster (`0x4ba725`), each arrival in list order, then each departure in
             // row order, ours the last (`0x4ba7a0`-`0x4ba7fd`), so a list naming nobody sees us
             // leave too. Each is looked up with its notice's callback, a zero guid asking nothing
@@ -560,6 +566,7 @@ impl GroupState {
             if self.raid_names_pending == 0 {
                 self.signal(GroupSignal::RaidRosterUpdate);
             }
+            self.signal(GroupSignal::RaidRebuilt { gone });
         } else {
             // `0x4ba550`: a list that is not a raid drops the held roster (`0x4ba55f`), and says so
             // (`0x4ba57b`); with no roster held it signals no `RAID_ROSTER_UPDATE`. Either way it
@@ -1291,6 +1298,27 @@ mod tests {
             [RaidTargetUpdate],
             "an old cursor reads what is left"
         );
+    }
+
+    /// Each raid rebuild ends in its ready-check leg (`0x4bac5a`), after its roster signal, told
+    /// whether a member is gone from the rows it replaced (`0x4ba825`).
+    #[test]
+    fn each_raid_rebuild_ends_in_its_ready_check_leg() {
+        let mut g = GroupState::default();
+        let mut raid = |members: Vec<GroupMemberEntry>| {
+            g.apply_list(1, 0, members, 1, None, Some(ME));
+            g.signals
+                .take()
+                .into_iter()
+                .filter_map(|s| match s {
+                    GroupSignal::RaidRebuilt { gone } => Some(gone),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (alice, bob) = (sub("Alice", 1, 0), sub("Bob", 2, 1));
+        assert_eq!(raid(vec![alice.clone(), bob]), [false], "a new raid");
+        assert_eq!(raid(vec![alice]), [true], "Bob is gone");
     }
 
     /// The raid roster writer signals after each rebuild (`0x4babef`), and nothing gates the signal

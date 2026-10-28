@@ -43,8 +43,8 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 19;
-const FRAME_FINAL_INPUTS: usize = 115;
+const FRAME_FINAL_FEEDS: usize = 18;
+const FRAME_FINAL_INPUTS: usize = 109;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
@@ -64,8 +64,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
     ("::net::motion::remote::extrapolate_remote_units", &["Commands net::motion::spline::Spline",
         "Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::spell::group_relation::publish_group_roster", &["spell::group_relation::GroupRoster"],
-        "copies the group's roster, which the relation reads take, once the packets are in"),
     ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::ui_action::feed::feed_actions", &["ui_action::ActionSlots", "ui_action::PlayerActions"],
@@ -112,9 +110,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
     ("::ui_item_text::apply_reads", &["ui_item_text::ItemTextOpen"],
         "a click's or a bag use's read, queued in its input or its call, which the reference \
          opens inside them (`0x5f58c0`, `0x4e32e0`), ahead of the packets (`0x420d23`)"),
-    ("::ui_instance::track_instance_state", &["ui_instance::InstanceState"],
-        "latches the dungeon just left once the map the transfer lands on is known, which the \
-         reference latches inside the map load and the packet (`0x464ff0`, `0x49e6ac`)"),
     ("::ui_logout::feed_logout", &["ui_logout::LogoutState"],
         "fires and clears the signals the logout replies queue, which the session verbs read in \
          their calls, where the reference's handlers signal in place (`0x5aaef0`, `0x5aaf60`)"),
@@ -129,8 +124,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
          bar's states read, derived once after the frame's last pet spell list, where the \
          reference derives at each list's handler (`0x4bdae0` into \
          `DeriveUnresolvedBoundSpells` `0x4f0ce0`); the known spells are the handlers' alone"),
-    ("::ui_party::feed::feed_party", &["UiScript"], "a field event's listeners read its push"),
-    ("::ui_pet::unit::feed_pet_unit", &["UiScript"], "a field event's listeners read its push"),
     ("::ui_session::feed_interact_npc", &["ui_session::InteractNpc"],
         "copies the interaction latch into the `npc` unit the token lookups read, where the \
          reference's `npc` is the latch itself (`0x515c00`), set inside the handlers through \

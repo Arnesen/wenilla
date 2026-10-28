@@ -533,6 +533,8 @@ mod duration_live_tests;
 #[cfg(test)]
 mod gossip_live_tests;
 #[cfg(test)]
+mod group_live_tests;
+#[cfg(test)]
 mod group_view_tests;
 #[cfg(test)]
 mod guard_tests;
@@ -542,6 +544,8 @@ mod guild_live_tests;
 mod host_read_tests;
 #[cfg(test)]
 mod inspect_live_tests;
+#[cfg(test)]
+mod instance_live_tests;
 #[cfg(test)]
 mod item_live_tests;
 #[cfg(test)]
