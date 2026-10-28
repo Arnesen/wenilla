@@ -82,22 +82,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "the wire's error texts",
     ),
     (
-        Row::HostHeld,
-        "::minimap::ping::MinimapPing",
-        "the members' minimap pings, which `drive_minimap_ping` fires; our own `PingLocation`, \
-         acting in its call, holds the ping in the host",
-    ),
-    (
-        Row::Queue,
-        "::net::PlayedTimeAnswer",
-        "the played-time answer",
-    ),
-    (
-        Row::Queue,
-        "::player::net::SkinnedFeed",
-        "the skinned state",
-    ),
-    (
         Row::Queue,
         "::player::view_subject::FarSight",
         "the far-sight machine a handler's Lua runs through the host's buff cancel; every feed \
@@ -171,6 +155,10 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // waiting on it through the build's own wait, read as the tick runs.
     "::item_names::ItemNames",
     "::items::Items",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: read, and quiet. A member's ping
+    // stores the point at its packet and signals on the notice lane (`0x4ee330`), our own
+    // `PingLocation` holds it in the host in its call, and only a new VM's seed reads it.
+    "::minimap::ping::MinimapPing",
     "::net::GuidIndex",
     // Read by the trainer's description getters through the host, and quiet.
     "::net::HomeBind",
@@ -180,6 +168,7 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read by the quest log getters through the host (`QuestClock`), and quiet: the time
     // response's `QUEST_LOG_UPDATE` fires on the quest log lane.
     "::net::ServerWallClock",
+    // Read through the host by `GetGameTime` (`0x515ee0`), and quiet: no event signals the clock.
     "::net::game_time::ServerTime",
     // Read, and quiet: the control packet's handler and our own create's arrival signal its
     // changes on the notice lane in place (`0x4958e0`), and the action bar's diff of it is
@@ -303,7 +292,6 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
 /// a row whose feed or inputs moved fails until it matches.
 #[rustfmt::skip]
 pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
-    ("::player::net::feed_player_skinned", &["player::net::SkinnedFeed"]),
     // The hover's pick runs outside every packet (`0x481790` → `0x4828d0` → `0x482090` →
     // `0x492e70` → `0x492890`), but its plate is rebuilt inside them, each rebuild the whole
     // builder over every input here: the unit's by the name-query callback `0x5fb840`, the
@@ -318,9 +306,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::death::feed_death", &["Transform", "death::DeathNet", "items::Countdowns", "items::Items",
         "names::NameCache", "net::GuidIndex", "net::NetStatus", "net::ObjectStore",
         "net::SelfGuid"]),
-    ("::minimap::ping::drive_minimap_ping", &["minimap::ping::MinimapPing",
-        "ui_party::GroupState"]),
-    ("::minimap::feed_game_time", &["net::game_time::ServerTime"]),
     // The party and raid tokens read the members' stores, records and the roster's cells as of
     // the drain's place (`ui_unit::views`), and the group getters read the cells through the host;
     // the roster push is their no-host fallback, and every snapshot's names and relations read as
@@ -387,9 +372,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "ui_pet::PetBar"]),
     ("::ui_loot_roll::feed_loot_rolls", &["items::Items", "names::NameCache", "net::SelfGuid",
         "ui_loot_roll::LootRolls"]),
-    ("::ui_chat::broadcast::feed_broadcasts", &["ui_chat::edit::ChannelState"]),
-    ("::ui_chat::channels::seed_channels", &["ui_chat::edit::ChannelState"]),
-    ("::ui_chat::feed::played_time_bridge", &["net::PlayedTimeAnswer"]),
 ];
 
 /// The view pushes [`READS_FRAME_FINAL`]'s test finds whose build the reference too makes outside

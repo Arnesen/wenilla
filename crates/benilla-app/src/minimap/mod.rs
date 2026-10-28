@@ -17,7 +17,7 @@ mod composite;
 mod interior;
 /// The minimap ping, engine-owned and pinned to a world point.
 mod ping;
-pub(crate) use ping::{MinimapPing, MinimapSteps};
+pub(crate) use ping::{MemberPing, MinimapPing, MinimapSteps};
 
 use std::collections::HashMap;
 
@@ -964,25 +964,6 @@ fn feed_minimap_player_facing(mut hosted_vm: crate::script_calls::HostedVm, play
     })
 }
 
-/// Push the game clock `GetGameTime()` answers when its hour or minute changes, the API's own
-/// resolution: the clock's fields as they stand (`0x515ee0`), -1, -1 while it is unset.
-fn feed_game_time(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    time: Res<crate::net::ServerTime>,
-    mut last: Local<crate::ui_script::VmMemo<Option<(i32, i32)>>>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else { return };
-        let last = last.get(script);
-        let now = (time.0.hour(), time.0.minute());
-        if *last == Some(now) {
-            return;
-        }
-        *last = Some(now);
-        script.set_game_time(now.0, now.1);
-    })
-}
-
 /// The app half of the `<Minimap>` widget. The zone label feed is `crate::area`'s: the reference
 /// fires `MINIMAP_ZONE_CHANGED` from the same area-update pass as the `ZONE_CHANGED` family
 /// (`0x494970` beside `0x494780`).
@@ -1043,19 +1024,11 @@ impl Plugin for MinimapPlugin {
                     feed_minimap_art
                         .in_set(crate::ui_script::UiDrain)
                         .before(UiQuadAppend),
-                    // Before the script tick, after the indoor push the radius reads. Gated on the
-                    // in-game UI: a member's ping in the login burst has no player to land on
-                    // (`0x4ee341`), so it is dropped, not signalled to the glue VM.
-                    ping::drive_minimap_ping
+                    // Before the script tick, after the indoor push the radius reads.
+                    ping::feed_minimap_player
                         .after(feed_minimap_inside)
                         .in_set(crate::ui_script::UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
-                    ping::drop_inbound_pings
-                        .after(ping::drive_minimap_ping)
-                        .in_set(crate::ui_script::UiFeed)
-                        .run_if(not(crate::ui_script::ingame_ui_up)),
-                    // Before the script tick, so GameTimeFrame reads this frame's minute.
-                    feed_game_time.in_set(crate::ui_script::UiFeed),
                     // In the feed, off the hover the last walk left; after the world drive only so
                     // the two VM writers keep one order.
                     blips::drive_blip_tooltip

@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiInput;
 
 #[cfg(test)]
 mod ace_gate_tests;
@@ -178,21 +178,9 @@ impl Plugin for UiChatPlugin {
                     .in_set(crate::lanes::UiLanes)
                     .after(crate::lanes::fire_in_order),
             )
-            // Before the drain, so a broadcast lands on the frame it decodes.
-            .add_systems(
-                Update,
-                broadcast::feed_broadcasts.in_set(crate::ui_script::UiFeed),
-            )
             // The last-input stamp `[0xcf0bc8]`, ungated and ahead of the UI pass: the reference
             // stamps raw input before dispatch, so a key the chat box swallows still counts.
             .add_systems(Update, idle::stamp_input.before(UiInput))
-            // A fresh VM's joined-channel mirror, before the drain so its first line is numbered.
-            .add_systems(
-                Update,
-                channels::seed_channels.in_set(crate::ui_script::UiFeed),
-            )
-            // `SMSG_PLAYED_TIME` -> `TIME_PLAYED_MSG`.
-            .add_systems(Update, feed::played_time_bridge.in_set(UiFeed))
             .add_systems(
                 Update,
                 (
