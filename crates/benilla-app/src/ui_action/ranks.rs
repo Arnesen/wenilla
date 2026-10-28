@@ -101,6 +101,9 @@ mod tests {
             stuck_spell: None,
             superseded: Vec::new(),
             unlearned: Vec::new(),
+            initial: Vec::new(),
+            forms: Vec::new(),
+            form_edits: None,
             dirty: true,
         })
         .insert_resource(ActionSlots {

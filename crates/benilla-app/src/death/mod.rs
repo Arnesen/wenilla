@@ -122,24 +122,31 @@ impl DeathNet {
 pub(crate) struct DeathFeedState {
     /// World-scoped: the last `(guid, dead, ghost)` the self body showed.
     mirror: Option<(u64, bool, bool)>,
-    /// World-scoped: our player arrived and its death state is not signalled yet.
-    arrival_owed: bool,
-    /// VM-scoped: the announce latches.
-    vm: crate::ui_script::VmMemo<DeathAnnounced>,
-}
-
-/// What the live VM has been told. A fresh VM's first sight of the body is no edge: a `/reload`'s
-/// cascade signals no death state (`0x490168` never reaches `0x495850`), and an arrival signals it
-/// after its cascade (`0x5deb65`, [`feed_death`]).
-#[derive(Default)]
-struct DeathAnnounced {
-    /// The last `(guid, dead, ghost)` this VM was given an event for.
-    last: Option<(u64, bool, bool)>,
-    /// The last corpse-range verdict announced.
+    /// World-scoped: the corpse-range latch `[0xb4e324]`, the last verdict signalled
+    /// (`0x4920f0`), which the cascade's corpse step zeroes into whichever VM is live.
     corpse_range: Option<CorpseRange>,
     /// A fresh reclaim delay re-fires the range events, as the 1.12 client does (`0x4962d0`),
     /// so RECOVER_CORPSE re-shows with the new delay.
     reclaim_generation: u32,
+    /// VM-scoped: the announce latches.
+    vm: crate::ui_script::VmMemo<DeathAnnounced>,
+}
+
+impl DeathFeedState {
+    /// The corpse-range latch set, as a ghost in range of its corpse left it.
+    #[cfg(test)]
+    pub(crate) fn latch_corpse_in_range_for_test(&mut self) {
+        self.corpse_range = Some(CorpseRange::In);
+    }
+}
+
+/// What the live VM has been told. A fresh VM's first sight of the body is no edge: a `/reload`'s
+/// cascade signals no death state (`0x490168` never reaches `0x495850`), and an arrival signals it
+/// after its cascade (`0x5deb65`, [`signal_death_state`]).
+#[derive(Default)]
+struct DeathAnnounced {
+    /// The last `(guid, dead, ghost)` this VM was given an event for.
+    last: Option<(u64, bool, bool)>,
     /// Held back while a player caster's name is still resolving.
     offer_generation: u32,
     /// The offer whose caster's name was looked up as its packet's (`0x5e7c82`, callback
@@ -239,12 +246,9 @@ impl DeathView<'_, '_> {
 }
 
 /// Derive the death state from the self descriptor, push the snapshot, and fire the death events
-/// on its edges.
-///
-/// Our player's arrival first signals the death state after its world-enter cascade
-/// (`0x5deb60`, `0x5deb65` → `0x495850`): a login, a reconnect or a worldport to a dead body hears
-/// `PLAYER_DEAD`, any other `PLAYER_ALIVE`. benilla holds it until the interface is up.
-#[allow(clippy::too_many_arguments)]
+/// on its edges. Our player's arrival signals the death state itself, after its world-enter
+/// cascade (`0x5deb65` → `0x495850`, [`signal_death_state`]): a login, a reconnect or a worldport
+/// to a dead body hears `PLAYER_DEAD`, any other `PLAYER_ALIVE`.
 pub(crate) fn feed_death(
     // The death stores, which the death calls write: an engine turn, its events signalled after.
     mut vm: crate::script_calls::VmWith<DeathView<'static, 'static>>,
@@ -252,14 +256,11 @@ pub(crate) fn feed_death(
     names: Res<crate::names::NameCache>,
     net: Res<NetCommands>,
     map: Option<Res<benilla_world::world_map::CurrentMap>>,
+    // Our player's create this frame, which runs no watcher (`0x465d80`): its death state is the
+    // arrival's own signal, not an edge.
     arrivals: Query<(), Added<SelfPlayer>>,
-    pending_load: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
-    state: Option<Res<State<crate::client_state::ClientState>>>,
 ) {
-    feed.arrival_owed |= !arrivals.is_empty();
-    if feed.arrival_owed && crate::ui_script::ingame_ui_up(pending_load, state) {
-        feed.arrival_owed = !signal(&mut vm, &mut feed);
-    }
+    let arrived = !arrivals.is_empty();
     vm.turn(|script, view| {
         let Some(script) = script else {
             return;
@@ -291,16 +292,12 @@ pub(crate) fn feed_death(
                 // (`Map.cpp:3617-3629`).
                 let _ = net.0.send(ClientCommand::CorpseQuery);
             }
-            // Logging in a ghost: no edge, just the corpse ask.
-            (None, _, true) => {
-                let _ = net.0.send(ClientCommand::CorpseQuery);
-            }
             _ => {}
         }
 
         // ── The VM edges: a fresh VM's memo is empty, and its first sight is no edge.
         let memo = feed.vm.get(script);
-        let prev = memo.last.filter(|&(g, ..)| g == guid);
+        let prev = memo.last.filter(|&(g, ..)| g == guid && !arrived);
         memo.last = Some((guid, dead, ghost));
         fire_vm_edges(script, prev.map(|(_, d, g)| (d, g)), dead, ghost);
 
@@ -359,21 +356,21 @@ pub(crate) fn feed_death(
         } else {
             None
         };
-        if memo.reclaim_generation != death_net.reclaim_generation {
-            memo.reclaim_generation = death_net.reclaim_generation;
-            memo.corpse_range = None; // re-announce whatever holds now
+        if feed.reclaim_generation != death_net.reclaim_generation {
+            feed.reclaim_generation = death_net.reclaim_generation;
+            feed.corpse_range = None; // re-announce whatever holds now
         }
-        if range != memo.corpse_range {
+        if range != feed.corpse_range {
             match range {
                 Some(CorpseRange::In) => script.fire_event("CORPSE_IN_RANGE", vec![]),
                 Some(CorpseRange::InInstance) => script.fire_event("CORPSE_IN_INSTANCE", vec![]),
                 // Leaving range and the ghost state ending both fire the one hide event.
-                Some(CorpseRange::Out) | None if memo.corpse_range.is_some() => {
+                Some(CorpseRange::Out) | None if feed.corpse_range.is_some() => {
                     script.fire_event("CORPSE_OUT_OF_RANGE", vec![]);
                 }
                 _ => {}
             }
-            memo.corpse_range = range;
+            feed.corpse_range = range;
         }
     })
 }
@@ -383,7 +380,7 @@ pub(crate) fn feed_death(
 /// `0x495876`) `PLAYER_DEAD` (`0x113`, `0x49587d`), its handlers reading the timer the death armed,
 /// then `ClearCursor(1, 1)` (`0x495889` → `0x495190`); else `PLAYER_ALIVE` (`0x112`, `0x495893`).
 /// The VM's memo takes the state, so the feed signals no edge of it again.
-fn signal_death(
+pub(crate) fn signal_death(
     mut vm: crate::script_calls::VmWith<DeathView<'static, 'static>>,
     mut feed: ResMut<DeathFeedState>,
 ) {
@@ -432,7 +429,8 @@ pub(crate) fn zero_release_timer(world: &mut World) {
     }
 }
 
-/// [`signal_death`] in place, from our own death's handler (`crate::target`'s `died`).
+/// [`signal_death`] in place, from our own death's handler (`crate::target`'s `died`) and from our
+/// player's arrival (`0x5deb65`, [`crate::ui_world_enter`]).
 pub(crate) fn signal_death_state(world: &mut World) {
     if let Err(e) = world.run_system_cached(signal_death) {
         // A harness without the death state signals nothing.
@@ -448,19 +446,53 @@ fn send_repop_request(store: &benilla_protocol::ObjectFields, net: &NetCommands)
     }
 }
 
+/// The corpse cache and the range latch, beside the host.
+type CorpseStores = (
+    Option<ResMut<'static, DeathNet>>,
+    Option<ResMut<'static, DeathFeedState>>,
+);
+
+/// `QueryCorpse 0x491f50` in the world-enter cascade (`0x490a28`), after its other sends: the
+/// corpse cache reset (`0x491f74` → `0x492010(-1, …)`), the range latch zeroed (`0x491f7b` →
+/// `0x4920f0(0)`), which signals `CORPSE_OUT_OF_RANGE` from a set latch, then, for a ghost
+/// (`PLAYER_FLAGS` bit 4, `0x491fad`), `MSG_CORPSE_QUERY` (`0x491fb2`). The flags watcher's
+/// release and revive asks are [`feed_death`]'s.
+pub(crate) fn query_corpse_on_world_enter(
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut vm: crate::script_calls::VmWith<CorpseStores>,
+    net: Res<NetCommands>,
+) {
+    let (death_net, feed) = vm.own();
+    if let Some(mut death_net) = death_net {
+        death_net.corpse = None;
+    }
+    let was_in = feed.is_some_and(|mut feed| {
+        matches!(
+            feed.corpse_range.take(),
+            Some(CorpseRange::In | CorpseRange::InInstance)
+        )
+    });
+    if was_in {
+        vm.run(|script| {
+            if let Some(script) = script {
+                script.fire_event("CORPSE_OUT_OF_RANGE", vec![]);
+            }
+        });
+    }
+    if self_q.single().is_ok_and(|store| store.0.player_is_ghost()) {
+        let _ = net.0.send(ClientCommand::CorpseQuery);
+    }
+}
+
 /// The world-enter cascade's last test (`0x490a2d`-`0x490a38`): with our health 0 or less it
 /// releases the body (`0x490a3c` → `0x5e0ae0`), after its 38 calls and ahead of its tutorials. The
 /// cascade runs at an arrival, a `/reload` and a reactivation (`0x5deb60`, `0x490168`,
-/// `0x5e9c08`), so logging in or
-/// reloading dead and unreleased goes to the graveyard (`MiscHandler.cpp:48-67`).
+/// `0x5e9c08`), so logging in or reloading dead and unreleased goes to the graveyard
+/// (`MiscHandler.cpp:48-67`).
 pub(crate) fn repop_on_world_enter(
-    mut cascades: MessageReader<crate::net::WorldEnterCascadeMessage>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     net: Res<NetCommands>,
 ) {
-    if cascades.read().next().is_none() {
-        return;
-    }
     if let Ok(store) = self_q.single() {
         if store.0.unit_is_dead() {
             send_repop_request(&store.0, &net);
@@ -817,7 +849,6 @@ impl Plugin for DeathPlugin {
         net::register(app);
         app.init_resource::<DeathNet>()
             .init_resource::<DeathFeedState>()
-            .add_message::<crate::net::WorldEnterCascadeMessage>()
             .add_systems(
                 Update,
                 (
@@ -827,13 +858,6 @@ impl Plugin for DeathPlugin {
                     drive_death_look,
                     // Before the feed, so the frame a session ends carries no memory of it.
                     end_session_death_feed.before(feed_death),
-                    // The cascade's last send, after its pet and meeting-stone legs (`0x4909c9`,
-                    // `0x490a14`); the feed's arrival signal follows the cascade (`0x5deb65`).
-                    repop_on_world_enter
-                        .in_set(UiFeed)
-                        .after(crate::ui_unit::UnitSnapshots)
-                        .after(crate::ui_dialog_verbs::meeting_stone_enter_world)
-                        .before(feed_death),
                 ),
             );
     }
@@ -1476,8 +1500,7 @@ mod tests {
         app.add_message::<crate::net::DisconnectedMessage>()
             .insert_resource(DeathFeedState {
                 mirror: Some((0x1234, true, true)),
-                arrival_owed: false,
-                vm: crate::ui_script::VmMemo::default(),
+                ..Default::default()
             });
 
         // No session edge: the memory stands.
@@ -1531,6 +1554,7 @@ mod tests {
             .init_resource::<crate::items::Items>()
             .init_resource::<Time<Real>>()
             .insert_resource(State::new(crate::client_state::ClientState::InWorld))
+            .add_plugins(crate::ui_world_enter::WorldEnterPlugin)
             .add_systems(Update, feed_death);
         app.insert_non_send_resource(recording_vm());
         let body = ObjectFields::from_pairs(&[
@@ -1548,6 +1572,7 @@ mod tests {
             .0
             .insert(ME, me);
         app.world_mut().resource_mut::<SelfGuid>().0 = Some(ME);
+        crate::ui_world_enter::push_arrival(app.world_mut());
         app
     }
 

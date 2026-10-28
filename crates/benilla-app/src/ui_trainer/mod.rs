@@ -84,10 +84,12 @@ pub(crate) struct TrainerOpen {
     /// The trainer the records were listed by, which a close leaves: the records stay until the
     /// next list (the close zeroes only the cell and the counts, `0x4d747c`-`0x4d7486`).
     pub(crate) listed: Option<u64>,
+    /// The cascade's reset, owed from its item's push ([`TrainerOpen::settle_world_reset`]).
+    pub(crate) world_reset: crate::ui_world_enter::OwedReset,
 }
 
 impl TrainerOpen {
-    /// Open (or replace) the window with a trainer's freshly-listed services.
+    /// Open (or replace) the window with a trainer's freshly-listed services, past an owed reset.
     pub(crate) fn open(
         &mut self,
         trainer: u64,
@@ -95,6 +97,7 @@ impl TrainerOpen {
         services: Vec<TrainerSpell>,
         greeting: String,
     ) {
+        self.settle_world_reset();
         self.trainer = Some(trainer);
         self.listed = Some(trainer);
         self.trainer_type = trainer_type;
@@ -134,7 +137,7 @@ pub(crate) fn pass_owed(open: Option<&TrainerOpen>, lane: Option<&mut TrainerLan
 /// ([`crate::field_watch::FieldNotice::TrainerPass`]) and the getters' item callbacks.
 #[derive(SystemParam)]
 pub(crate) struct TrainerPasses<'w> {
-    open: Option<Res<'w, TrainerOpen>>,
+    open: Option<ResMut<'w, TrainerOpen>>,
     lane: Option<ResMut<'w, TrainerLane>>,
 }
 
@@ -142,6 +145,13 @@ impl TrainerPasses<'_> {
     /// One caller's pass, at its place ([`pass_owed`]).
     pub(crate) fn owed(&mut self) {
         pass_owed(self.open.as_deref(), self.lane.as_deref_mut());
+    }
+
+    /// Our create's trainer reset, owed from its packet ([`TrainerOpen::settle_world_reset`]).
+    pub(crate) fn owe_world_reset(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.world_reset.owe();
+        }
     }
 }
 
@@ -902,6 +912,37 @@ pub(crate) fn close_core(world: &mut World) {
         // The outer core clears them after every signal.
         crate::lanes::Behind::Nested => {}
     }
+}
+
+impl TrainerOpen {
+    /// The world-enter cascade's trainer reset (`0x4909ab` → `0x4d73e0`), which signals nothing:
+    /// the trainer's guid, selection, total and greeting zeroed (`0x4d73e2`-`0x4d73f6`), so the
+    /// getters find no services. The sweep ahead of every cascade has closed the window, so only
+    /// the records a close leaves go here. Owed from the cascade's push, it runs at the cascade's
+    /// place or ahead of a later list ([`crate::ui_world_enter::OwedReset`]).
+    pub(crate) fn settle_world_reset(&mut self) {
+        if self.world_reset.take() {
+            self.trainer = None;
+            self.services.clear();
+            self.greeting.clear();
+        }
+    }
+}
+
+/// The trainer reset in the cascade's place, unless a later list ran it first: the engine's
+/// records, then the VM's rows and selection, its collapsed lines kept
+/// ([`UiScript::reset_trainer_world_state`]).
+pub(crate) fn reset_on_world_enter(
+    mut vm: crate::script_calls::VmWith<Option<ResMut<'static, TrainerOpen>>>,
+) {
+    if let Some(mut open) = vm.own() {
+        open.settle_world_reset();
+    }
+    vm.run(|script| {
+        if let Some(script) = script {
+            script.reset_trainer_world_state();
+        }
+    });
 }
 
 /// A `/reload`'s VM gets the window the engine holds (`0xb737b0`, `0xb73a10`), rows and all, with

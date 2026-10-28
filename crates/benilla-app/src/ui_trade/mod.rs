@@ -50,6 +50,9 @@ struct TradeOffer {
 /// handlers' getters and cleared at the next open; cleared whole on disconnect.
 #[derive(Resource, Default)]
 pub(crate) struct TradeSession {
+    /// The cascade's reset of the window's tables, owed from its item's push
+    /// ([`TradeSession::settle_world_reset`]).
+    pub(crate) world_reset: crate::ui_world_enter::OwedReset,
     /// Set at our initiate or the ladder's accept, since `OPEN_WINDOW` carries no guid.
     partner: Option<u64>,
     /// Our `CMSG_INITIATE_TRADE` is live: the reference's `[0xc4bec8]`, set only as it goes out
@@ -429,6 +432,23 @@ impl TradeSession {
         self.their.gold = 0;
     }
 
+    /// The world-enter cascade's reset of the window's tables (`0x4bf0e0`): both offers' slots,
+    /// the accepts and the compare's caches. The handler's cells (the pending initiate, the edit
+    /// counter, the partner flag, the offered money and spells) are not the window's and stay; the
+    /// sweep ahead of every cascade has closed the window. Owed from the cascade's push, it runs at
+    /// the cascade's place or ahead of a later trade packet ([`crate::ui_world_enter::OwedReset`]).
+    pub(crate) fn settle_world_reset(&mut self) {
+        if !self.world_reset.take() {
+            return;
+        }
+        self.our.slots = Default::default();
+        self.their.slots = Default::default();
+        self.our_accept = false;
+        self.their_accept = false;
+        self.money_seen = [0; 2];
+        self.spell_seen = [0; 2];
+    }
+
     /// Disconnect: a full reset, offers and waits included; a session teardown is not a trade
     /// event.
     pub(crate) fn clear_session(&mut self) {
@@ -503,6 +523,22 @@ pub(crate) fn open_window(world: &mut World, purse: Option<u64>) {
     if let Some(mut lane) = world.get_resource_mut::<TradeLane>() {
         lane.push(TradeEvent::Show { partner, purse });
     }
+}
+
+/// The trade reset in the cascade's place (`0x4909b5` → `0x4bf0e0`), which signals nothing,
+/// unless a later trade packet ran it first: the engine's tables, then the VM's tables and partner
+/// cell.
+pub(crate) fn reset_on_world_enter(
+    mut vm: crate::script_calls::VmWith<Option<ResMut<'static, TradeSession>>>,
+) {
+    if let Some(mut trade) = vm.own() {
+        trade.settle_world_reset();
+    }
+    vm.run(|script| {
+        if let Some(script) = script {
+            script.reset_trade_tables();
+        }
+    });
 }
 
 /// The close core, `0x4bf4e0` with a zero guid: with a window open, the latch release
