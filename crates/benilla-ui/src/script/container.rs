@@ -196,9 +196,6 @@ pub struct ContainerUse {
     pub slot: u32,
     pub guid: u64,
     pub arm: UseArm,
-    /// The equip arm raised the bind-on-equip question and sent nothing: the item stays on the
-    /// cursor, locked, under the popup (`0x5e16c6`, `0x5e16ce`).
-    pub asks: bool,
     /// `onSelf`: the use targets the player in place of the selection (`0x4fa17d`-`0x4fa18e`).
     pub on_self: bool,
     /// What the protected-action gate's tag 2 allowed the call: an item's on-use spell casts
@@ -508,8 +505,10 @@ fn custom_cursor(model: &mut super::Model, name: &str) -> bool {
 /// its lock here, in the call, so a later call reads it as the reference's does: the withdraw and
 /// deposit (`0x4fa312`, `0x4fa34b`), the sale (`0x4fa37f`), the open (`0x5edcd9`) and the wrap
 /// paper (`0x5edea0`). The equip arm is not done here: it returns its item, which the call puts on
-/// the cursor ([`use_equip_arm`]). The host sends each arm, from the call left in `call`, and the
-/// repair from the model's [`ItemCall::Repair`].
+/// the cursor ([`use_equip_arm`]). The withdraw, deposit and sale send first (`0x4fa305`,
+/// `0x4fa33e`, `0x4fa378`), their call handed to the host in place ahead of the lock's signal; the
+/// host sends the item arms from the call left in `call`, and the repair from its
+/// [`ItemCall::Repair`].
 fn use_cleared(
     lua: &Lua,
     model: &mut super::Model,
@@ -527,7 +526,7 @@ fn use_cleared(
     let known = s.item_class.is_some();
     let equip = (fork == UseFork::Equip).then(|| s.cursor_item(bag, slot));
     if model.repair_mode {
-        model.item_calls.push(ItemCall::Repair { bag, slot });
+        model.item_call(ItemCall::Repair { bag, slot });
         return None;
     }
     let arm = if bag == -1 || (5..=10).contains(&bag) {
@@ -556,66 +555,44 @@ fn use_cleared(
             return None;
         }
     }
-    *call = Some(super::ScriptCall::UseContainerItem(ContainerUse {
+    let use_call = super::ScriptCall::UseContainerItem(ContainerUse {
         bag,
         slot,
         guid,
         arm,
-        asks: false,
         on_self,
         may_cast,
-    }));
+    });
     match arm {
-        UseArm::Withdraw | UseArm::Deposit | UseArm::Sell => cursor::lock_item(model, guid),
-        UseArm::Item(UseFork::WrapPaper) => arm_gift_wrap(model, bag, slot, guid),
-        UseArm::Item(_) => {}
+        UseArm::Withdraw | UseArm::Deposit | UseArm::Sell => {
+            model.call_in_verb(use_call);
+            cursor::lock_item(model, guid);
+        }
+        UseArm::Item(fork) => {
+            *call = Some(use_call);
+            if fork == UseFork::WrapPaper {
+                arm_gift_wrap(model, bag, slot, guid);
+            }
+        }
     }
     None
 }
 
 /// The equip arm (`0x4fa3b9`): `0x5e1840` puts the item on the cursor and runs
-/// `AutoEquipCursorItem` (`0x4fa3ff`), then the item locks unless it is a projectile
-/// (`0x4fa40b`, `0x4fa418`), whose clear unlocked it instead (`0x5e1711`). A bind-on-equip item
-/// sends nothing: it stays held and locked under the question.
-fn use_equip_arm(
-    lua: &Lua,
-    bag: i64,
-    slot: u32,
-    item: CursorItem,
-    on_self: bool,
-    may_cast: bool,
-) -> mlua::Result<()> {
+/// `AutoEquipCursorItem` (`0x4fa3ff`), which sends, asks or parks on the record in place, the send
+/// ahead of its clear; then the clicked item locks unless it is a projectile (`0x4fa406`-
+/// `0x4fa418`), whose clear unlocked it instead (`0x5e1711`). A bind-on-equip item sends nothing:
+/// it stays held and locked under the question. An item the verb refused (in the trade window)
+/// sends nothing, but still locks.
+fn use_equip_arm(lua: &Lua, item: CursorItem) -> mlua::Result<()> {
     let guid = item.guid;
     let projectile = item.item_class == Some(cursor::ITEM_CLASS_PROJECTILE);
-    let step = cursor::equip::auto_equip_from(lua, item, false)?;
+    cursor::equip::auto_equip_from(lua, item, false)?;
     super::tick::verb(lua, |model| {
         if !projectile {
             cursor::lock_item(model, guid);
         }
     });
-    // A record still in flight parks the equip on it (`0x5e160c`), which the use's own fork
-    // test reads cached, so only a view behind the cache reaches this.
-    if let cursor::equip::AutoEquip::Waits { entry } = step {
-        super::item_calls::submit(lua, super::ItemCall::AutoEquipWait { entry })?;
-    }
-    // An item the verb refused (in the trade window) sends nothing, but still locks (`0x4fa418`).
-    if matches!(
-        step,
-        cursor::equip::AutoEquip::Sent { .. } | cursor::equip::AutoEquip::Asked { .. }
-    ) {
-        super::calls::submit(
-            lua,
-            super::ScriptCall::UseContainerItem(ContainerUse {
-                bag,
-                slot,
-                guid,
-                arm: UseArm::Item(UseFork::Equip),
-                asks: matches!(step, cursor::equip::AutoEquip::Asked { .. }),
-                on_self,
-                may_cast,
-            }),
-        )?;
-    }
     Ok(())
 }
 
@@ -672,7 +649,7 @@ fn pickup_container_item(
         // No eligibility test: the server refuses with an `ERR_CANT_WRAP_*` reason
         // (`SMSG_INVENTORY_CHANGE_FAILURE` 43-48), and a local gate would eat that error line.
         model.pending_wrap = None;
-        model.item_calls.push(ItemCall::Wrap {
+        model.item_call(ItemCall::Wrap {
             gift_bag: wrap.bag,
             gift_slot: wrap.slot,
             item_bag: bag,
@@ -708,7 +685,7 @@ fn pickup_container_item(
                 may_cast,
             });
         } else if occupied {
-            model.item_calls.push(ItemCall::Repair { bag, slot });
+            model.item_call(ItemCall::Repair { bag, slot });
         }
         return ContainerClick::Done;
     }
@@ -777,9 +754,7 @@ fn pickup_container_item(
         Some(CursorPayload::Merchant(_)) if !vendor.open => ContainerClick::Done,
         Some(CursorPayload::Merchant(_)) => {
             if let Some(entry) = vendor.held_entry {
-                model
-                    .merchant_drops
-                    .push(super::MerchantCall::BuyInSlot { bag, slot, entry });
+                model.merchant_call_in_verb(super::MerchantCall::BuyInSlot { bag, slot, entry });
             }
             cursor::clear_cursor(model);
             ContainerClick::Done
@@ -809,7 +784,7 @@ enum ContainerClick {
 
 /// Queue a split's placement (`0x5e1210`), which asks no question.
 fn queue_split(model: &mut super::Model, held: &CursorItem, dst_bag: i64, dst_slot: u32, n: u32) {
-    model.item_calls.push(ItemCall::Move(ContainerMove {
+    model.item_call(ItemCall::Move(ContainerMove {
         src_bag: held.bag,
         src_slot: held.slot,
         dst_bag,
@@ -1140,12 +1115,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let equip = super::tick::verb(lua, |model| {
                 use_cleared(lua, model, bag, slot, on_self, may_cast, vendor, &mut call)
             });
-            super::item_calls::submit_item_calls(lua)?;
             if let Some(call) = call {
                 super::calls::submit(lua, call)?;
             }
             if let Some(item) = equip {
-                use_equip_arm(lua, bag, slot, item, on_self, may_cast)?;
+                use_equip_arm(lua, item)?;
             }
             Ok(())
         })?,
@@ -1180,7 +1154,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let click = super::tick::verb(lua, |model| {
                 pickup_container_item(lua, model, bag, slot, may_cast, vendor)
             });
-            super::item_calls::submit_item_calls(lua)?;
             match click {
                 ContainerClick::Done => {}
                 ContainerClick::Swapped => super::tick::verb(lua, |model| {
@@ -1191,7 +1164,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     super::calls::submit(lua, super::ScriptCall::PickItem(pick))?
                 }
             }
-            super::merchant::submit_slot_buys(lua)
+            Ok(())
         })?,
     )?;
 
@@ -3027,7 +3000,8 @@ mod tests {
         assert!((start - 100.02).abs() < 1e-9);
     }
 
-    /// `UseContainerItem`'s use and equip arms hand their call to the lent host inside the call.
+    /// `UseContainerItem`'s use arm hands its call to the lent host inside the call, and its equip
+    /// arm the equip's send, carrying the set's pickup.
     #[test]
     fn container_uses_apply_in_the_call_with_a_host_lent() {
         use crate::script::ScriptCall;
@@ -3045,9 +3019,16 @@ mod tests {
         s.seat_item_records();
         let equipped =
             crate::script::host::test_support::applied_in_call(&mut s, "UseContainerItem(0, 1)");
-        let equip_arm = super::UseArm::Item(super::UseFork::Equip);
         assert!(
-            matches!(equipped.as_slice(), [ScriptCall::UseContainerItem(u)] if u.arm == equip_arm),
+            matches!(
+                equipped.as_slice(),
+                [ScriptCall::Item(crate::script::ItemCall::AutoEquip {
+                    bag: 0,
+                    slot: 1,
+                    ammo: None,
+                    picked: true
+                })]
+            ),
             "{equipped:?}"
         );
     }

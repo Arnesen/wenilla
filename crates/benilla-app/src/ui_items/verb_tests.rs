@@ -438,11 +438,10 @@ fn the_bind_answers_act_inside_their_calls() {
 }
 
 /// An accepted pending swap sends `CMSG_SWAP_INV_ITEM` (`0x5e0fdb`) and only then clears the
-/// cursor (`0x5e0fe7`), so the clear's handlers send after the packet. The census counts the send
-/// under `Item` as made while a handler waits, which is the reference's order: see
-/// [`SENDS_IN_ORDER`](crate::script_calls::census::SENDS_IN_ORDER).
+/// cursor (`0x5e0fe7`), so the clear's handlers send after the packet. The send is handed over in
+/// place, so the census counts no send made while a handler waits.
 #[test]
-fn an_accepted_swap_sends_before_its_held_clear_signals() {
+fn an_accepted_swap_sends_before_its_clears_signals() {
     let mut h = Bags::new();
     h.run("PickupContainerItem(0, 7) PickupInventoryItem(1)");
     h.run(
@@ -468,7 +467,7 @@ fn an_accepted_swap_sends_before_its_held_clear_signals() {
         ],
         "the packet, then the clear's handler"
     );
-    crate::script_calls::census::shows_in_order("Item");
+    crate::script_calls::census::shows_no_send();
 }
 
 /// An auto-equip's bind answer re-issues the pick-up and equip from the slot as it stands
@@ -492,6 +491,247 @@ fn an_auto_equips_accept_reads_the_slot_as_it_stands() {
             roll()
         ]
     );
+}
+
+/// What `verb` sent with a listener armed that rolls 1-100 on `CURSOR_UPDATE` and 2-100 on
+/// `ITEM_LOCK_CHANGED`, after `setup`: each command by its kind, a listener's roll by its event.
+fn heard_around(h: &mut Bags, setup: &str, verb: &str) -> Vec<&'static str> {
+    h.run(
+        r#"local f = CreateFrame("Frame")
+        f:RegisterEvent("CURSOR_UPDATE") f:RegisterEvent("ITEM_LOCK_CHANGED")
+        f:SetScript("OnEvent", function()
+            if ARMED then RandomRoll(event == "CURSOR_UPDATE" and 1 or 2, 100) end
+        end)"#,
+    );
+    h.run(setup);
+    let _ = h.sent();
+    h.run(&format!("ARMED = true {verb} ARMED = nil"));
+    h.rx.try_iter()
+        .filter_map(|c| match c {
+            ClientCommand::RandomRoll { min: 1, .. } => Some("cursor"),
+            ClientCommand::RandomRoll { .. } => Some("lock"),
+            ClientCommand::AutoEquipItem { .. } => Some("equip"),
+            ClientCommand::SwapInvItem { .. } => Some("swap"),
+            ClientCommand::DestroyItem { .. } => Some("destroy"),
+            ClientCommand::SplitItem { .. } => Some("split"),
+            ClientCommand::AutoStoreBagItem { .. } => Some("store"),
+            ClientCommand::SetAmmo { .. } => Some("ammo"),
+            ClientCommand::BuyItemInSlot { .. } => Some("buy"),
+            ClientCommand::WrapItem { .. } => Some("wrap"),
+            ClientCommand::AutoBankItem { .. } => Some("deposit"),
+            ClientCommand::AutoStoreBankItem { .. } => Some("withdraw"),
+            ClientCommand::SellItem { .. } => Some("sell"),
+            ClientCommand::ItemQuery { .. } | ClientCommand::NameQuery { .. } => None,
+            _ => Some("other"),
+        })
+        .collect()
+}
+
+/// `AutoEquipCursorItem` sends (`0x5e1757`) before its clear (`0x5e1763`), and `SwapItem`
+/// (`0x5e0fdb`) before its own (`0x5e0fe7`), so the clear's listeners send after the equip:
+/// `AutoEquipCursorItem()`, `EquipCursorItem` on a slot the item fits (`0x489757`, then `LockItem`
+/// on the occupant, `0x489761`) and on one it does not (`0x4897a0`), the bag click's equip
+/// (`0x4fa3ff`, after its own clear `0x4fa198`, then `LockItem` `0x4fa418`), the bind-confirm
+/// accept (`0x5e1c23`, whose `SetCursorItem` drops the held item first, `0x494bb6`), and the bag
+/// click's whole-stack swap (`LockItem` `0x4f9e85`, `SwapItem` `0x4f9eac`, its own clear
+/// `0x4f9eb8`).
+#[test]
+fn each_cursor_equip_sends_ahead_of_its_clears_listeners() {
+    let cases: [(&str, &str, &[&str]); 6] = [
+        (
+            "PickupContainerItem(0, 4)",
+            "AutoEquipCursorItem()",
+            &["equip", "cursor"],
+        ),
+        (
+            "PickupContainerItem(0, 4)",
+            "EquipCursorItem(1)",
+            &["swap", "cursor", "lock"],
+        ),
+        (
+            "PickupContainerItem(0, 1)",
+            "EquipCursorItem(1)",
+            &["equip", "cursor"],
+        ),
+        (
+            "",
+            "UseContainerItem(0, 4)",
+            &["cursor", "cursor", "cursor", "equip", "cursor", "lock"],
+        ),
+        (
+            "UseContainerItem(0, 7)",
+            "EquipPendingItem(0)",
+            &["lock", "cursor", "cursor", "equip", "cursor"],
+        ),
+        (
+            "PickupContainerItem(0, 1)",
+            "PickupContainerItem(0, 2)",
+            &["lock", "swap", "cursor", "cursor"],
+        ),
+    ];
+    for (setup, verb, wire) in cases {
+        let mut h = Bags::new();
+        assert_eq!(heard_around(&mut h, setup, verb), wire, "{setup} {verb}");
+    }
+}
+
+/// Arrows in backpack slot 5 (wire 27), the projectile class the ammo slot loads by.
+fn with_arrows(h: &mut Bags) {
+    const ARROWS: u32 = 2512;
+    const R: u64 = 0x4000_0000_0000_0A05;
+    let world = h.app.world_mut();
+    let me = world
+        .query_filtered::<Entity, With<SelfPlayer>>()
+        .single(world)
+        .expect("us");
+    world
+        .get_mut::<ObjectStore>(me)
+        .expect("our store")
+        .0
+        .merge(ObjectFields::from_pairs(&[
+            (F_INV_SLOT_HEAD + 2 * 27, R as u32),
+            (F_INV_SLOT_HEAD + 2 * 27 + 1, (R >> 32) as u32),
+        ]));
+    test_spawn_item(
+        world,
+        R,
+        ObjectFields::from_pairs(&[(F_TYPE, 0x3), (FIELD_OBJECT_ENTRY, ARROWS), (14, 200)]),
+        false,
+    );
+    world.resource_mut::<Items>().insert_template(
+        ARROWS,
+        Some(ItemInfo {
+            class: crate::ui_items::ITEM_CLASS_PROJECTILE,
+            ..test_template("Rough Arrow")
+        }),
+    );
+}
+
+/// A banker open, as the app holds it and the bank feed mirrors it to the VM, with linen in the
+/// bank's slot 1 (the player's slot 39).
+fn with_bank(h: &mut Bags) {
+    const L: u64 = 0x4000_0000_0000_0A30;
+    let world = h.app.world_mut();
+    world
+        .resource_mut::<crate::ui_bank::BankOpen>()
+        .open(0xF130_0000_0000_0043);
+    let me = world
+        .query_filtered::<Entity, With<SelfPlayer>>()
+        .single(world)
+        .expect("us");
+    world
+        .get_mut::<ObjectStore>(me)
+        .expect("our store")
+        .0
+        .merge(ObjectFields::from_pairs(&[
+            (F_INV_SLOT_HEAD + 2 * 39, L as u32),
+            (F_INV_SLOT_HEAD + 2 * 39 + 1, (L >> 32) as u32),
+        ]));
+    test_spawn_item(
+        world,
+        L,
+        ObjectFields::from_pairs(&[(F_TYPE, 0x3), (FIELD_OBJECT_ENTRY, LINEN), (14, 1)]),
+        false,
+    );
+    world
+        .non_send_resource_mut::<UiScript>()
+        .set_bank(Some(benilla_ui::script::BankState::default()));
+}
+
+/// Past `UseContainerItem`'s own clear (`0x4fa198`), its withdraw, deposit and sale send first
+/// (`0x4fa305` into `0x5e18f0`,
+/// `0x4fa33e` into `0x5e19e0`, `0x4fa378` into `0x5e1d50`) and lock after (`LockItem` at
+/// `0x4fa312`, `0x4fa34b`, `0x4fa37f`); `PickupMerchantItem`'s sale sends (`0x4fb7a7`) ahead of
+/// its `ClearCursor(0,1)` (`0x4fb7b3`).
+#[test]
+fn each_bank_and_vendor_send_goes_ahead_of_its_signals() {
+    type Prep = fn(&mut Bags);
+    let cases: [(Prep, &str, &str, &[&str]); 4] = [
+        (
+            with_bank,
+            "",
+            "UseContainerItem(-1, 1)",
+            &["cursor", "withdraw", "lock"],
+        ),
+        (
+            with_bank,
+            "",
+            "UseContainerItem(0, 1)",
+            &["cursor", "deposit", "lock"],
+        ),
+        (
+            Bags::open_vendor,
+            "",
+            "UseContainerItem(0, 1)",
+            &["cursor", "sell", "lock"],
+        ),
+        (
+            Bags::open_vendor,
+            "PickupContainerItem(0, 1)",
+            "PickupMerchantItem(0)",
+            &["sell", "cursor"],
+        ),
+    ];
+    for (prep, setup, verb, wire) in cases {
+        let mut h = Bags::new();
+        prep(&mut h);
+        assert_eq!(heard_around(&mut h, setup, verb), wire, "{setup} {verb}");
+    }
+}
+
+/// The other cursor verbs send in their bodies too, ahead of the clear or unlock that follows:
+/// `DeleteCursorItem` (`0x4898a3`, then `ClearCursor(1,1)` `0x4898af` and `LockItem` `0x4898bc`),
+/// the bag click's split (`0x4f9e43` into `0x5e1210`, then `0x4f9e4f`), the bag worker's store
+/// (`0x4c7e49` into `0x5e12e0`, then `0x4c7e55`), the ammo slot's load (`0x4c7440`, then
+/// `ClearCursor(1,1)` at `0x4c794d`), a vendor row's drop (`0x4f9f3c` into `0x5e1f30`, then
+/// `0x4f9f48`) and the gift wrap (`0x5ee0a5`, then the paper's unlock, `0x5ee0aa` into
+/// `0x5eded0`).
+#[test]
+fn each_cursor_send_goes_ahead_of_its_clears_listeners() {
+    let none = |_: &mut Bags| {};
+    // Armed with the host lent, so the paper resolves and its lock is real.
+    let wrap = |h: &mut Bags| {
+        with_hosted_vm(h.app.world_mut(), |s| s.expect("a VM").arm_gift_wrap(0, 6));
+    };
+    type Prep = fn(&mut Bags);
+    let cases: [(Prep, &str, &str, &[&str]); 6] = [
+        (
+            none,
+            "PickupContainerItem(0, 1)",
+            "DeleteCursorItem()",
+            &["destroy", "lock", "cursor", "lock"],
+        ),
+        (
+            none,
+            "SplitContainerItem(0, 3, 2)",
+            "PickupContainerItem(0, 9)",
+            &["split", "cursor"],
+        ),
+        (
+            none,
+            "PickupContainerItem(0, 1)",
+            "PutItemInBag(20)",
+            &["store", "cursor"],
+        ),
+        (
+            with_arrows,
+            "PickupContainerItem(0, 5)",
+            "PickupInventoryItem(0)",
+            &["ammo", "lock", "cursor"],
+        ),
+        (
+            Bags::open_vendor,
+            "PickupMerchantItem(1)",
+            "PickupContainerItem(0, 5)",
+            &["buy", "cursor"],
+        ),
+        (wrap, "", "PickupContainerItem(0, 1)", &["wrap", "lock"]),
+    ];
+    for (prep, setup, verb, wire) in cases {
+        let mut h = Bags::new();
+        prep(&mut h);
+        assert_eq!(heard_around(&mut h, setup, verb), wire, "{setup} {verb}");
+    }
 }
 
 /// An item action's press equips the item it finds in the bags (`0x4e602a` → `0x5e1840`), read

@@ -23,8 +23,6 @@ pub(super) fn pickup_inventory_item(lua: &Lua, id: u32) -> mlua::Result<bool> {
     let may_cast = protected::gate(lua, Tag::CAST);
     let vendor = crate::script::merchant::at_call(lua);
     let click = verb(lua, |model| doll_click(lua, model, id, may_cast, vendor));
-    crate::script::item_calls::submit_item_calls(lua)?;
-    crate::script::merchant::submit_slot_buys(lua)?;
     Ok(match click {
         DollClick::Done(repaint) => repaint,
         DollClick::Swapped(occupant) => {
@@ -120,7 +118,7 @@ pub(super) fn doll_click(
                 may_cast,
             });
         } else if usable && (1..=19).contains(&id) {
-            model.item_calls.push(ItemCall::RepairWorn(id));
+            model.item_call(ItemCall::RepairWorn(id));
         }
         return DollClick::Done(false);
     }
@@ -203,13 +201,11 @@ pub(super) fn doll_click(
                 return DollClick::Done(false);
             };
             if entry == held.item_id {
-                model
-                    .merchant_drops
-                    .push(crate::script::MerchantCall::BuyInSlot {
-                        bag: EQUIPMENT_BAG,
-                        slot: id,
-                        entry,
-                    });
+                model.merchant_call_in_verb(crate::script::MerchantCall::BuyInSlot {
+                    bag: EQUIPMENT_BAG,
+                    slot: id,
+                    entry,
+                });
             }
             clear_cursor(model);
             DollClick::Done(true)
@@ -232,14 +228,14 @@ fn ammo_click(lua: &Lua, model: &mut Model) -> DollClick {
             let projectile = held.item_class == Some(ITEM_CLASS_PROJECTILE)
                 && super::equip::held_facts(lua, model, &held).is_some();
             if projectile {
-                model.item_calls.push(ItemCall::SetAmmo {
+                model.item_call(ItemCall::SetAmmo {
                     entry: held.item_id,
                 });
             } else {
                 auto_equip_cursor_item(lua, model);
             }
         }
-        Some(CursorPayload::Ammo(held)) => model.item_calls.push(ItemCall::SetAmmo {
+        Some(CursorPayload::Ammo(held)) => model.item_call(ItemCall::SetAmmo {
             entry: held.item_id,
         }),
         _ => {
@@ -264,11 +260,10 @@ fn ammo_click(lua: &Lua, model: &mut Model) -> DollClick {
 }
 
 /// `EquipCursorItem(id)` (`0x489660`), its body apart from the doll click's: it acts only on a held
-/// item and files its send for the host ([`equip_held`]), then locks the displaced item past the
-/// swap's call (`0x489761`).
+/// item, its swap or auto-equip sending in place ahead of its clear ([`equip_held`]), then locks
+/// the displaced item past the swap's call (`0x489761`).
 pub(super) fn equip_cursor_item(lua: &Lua, id: u32) -> mlua::Result<()> {
     let occupant = verb(lua, |model| equip_held(lua, model, id));
-    crate::script::item_calls::submit_item_calls(lua)?;
     if let Some(occupant) = occupant {
         verb(lua, |model| lock_item(model, occupant));
     }
@@ -323,10 +318,10 @@ fn equip_held(lua: &Lua, model: &mut Model, id: u32) -> Option<u64> {
     None
 }
 
-/// `AutoEquipCursorItem(1)` on the held item (`0x48979c`): the question skipped, the send filed.
+/// `AutoEquipCursorItem(1)` on the held item (`0x48979c`): the question skipped, the send handed
+/// over in place.
 fn auto_equip_unasked(lua: &Lua, model: &mut Model) {
-    let step = super::equip::auto_equip_held(lua, model, true);
-    super::equip::file_auto_equip(model, step);
+    super::equip::auto_equip_held(lua, model, true, false);
 }
 
 /// `CursorCanGoInSlot(id)`, the doll slot's highlight on `CURSOR_UPDATE`
@@ -355,7 +350,6 @@ pub(super) fn use_inventory_item(lua: &Lua, id: u32, on_self: bool) -> mlua::Res
     verb(lua, |model| {
         use_cleared(lua, model, id, on_self, may_cast, &mut call)
     });
-    crate::script::item_calls::submit_item_calls(lua)?;
     if let Some(call) = call {
         crate::script::calls::submit(lua, call)?;
     }
@@ -407,7 +401,7 @@ fn use_cleared(
         && crate::script::char_stats::own_inv_view(lua, model, id as usize)
             .is_some_and(|s| s.item_id != 0)
     {
-        model.item_calls.push(ItemCall::RepairWorn(id));
+        model.item_call(ItemCall::RepairWorn(id));
     }
 }
 
@@ -464,7 +458,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "AutoEquipCursorItem",
         lua.create_function(|lua, ()| {
             verb(lua, |model| auto_equip_cursor_item(lua, model));
-            crate::script::item_calls::submit_item_calls(lua)
+            Ok(())
         })?,
     )?;
     g.set(
@@ -505,7 +499,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_equip_cursor_item, equip_cursor_item, pickup_inventory_item};
+    use super::{auto_equip_cursor_item, equip_cursor_item, pickup_inventory_item, verb};
     use crate::script::cursor::{CursorAction, CursorPayload, CursorSpell, EQUIPMENT_BAG};
     use crate::script::{ContainerMove, ContainerSlot, ContainerState, InvSlotView, UiScript};
     use crate::script::{ItemPick, ScriptCall};
@@ -978,7 +972,12 @@ mod tests {
         assert!(s.cursor_payload().is_none());
         assert_eq!(
             s.take_item_calls(),
-            [ItemCall::AutoEquip { bag: 0, slot: 2 }]
+            [ItemCall::AutoEquip {
+                bag: 0,
+                slot: 2,
+                ammo: None,
+                picked: false
+            }]
         );
 
         s.set_cursor_for_test(CursorPayload::Ammo(CursorAmmo {
@@ -1097,8 +1096,7 @@ mod tests {
         s.seat_item_records();
         s.run("PickupContainerItem(0, 1)").unwrap();
 
-        assert!(auto_equip_cursor_item(s.lua(), &mut s.model_mut()));
-        s.submit_filed_item_calls();
+        assert!(verb(s.lua(), |m| auto_equip_cursor_item(s.lua(), m)));
         assert!(s.cursor_item().is_none());
         assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
     }
@@ -1207,8 +1205,7 @@ mod tests {
 
         s.seat_item_records();
         s.run("PickupInventoryItem(1)").unwrap();
-        assert!(auto_equip_cursor_item(s.lua(), &mut s.model_mut()));
-        s.submit_filed_item_calls();
+        assert!(verb(s.lua(), |m| auto_equip_cursor_item(s.lua(), m)));
         assert!(s.cursor_item().is_none(), "put back");
         assert!(s.take_container_autoequips().is_empty());
 
@@ -1217,8 +1214,7 @@ mod tests {
         s.set_container(0, Some(state));
         s.seat_item_records();
         s.run("SplitContainerItem(0, 1, 2)").unwrap();
-        assert!(auto_equip_cursor_item(s.lua(), &mut s.model_mut()));
-        s.submit_filed_item_calls();
+        assert!(verb(s.lua(), |m| auto_equip_cursor_item(s.lua(), m)));
         assert!(s.cursor_item().is_none(), "sent");
         assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
     }
@@ -1575,8 +1571,7 @@ mod tests {
         );
         s.seat_item_records();
         s.run("PickupContainerItem(-1, 3)").unwrap();
-        assert!(auto_equip_cursor_item(s.lua(), &mut s.model_mut()));
-        s.submit_filed_item_calls();
+        assert!(verb(s.lua(), |m| auto_equip_cursor_item(s.lua(), m)));
         assert_eq!(s.take_container_autoequips(), vec![(-1, 3)]);
         assert!(s.cursor_item().is_none());
 
@@ -1604,8 +1599,7 @@ mod tests {
             consumable: false,
             equip_slots: vec![20, 21, 22, 23],
         }));
-        assert!(auto_equip_cursor_item(s.lua(), &mut s.model_mut()));
-        s.submit_filed_item_calls();
+        assert!(verb(s.lua(), |m| auto_equip_cursor_item(s.lua(), m)));
         assert_eq!(s.take_container_autoequips(), vec![(EQUIPMENT_BAG, 64)]);
     }
 
@@ -1630,8 +1624,7 @@ mod tests {
         s.run("PickupBagFromSlot(64)").unwrap();
         assert_eq!(s.cursor_item().map(|i| i.guid), Some(0x112));
         s.set_bank(None);
-        assert!(auto_equip_cursor_item(s.lua(), &mut s.model_mut()));
-        s.submit_filed_item_calls();
+        assert!(verb(s.lua(), |m| auto_equip_cursor_item(s.lua(), m)));
         assert_eq!(s.take_container_autoequips(), vec![(EQUIPMENT_BAG, 64)]);
         assert!(s.cursor_item().is_none());
     }

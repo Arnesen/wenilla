@@ -1,9 +1,9 @@
 //! The engine half of the bag, cursor and paper-doll verbs, which the host applies inside each
 //! verb's call ([`ItemCall`]): the reference's bindings send their packets in their own bodies,
 //! so a chunk's item packets leave in call order with every other verb's, and its next line reads
-//! what the verb did. A verb's segment files its calls on the model as it decides
-//! ([`super::Model::item_calls`]), and the binding hands them to the host as the segment ends
-//! ([`submit_item_calls`]).
+//! what the verb did. A verb's segment hands each call to the host in its place among the
+//! segment's signals as it decides ([`Model::item_call`]), so a send goes out ahead of the clear
+//! or the unlock that follows it in the reference, and their listeners hear it sent.
 
 use mlua::Lua;
 
@@ -39,8 +39,17 @@ pub enum ItemCall {
     /// A repair-cursor click on a worn item, its 1-based doll slot (`0x4c7714`, `0x4c79c4`).
     RepairWorn(u32),
     /// `AutoEquipCursorItem`'s send past its question (`0x5e1480`): the item from Lua
-    /// `(bag, slot)`.
-    AutoEquip { bag: i64, slot: u32 },
+    /// `(bag, slot)`. `ammo`: the item is a projectile of that entry by its cached record
+    /// (`0x5e16ff`, `0x5e1704`), which loads with `CMSG_SET_AMMO` (`0x5e170c`-`0x5e1725`) in place of
+    /// `CMSG_AUTOEQUIP_ITEM`. `picked`: `0x5e1840` put it on the cursor in the same call (the bag's
+    /// right-click, the bar's equip, the bind-confirm accept), so its pickup and the send's
+    /// put-down both land inside the call (`0x494c4a`, `0x49520a`) and play with the send.
+    AutoEquip {
+        bag: i64,
+        slot: u32,
+        ammo: Option<u32>,
+        picked: bool,
+    },
     /// `AutoEquipCursorItem`'s bind question (`0x5e16c6`): the record and its event, filed with
     /// the item held.
     EquipAsk { bag: i64, slot: u32, guid: u64 },
@@ -60,19 +69,19 @@ pub enum ItemCall {
     BindOnUse { may_cast: bool },
 }
 
-/// Hand the host the item calls the verb's last segment filed, in the order filed, before the
-/// verb returns.
-pub(super) fn submit_item_calls(lua: &Lua) -> mlua::Result<()> {
-    let calls = std::mem::take(
-        &mut lua
-            .app_data_mut::<Model>()
-            .expect("model app_data")
-            .item_calls,
-    );
-    for call in calls {
-        super::calls::submit(lua, ScriptCall::Item(call))?;
+impl Model {
+    /// Hand `call` to the host in its place among the verb segment's signals
+    /// ([`Model::call_in_verb`]), as the reference's bindings send in their own bodies: ahead of
+    /// the clear or the unlock that follows the send.
+    pub(crate) fn item_call(&mut self, call: ItemCall) {
+        self.call_in_verb(ScriptCall::Item(call));
     }
-    Ok(())
+
+    /// [`Model::item_call`] for a held vendor row's drop: the buy (`0x5e1f30`) goes out ahead of
+    /// the drop's `ClearCursor` (`0x4c7954`, `0x4c7eb6`, `0x4f9f48`).
+    pub(crate) fn merchant_call_in_verb(&mut self, call: super::MerchantCall) {
+        self.call_in_verb(ScriptCall::Merchant(call));
+    }
 }
 
 /// Hand the host one item call now.
@@ -113,7 +122,7 @@ impl super::UiScript {
     /// The `(bag, slot)` auto-equip sends kept ([`ItemCall::AutoEquip`]).
     pub fn take_container_autoequips(&mut self) -> Vec<(i64, u32)> {
         self.take_item_calls_where(|call| match *call {
-            ItemCall::AutoEquip { bag, slot } => Some((bag, slot)),
+            ItemCall::AutoEquip { bag, slot, .. } => Some((bag, slot)),
             _ => None,
         })
     }
@@ -183,14 +192,5 @@ impl super::UiScript {
     /// How many `ConfirmBindOnUse()` calls were kept.
     pub fn take_bind_on_use_confirms(&mut self) -> u32 {
         self.take_bind_on_use_casts().len() as u32
-    }
-}
-
-#[cfg(test)]
-impl super::UiScript {
-    /// Hand the host the item calls a model step filed outside its binding, as the binding would
-    /// as its segment ends ([`submit_item_calls`]).
-    pub(crate) fn submit_filed_item_calls(&mut self) {
-        submit_item_calls(&self.lua).expect("the filed item calls submit");
     }
 }

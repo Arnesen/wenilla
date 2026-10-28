@@ -19,8 +19,8 @@ pub enum AutoEquip {
     None,
     /// An item from an equipment or equipped-bag slot, put back (`0x5e155a`).
     Back,
-    /// The equip is sent, the item `guid` from this Lua `(bag, slot)` cleared off the cursor. A
-    /// projectile loads by entry with `CMSG_SET_AMMO`, the app's to tell.
+    /// The equip is sent, the item `guid` from this Lua `(bag, slot)` cleared off the cursor after
+    /// it. A projectile loads by entry with `CMSG_SET_AMMO` ([`ItemCall::AutoEquip`]'s `ammo`).
     Sent { bag: i64, slot: u32, guid: u64 },
     /// An unbound bind-on-equip item raised `AUTOEQUIP_BIND_CONFIRM` (`0x5e16c6`) and the call
     /// returned (`0x5e16ce`) with no `ClearCursor`: the item stays on the cursor, with whatever
@@ -65,6 +65,28 @@ impl EquipFacts {
             bound: v.already_bound,
         }
     }
+}
+
+/// Hand what `AutoEquipCursorItem` decided to the host in its place among the segment's signals
+/// ([`Model::item_call`]): the reference sends in its body ahead of its clear (`0x5e1757` then
+/// `0x5e1763`; held ammo `0x5e14e0` then `0x5e14ec`), and raises its question (`0x5e16c6`) or asks
+/// the record (`0x5e1603`) there too. `ammo`: the sent item is a projectile of that entry
+/// ([`projectile_entry`]). `picked`: `0x5e1840` put the item on the cursor in the same call, so
+/// the send carries the pickup and put-down that land inside it.
+fn hand_over(model: &mut Model, step: AutoEquip, ammo: Option<u32>, picked: bool) {
+    let call = match step {
+        AutoEquip::None | AutoEquip::Back => return,
+        AutoEquip::Sent { bag, slot, .. } => ItemCall::AutoEquip {
+            bag,
+            slot,
+            ammo,
+            picked,
+        },
+        AutoEquip::Asked { bag, slot, guid } => ItemCall::EquipAsk { bag, slot, guid },
+        AutoEquip::Waits { entry } => ItemCall::AutoEquipWait { entry },
+        AutoEquip::Ammo { entry } => ItemCall::SetAmmo { entry },
+    };
+    model.item_call(call);
 }
 
 /// The answer of an equip question.
@@ -133,18 +155,27 @@ pub(super) fn held_facts(lua: &Lua, model: &Model, item: &CursorItem) -> Option<
 /// by its guid (`0x5e15b2`, none returning with nothing done), then asked about, parked on its
 /// record or sent ([`equip_question`]), the server picking the slot and swapping the displaced
 /// piece back (`ItemHandler.cpp:138-228`). A split carry is no exception: the call never reads
-/// the split count `0xb4b40c`. The send tail clears with `ClearCursor(ebx,1)` (`0x5e1761`): a
-/// projectile loads by entry with `CMSG_SET_AMMO` and stays in its bag, so its arm sets
+/// the split count `0xb4b40c`. The send (`0x5e1757`) goes to the host in place ahead of its clear,
+/// `ClearCursor(ebx,1)` (`0x5e1763`) ([`hand_over`], `picked` passed on): a projectile, by the
+/// found item's record ([`projectile_entry`]), loads by entry with `CMSG_SET_AMMO` and stays in its bag, so its arm sets
 /// `ebx = 1` (`0x5e1704`, `0x5e1711`) and the item unlocks; every other arm keeps the lock for
 /// the server's answer (`0x5e1577`). Neither locks anything new.
-pub(crate) fn auto_equip_held(lua: &Lua, model: &mut Model, suppress: bool) -> AutoEquip {
+pub(crate) fn auto_equip_held(
+    lua: &Lua,
+    model: &mut Model,
+    suppress: bool,
+    picked: bool,
+) -> AutoEquip {
     let item = match &model.cursor {
         Some(CursorPayload::Item(item)) => item.clone(),
-        // A zero entry sends nothing (`0x5e14a6`).
+        // A zero entry sends nothing (`0x5e14a6`); else the send, then `ClearCursor(1,1)`.
         Some(CursorPayload::Ammo(ammo)) if ammo.item_id != 0 => {
-            let entry = ammo.item_id;
+            let step = AutoEquip::Ammo {
+                entry: ammo.item_id,
+            };
+            hand_over(model, step, None, picked);
             clear_cursor(model);
-            return AutoEquip::Ammo { entry };
+            return step;
         }
         _ => return AutoEquip::None,
     };
@@ -156,53 +187,50 @@ pub(crate) fn auto_equip_held(lua: &Lua, model: &mut Model, suppress: bool) -> A
         return AutoEquip::None;
     };
     let (bag, slot, guid) = (item.bag, item.slot, item.guid);
-    match equip_question(lua, model, facts, suppress) {
-        Question::Ask => return AutoEquip::Asked { bag, slot, guid },
-        Question::Wait(entry) => return AutoEquip::Waits { entry },
-        Question::Send => {}
-    }
-    let how = if item.item_class == Some(ITEM_CLASS_PROJECTILE) {
-        Clear::BOTH
-    } else {
-        Clear::KEEP_LOCK
+    let step = match equip_question(lua, model, facts, suppress) {
+        Question::Ask => AutoEquip::Asked { bag, slot, guid },
+        Question::Wait(entry) => AutoEquip::Waits { entry },
+        Question::Send => AutoEquip::Sent { bag, slot, guid },
     };
-    clear(model, how);
-    AutoEquip::Sent { bag, slot, guid }
+    let ammo = projectile_entry(model, facts.item_id);
+    hand_over(model, step, ammo, picked);
+    if let AutoEquip::Sent { .. } = step {
+        clear(
+            model,
+            if ammo.is_some() {
+                Clear::BOTH
+            } else {
+                Clear::KEEP_LOCK
+            },
+        );
+    }
+    step
 }
 
-/// File what [`auto_equip_held`] did for the host ([`ItemCall::AutoEquip`],
-/// [`ItemCall::EquipAsk`], [`ItemCall::AutoEquipWait`]). Returns whether to repaint.
-pub(super) fn file_auto_equip(model: &mut Model, step: AutoEquip) -> bool {
-    match step {
-        AutoEquip::Sent { bag, slot, .. } => {
-            model.item_calls.push(ItemCall::AutoEquip { bag, slot });
-            true
-        }
-        AutoEquip::Asked { bag, slot, guid } => {
-            model
-                .item_calls
-                .push(ItemCall::EquipAsk { bag, slot, guid });
-            false
-        }
-        AutoEquip::Waits { entry } => {
-            model.item_calls.push(ItemCall::AutoEquipWait { entry });
-            false
-        }
-        AutoEquip::Ammo { entry } => {
-            model.item_calls.push(ItemCall::SetAmmo { entry });
-            true
-        }
-        AutoEquip::Back => true,
-        AutoEquip::None => false,
-    }
+/// The sent item's entry when its record, in the item cache `GetItemClass` reads (`0x5d9f30`
+/// at `0x5e16ff`), is a projectile's (`0x5e1704`): the one place that decides between
+/// `CMSG_SET_AMMO` and `CMSG_AUTOEQUIP_ITEM`, and the clear's unlock. An uncached record is none.
+fn projectile_entry(model: &Model, item_id: u32) -> Option<u32> {
+    model
+        .item_templates
+        .get(&item_id)
+        .is_some_and(|t| t.class == ITEM_CLASS_PROJECTILE)
+        .then_some(item_id)
+}
+
+/// Whether what [`auto_equip_held`] did changed the cursor, so the caller repaints.
+pub(super) fn repaints(step: AutoEquip) -> bool {
+    matches!(
+        step,
+        AutoEquip::Sent { .. } | AutoEquip::Ammo { .. } | AutoEquip::Back
+    )
 }
 
 /// `AutoEquipCursorItem()` (`0x48a040` into `0x5e1480`), a click or drop on the doll's model
-/// (`PaperDollFrame.lua:31-35`), filing the send, the question or the wait for the host
-/// ([`file_auto_equip`]). Returns whether to repaint.
+/// (`PaperDollFrame.lua:31-35`), its send, question or wait handed to the host in place. Returns
+/// whether to repaint.
 pub(crate) fn auto_equip_cursor_item(lua: &Lua, model: &mut Model) -> bool {
-    let step = auto_equip_held(lua, model, false);
-    file_auto_equip(model, step)
+    repaints(auto_equip_held(lua, model, false, false))
 }
 
 /// `SetCursorItem`'s control gate (`0x494b8d`): without control of the character
@@ -225,32 +253,36 @@ pub(crate) fn auto_equip_from(
     item: CursorItem,
     suppress: bool,
 ) -> mlua::Result<AutoEquip> {
-    if !put_for_equip(lua, item)? {
+    let Some(picked) = put_for_equip(lua, item)? else {
         return Ok(AutoEquip::None);
-    }
-    Ok(auto_equip_on_cursor(lua, suppress))
+    };
+    Ok(auto_equip_on_cursor(lua, suppress, picked))
 }
 
 /// The first half of `0x5e1840`: the trade window's refusal (`0x5e1897`-`0x5e18b3`, `0x4bfd20`),
 /// shown inside the verb, ends it before the set, and the set itself (`0x5e18c9`), whose signals
-/// all fire ahead of `AutoEquipCursorItem`. Returns whether `AutoEquipCursorItem` follows.
-pub(crate) fn put_for_equip(lua: &Lua, item: CursorItem) -> mlua::Result<bool> {
+/// all fire ahead of `AutoEquipCursorItem`. `None` when the refusal ended it, else whether the
+/// set put the item on: with no control `SetCursorItem` returns before its clear and its pickup
+/// (`0x494b8d`-`0x494ba9` → `0x494c59`), and `AutoEquipCursorItem` still runs on what is held.
+pub(crate) fn put_for_equip(lua: &Lua, item: CursorItem) -> mlua::Result<Option<bool>> {
     let in_trade = lua
         .app_data_ref::<Model>()
         .expect("model app_data")
         .trade_holds(item.guid);
     if in_trade {
         crate::script::calls::display_error(lua, "ERR_EQUIP_TRADE_ITEM")?;
-        return Ok(false);
+        return Ok(None);
     }
-    set_cursor(lua, true, Setter::Item, |_| Some(CursorPayload::Item(item)));
-    Ok(true)
+    Ok(Some(set_cursor(lua, true, Setter::Item, |_| {
+        Some(CursorPayload::Item(item))
+    })))
 }
 
 /// The second half of `0x5e1840`: `AutoEquipCursorItem(suppress)` (`0x5e18d5`) on whatever the
-/// cursor holds now, the signals of the set and of any listener between having run.
-pub(crate) fn auto_equip_on_cursor(lua: &Lua, suppress: bool) -> AutoEquip {
-    verb(lua, |model| auto_equip_held(lua, model, suppress))
+/// cursor holds now, the signals of the set and of any listener between having run. Its send
+/// carries the set's pickup when the set ran (`picked`, [`hand_over`]).
+pub(crate) fn auto_equip_on_cursor(lua: &Lua, suppress: bool, picked: bool) -> AutoEquip {
+    verb(lua, |model| auto_equip_held(lua, model, suppress, picked))
 }
 
 impl crate::script::UiScript {
@@ -268,7 +300,7 @@ impl crate::script::UiScript {
                 auto_equip_cursor_item(&self.lua, model);
             }
         });
-        crate::script::item_calls::submit_item_calls(&self.lua)
+        Ok(())
     }
 
     /// The item at Lua `(bag, slot)` as the cursor takes it; none for an empty or unresolved slot
@@ -282,6 +314,8 @@ impl crate::script::UiScript {
 
     /// `0x5e1840` on the item at Lua `(bag, slot)`: the bind-confirm accept re-issues it with
     /// `suppress` set (`0x5e1c23`). Nothing happens for an empty or unresolved slot (`0x5e18da`).
+    /// With the host out applying the accept, the set's signals, the send handed over in place
+    /// and the clear's signals run in that order as it settles.
     pub fn auto_equip_slot(&mut self, bag: i64, slot: u32, suppress: bool) -> AutoEquip {
         let Some(item) = self.item_at(bag, slot) else {
             return AutoEquip::None;
@@ -309,26 +343,27 @@ impl crate::script::UiScript {
     /// The first half of `0x5e1840` on the bag item `guid` ([`put_for_equip`]), for the bar's
     /// equip, whose set signals (`0x494bb6`, `0x494c54`) fire before the send. Returns whether
     /// [`Self::auto_equip_cursor`] follows: an item the model does not hold is no `0x5e1840`
-    /// (`0x5e18da`), and the trade window's refusal ends it.
-    pub fn put_on_cursor_for_equip(&mut self, guid: u64) -> bool {
+    /// (`0x5e18da`), and the trade window's refusal ends it. `Some(picked)`: whether the set put
+    /// the item on, which [`Self::auto_equip_cursor`] takes.
+    pub fn put_on_cursor_for_equip(&mut self, guid: u64) -> Option<bool> {
         let at = {
             let model = self.model_ref();
             crate::script::held::find_guid(&self.lua, &model, guid)
                 .map(|(bag, slot, _)| (bag, slot))
         };
-        let Some(item) = at.and_then(|(bag, slot)| self.item_at(bag, slot)) else {
-            return false;
-        };
+        let item = at.and_then(|(bag, slot)| self.item_at(bag, slot))?;
         put_for_equip(&self.lua, item).unwrap_or_else(|e| {
             self.push_error(e);
-            false
+            None
         })
     }
 
     /// The second half of `0x5e1840`: `AutoEquipCursorItem(suppress)` on whatever the cursor
-    /// holds now ([`auto_equip_on_cursor`]).
-    pub fn auto_equip_cursor(&mut self, suppress: bool) -> AutoEquip {
-        auto_equip_on_cursor(&self.lua, suppress)
+    /// holds now ([`auto_equip_on_cursor`]), its send handed to the host in place: the bar's
+    /// equip, whose segment is held while its call applies and runs as it settles. `picked`: the
+    /// first half's set put the item on ([`Self::put_on_cursor_for_equip`]).
+    pub fn auto_equip_cursor(&mut self, suppress: bool, picked: bool) -> AutoEquip {
+        auto_equip_on_cursor(&self.lua, suppress, picked)
     }
 }
 
@@ -367,6 +402,7 @@ mod tests {
     #[test]
     fn an_unknown_item_leaves_the_cursor_alone() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
         s.run("PickupContainerItem(0, 1)").unwrap();
 
@@ -377,10 +413,11 @@ mod tests {
     }
 
     /// The set's inner clear drops a held item with an unlock; the bar's item never locks; the
-    /// send leaves the cursor empty and queues nothing, the caller sends.
+    /// send is handed over in place and leaves the cursor empty.
     #[test]
     fn the_pick_drops_the_held_item_and_the_send_clears_the_cursor() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
         s.seat_item_records();
         s.run("PickupContainerItem(0, 1)").unwrap();
@@ -397,13 +434,38 @@ mod tests {
         assert!(s.cursor_item().is_none());
         assert!(!s.item_locked(0x11), "the held item went back unlocked");
         assert!(!s.item_locked(0x12));
-        assert!(s.take_container_autoequips().is_empty());
+        assert_eq!(s.take_container_autoequips(), vec![(0, 2)]);
+    }
+
+    /// The bar's second half hands its send over in place, carrying the set's pickup.
+    #[test]
+    fn the_bars_second_half_hands_its_send_over() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_container(0, Some(bag(&[(1, 0x11, 4)])));
+        s.seat_item_records();
+        assert_eq!(s.put_on_cursor_for_equip(0x11), Some(true));
+        assert!(matches!(
+            s.auto_equip_cursor(false, true),
+            AutoEquip::Sent { guid: 0x11, .. }
+        ));
+        assert!(s.cursor_item().is_none());
+        assert_eq!(
+            s.take_item_calls(),
+            [crate::script::ItemCall::AutoEquip {
+                bag: 0,
+                slot: 1,
+                ammo: None,
+                picked: true
+            }]
+        );
     }
 
     /// A projectile's send clears with the unlock (`0x5e1711`, `0x5e1763`), signalling it.
     #[test]
     fn a_projectile_signals_the_unlock_of_its_clear() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(bag(&[(1, 0x11, 6)])));
         s.seat_item_records();
         s.run(
@@ -420,6 +482,78 @@ mod tests {
             }
         );
         assert_eq!(s.eval::<i64>("return SIGNALS").unwrap(), 1);
+        assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
+    }
+
+    /// The item cache's record decides the projectile (`0x5e16ff` → `GetItemClass 0x5d9f30`), not
+    /// the class the item took the cursor with: arrows picked up before their record landed load
+    /// by entry and unlock once it has, and the call carries that decision.
+    #[test]
+    fn a_projectile_held_before_its_record_landed_loads_by_the_record() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        let mut arrows = bag(&[(1, 0x11, 6)]);
+        arrows.slots.get_mut(&1).unwrap().item_class = None;
+        s.set_container(0, Some(arrows));
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.item_locked(0x11));
+        s.set_item_template(
+            101,
+            crate::script::ItemTemplateView {
+                class: super::ITEM_CLASS_PROJECTILE,
+                ..Default::default()
+            },
+        );
+        s.run("AutoEquipCursorItem()").unwrap();
+        assert!(s.cursor_item().is_none());
+        assert!(!s.item_locked(0x11), "the clear unlocked it");
+        assert_eq!(
+            s.take_item_calls(),
+            [crate::script::ItemCall::AutoEquip {
+                bag: 0,
+                slot: 1,
+                ammo: Some(101),
+                picked: false
+            }]
+        );
+    }
+
+    /// With no control `SetCursorItem` returns before its clear and its pickup (`0x494b8d` →
+    /// `0x494c59`), and `AutoEquipCursorItem` sends what is held: the send carries no pickup.
+    #[test]
+    fn a_refused_set_sends_the_held_item_without_its_pickup() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
+        s.seat_item_records();
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        s.set_player_control(false);
+        assert_eq!(s.put_on_cursor_for_equip(0x12), Some(false));
+        assert!(matches!(
+            s.auto_equip_cursor(false, false),
+            AutoEquip::Sent { guid: 0x11, .. }
+        ));
+        assert_eq!(
+            s.take_item_calls(),
+            [crate::script::ItemCall::AutoEquip {
+                bag: 0,
+                slot: 1,
+                ammo: None,
+                picked: false
+            }]
+        );
+        s.set_player_control(true);
+        s.unlock_item(0x11);
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        s.set_player_control(false);
+        assert!(matches!(
+            s.auto_equip_slot(0, 2, true),
+            AutoEquip::Sent { guid: 0x11, .. }
+        ));
+        assert!(matches!(
+            s.take_item_calls()[..],
+            [crate::script::ItemCall::AutoEquip { picked: false, .. }]
+        ));
     }
 
     /// `AutoEquipCursorItem` never reads the split count `0xb4b40c` (`0x5e1480`-`0x5e1790`): a
@@ -626,12 +760,8 @@ mod tests {
 
         assert_eq!(s.cursor_item().map(|i| i.guid), Some(0x11));
         assert!(s.item_locked(0x11));
-        let calls = s.take_script_calls();
-        let [crate::script::ScriptCall::UseContainerItem(u)] = calls.as_slice() else {
-            panic!("one use call: {calls:?}");
-        };
-        assert!(u.asks);
-        assert!(s.take_container_autoequips().is_empty());
+        assert_eq!(s.take_container_equip_asks(), vec![(0, 1, 0x11)]);
+        assert!(s.take_script_calls().is_empty(), "the question alone");
     }
 
     /// Unbound and not asked, the right-click puts the item on the cursor and the send clears it
@@ -646,11 +776,15 @@ mod tests {
 
         assert!(s.cursor_item().is_none());
         assert!(s.item_locked(0x11));
-        let calls = s.take_script_calls();
-        let [crate::script::ScriptCall::UseContainerItem(u)] = calls.as_slice() else {
-            panic!("one use call: {calls:?}");
-        };
-        assert!(!u.asks);
+        assert_eq!(
+            s.take_item_calls(),
+            [crate::script::ItemCall::AutoEquip {
+                bag: 0,
+                slot: 1,
+                ammo: None,
+                picked: true
+            }]
+        );
     }
 
     /// The accept re-issues from the slot with `suppress` set (`0x5e1c23`): the held item drops
@@ -718,6 +852,7 @@ mod tests {
     fn a_held_handler_reads_the_cursor_its_step_left() {
         for held in [false, true] {
             let mut s = UiScript::new().unwrap();
+            s.keep_calls();
             s.set_container(0, Some(bag(&[(1, 0x11, 4), (2, 0x12, 4)])));
             s.seat_item_records();
             s.run(
