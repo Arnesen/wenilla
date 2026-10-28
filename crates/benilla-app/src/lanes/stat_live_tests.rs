@@ -406,8 +406,15 @@ fn client() -> Client {
     c.frame(vec![]);
     c.frame(vec![]);
     c.eval::<()>(false, "Seen = {}");
-    // The purse's VM copy, which no feed pushes: `GetMoney` reads the coinage through the host.
-    crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| s.expect("a VM").set_money(123_456));
+    // The VM's copies of the purse, the experience, the rest and the play-time bits, which no
+    // feed pushes: their getters read the descriptor through the host.
+    crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| {
+        let s = s.expect("a VM");
+        s.set_money(123_456);
+        s.set_player_xp(4_200, 9_000);
+        s.set_rest_state(1, 1_500, true);
+        s.set_play_time(true, false);
+    });
     c
 }
 
@@ -418,6 +425,8 @@ fn client() -> Client {
 #[test]
 fn every_stat_getter_answers_the_same_live_as_off_the_snapshot() {
     let mut c = client();
+    // The four tokens' copies, which no feed pushes in game, seated for the host-less answer.
+    crate::ui_unit::seat_tokens_once(c.app.world_mut());
     let snapshot = c.answers(false);
     let live = c.answers(true);
     assert_eq!(snapshot, live, "snapshot vs live");

@@ -302,6 +302,10 @@ fn client() -> Client {
     c.frame(vec![]);
     c.frame(vec![]);
     c.eval::<()>(false, "Seen = {} PetSeen = {} DeepSeen = {}");
+    // The VM's copy of our experience, which no feed pushes: `UnitXP` reads it through the host.
+    crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| {
+        s.expect("a VM").set_player_xp(1234, 0)
+    });
     c
 }
 
@@ -311,6 +315,8 @@ fn client() -> Client {
 #[test]
 fn every_token_form_names_the_same_unit_live_as_off_the_snapshot() {
     let mut c = client();
+    // The four tokens' copies, which no feed pushes in game, seated for the host-less answer.
+    crate::ui_unit::seat_tokens_once(c.app.world_mut());
     let snapshot = c.answers(false);
     let live = c.answers(true);
     assert_eq!(snapshot.len(), TOKENS.len());

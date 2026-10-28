@@ -477,13 +477,10 @@ impl Plugin for UiActionPlugin {
                     // After the macros' bound spells, which a macro slot resolves through.
                     state::feed_action_state
                         .in_set(UnitFeed)
-                        .in_set(crate::ui_unit::WorldEnterSeats)
                         .after(crate::player::ControlRestore)
                         .after(crate::ui_macro::MacroBindings)
                         .after(feed::feed_actions),
-                    // After the unit snapshots, which its handlers read (the target stored at
-                    // `0x4936e2`, a watched field written before its watch runs), and ahead of the
-                    // events its producers precede: the select's `PLAYER_TARGET_CHANGED` and the
+                    // Ahead of the events its producers precede: the select's `PLAYER_TARGET_CHANGED` and the
                     // combo points' event (the unit events), the watched fields' own events (the
                     // field notices, whose lane fires after every feed) and the form's cast
                     // change (the cast reports).
@@ -491,7 +488,6 @@ impl Plugin for UiActionPlugin {
                         .in_set(UnitFeed)
                         .in_set(CooldownEvents)
                         .after(state::feed_action_state)
-                        .after(crate::ui_unit::UnitSnapshots)
                         .before(crate::ui_cast::feed_cast_reports),
                     // The latches must be current before the target chain's cursor reads them.
                     track_learned_abilities
