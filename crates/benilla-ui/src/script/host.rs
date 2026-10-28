@@ -156,6 +156,9 @@ struct HostSlot {
     /// The deferred stretches running now ([`UiScript::defer`]): while any is, every handler fired
     /// is held and nothing that waits runs, a lend's included.
     defer: Cell<u32>,
+    /// A deferred stretch split as a close's engine and interface halves ([`UiScript::defer_split`]):
+    /// its own calls apply at once while its signals and writes wait.
+    split: Cell<bool>,
     /// The live reads a host's apply lends while it calls into the VM's own steps with the host
     /// out ([`UiScript::reading`]): what a getter's question asks when no host is in the slot.
     /// The same invariant as `host`: valid and unaliased while set.
@@ -354,14 +357,23 @@ pub(crate) fn holding(lua: &Lua) -> bool {
     (slot.hold.get() && slot.host.get().is_none()) || slot.defer.get() > 0
 }
 
-/// A deferred stretch, while it lives ([`UiScript::defer`]).
-pub struct Deferring(Lua);
+/// Whether a call made now applies at once through the lent host inside a split stretch
+/// ([`UiScript::defer_split`]): the host is in the slot, not out applying another call.
+pub(crate) fn splitting(lua: &Lua) -> bool {
+    let slot = slot(lua);
+    slot.host.get().is_some() && slot.split.get()
+}
+
+/// A deferred stretch, while it lives ([`UiScript::defer`]), with whether the stretch around it
+/// was split, put back as it ends.
+pub struct Deferring(Lua, bool);
 
 impl Drop for Deferring {
     fn drop(&mut self) {
         let slot = slot(&self.0);
         slot.defer.set(slot.defer.get() - 1);
         slot.open.set(slot.open.get() - 1);
+        slot.split.set(self.1);
     }
 }
 
@@ -372,12 +384,25 @@ impl UiScript {
     /// waits, and the host counts as open, so a call made meanwhile waits too.
     pub fn defer(&self) -> Deferring {
         let lua = self.lua().clone();
-        {
+        let outer = {
             let slot = slot(&lua);
             slot.defer.set(slot.defer.get() + 1);
             slot.open.set(slot.open.get() + 1);
-        }
-        Deferring(lua)
+            // A stretch nested in a split one parks its calls with the rest.
+            slot.split.replace(false)
+        };
+        Deferring(lua, outer)
+    }
+
+    /// [`Self::defer`] split as a close's engine and interface halves: every call the stretch's own
+    /// Lua and verbs make applies at once through the lent host, as the reference's engine
+    /// callback sends inside its handler (`AutoEquipCursorItem` from `0x5e17a0`, `0x5e1757`; a
+    /// swap's `0x5e0fdb` ahead of its clear `0x5e0fe7`), while every signal and write waits, to be
+    /// parked ([`Self::park_since`]). What a call's apply signals waits with the rest.
+    pub fn defer_split(&self) -> Deferring {
+        let guard = self.defer();
+        slot(&guard.0).split.set(true);
+        guard
     }
 
     /// Run `f` with `host` lent to the VM: each script call a verb makes meanwhile applies before

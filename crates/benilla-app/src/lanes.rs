@@ -120,6 +120,14 @@ pub(crate) fn firing_now() -> Option<Stamp> {
     FIRING.get()
 }
 
+/// Whether the item firing on this thread was pushed between `from` and `to`, or nests under one
+/// that was: it is part of what ran between the two marks.
+pub(crate) fn firing_between(from: Mark, to: Mark) -> bool {
+    FIRING
+        .get()
+        .is_some_and(|s| s.path().iter().any(|n| (from.0..to.0).contains(n)))
+}
+
 thread_local! {
     /// A close core is running held behind a lane: what a core it re-enters signals is its.
     static BEHIND: Cell<bool> = const { Cell::new(false) };
@@ -572,6 +580,8 @@ mod petition_live_tests;
 mod quest_log_live_tests;
 #[cfg(test)]
 mod quiet_tests;
+#[cfg(test)]
+mod record_callback_tests;
 #[cfg(test)]
 mod reputation_live_tests;
 #[cfg(test)]

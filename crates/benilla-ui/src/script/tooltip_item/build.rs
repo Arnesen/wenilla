@@ -253,9 +253,38 @@ pub(super) fn keep_misses(model: &mut Model, h: FrameHandle, dedupe: bool) {
         return;
     }
     let waits = model.item_cache_waits.entry(h).or_default();
+    let mut asks = Vec::new();
     for m in misses {
+        if let CacheWait::Template(entry) = m {
+            asks.push(entry);
+        }
         if !dedupe || !waits.contains(&m) {
             waits.push(m);
+        }
+    }
+    model.tooltip_record_asks.extend(asks);
+}
+
+/// Ask the item cache for every record a tooltip kept a wait on, each with the tooltips'
+/// callback, which the answer runs in its place among the entry's (`0x52b722`, `0x52eda4`); the
+/// caller holds no borrow of the model.
+pub(in crate::script) fn ask_tooltip_records(lua: &Lua) {
+    let asks = std::mem::take(
+        &mut lua
+            .app_data_mut::<Model>()
+            .expect("model app_data")
+            .tooltip_record_asks,
+    );
+    for entry in asks {
+        let ask = crate::script::RecordAsk::Item {
+            entry,
+            owner: 0,
+            callback: crate::script::ItemCallback::Tooltip,
+        };
+        if let Err(e) = crate::script::calls::ask(lua, ask) {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .record_lua_error(&e);
         }
     }
 }
@@ -292,6 +321,8 @@ pub(in crate::script) fn build_item(
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     keep_misses(&mut model, h, true);
                     model.item_builds.insert(h, build);
+                    drop(model);
+                    ask_tooltip_records(lua);
                     return Ok(false);
                 }
             }
@@ -350,6 +381,7 @@ pub(in crate::script) fn build_item(
         }
     }
     show_or_hide_empty(lua, h);
+    ask_tooltip_records(lua);
     Ok(live)
 }
 
@@ -384,10 +416,11 @@ pub(super) fn sell_amount(
     i64::from(amount)
 }
 
-/// `CGTooltip::OnCacheAnswer` (`0x52e530`) for every answer pushed since the last tick: each
-/// callback node an answer settles rebuilds its tooltip from the inputs it keeps then, so two
-/// answers are two rebuilds. A tooltip that keeps none takes the answer and stays as it is.
-pub(in crate::script) fn answer_item_caches(lua: &Lua) -> Vec<mlua::Error> {
+/// `CGTooltip::OnCacheAnswer` (`0x52e530`) for every answer pushed since the last tick, or with
+/// `only`, for the item record cache's answer of that entry alone, at its packet: each callback
+/// node an answer settles rebuilds its tooltip from the inputs it keeps then, so two answers are
+/// two rebuilds. A tooltip that keeps none takes the answer and stays as it is.
+pub(in crate::script) fn answer_item_caches(lua: &Lua, only: Option<u32>) -> Vec<mlua::Error> {
     let due: Vec<(u32, FrameHandle, usize)> = {
         let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
         let model = &mut *guard;
@@ -402,7 +435,8 @@ pub(in crate::script) fn answer_item_caches(lua: &Lua) -> Vec<mlua::Error> {
                 continue;
             };
             let before = waits.len();
-            waits.retain(|w| !w.answered(lua, model, &mut sets));
+            let settles = |w: &CacheWait| only.is_none_or(|e| *w == CacheWait::Template(e));
+            waits.retain(|w| !(settles(w) && w.answered(lua, model, &mut sets)));
             let answers = before - waits.len();
             if !waits.is_empty() {
                 model.item_cache_waits.insert(h, waits);

@@ -423,6 +423,11 @@ pub enum ItemCallback {
     /// `GetBuybackItemInfo` (`0x4fb40c`), whose callback `0x4fb570` signals `MERCHANT_UPDATE`; its
     /// query's guid is 0 (`0x4fb3f0`-`0x4fb3f7`).
     Buyback,
+    /// A tooltip build's miss, with the tooltip as the cookie: the item tooltip's `0x52e530`
+    /// (`0x52b722`, `0x52bf60`, `0x52dc27`, `0x535f53`, `0x5361ee`) or the spell tooltip's
+    /// reagent `0x52f820` (`0x52eda4`, `0x52f3f4`), whose answer rebuilds the tooltips the VM
+    /// keeps waiting on it.
+    Tooltip,
 }
 
 /// Make `ask` inside the getter's call. A getter never raises for its lookup: with no host lent,
@@ -716,6 +721,11 @@ pub(crate) fn submit(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
     if model.call_depth >= MAX_NESTING {
         return Err(mlua::Error::runtime(TOO_DEEP));
     }
+    if super::host::splitting(lua) {
+        drop(model);
+        apply_now(lua, call);
+        return Ok(());
+    }
     let seq = model.queue_call(call);
     model.call_raises.awaited.push(seq);
     drop(model);
@@ -858,6 +868,73 @@ pub(super) fn settle(lua: &Lua, script: &mut UiScript) {
                 drain(lua);
             }
         }
+    }
+}
+
+/// A held segment's calls inside a split stretch ([`super::host::splitting`]), each applied at
+/// once through the lent host in its order: what the segment raised ahead of a call is held as
+/// its own segment first, so what the call's apply signals waits behind it; the rest is returned
+/// to be held.
+pub(crate) fn apply_split_calls(
+    lua: &Lua,
+    raised: Vec<super::tick::Raised>,
+) -> Vec<super::tick::Raised> {
+    use super::tick::Raised;
+    if !super::host::splitting(lua) || !raised.iter().any(|r| matches!(r, Raised::Call(_))) {
+        return raised;
+    }
+    let mut rest = Vec::with_capacity(raised.len());
+    // Cursor views open in `rest`: a segment is cut only where none is, so each view stays with
+    // its end.
+    let mut views = 0usize;
+    for r in raised {
+        match r {
+            Raised::Call(call) if super::host::splitting(lua) => {
+                if views == 0 {
+                    hold_segment(lua, std::mem::take(&mut rest));
+                }
+                apply_now(lua, *call);
+            }
+            other => {
+                match other {
+                    Raised::CursorView(_) => views += 1,
+                    Raised::EndCursorView => views = views.saturating_sub(1),
+                    _ => {}
+                }
+                rest.push(other);
+            }
+        }
+    }
+    rest
+}
+
+/// Hold `raised` for the host as one segment ([`Held::Segment`]) when it holds anything a
+/// listener or a later read sees: an event, a lock or cursor write, or a call.
+pub(crate) fn hold_segment(lua: &Lua, raised: Vec<super::tick::Raised>) {
+    use super::tick::Raised;
+    if raised.iter().any(|r| {
+        matches!(
+            r,
+            Raised::Event(..) | Raised::Lock { .. } | Raised::CursorWrite(_) | Raised::Call(_)
+        )
+    }) {
+        hold(lua, Held::Segment(raised));
+    }
+}
+
+/// Apply `call` through the lent host at once, with its tail, inside a split stretch: what it
+/// signals waits; what it raises is the script's error.
+fn apply_now(lua: &Lua, call: ScriptCall) {
+    let outer = swap_raising(lua, None);
+    let mut script = UiScript::reentrant(lua);
+    let tail = super::host::with_host(lua, |host| host.apply(&mut script, call)).flatten();
+    if let Some(tail) = tail {
+        tail(&mut script);
+    }
+    if let Some(message) = swap_raising(lua, outer) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .record_lua_error(&mlua::Error::runtime(message));
     }
 }
 
@@ -1974,6 +2051,46 @@ mod tests {
         assert!(s.item_locked(LOCKED), "the lock made again");
         assert!(s.cursor_payload().is_none(), "the clear made again");
         assert_eq!(global::<String>(&s, "SEEN"), "nil");
+    }
+
+    /// A host whose every call signals `PLAYER_TARGET_CHANGED`.
+    struct Signalling(Vec<ScriptCall>);
+
+    impl CallHost for Signalling {
+        fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+            self.0.push(call);
+            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+            None
+        }
+    }
+
+    /// In a split stretch, a verb that signals and then makes a call applies the call at once,
+    /// and what was raised before it waits ahead of what its apply signals.
+    #[test]
+    fn a_split_stretch_keeps_a_signal_ahead_of_a_later_calls_signals() {
+        let mut s = UiScript::new().unwrap();
+        on(&s, "LOOT_OPENED", r#"ORDER = (ORDER or "") .. "opened ""#);
+        on(
+            &s,
+            "PLAYER_TARGET_CHANGED",
+            r#"ORDER = (ORDER or "") .. "applied ""#,
+        );
+        let mut host = Signalling(Vec::new());
+        let lua = s.lua().clone();
+        let mark = s.waiting_mark();
+        let deferring = s.defer_split();
+        s.hosted(&mut host, |_| {
+            super::super::tick::verb(&lua, |model| {
+                model.raise("LOOT_OPENED", vec![]);
+                model.call_in_verb(ScriptCall::ClearTarget);
+            })
+        });
+        assert_eq!(host.0, vec![ScriptCall::ClearTarget], "applied at once");
+        assert_eq!(global::<Option<String>>(&s, "ORDER"), None, "held");
+        let key = s.park_since(mark).expect("parked");
+        drop(deferring);
+        s.hosted(&mut host, |s| s.run_parked(key));
+        assert_eq!(global::<String>(&s, "ORDER"), "opened applied ");
     }
 
     /// The deferral's guard ends with a panic that unwinds through it: nothing is held after.
