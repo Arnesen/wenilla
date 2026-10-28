@@ -5,14 +5,12 @@
 //! description, gold. The aura builder `0x52f880` is [`super::tooltip_aura`]'s.
 //!
 //! The app resolves each spell into a [`SpellTooltipView`] (`$`-tokens, cast, range and duration
-//! data, each `GlobalStrings.lua` template by key, read at the render), kept in an ask-once store
-//! by spell id and pushed ahead of a hover: one store for the
-//! views built against the player and one for those built against its pet, which the builder's
-//! unit selector asks for. A miss records the id; a `set_spell_by_id` miss also waits, and the
-//! app's answer re-renders that tooltip a frame after the hover. That frame is a known difference
-//! from the reference, which builds every spell tooltip at the call (`0x52e610`); a spell no
-//! pushed set names, such as an `enchant:` link's, always meets it. A talent miss shows its view on
-//! the next hover. An aura view's miss waits the same way.
+//! data, each `GlobalStrings.lua` template by key, read at the render), built at the setter's call
+//! through the lent host ([`SpellViewQuery`]), as the reference builds every spell tooltip at the
+//! call (`0x52e610`). With no host to ask, the views come from an ask-once store by spell id, one
+//! for the views built against the player and one for those built against its pet, which the
+//! builder's unit selector asks for: a miss records the id and waits, and a push of the view
+//! re-renders that tooltip. An aura view's miss waits the same way.
 
 use mlua::{Lua, Table, Value};
 
@@ -82,6 +80,11 @@ pub struct SpellTooltipView {
     pub use_all: Option<TooltipText>,
     /// The `$`-substituted description.
     pub description: TooltipText,
+    /// The tools' and reagents' entries whose record the item cache missed at this build, each
+    /// looked up with the tooltip as its answer's cookie (`0x52eda4`, `0x52f3f4`) and counted
+    /// (`0x52edaf`, `0x52f3ff`): the last to answer rebuilds the tooltip
+    /// ([`answer_spell_items`]).
+    pub item_misses: Vec<u32>,
 }
 
 /// The spell's reputation line (`0x52f2ae`-`0x52f38e`): `ITEM_REQ_REPUTATION` (`0x854b8c`) of the
@@ -100,10 +103,23 @@ pub struct ReputationRequirement {
     pub female: bool,
 }
 
+/// A spell's view built at the call, as the builder `0x52e610` builds it at each setter's: against
+/// the player, or with `pet`, the builder's unit selector (`0x6e3130`), against its pet. The host
+/// declines a spell with no record, and the getter reads the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpellViewQuery {
+    pub spell_id: u32,
+    pub pet: bool,
+}
+
+impl super::live::LiveQuery for SpellViewQuery {
+    type Answer = SpellTooltipView;
+}
+
 impl super::UiScript {
     /// Store or replace a spell's view built against the player, answering its ask: a tooltip
-    /// waiting on it re-renders now, a frame after its hover, where the reference builds it whole
-    /// at the call (`0x52e610`).
+    /// waiting on it re-renders now. The store is what a setter reads with no host to build the
+    /// view at the call ([`SpellViewQuery`]).
     pub fn set_spell_tooltip(&mut self, spell_id: u32, view: SpellTooltipView) {
         self.store_spell_view(false, spell_id, view);
     }
@@ -142,42 +158,6 @@ impl super::UiScript {
     /// Drain the spell ids the renderers asked the pet's store for and it lacked.
     pub fn take_pet_spell_tooltip_asks(&mut self) -> Vec<u32> {
         self.model_mut().pet_spell_tooltip_asks.drain().collect()
-    }
-
-    /// The spells whose player view a hover reads from the VM's own state rather than the
-    /// player's book: the questgiver panel's reward spell, read through the lent host
-    /// ([`super::quest::state`]), each log entry's and the open craft's spell subjects. The app
-    /// pushes their views ahead of a hover; the auras' views are [`Self::aura_tooltip_subjects`].
-    pub fn spell_tooltip_subjects(&self) -> Vec<u32> {
-        let panel = super::quest::state(self.lua()).and_then(|q| q.reward_spell);
-        let model = self.model_ref();
-        let rewards = panel
-            .iter()
-            .chain(
-                model
-                    .quest_log
-                    .entries
-                    .iter()
-                    .filter(|e| !e.is_header)
-                    .filter_map(|e| {
-                        model
-                            .quest_store
-                            .records
-                            .get(&e.quest_id)?
-                            .reward_spell
-                            .as_ref()
-                    }),
-            )
-            .map(|s| s.spell_id);
-        let craft = model
-            .craft
-            .iter()
-            .flat_map(|c| &c.recipes)
-            .filter_map(|r| match r.tooltip {
-                CraftTooltip::Spell(id) => Some(id),
-                CraftTooltip::Item(_) => None,
-            });
-        rewards.chain(craft).filter(|&id| id != 0).collect()
     }
 }
 
@@ -327,13 +307,16 @@ fn spell_store(
     }
 }
 
-/// Look up a spell's view built against the player, or with `alt_caster` against its pet; a miss
-/// records the ask.
+/// A spell's view built against the player, or with `alt_caster` against its pet, at the call
+/// through the lent host ([`SpellViewQuery`]), else off the store, where a miss records the ask.
 pub(super) fn spell_view_of(
     lua: &Lua,
     spell_id: u32,
     alt_caster: bool,
 ) -> Option<SpellTooltipView> {
+    if let Some(v) = built_at_the_call(lua, spell_id, alt_caster) {
+        return Some(v);
+    }
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let (views, asks) = spell_store(&mut model, alt_caster);
     let v = views.get(&spell_id).cloned();
@@ -341,6 +324,28 @@ pub(super) fn spell_view_of(
         asks.insert(spell_id);
     }
     v
+}
+
+/// [`spell_view_of`] recording no ask: the view built at the call, else the store's.
+pub(super) fn spell_view_peek(
+    lua: &Lua,
+    spell_id: u32,
+    alt_caster: bool,
+) -> Option<SpellTooltipView> {
+    built_at_the_call(lua, spell_id, alt_caster).or_else(|| {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        spell_store(&mut model, alt_caster)
+            .0
+            .get(&spell_id)
+            .cloned()
+    })
+}
+
+/// The view the lent host builds at the call ([`SpellViewQuery`]); spell 0 asks nothing.
+fn built_at_the_call(lua: &Lua, spell_id: u32, pet: bool) -> Option<SpellTooltipView> {
+    (spell_id != 0)
+        .then(|| super::live::ask(lua, &SpellViewQuery { spell_id, pet }))
+        .flatten()
 }
 
 /// The talent lines [`render_spell`] interleaves (`TOOLTIP_TALENT_RANK 0x854a2c`,
@@ -634,6 +639,7 @@ pub(super) fn set_spell_with_talent(
     }
     match spell_view_of(lua, spell_id, false) {
         Some(v) => {
+            note_build(lua, h, spell_id, &v.item_misses);
             render_spell(lua, this, &v, SpellRenderOpts::default(), Some(&talent))?;
         }
         None => {
@@ -689,6 +695,95 @@ pub(super) fn set_spell_flagged(
     fill_spell(lua, this, h, spell_id, fallback_name, opts)
 }
 
+/// What a fresh spell build keeps on its tooltip for the rebuild an item answer runs: the spell id
+/// (`+0x39c`, stored at `0x52e6c6`, zeroed by the clear at `0x5300e3`) and the misses still owed
+/// (`+0x3b0`, zeroed at `0x52e6cc`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SpellBuild {
+    spell_id: u32,
+    misses: u32,
+}
+
+/// A fresh build of `spell_id` on `h`, which missed the item records `misses`: the tooltip keeps
+/// the spell and the count, and each miss keeps one answer's callback per tooltip and entry
+/// (`0x55ba30` with flag 1, `0x52ed85`), across later builds and clears.
+fn note_build(lua: &Lua, h: FrameHandle, spell_id: u32, misses: &[u32]) {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    model.spell_builds.insert(
+        h,
+        SpellBuild {
+            spell_id,
+            misses: misses.len() as u32,
+        },
+    );
+    if misses.is_empty() {
+        return;
+    }
+    let waits = model.spell_item_waits.entry(h).or_default();
+    for &entry in misses {
+        if !waits.contains(&entry) {
+            waits.push(entry);
+        }
+    }
+}
+
+/// `CGTooltip::OnSpellItemAnswer` (`0x52f820`) for every item record pushed since the last tick:
+/// each answer a tooltip waits on takes one off its count (`0x52f838`), and once none is owed
+/// (`0x52f847`) a tooltip still keeping a spell (`0x52f849`) builds it again fresh, with every
+/// other argument 0 (`0x52f862`), and sizes it (`0x52f867`). A refused record never answers
+/// (`0x52f826`).
+pub(super) fn answer_spell_items(lua: &Lua) -> Vec<mlua::Error> {
+    let answered: Vec<(FrameHandle, usize)> = {
+        let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
+        let model = &mut *guard;
+        if model.spell_item_waits.is_empty() {
+            return Vec::new();
+        }
+        let tips: Vec<FrameHandle> = model.spell_item_waits.keys().copied().collect();
+        let mut answered = Vec::new();
+        for h in tips {
+            let Some(mut waits) = model.spell_item_waits.remove(&h) else {
+                continue;
+            };
+            let before = waits.len();
+            waits.retain(|entry| !model.item_templates.contains_key(entry));
+            if !waits.is_empty() {
+                model.spell_item_waits.insert(h, waits.clone());
+            }
+            if waits.len() < before {
+                answered.push((h, before - waits.len()));
+            }
+        }
+        answered
+    };
+    let mut errors = Vec::new();
+    for (h, answers) in answered {
+        for _ in 0..answers {
+            let rebuild = {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let id = model.frame_id(h);
+                model.spell_builds.get_mut(&h).and_then(|b| {
+                    b.misses = b.misses.saturating_sub(1);
+                    (b.misses == 0 && b.spell_id != 0).then_some((id, b.spell_id))
+                })
+            };
+            let Some((id, spell_id)) = rebuild else {
+                continue;
+            };
+            clear(lua, h);
+            let rebuilt = frame_wrapper(lua, id).and_then(|this| {
+                fill_spell(lua, &this, h, spell_id, None, SpellRenderOpts::default())
+            });
+            if let Err(e) = rebuilt {
+                errors.push(e);
+            }
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            super::tooltip::size_tooltip(&mut model, h);
+        }
+    }
+    errors
+}
+
 /// Fill a cleared tooltip with the spell's view, or with the fallback name and a wait on the ask.
 fn fill_spell(
     lua: &Lua,
@@ -699,7 +794,10 @@ fn fill_spell(
     opts: SpellRenderOpts,
 ) -> mlua::Result<bool> {
     let live = match spell_view_of(lua, spell_id, opts.alt_caster) {
-        Some(v) => render_spell(lua, this, &v, opts, None)?,
+        Some(v) => {
+            note_build(lua, h, spell_id, &v.item_misses);
+            render_spell(lua, this, &v, opts, None)?
+        }
         None => {
             if let Some(name) = fallback_name.clone() {
                 append_line(lua, this, (name, WHITE), None, false)?;
