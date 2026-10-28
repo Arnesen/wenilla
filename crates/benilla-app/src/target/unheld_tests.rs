@@ -704,6 +704,18 @@ fn a_world_port_keeps_the_selection_by_guid() {
                 needs_ack: true,
             },
         );
+        assert_eq!(
+            selection(&f).0,
+            Some(guid),
+            "the port's packet leaves the old world: held: {held}"
+        );
+        if held {
+            assert!(
+                selection(&f).1.is_some(),
+                "the held target's object stands until the timer"
+            );
+        }
+        crate::net::fire_worldport_timer(f.app.world_mut());
         assert_eq!(selection(&f), (Some(guid), None), "held: {held}");
         assert_eq!(picks(&f), Vec::<u64>::new(), "the port sends nothing");
         let seen: u32 = crate::script_calls::eval_in_vm(f.app.world_mut(), "return SEEN");
