@@ -264,6 +264,128 @@ fn an_item_cooldowns_listeners_read_its_packets_list() {
     );
 }
 
+/// A cooldown query that missed its record left the callback `0x6e2f70` on the item cache
+/// (`0x6e2efb`), and the record's answer runs it inside its handler (`0x55bdb0`): the query again,
+/// and with the item's cooldown running the pair and the bags (`0x6e2f89`, `0x6e2f8e`), at the
+/// answer's place. So with the answer first and a spell cooldown after it in one frame, the
+/// record's flush fires first and reads Frost Nova cold.
+#[test]
+fn a_cooldown_querys_record_flushes_at_its_answers_place() {
+    const HEARTHSTONE: u32 = 6948;
+    const HEARTH: u32 = 8690;
+    let mut c = client();
+    let world = c.app.world_mut();
+    {
+        let mut slots = world.resource_mut::<crate::ui_action::ActionSlots>();
+        slots.buttons.insert(
+            3,
+            ActionButton {
+                slot: 3,
+                action: HEARTHSTONE,
+                kind: ACTION_KIND_ITEM,
+            },
+        );
+        slots.touch();
+    }
+    world
+        .resource_mut::<crate::spell::Cooldowns>()
+        .apply_wire_item_cooldown(HEARTHSTONE, HEARTH, std::time::Instant::now());
+    c.frame(vec![]);
+    c.seen(&[]);
+    let mut record = crate::items::test_template("Hearthstone");
+    record.use_spell = Some(benilla_protocol::messages::ItemUseSpell {
+        spell_id: HEARTH,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    });
+    c.frame(vec![
+        vec![SessionEvent::ItemTemplate {
+            entry: HEARTHSTONE,
+            info: Some(Box::new(record)),
+        }],
+        vec![spell_cooldown(FROST_NOVA, 10_000)],
+    ]);
+    assert_eq!(
+        c.seen(&[
+            "ACTIONBAR_UPDATE_COOLDOWN",
+            "SPELL_UPDATE_COOLDOWN",
+            "BAG_UPDATE_COOLDOWN"
+        ]),
+        [
+            "ACTIONBAR_UPDATE_COOLDOWN:0:0:0:0:0:0",
+            "SPELL_UPDATE_COOLDOWN:0:0:0:0:0:0",
+            "BAG_UPDATE_COOLDOWN:0:0:0:0:0:0",
+            "ACTIONBAR_UPDATE_COOLDOWN:10:0:0:10:0:0",
+            "SPELL_UPDATE_COOLDOWN:10:0:0:10:0:0",
+        ]
+    );
+}
+
+/// `SMSG_PET_SPELLS` derives the macros that follow the pet's book after its book's sort and
+/// ahead of `SetPetGuid` (`0x4bdadb` → `0x4b2fd0`, `0x4bdae0` → `0x4f0ce0`, `0x4bdaf0` →
+/// `0x4bc7e0`): a `/cast` of the pet's spell that missed is still unbound to the sort's
+/// `SPELLS_CHANGED`, and bound out of the pet's book to `SetPetGuid`'s `PET_BAR_UPDATE`, which
+/// `GetActionAutocast` reads through the record's book (`0x4e6fcb`).
+#[test]
+fn a_pet_spell_list_binds_its_macros_between_its_sort_and_its_pet() {
+    use benilla_protocol::messages::{
+        PetActionEntry, PetSpells, ACTION_KIND_MACRO, PET_ACT_ENABLED,
+    };
+    const PET: u64 = 0x2A;
+    const SEDUCTION: u32 = 6358;
+    let mut c = client();
+    let world = c.app.world_mut();
+    world.insert_resource(spells_with(&[SEDUCTION]));
+    {
+        let mut script = world.non_send_resource_mut::<UiScript>();
+        script.run(r#"SLASH_CAST1 = "/cast""#).unwrap();
+        script.set_macros(benilla_ui::script::MacroState::from_scopes(
+            vec![benilla_ui::script::MacroView {
+                name: "Sed".into(),
+                body: format!("/cast Spell {SEDUCTION}"),
+                ..Default::default()
+            }],
+            Vec::new(),
+        ));
+        // The load's derivation, with no pet: a miss.
+        script.derive_macro_bindings(|_, _| true);
+    }
+    {
+        let mut slots = world.resource_mut::<crate::ui_action::ActionSlots>();
+        slots.buttons.insert(
+            3,
+            ActionButton {
+                slot: 3,
+                action: 1,
+                kind: ACTION_KIND_MACRO,
+            },
+        );
+        slots.touch();
+    }
+    c.frame(vec![]);
+    c.eval::<()>(
+        false,
+        r#"local g = CreateFrame("Frame")
+        g:RegisterEvent("SPELLS_CHANGED")
+        g:RegisterEvent("PET_BAR_UPDATE")
+        g:SetScript("OnEvent", function()
+            table.insert(Seen, "PET:" .. event .. ":" .. tostring(GetActionAutocast(4)))
+        end)"#,
+    );
+    c.seen(&[]);
+    let entry = PetActionEntry::from(SEDUCTION | (u32::from(PET_ACT_ENABLED) << 24));
+    c.frame(vec![vec![SessionEvent::PetSpells(Box::new(PetSpells {
+        pet_guid: PET,
+        spells: vec![entry],
+        ..Default::default()
+    }))]]);
+    assert_eq!(
+        c.seen(&["PET"]),
+        ["PET:SPELLS_CHANGED:nil", "PET:PET_BAR_UPDATE:1"]
+    );
+}
+
 /// The getters answer the same through the lent host as off the frame's snapshots wherever the
 /// snapshots are current: every slot, cold and running. The book and the bags are read through
 /// the host alone, so their lines are the live read's.
@@ -467,17 +589,16 @@ fn the_pet_book_and_a_pet_bound_slot_read_the_pets_list_inside_their_packet() {
     }
     c.frame(vec![]);
     c.frame(vec![]);
-    c.app
-        .world_mut()
-        .resource_mut::<crate::ui_macro::MacroBoundSpells>()
-        .0
-        .insert(
+    crate::ui_macro::bind_for_test(
+        &mut c.app.world_mut().non_send_resource_mut::<UiScript>(),
+        &[(
             1,
             crate::ui_macro::Bound {
                 spell: crate::ui_macro::BoundSpell::Spell(BITE),
                 pet_book: true,
             },
-        );
+        )],
+    );
     c.frame(vec![]);
     c.eval::<()>(
         false,

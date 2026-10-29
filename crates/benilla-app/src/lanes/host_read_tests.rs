@@ -43,8 +43,8 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 18;
-const FRAME_FINAL_INPUTS: usize = 109;
+const FRAME_FINAL_FEEDS: usize = 17;
+const FRAME_FINAL_INPUTS: usize = 106;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
@@ -72,10 +72,10 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::ui_action::state::feed_action_state", &["spell::cooldowns::Cooldowns",
-        "ui_action::state::ActionStateMemory"],
-        "keeps the frame's `GetTime` clock the cooldown reads map each start through, and \
-         writes the list as it walks the slots"),
+    ("::ui_action::state::feed_action_state", &["ui_action::state::ActionStateMemory"],
+        "stores the slots' usable pairs the frame's writes owe and the reactive list the frame's \
+         learns grew, which the usable refreshes inside the packets read, where the reference \
+         stores each at its write (`0x4e590a`, `0x4b27c7`)"),
     ("::ui_cast::feed_cast_reports", &["ui_action::cast_lines::CastFailRedisplays"],
         "holds the refusals that wait on their item's record, which it tests to queue the cast \
          lane's retry behind the frame's packets, where the reference shows each in the record's \
@@ -108,10 +108,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
          character's buttons off benilla's older numbering through the bar verbs, a move with no \
          reference fact; the reference runs the reader inside the account-data settle \
          (`0x5afaca`, `0x5afd19`)"),
-    ("::ui_macro::rebind_macro_spells", &["ui_macro::MacroBoundSpells"],
-        "copies out the bound spells the bar's states read, derived once after the frame's last \
-         pet spell list, where the reference derives at each list's handler (`0x4bdae0` into \
-         `DeriveUnresolvedBoundSpells` `0x4f0ce0`)"),
     ("::ui_session::feed_interact_npc", &["ui_session::InteractNpc"],
         "copies the interaction latch into the `npc` unit the token lookups read, where the \
          reference's `npc` is the latch itself (`0x515c00`), set inside the handlers through \
