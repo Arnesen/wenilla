@@ -360,8 +360,9 @@ fn a_charmed_player_is_refused_by_every_selector() {
 }
 
 /// `HandleUnitCombatMessage`'s select of the attacker (`0x6259fe`) is `SelectTarget` too, so
-/// with a cursor standing it binds the attacker to the cast and the selection stays empty. The
-/// packet handler runs in no script, whose context passes the bind's tag 2 (`0x494a5a`).
+/// with a cursor standing it binds the attacker to the cast at the packet and the selection stays
+/// empty. The packet handler runs in no script, whose context passes the bind's tag 2
+/// (`0x494a5a`).
 #[test]
 fn an_attacker_acquired_with_the_cursor_up_is_bound() {
     let mut f = fix(false);
@@ -370,7 +371,6 @@ fn an_attacker_acquired_with_the_cursor_up_is_bound() {
     *f.app.world_mut().resource_mut::<Selection>() = Selection::default();
     f.swung_at_us(mob);
     f.acquire();
-    f.bind();
     assert_eq!(f.wire(), (vec![Some(MOB)], vec![]));
     assert_eq!(f.selected(), None);
     assert!(!f.cursor_is_up());
@@ -414,7 +414,8 @@ fn a_caster_at_us_is_selected_when_it_cannot_assist_and_nothing_is() {
     assert_eq!(f.wire(), (vec![], vec![MOB]), "CMSG_SET_SELECTION");
 }
 
-/// The caster's select is `SelectTarget` too, so a standing cursor binds it to the cast instead.
+/// The caster's select is `SelectTarget` too, so a standing cursor binds it to the cast instead,
+/// at the packet.
 #[test]
 fn a_caster_acquired_with_the_cursor_up_is_bound() {
     let mut f = fix(false);
@@ -424,7 +425,6 @@ fn a_caster_acquired_with_the_cursor_up_is_bound() {
     f.make_unit(mob);
     f.cast_at_us(mob);
     f.acquire();
-    f.bind();
     assert_eq!(f.wire(), (vec![Some(MOB)], vec![]));
     assert_eq!(f.selected(), None);
 }
@@ -482,6 +482,35 @@ fn a_tab_goes_on_past_a_unit_the_cursor_refused() {
         "the second press has moved on to the next"
     );
     assert_eq!(f.selected(), Some(OLD), "the target never moved");
+}
+
+/// The melee probe's press is the player's Attack, whose nearest-enemy pick (`0x6130bc` →
+/// `0x4941e6`) is `SelectTarget` too: with the cursor up it binds the unit inside the press, so
+/// the cast goes out in the same pass, with nothing selected and no swing.
+#[test]
+fn the_melee_probes_pick_with_the_cursor_up_binds_in_its_press() {
+    let mut f = fix(false);
+    *f.app.world_mut().resource_mut::<Selection>() = Selection::default();
+    let mob = f.mob;
+    f.app
+        .world_mut()
+        .entity_mut(mob)
+        .insert(crate::net::NetEntity {
+            kind: benilla_protocol::EntityKind::Unit,
+            display_id: None,
+            scale: 1.0,
+        });
+    f.make_unit(mob);
+    vm_in_the_world(&mut f);
+    f.cursor_up();
+    f.app.world_mut().write_message(scan::AttackNearestRequest);
+    f.app
+        .world_mut()
+        .run_system_once(crate::ui_action::attack_nearest_probe)
+        .expect("the probe runs");
+    assert_eq!(f.wire(), (vec![Some(MOB)], vec![]));
+    assert_eq!(f.selected(), None);
+    assert!(!f.cursor_is_up());
 }
 
 /// A left click with the cursor up and no object under the press: the terrain leg

@@ -293,6 +293,11 @@ impl TargetScan<'_, '_> {
             .map(|g| g.0)
     }
 
+    /// The object `guid` names (`0x468460`, typemask 1).
+    fn entity_of(&self, guid: u64) -> Option<Entity> {
+        self.index.as_ref()?.0.get(&guid).copied()
+    }
+
     fn store_at(&self, entity: Entity) -> Option<&ObjectStore> {
         self.stores.get(entity).ok()
     }
@@ -797,7 +802,8 @@ impl AttackPick<'_, '_> {
     /// place, as `SetSelection` does inside the validator, before it [`Self::settle`]s. The
     /// candidate is the guid the caller passed, else the selection (`0x61306b`): `AttackTarget`
     /// passes none (`0x489b50` → `0x6131a0(0,0)`), nor does the pet bar (`0x4be42b`); TryCast
-    /// passes the caster on a self-cast press (`0x4e610e`). An empty candidate (`0x61307f`) or a
+    /// passes the caster on a self-cast press (`0x4e610e`), and a go's deferred start its first
+    /// hit (`0x6e8402`). An empty candidate (`0x61307f`) or a
     /// unit the actor is friendly toward (`0x6130a3`, dropped at `0x6130a8`), the caster included,
     /// runs `TargetNearestEnemy` (`0x6130b5`), which commits its pick inside the validator, so a
     /// call after this one reads it. `may_pick` is the protected-action gate's tag 4, which opens
@@ -813,16 +819,8 @@ impl AttackPick<'_, '_> {
         seam: &mut crate::creature_anim::AttackSeam,
     ) -> Owed {
         let candidate = passed.or(selection.guid);
-        if candidate.is_some_and(|g| self.keeps(g)) {
-            // `0x613100`: the kept unit is selected again, a no-op unless the cursor is up. Only
-            // the selection is kept in practice: the unit a caller passes is the caster.
-            if let Some((entity, guid)) = selection
-                .target
-                .zip(selection.guid)
-                .filter(|&(_, guid)| Some(guid) == candidate)
-            {
-                self.front.takes(entity, guid, seam.slots.targeting());
-            }
+        if let Some(guid) = candidate.filter(|&g| self.keeps(g)) {
+            return self.select_kept(guid, selection, seam);
         } else if may_pick {
             return cycle(
                 ScanSide::Enemy,
@@ -836,6 +834,47 @@ impl AttackPick<'_, '_> {
             );
         }
         Owed::default()
+    }
+
+    /// `0x613100`: `SelectTarget` on the kept candidate, whatever is selected: the selection's own
+    /// guid is the setter's dedup, a passed unit a whole select, and with the targeting cursor up
+    /// a held one is bound to the cast instead (`0x4935d5`). A guid that names no object is stored
+    /// unlit (`0x4935c8` → `0x493605`).
+    fn select_kept(
+        &mut self,
+        guid: u64,
+        selection: &mut Selection,
+        seam: &mut crate::creature_anim::AttackSeam,
+    ) -> Owed {
+        let entity = self.scan.entity_of(guid);
+        if let Some(entity) = entity {
+            if self.front.takes(entity, guid, seam.slots.targeting()) {
+                return Owed::default();
+            }
+        }
+        let store = entity.and_then(|e| self.scan.store_at(e));
+        // The re-swing's gate is `StartAttack`'s on the new target (`0x5ecc16`).
+        let attackable = store.is_some_and(|store| {
+            let unit = self.scan.relations.unit_of(guid, store);
+            attack_target_valid(
+                &self.scan.relations.get(),
+                self.scan.relations.me().as_ref(),
+                &unit,
+                store,
+            )
+        });
+        let old_latches = latches_on(&self.scan.relations, selection.guid);
+        let (_, owed) = commit_owing(
+            selection,
+            seam,
+            entity,
+            guid,
+            store,
+            self.scan.self_guid(),
+            attackable,
+            old_latches,
+        );
+        owed
     }
 
     /// The validator from the selection's re-read on (`0x6130c1`-`0x613198`), once the pick's
@@ -877,7 +916,7 @@ impl AttackPick<'_, '_> {
     /// on the pet arm (`0x4bd40d`), which vmangos gives its owner's faction (`Pet.cpp:248`). The
     /// reaction to oneself is 4 before any faction rung (`0x606200`), so a passed caster is never
     /// kept, FFA flag or not.
-    fn keeps(&self, guid: u64) -> bool {
+    pub(crate) fn keeps(&self, guid: u64) -> bool {
         if self.scan.self_guid() == Some(guid) {
             return false;
         }
@@ -1089,11 +1128,19 @@ pub(crate) fn fire_owed_selects_lane(world: &mut World) {
 
 /// One owed select on the world, its unit edits applied as it returns.
 fn run_owed_select(world: &mut World, select: OwedSelect) {
+    select_in_place(world, select);
+    crate::creature_anim::apply_unit_edits(world);
+}
+
+/// One owed select, then the bind of a unit it handed the targeting cursor (`SelectTarget`,
+/// `0x4935d5` → `0x6e5b40`) at the select's place: the acquires' selects (`0x6259fe`,
+/// `0x6e799c`) bind inside their packets, so the cast goes out and signals there.
+fn select_in_place(world: &mut World, select: OwedSelect) {
     if let Err(err) = world.run_system_cached_with(owed_select, select) {
         // A harness without the selection's seams selects nothing.
         debug!("target: an owed select did not run: {err}");
     }
-    crate::creature_anim::apply_unit_edits(world);
+    crate::script_calls::bind_picks_here(world);
 }
 
 /// The packet's owed selects, after its handlers, each run as the firing of its stamp with the
@@ -1106,12 +1153,7 @@ pub(super) fn run_owed_selects(world: &mut World, _: crate::lanes::Stamp) {
     };
     for (at, select) in std::mem::take(&mut owed.0) {
         crate::lanes::firing(at, || {
-            super::release::park_signals(world, |world| {
-                if let Err(err) = world.run_system_cached_with(owed_select, select) {
-                    // A harness without the selection's seams selects nothing.
-                    debug!("target: an owed select did not run: {err}");
-                }
-            });
+            super::release::park_signals(world, |world| select_in_place(world, select));
         });
     }
 }

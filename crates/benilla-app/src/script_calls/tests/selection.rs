@@ -457,17 +457,26 @@ fn a_switch_to_a_friend_while_swinging_stops_again() {
     );
 }
 
-/// StartAttack selects its target (`0x5ecca0`-`0x5eccaa` → `0x493540`) after the stand and before
-/// the swing: the attack a stealth opener defers to its `SMSG_SPELL_GO` (`0x6e8402` → `0x6131a0`
-/// → `0x5ecb70`) selects the GO's first hit, whatever is selected, and its `PLAYER_TARGET_CHANGED`
-/// (`0x49389c`) runs its listeners before the swing (`0x5ecd3c`).
-#[test]
-fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
+/// The keys of the refusals a handler queued for the action feed's lines.
+fn error_keys(f: &Frame) -> Vec<String> {
+    f.app
+        .world()
+        .resource::<crate::ui_action::UiErrorKeys>()
+        .snapshot()
+        .into_iter()
+        .map(|e| e.key.to_string())
+        .collect()
+}
+
+/// Backstab's `SMSG_SPELL_GO` from us at [`MOB`], whose start of the swing it defers
+/// (`AttributesEx2` bit 20, `0x6e83c0`), with us not swinging (`[+0xc48]`, `0x6e83e7`).
+fn backstab_lands(f: &mut Frame) {
+    backstab_lands_at(f, vec![MOB], Some(MOB));
+}
+
+/// [`backstab_lands`] with `hits` and the packet's `target`.
+fn backstab_lands_at(f: &mut Frame, hits: Vec<u64>, target: Option<u64>) {
     const BACKSTAB: u32 = 53;
-    let mut f = frame(true);
-    spawn_mob(&mut f, &[]);
-    swinging_at_old(&mut f);
-    on_target_changed(&mut f, "RandomRoll(1, 100)");
     let world = f.app.world_mut();
     let me = world.resource::<GuidIndex>().0[&ME];
     world
@@ -479,7 +488,6 @@ fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
                 BACKSTAB,
                 benilla_formats::SpellDisplay {
                     name: "Backstab".into(),
-                    // `AttributesEx2` bit 20, the GO-deferred start's test (`0x6e83c0`).
                     attributes_ex2: 0x0010_0000,
                     ..Default::default()
                 },
@@ -499,9 +507,9 @@ fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
             caster: ME,
             spell_id: BACKSTAB,
             cast_flags: 0,
-            hits: vec![MOB],
+            hits,
             misses: vec![],
-            target: Some(MOB),
+            target,
             go_target: None,
             target_mask: 0x2,
             source: None,
@@ -511,11 +519,124 @@ fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
             unit_caster: ME,
         }],
     );
+}
+
+/// A GO with no hit falls back to the packet's target (the `Deviation:` at `spell_go`), but only
+/// one the validator keeps: a friend would drop to the nearest-enemy cycle (`0x6130b5`), which
+/// the fallback never runs, so nothing is selected and no swing goes out.
+#[test]
+fn a_go_with_no_hit_and_a_friendly_target_starts_nothing() {
+    let mut f = frame(true);
+    with_factions(&mut f, FRIEND, &[]);
+    spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+    swinging_at_old(&mut f);
+    backstab_lands_at(&mut f, vec![], Some(OLD));
+    assert_eq!(attack_wire(&f), Vec::<String>::new());
+    assert_eq!(selected(&f), Some(OLD));
+    assert!(error_keys(&f).is_empty());
+}
+
+/// The GO's deferred start is the player's Attack at its first hit (`0x6e8402` → `0x6131a0`),
+/// whose validator (`0x612df0`) selects the hit whatever is selected (`0x613100`), and its
+/// `PLAYER_TARGET_CHANGED` (`0x49389c`) runs its listeners before the swing at the selection the
+/// validator re-read (`0x6130c1`).
+#[test]
+fn a_go_deferred_attack_selects_its_hit_before_it_swings() {
+    let mut f = frame(true);
+    spawn_mob(&mut f, &[]);
+    swinging_at_old(&mut f);
+    on_target_changed(&mut f, "RandomRoll(1, 100)");
+    backstab_lands(&mut f);
     assert_eq!(selected(&f), Some(MOB));
     assert_eq!(
         attack_wire(&f),
         ["SetSelection 0x31", "RandomRoll", "AttackSwing 0x31"]
     );
+}
+
+/// The validator's actor checks run first (`0x612e10`-`0x61305a`): a stunned player's GO shows
+/// its line, selects nothing and sends no swing.
+#[test]
+fn a_stunned_casters_go_shows_its_line_and_does_not_swing() {
+    let mut f = frame(true);
+    spawn_mob(&mut f, &[]);
+    swinging_at_old(&mut f);
+    let world = f.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    let mut store = world.get_mut::<ObjectStore>(me).unwrap();
+    let flags = store.0.unit_flags();
+    store.0.merge(benilla_protocol::ObjectFields::from_pairs(&[(
+        FLAGS,
+        flags | 0x0004_0000,
+    )]));
+    backstab_lands(&mut f);
+    assert_eq!(error_keys(&f), ["ERR_ATTACK_STUNNED"]);
+    assert_eq!(attack_wire(&f), Vec::<String>::new());
+    assert_eq!(selected(&f), Some(OLD));
+}
+
+/// With the targeting cursor up, the validator's select (`0x613100`) hands the GO's hit to the
+/// cursor's cast (`0x4935d5` → `0x6e5b40`), which binds it inside the GO's packet and selects
+/// nothing; the validator then re-reads the selection (`0x6130c1`), so the swing goes at the unit
+/// selected before, after the cast.
+#[test]
+fn a_go_deferred_attack_with_the_cursor_up_binds_its_hit_and_swings_at_the_selection() {
+    let mut f = frame(true);
+    spawn_mob(&mut f, &[]);
+    swinging_at_old(&mut f);
+    with_the_cursor_up(&mut f);
+    backstab_lands(&mut f);
+    let sent: Vec<String> =
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::CastSpell { spell_id, target } => {
+                    Some(format!("CastSpell {spell_id} {target:x?}"))
+                }
+                ClientCommand::SetSelection { guid } => Some(format!("SetSelection {guid:#x}")),
+                ClientCommand::AttackSwing { guid } => Some(format!("AttackSwing {guid:#x}")),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(
+        sent,
+        [
+            format!("CastSpell {HEAL} Some(31)"),
+            "AttackSwing 0x21".into()
+        ]
+    );
+    assert_eq!(selected(&f), Some(OLD));
+    assert!(!cursor_is_up(&f));
+}
+
+/// The same with nothing selected: the bind leaves the selection empty, so the re-read finds
+/// nothing and the validator shows "There is nothing to attack." (`0x6130d9`), with no swing.
+#[test]
+fn a_go_deferred_attack_the_cursor_took_with_nothing_selected_shows_no_target() {
+    let mut f = frame(false);
+    spawn_mob(&mut f, &[]);
+    swinging_at_old(&mut f);
+    with_the_cursor_up(&mut f);
+    backstab_lands(&mut f);
+    assert_eq!(error_keys(&f), ["ERR_NO_ATTACK_TARGET"]);
+    let sent: Vec<_> = f.rx.try_iter().collect();
+    assert!(
+        sent.iter().any(|c| matches!(
+            c,
+            ClientCommand::CastSpell {
+                spell_id: HEAL,
+                target: Some(MOB)
+            }
+        )),
+        "{sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|c| matches!(
+            c,
+            ClientCommand::AttackSwing { .. } | ClientCommand::SetSelection { .. }
+        )),
+        "{sent:?}"
+    );
+    assert_eq!(selected(&f), None);
 }
 
 /// The wire a pick and what follows it send, in order: selections, rolls, Sinister Strike's casts
@@ -806,6 +927,51 @@ fn a_possessed_attacks_latch_signals_its_bar_before_the_order() {
     assert!(
         eval::<bool>(&mut f, "return LIT == 1"),
         "the latch lit Attack"
+    );
+}
+
+/// With the targeting cursor up, the pet bar's Attack validator (`0x4bd40d`) hands its kept unit
+/// to the cast at its select (`0x613100` → `0x4935d5`), inside the validator, so the cast goes out
+/// ahead of the latch's `PET_BAR_UPDATE` (`0x4bd438`), whose listener's packet follows, and the
+/// order at the unit last (`0x4bd4a4`).
+#[test]
+fn a_possessed_attacks_bind_goes_ahead_of_its_bar_update() {
+    let attack = benilla_protocol::messages::PET_COMMAND_ATTACK
+        | (u32::from(benilla_protocol::messages::PET_ACT_COMMAND) << 24);
+    let mut f = frame(true);
+    with_factions(&mut f, FOE, &[]);
+    with_pet(&mut f, true, attack);
+    feeds(&mut f);
+    f.rx.try_iter().for_each(drop);
+    run(
+        &mut f,
+        r#"local r = CreateFrame("Frame")
+        r:RegisterEvent("PET_BAR_UPDATE")
+        r:SetScript("OnEvent", function() RandomRoll(1, 100) end)"#,
+    );
+    with_the_cursor_up(&mut f);
+    run_pressed(&mut f, "PetAttack()");
+    let wire: Vec<String> =
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::CastSpell { spell_id, target } => {
+                    Some(format!("CastSpell {spell_id} {target:x?}"))
+                }
+                ClientCommand::RandomRoll { .. } => Some("RandomRoll".into()),
+                ClientCommand::PetAction { target_guid, .. } => {
+                    Some(format!("PetAction {target_guid:#x}"))
+                }
+                ClientCommand::SetSelection { guid } => Some(format!("SetSelection {guid:#x}")),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(
+        wire,
+        [
+            format!("CastSpell {HEAL} Some(21)"),
+            "RandomRoll".into(),
+            "PetAction 0x21".into()
+        ]
     );
 }
 
