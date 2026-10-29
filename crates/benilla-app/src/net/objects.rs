@@ -82,6 +82,7 @@ pub(crate) struct Scene<'w, 's> {
     remote: Query<'w, 's, &'static mut RemoteMotion>,
     modes: Query<'w, 's, &'static mut UnitMoveModes>,
     xp_awarded: Query<'w, 's, (), With<crate::ui_chat::combat::watch::XpAwarded>>,
+    client_controlled: Query<'w, 's, (), With<super::ClientControlled>>,
     riders: Query<'w, 's, &'static mut crate::transport::TransportRider>,
     /// A transport's clock, which only a new object's create sets (`0x5f7080`).
     anchors: Query<'w, 's, &'static crate::transport::TransportAnchor>,
@@ -158,6 +159,16 @@ pub(crate) struct Scene<'w, 's> {
     place: crate::ui_party::net::SnapshotPlace<'w, 's>,
     /// The active mover, which its unit's release and destroy zero.
     mover: Option<ResMut<'w, super::MoverClaim>>,
+    /// The far-sight subject, whose view-out term the stun's tick reads.
+    view_subject: Option<Res<'w, crate::player::ViewSubject>>,
+    /// The active mover's auto-move, which its release and the watchers' stops end.
+    follow: Option<ResMut<'w, crate::player::FollowState>>,
+    approach: Option<ResMut<'w, crate::player::Approach>>,
+    /// Autorun as the frame's calls leave it, which an auto-move's stop clears.
+    call_autorun: Option<ResMut<'w, crate::player::CallAutorun>>,
+    /// Our own control, which our arrival restores and `IsClientControlled` reads for our
+    /// character (`0x5fa5f0`).
+    own_control_lost: Option<ResMut<'w, crate::player::OwnControlLost>>,
     /// Who we drive and whether we may, which our own arrival gives back.
     mover_lock: Option<ResMut<'w, crate::player::MoverLock>>,
     /// The area spirit healer the ghost flag's clear empties (`0x5dea20` → `0x4921c0`), and the
@@ -641,6 +652,24 @@ fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
             &mut sc.transforms,
             &mut sc.riders,
         );
+        // A path started on the active mover runs its input tick (`0x6187a0` → `0x602053`), whose
+        // precondition the server's spline fails (`0x5144e0`): the teardown leg stops the auto-move
+        // (`0x5146d6`). A stop starts no path, and nor does a rooted mover: the start returns 0 on
+        // the root bit `0x1000` (`0x6187c2`-`0x6187c7`), so `0x601fee` skips the tick.
+        let mover_rooted = sc
+            .player
+            .as_deref()
+            .is_some_and(crate::player::Player::rooted);
+        if !stop && !mover_rooted {
+            update::stop_auto_move(
+                sc.mover.as_deref(),
+                sc.follow.as_deref_mut(),
+                sc.approach.as_deref_mut(),
+                sc.call_autorun.as_deref_mut(),
+                &mut sc.field_notices,
+                guid,
+            );
+        }
     }
 }
 

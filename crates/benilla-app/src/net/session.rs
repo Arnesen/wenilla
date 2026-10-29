@@ -335,39 +335,76 @@ fn log_teardown(view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>, b: &Br
     }
 }
 
-/// Teleport, knockback and client control, forwarded unjudged to the controller, which applies
-/// and answers them.
-fn on_mover_edge(In(ev): In<SessionEvent>, mut e: Edges, b: Bridge) {
+/// Teleport and knockback, forwarded unjudged to the controller, which applies and answers them.
+/// A near teleport runs the movement guard first inside the packet (`OnForcedTeleport 0x602fb0`
+/// → `0x60e990(1, 0)` at `0x60300e`, [`MoveInput`]), before the move is queued (`0x603029`); the
+/// echo's own stop (`0x60e3b1`) finds none left.
+fn on_mover_edge(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    self_guid: Res<SelfGuid>,
+    mut moved: MoveInput,
+) {
     match ev {
         SessionEvent::Teleport {
             guid,
             counter,
             position,
             orientation,
-        } => teleport(
-            guid,
-            counter,
-            position,
-            orientation,
-            &b.self_guid,
-            &mut e.teleports,
-        ),
+        } => {
+            moved.stop(guid, self_guid.0);
+            teleport(
+                guid,
+                counter,
+                position,
+                orientation,
+                &self_guid,
+                &mut e.teleports,
+            );
+        }
+        // `QueueKnockBack 0x602670` runs the same guard first (`0x60267e`), ahead of the queue
+        // (`0x617a30`).
         SessionEvent::KnockBack {
             guid,
             counter,
             launch,
-        } => knock_back(guid, counter, launch, &b.self_guid, &mut e.knockbacks),
+        } => {
+            moved.stop(guid, self_guid.0);
+            knock_back(guid, counter, launch, &self_guid, &mut e.knockbacks);
+        }
         _ => {}
     }
 }
 
+/// The movement guard `CGUnit_C::OnMoveInput(1, 0)` (`0x60e990`) where a forced move's handler runs
+/// it on its unit: the active mover's auto-move stops (`0x60e99d`-`0x60e9b5`), the follow's
+/// `AUTOFOLLOW_END` on the notice lane, then the active player's loot window closes as on a
+/// movement start (`0x60e9c1`-`0x60e9dd`).
+#[derive(bevy::ecs::system::SystemParam)]
+struct MoveInput<'w, 's> {
+    auto_move: crate::player::AutoMoveStop<'w>,
+    lane: Option<ResMut<'w, crate::field_watch::NoticeLane>>,
+    loot: crate::ui_loot::MoveStartClose<'w, 's>,
+}
+
+impl MoveInput<'_, '_> {
+    fn stop(&mut self, guid: u64, me: Option<u64>) {
+        self.auto_move.stop(guid, self.lane.as_deref_mut());
+        if me == Some(guid) {
+            self.loot.close();
+        }
+    }
+}
+
 /// What [`on_client_control`] holds beside the host: the cast its fall cancels, our guid, the flag,
-/// and the notice lane its signals go on (absent in a harness without the unit feed).
+/// the notice lane its signals go on (absent in a harness without the unit feed), and the
+/// outgoing mover's auto-move.
 type ControlSet = (
     crate::spell::SelfCancel<'static>,
     Res<'static, SelfGuid>,
     ResMut<'static, crate::player::OwnControlLost>,
     Option<ResMut<'static, crate::field_watch::NoticeLane>>,
+    crate::player::AutoMoveStop<'static>,
 );
 
 /// `SMSG_CLIENT_CONTROL_UPDATE` (`0x5fa6b1` → `SetPlayerControl 0x4958e0`), its movement judged by
@@ -375,20 +412,38 @@ type ControlSet = (
 /// (`0x4958ea`); its fall drops the cursor's payload and the cast (`0x4958e8`-`0x495901` →
 /// `0x495920`), and the change signals on the notice lane at this packet's place, then runs the
 /// usable refresh (`0x4958f7`/`0x49590b`, `0x4958fc`/`0x495910`). A store that changes nothing does
-/// nothing (`0x4958e6`).
+/// nothing (`0x4958e6`). Ahead of it the unit's control moves the active mover (`0x5fa600`): a
+/// grant claims the unit (`0x5fa696`) and a stop of the mover zeroes it (`0x5fa678`-`0x5fa696`),
+/// and the switch ends the outgoing mover's auto-move first (`SetActiveMover`, `0x600731`-
+/// `0x600742`), its `AUTOFOLLOW_END` on the notice lane ahead of the flag's signal.
 fn on_client_control(
     In(ev): In<SessionEvent>,
     mut e: Edges,
     // The flag and our guid are the host's too, so they sit in the set it shares with the cast.
     mut vm: crate::script_calls::VmWith<ControlSet>,
+    // The unit whose `IsClientControlled` bit the update writes.
+    mut units: (Option<Res<super::GuidIndex>>, Commands),
 ) {
     let SessionEvent::ClientControl { mover, allow_move } = ev else {
         return;
     };
     e.client_control
         .write(ClientControlMessage { mover, allow_move });
+    // `0x5fa62a`/`0x5fa631`: the unit's own bit first (`0x5fa636`).
+    if let Some(&unit) = units.0.as_deref().and_then(|i| i.0.get(&mover)) {
+        let mut unit = units.1.entity(unit);
+        if allow_move {
+            unit.insert(super::ClientControlled);
+        } else {
+            unit.remove::<super::ClientControlled>();
+        }
+    }
     {
-        let (_, self_guid, mut own, _) = vm.own();
+        let (_, self_guid, mut own, mut lane, mut stop) = vm.own();
+        let switches = stop.mover().is_some_and(|m| (m == mover) != allow_move);
+        if switches {
+            stop.stop_mover(lane.as_deref_mut());
+        }
         if self_guid.0 != Some(mover) || own.0 == !allow_move {
             return;
         }
@@ -397,7 +452,7 @@ fn on_client_control(
     if !allow_move {
         crate::spell::drop_hold(&mut vm, |(mut cancel, ..)| cancel.abort_cast());
     }
-    if let (.., Some(mut lane)) = vm.own() {
+    if let (_, _, _, Some(mut lane), _) = vm.own() {
         use crate::field_watch::FieldNotice;
         lane.write(FieldNotice::PlayerControl {
             in_control: allow_move,

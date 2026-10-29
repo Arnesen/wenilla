@@ -14,7 +14,16 @@
 //! The reference's turn-away cancel (160°-220°, `0x80c604`, `0x80c600`) runs only while drunk,
 //! gated at `0x610a3d` on the drunk fraction, armed as the turn converges and disarmed at random
 //! (`0x61092e`); it is not built. The start gate (who may be followed) is
-//! [`crate::target::by_name`]'s.
+//! [`crate::target::by_name`]'s, and the start signals `AUTOFOLLOW_BEGIN` inside its call
+//! (`0x610071`, [`crate::script_calls::ScriptCallHost`]).
+//!
+//! Every end goes through the canceller `0x60fb60`, which signals `AUTOFOLLOW_END` for a follow
+//! first (`0x60fb76`-`0x60fb84`), where the end runs ([`end`]): the packet handlers' ends at their
+//! packets ([`super::AutoMoveStop`]), the input's and the steer's at their place in the frame.
+//!
+//! Deviation: every end signals `END`, because the reference's three silent ends are a bug: two
+//! writers reset the follow mode cell `0xc4d888` directly (`0x5fb646`, `0x60396f`), leaving a
+//! stale guid at `0xc4d980`, and the canceller's early-out (`0x60fb70`) fires nothing.
 
 use std::f32::consts::PI;
 
@@ -51,6 +60,10 @@ pub(crate) struct FollowState {
     pub(crate) name: String,
     /// The band's latch: the synthesized forward input is held.
     moving: bool,
+    /// A packet's auto-move stop owes its forward release (`0x60e7f0`): it clears autorun
+    /// (`0x514630`, [`super::press::CallAutorun::clear`]) behind its `AUTOFOLLOW_END`, and the
+    /// frame's steer ([`steer_follow`]) applies the bit the calls left before the controller's step.
+    release_owed: bool,
     /// `WOW_FOLLOW_TRACE` bookkeeping: the last trace line's time and position.
     traced_at: f64,
     traced_pos: Option<Vec3>,
@@ -66,11 +79,40 @@ impl FollowState {
         self.traced_pos = None;
     }
 
+    /// Owe the forward release of an auto-move a packet stopped ([`super::end_auto_move`]).
+    pub(crate) fn owe_release(&mut self) {
+        self.release_owed = true;
+    }
+
+    /// Whether a stop owes the frame its release, for a test.
+    #[cfg(test)]
+    pub(crate) fn owes_release(&self) -> bool {
+        self.release_owed
+    }
+
     /// Stop following; `true` if we were.
     pub(crate) fn stop(&mut self) -> bool {
         self.moving = false;
         self.guid.take().is_some()
     }
+}
+
+/// The canceller's follow leg (`0x60fb60`): a follow in flight signals `AUTOFOLLOW_END` (`0x60fb84`)
+/// on the notice lane at the caller's place, then ends (`0x60fc1e`); `true` if one ended. With no
+/// lane, in a harness without the unit feed, it ends silently.
+pub(crate) fn end(
+    follow: &mut FollowState,
+    lane: Option<&mut crate::field_watch::NoticeLane>,
+) -> bool {
+    if follow.guid.is_none() {
+        return false;
+    }
+    if let Some(lane) = lane {
+        lane.write(crate::field_watch::FieldNotice::Global {
+            id: crate::field_watch::id::AUTOFOLLOW_END,
+        });
+    }
+    follow.stop()
 }
 
 /// A start-following request: `FollowUnit` or `FollowByName`. A name finds players only; the start
@@ -218,7 +260,9 @@ impl FollowInput<'_, '_> {
 
 /// Cancel, re-resolve the followee, steer, and set [`Player::auto_forward`] for `control`. The
 /// cancel comes first, as the reference's start emitters run ahead of the axis math (`0x5150a7` vs
-/// the emitter tail `0x5151a0`).
+/// the emitter tail `0x5151a0`). Each end here is frame time's (`0x5146d6`, `0x6106b0`), after the
+/// packets, and signals behind them ([`end`]).
+#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn steer_follow(
     time: Res<Time>,
     mut follow: ResMut<FollowState>,
@@ -227,14 +271,17 @@ pub(super) fn steer_follow(
     index: Res<GuidIndex>,
     transforms: Query<&Transform>,
     input: FollowInput,
+    mut lane: Option<ResMut<crate::field_watch::NoticeLane>>,
+    called: Option<Res<super::press::CallAutorun>>,
 ) {
     player.auto_forward = false;
+    release_owed(&mut follow, &mut player, called.as_deref());
     if follow.guid.is_none() {
         return;
     }
     if input.cancels(&player) {
         info!("follow: cancelled by the player's own movement input");
-        follow.stop();
+        end(&mut follow, lane.as_deref_mut());
         return;
     }
     let Some(guid) = follow.guid else { return };
@@ -246,14 +293,14 @@ pub(super) fn steer_follow(
         .map(|t| t.translation)
     else {
         info!("follow: the followee is gone — follow ends");
-        follow.stop();
+        end(&mut follow, lane.as_deref_mut());
         return;
     };
     let delta = target - player.pos;
     // On the full 3D delta, before the bearing flattens it.
     if vertically_degenerate(delta) {
         info!("follow: the followee is within 1° of straight overhead — follow ends");
-        follow.stop();
+        end(&mut follow, lane.as_deref_mut());
         return;
     }
     let flat = Vec3::new(delta.x, 0.0, delta.z);
@@ -293,6 +340,33 @@ pub(super) fn steer_follow(
     }
     follow.moving = moving;
     player.auto_forward = moving;
+}
+
+/// The forward release a stop owed (`0x60e7f0`): autorun as the calls left it after the stop's
+/// clear (`0x514630`), clear with no store for it (a harness). The synthesized forward is the
+/// steer's own, rewritten each frame.
+pub(super) fn release_owed(
+    follow: &mut FollowState,
+    player: &mut Player,
+    called: Option<&super::press::CallAutorun>,
+) {
+    if std::mem::take(&mut follow.release_owed) {
+        player.autorun = called.is_some_and(|c| c.bit(false));
+    }
+}
+
+/// [`steer_follow`]'s release of what a packet's stop owed, for a test.
+#[cfg(test)]
+pub(crate) fn release_owed_for_test(world: &mut World) {
+    world.resource_scope(|world, mut follow: Mut<FollowState>| {
+        world.resource_scope(|world, mut player: Mut<Player>| {
+            release_owed(
+                &mut follow,
+                &mut player,
+                world.get_resource::<super::press::CallAutorun>(),
+            );
+        });
+    });
 }
 
 /// Whether `WOW_FOLLOW_TRACE` is set, read once.

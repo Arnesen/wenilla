@@ -148,6 +148,8 @@ enum Body {
         /// Bit 3 of the unit's `+0xc58`, which only the constructor clears (`0x5fae7a`): the
         /// object a block brings back is the one that left.
         xp_awarded: bool,
+        /// Bit 0x400 of the same word ([`crate::net::ClientControlled`]).
+        client_controlled: bool,
         /// A unit's resolved records, which its slot 3 compares (`0x5fbe28`).
         display: Option<HeldDisplay>,
         /// A transport's clock, which reactivation leaves (`0x464530` constructs nothing).
@@ -292,16 +294,23 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
             }),
         ) => {
             let moved = write_fields(&mut store, fields.clone());
-            let (pose, modes, xp_awarded, display, kept_anchor) = match body {
+            let (pose, modes, (xp_awarded, controlled), display, kept_anchor) = match body {
                 Body::World {
                     pose,
                     modes,
                     xp_awarded,
+                    client_controlled,
                     display,
                     anchor,
                     ..
-                } => (Some(pose), modes, xp_awarded, display, anchor),
-                Body::Item { .. } => (None, None, false, None, None),
+                } => (
+                    Some(pose),
+                    modes,
+                    (xp_awarded, client_controlled),
+                    display,
+                    anchor,
+                ),
+                Body::Item { .. } => (None, None, (false, false), None, None),
             };
             // Only a unit takes the block's movement (`0x46638c`); any other type keeps its pose.
             let unit = matches!(kind, EntityKind::Unit | EntityKind::Player);
@@ -321,6 +330,9 @@ fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene) {
             }
             if xp_awarded {
                 sc.commands.entity(e).insert(XpAwarded);
+            }
+            if controlled {
+                sc.commands.entity(e).insert(crate::net::ClientControlled);
             }
             if let Some(display) = display {
                 sc.commands.entity(e).insert(display);
@@ -610,6 +622,7 @@ fn respawn(sc: &mut Scene, guid: u64, body: Body, store: ObjectFields, pose: Opt
             modes,
             rider,
             xp_awarded,
+            client_controlled,
             display,
             anchor,
         } => {
@@ -637,6 +650,9 @@ fn respawn(sc: &mut Scene, guid: u64, body: Body, store: ObjectFields, pose: Opt
             }
             if xp_awarded {
                 entity.insert(XpAwarded);
+            }
+            if client_controlled {
+                entity.insert(crate::net::ClientControlled);
             }
             if let Some(display) = display {
                 entity.insert(display);
@@ -826,9 +842,60 @@ fn deactivate(sc: &mut Scene, guid: u64, script: Option<&UiScript>) {
             || crate::target::raid_member_or_pet(group, guid, me, &held),
         );
     }
+    // `0x5fbc26`-`0x5fbc3b`: the active mover's release stops its auto-move
+    // (`ReleaseActiveMover 0x6006b0` → `0x6006c2`); the global goes with the unit ([`release`]).
+    // The later `0x5fbcd7` finds no active mover left.
+    stop_auto_move(
+        sc.mover.as_deref(),
+        sc.follow.as_deref_mut(),
+        sc.approach.as_deref_mut(),
+        sc.call_autorun.as_deref_mut(),
+        &mut sc.field_notices,
+        guid,
+    );
     // The release's `PARTY_MEMBER_DISABLE` for a party slot's player (`0x5e9b78`).
     if held(guid).is_some_and(|s| s.0.created_as() == Some(ObjectType::Player)) {
         sc.group.member_object(guid, false);
+    }
+}
+
+/// Whether the mover's input tick takes its teardown leg (`0x5146c1`-`0x5146ce`): it may neither
+/// translate (`0x514560`) nor turn (`0x5145b0`), off its health, the far-sight latch, the root and
+/// the stun its new flags hold ([`crate::player::MoverInput`]).
+fn tick_tears_down(sc: &Scene, fields: &ObjectFields) -> bool {
+    let driving_own_body = sc
+        .mover_lock
+        .as_deref()
+        .is_none_or(|l| l.foreign_mover.is_none());
+    let input = crate::player::MoverInput {
+        dead: fields.unit_is_dead(),
+        view_is_out: crate::player::view_is_out(
+            driving_own_body,
+            sc.view_subject
+                .as_deref()
+                .is_some_and(|v| v.remote.is_some()),
+        ),
+    };
+    let rooted = sc
+        .player
+        .as_deref()
+        .is_some_and(crate::player::Player::rooted);
+    let stunned = fields.unit_flags() & crate::player::UNIT_FLAG_STUNNED != 0;
+    input.torn_down(rooted, stunned)
+}
+
+/// `StopAutoMove` (`0x60fb60`) on `guid`, a no-op unless it is the active mover
+/// ([`crate::player::AutoMoveStop`]): the scene's claim, auto-move and notice lane.
+pub(super) fn stop_auto_move(
+    mover: Option<&crate::net::MoverClaim>,
+    follow: Option<&mut crate::player::FollowState>,
+    approach: Option<&mut crate::player::Approach>,
+    autorun: Option<&mut crate::player::CallAutorun>,
+    lane: &mut crate::field_watch::NoticeLane,
+    guid: u64,
+) {
+    if mover.is_some_and(|m| m.holds(guid)) {
+        crate::player::end_auto_move(follow, approach, autorun, Some(lane));
     }
 }
 
@@ -869,6 +936,7 @@ fn release(sc: &mut Scene, guid: u64) {
                         local_orientation: r.local_orientation,
                     }),
                     xp_awarded: sc.xp_awarded.contains(e),
+                    client_controlled: sc.client_controlled.contains(e),
                     display: sc.held_displays.get(e).ok().copied(),
                     anchor: sc.anchors.get(e).ok().copied(),
                 }
@@ -1109,6 +1177,64 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
             }
             crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::TrainerPass) => {
                 sc.trainer.owed()
+            }
+            // A watcher's stop of the mover's auto-move, its `AUTOFOLLOW_END` at this place.
+            crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::AutoMoveStop) => {
+                stop_auto_move(
+                    sc.mover.as_deref(),
+                    sc.follow.as_deref_mut(),
+                    sc.approach.as_deref_mut(),
+                    sc.call_autorun.as_deref_mut(),
+                    &mut sc.field_notices,
+                    guid,
+                );
+            }
+            // The stun's tick (`0x5ff501` → `0x514640`): its teardown leg (`0x5146d6`).
+            crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::InputTick) => {
+                if tick_tears_down(sc, fields) {
+                    stop_auto_move(
+                        sc.mover.as_deref(),
+                        sc.follow.as_deref_mut(),
+                        sc.approach.as_deref_mut(),
+                        sc.call_autorun.as_deref_mut(),
+                        &mut sc.field_notices,
+                        guid,
+                    );
+                }
+            }
+            // A far sight on a held object (`0x5ee39c` on, past the unresolved return). A unit we
+            // control takes the active mover (`0x5ee45d` → `0x5ee477`), whose switch stops the
+            // outgoing one's auto-move (`0x600742`) and is a no-op when it already holds it
+            // (`0x6006fb`); the switch itself is possession's control update's. Any other object
+            // runs the mover's tick (`0x5ee4a2`), which the view's going out tears down.
+            crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::FarSightStop {
+                object,
+            }) => {
+                if !sc.index.0.contains_key(&object) {
+                    continue;
+                }
+                let active = sc.mover.as_deref().and_then(crate::net::MoverClaim::get);
+                // `IsClientControlled` (`0x5fa5f0`): our own control, or the unit's own bit.
+                let controlled = if object == guid {
+                    !sc.own_control_lost.as_deref().is_some_and(|l| l.0)
+                } else {
+                    sc.client_controlled.contains(sc.index.0[&object])
+                };
+                let stops = if controlled {
+                    active.filter(|&m| m != object)
+                } else {
+                    Some(guid)
+                };
+                if let Some(mover) = stops {
+                    stop_auto_move(
+                        sc.mover.as_deref(),
+                        sc.follow.as_deref_mut(),
+                        sc.approach.as_deref_mut(),
+                        sc.call_autorun.as_deref_mut(),
+                        &mut sc.field_notices,
+                        mover,
+                    );
+                }
             }
             // The ghost flag's clear (`0x5dea20`): `SetAreaSpiritHealer(0, 0)` runs at the packet,
             // a pending wave's `CMSG_CANCEL_AURA` going out here and its event on the lane ahead
