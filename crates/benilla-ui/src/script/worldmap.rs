@@ -10,11 +10,9 @@
 //! cells, rebuilds the landmark list for the new map, then fires `WORLD_MAP_UPDATE` before it
 //! returns (`0x4a6ce4`), so `WorldMapFrame`'s OnShow repaints the map before its first draw.
 //!
-//! Deviation: the engine's own pushes (the world-enter sync, the explored areas, the landmark
-//! sources, the catalog) queue `WORLD_MAP_UPDATE` for the next frame's tick and fire only on a
-//! change, where the reference fires in place from the handler that moved the data: the app's
-//! feeds run after the frame's tick. A world-state packet's signal is the exception, which the
-//! world-state lane fires at the packet's place.
+//! Deviation: the engine's own push (the world-enter sync) queues `WORLD_MAP_UPDATE` for the next
+//! frame's tick and fires only on a change, where the reference fires in place from the handler
+//! that moved the data: the app's feeds run after the frame's tick.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -537,18 +535,16 @@ fn revealed_overlays(state: &WorldMapState) -> Vec<&WorldMapOverlayView> {
 }
 
 impl super::UiScript {
-    /// Pushes the catalog at startup, queueing `WORLD_MAP_UPDATE` so an open map repaints.
+    /// Pushes the catalog at the interface load, with no signal: the reference builds its lists
+    /// in `CGGameUI::InitializeGame` (`0x48f5d1` → `0x4a5d00`), which signals nothing.
     pub fn set_world_map_catalog(&mut self, continents: Vec<WorldMapContinentView>) {
-        let mut model = self.model_mut();
-        model.worldmap.continents = continents;
-        model.queue_event("WORLD_MAP_UPDATE", Vec::new());
+        self.model_mut().worldmap.continents = continents;
     }
 
-    /// Pushes the orphan list beside the catalog, both filled in one walk (`0x4a5d00`).
+    /// Pushes the orphan list beside the catalog, both filled in one walk (`0x4a5d00`), with no
+    /// signal.
     pub fn set_world_map_direct_areas(&mut self, direct_areas: Vec<(u32, WorldMapZoneView)>) {
-        let mut model = self.model_mut();
-        model.worldmap.direct_areas = direct_areas;
-        model.queue_event("WORLD_MAP_UPDATE", Vec::new());
+        self.model_mut().worldmap.direct_areas = direct_areas;
     }
 
     /// Pushes the resolver's orphan leg; the continent leg rides [`Self::set_world_map_feed`].
@@ -605,9 +601,30 @@ impl super::UiScript {
         refresh_landmarks(&mut model);
     }
 
-    /// [`Self::set_world_map_landmark_sources`] for the rebuild a world-state packet makes, which
-    /// signals `WORLD_MAP_UPDATE` itself at the packet's place (`0x48fa0d` into `0x4a6cdf`): the
-    /// list is rebuilt now and nothing is queued.
+    /// The map setter `0x4a67a0` re-run over the map it shows by the gossip marker's set
+    /// (`0x6dac93`) and its clears in the minimap's update, at the deadline (`0x6d9411`) and on
+    /// arrival (`0x6d9a4c`): the landmark list is rebuilt from `sources` when the host has them,
+    /// then `WORLD_MAP_UPDATE` signals in place (`0x4a6ce4`), whether or not the list moved.
+    pub fn world_map_landmarks_changed(&mut self, sources: Option<Vec<WorldMapLandmarkSource>>) {
+        {
+            let mut model = self.model_mut();
+            if let Some(sources) = sources {
+                model.worldmap.landmark_sources = sources;
+            }
+            model.worldmap.landmarks = build_landmarks(&model);
+        }
+        self.fire_event("WORLD_MAP_UPDATE", Vec::new());
+    }
+
+    /// Stores the landmark sources with no rebuild and no signal, for an input the reference reads
+    /// only at the setter's next run (`0x4a67a0` reads the rows and the marker as it builds).
+    pub fn seed_world_map_landmark_sources(&mut self, sources: Vec<WorldMapLandmarkSource>) {
+        self.model_mut().worldmap.landmark_sources = sources;
+    }
+
+    /// [`Self::set_world_map_landmark_sources`] with nothing queued: the rebuild a world-state
+    /// packet makes, which signals `WORLD_MAP_UPDATE` itself at the packet's place (`0x48fa0d`
+    /// into `0x4a6cdf`), and a new VM's seed.
     pub fn rebuild_world_map_landmarks(&mut self, sources: Vec<WorldMapLandmarkSource>) {
         let mut model = self.model_mut();
         model.worldmap.landmark_sources = sources;
