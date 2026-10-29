@@ -167,21 +167,34 @@ pub(crate) fn seat_item_lane(world: &mut World) {
 
 /// One run, in its handler's order: its unlocks, the recount of each entry it passes `0x4e5c70`,
 /// its trade half unless a close ran it, then its own tail ([`fire_tail`]). A run with no notice
-/// unlocks, then signals its bag events and its unit signals.
+/// unlocks, then signals its bag events and its unit signals. Its alert recompute (`0x4c7ee0`)
+/// reads the objects as of its place through the lent host: behind a visible item's rebuilds,
+/// ahead of its recounts (`0x5dee75`, `0x5dee7a`), else last, behind the stack count's quest log
+/// ask (`0x5d9519`, `0x5d952a`), the enchantment's slot signal (`0x5d9b2a`, `0x5d9b2f`), and alone
+/// for the flags' and the durability's.
 fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeTouch>) {
     let Run {
         notice,
         signals,
         unlocks,
         bags,
+        alerts,
     } = run;
     let Some(notice) = notice else {
         on_vm(vm, |script| fire_unlocks(script, unlocks));
         fire_bags(vm, &bags);
         on_vm(vm, |script| fire_signals(script, &mut reads.sink, signals));
+        if alerts {
+            on_vm(vm, UiScript::recompute_inventory_alerts);
+        }
         return;
     };
     let rebuild = rebuild_at(&notice);
+    let alerts_first = alerts
+        && matches!(
+            notice,
+            ItemNotice::Visible { .. } | ItemNotice::ForeignVisible
+        );
     let held = vm.run(|script| {
         let Some(script) = script else {
             return false;
@@ -189,6 +202,9 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
         fire_unlocks(script, unlocks);
         if rebuild == Some(Rebuild::BeforeRecount) {
             rebuild_lists(script);
+        }
+        if alerts_first {
+            script.recompute_inventory_alerts();
         }
         true
     });
@@ -205,6 +221,9 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
         });
     }
     fire_tail(vm, &mut reads.sink, &notice, &bags, signals, rebuild);
+    if alerts && !alerts_first {
+        on_vm(vm, UiScript::recompute_inventory_alerts);
+    }
 }
 
 /// `f` on the VM with the host lent; nothing with no VM.
@@ -221,7 +240,7 @@ fn on_vm(vm: &mut RunVm, f: impl FnOnce(&mut UiScript)) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rebuild {
     /// Ahead of the recount: the record set-up (`0x5d85be`), the destroy (`0x5d8788`), the stack
-    /// count (`0x5d94d1`) and a visible item (`0x5dee70`).
+    /// count (`0x5d94d1`) and anyone's visible item (`0x5dee70`).
     BeforeRecount,
     /// After the recounts, ahead of the bag update: a backpack or keyring seat (`0x4f8e65`) and a
     /// container's (`0x4f917c`).
@@ -237,7 +256,8 @@ fn rebuild_at(notice: &ItemNotice) -> Option<Rebuild> {
         ItemNotice::Record { .. }
         | ItemNotice::Destroyed { .. }
         | ItemNotice::StackCount { .. }
-        | ItemNotice::Visible { .. } => Some(Rebuild::BeforeRecount),
+        | ItemNotice::Visible { .. }
+        | ItemNotice::ForeignVisible => Some(Rebuild::BeforeRecount),
         ItemNotice::Seat { .. } => Some(Rebuild::BeforeBags),
         ItemNotice::Bag { .. } => Some(Rebuild::AfterBags),
         ItemNotice::EntryRecord { .. }

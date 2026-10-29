@@ -206,32 +206,154 @@ fn slot_is_broken(v: &InvSlotView, durability: Option<(u32, u32)>) -> bool {
     v.flags & 0x10 != 0 || matches!(durability, Some((0, max)) if max > 0)
 }
 
-/// One region's `GetInventoryAlertStatus` (`0x4c7ee0`): 4 when force-red or broken, 3 with 1..=5
-/// durability points left (an absolute count, not a percentage), else 0. Statuses 1 and 2, the
-/// temporary-enchant alerts, are not fed; stock gives them no color (`DurabilityFrame.lua:18-19`).
-fn alert_status(slot: &Option<InvSlotView>) -> u8 {
-    let Some(v) = slot.as_ref().filter(|v| v.item_id != 0) else {
+/// What `0x4c7ee0` reads of one worn item: `ITEM_FIELD_FLAGS` (`+0x3c`), `DURABILITY` (`+0xa0`)
+/// and `MAXDURABILITY` (`+0xa4`); for the temporary-enchant arm, the record's flags (the `+0x110`
+/// table's slot 0, `0x4c8039`, 0 while the record is not cached), the temporary enchantment's id
+/// (`ITEM_FIELD_ENCHANTMENT` slot 1, `+0x4c`, `0x4c8043`) and its milliseconds left
+/// (`0x5d9d00(1)`, `0x4c805b`: the deadline less now, 0 when unset or run out).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlertItem {
+    pub flags: u32,
+    pub durability: u32,
+    pub max_durability: u32,
+    pub record_flags: u32,
+    pub temp_enchant: u32,
+    pub temp_enchant_left_ms: u32,
+}
+
+/// `0x4c7ee0`'s reads: the item `GetItemInSlot` (`0x6228a0`) finds in each of the 11 worn regions,
+/// in `0x806eb8`'s order, and, while `PLAYER_AMMO_ID` is set, the carried count of that ammunition
+/// (`0x622130(id, 0)`, `0x4c7f73`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlertInputs {
+    pub worn: [Option<AlertItem>; 11],
+    pub ammo: Option<u32>,
+}
+
+/// The live question of the alert recompute: its reads as of here, `None` while no active player
+/// is held, when the recompute does nothing (`0x4c7f06`).
+pub struct InventoryAlertInputs;
+
+impl super::live::LiveQuery for InventoryAlertInputs {
+    type Answer = Option<AlertInputs>;
+}
+
+/// One worn region's status (`0x4c7faa`-`0x4c806d`): 4 when force-red (`0x10`); else, unless
+/// wrapped (`0x08`) or without a maximum, 4 at durability 0 and 3 with 1..=5 points left (an
+/// absolute count, not a fraction); else the temporary-enchant arm (`0x4c8035`): with record flag
+/// `0x2000` clear (`0x4c803b`) and a temporary enchantment (`0x4c8046`), 1, or 2 with 30000 ms or
+/// fewer left (`0x4c8060`, unsigned); else 0.
+fn alert_status(item: Option<AlertItem>) -> u8 {
+    let Some(v) = item else {
         return 0;
     };
     if v.flags & 0x10 != 0 {
         return 4;
     }
-    if v.flags & 0x08 != 0 {
+    if v.flags & 0x08 == 0 && v.max_durability != 0 {
+        match v.durability {
+            0 => return 4,
+            1..=5 => return 3,
+            _ => {}
+        }
+    }
+    if v.record_flags & 0x2000 != 0 || v.temp_enchant == 0 {
         return 0;
     }
-    match v.durability {
-        Some((0, max)) if max > 0 => 4,
-        Some((1..=5, max)) if max > 0 => 3,
-        _ => 0,
+    if v.temp_enchant_left_ms <= 30_000 {
+        2
+    } else {
+        1
     }
 }
 
-/// The low-ammo region (`0x4c7ee0`'s slot -1 arm): 3 when the carried ammo is 20 or fewer, else 0.
-fn ammo_alert_status(slot: &Option<InvSlotView>) -> u8 {
-    match slot.as_ref().filter(|v| v.item_id != 0) {
-        Some(v) if v.count <= 20 => 3,
-        _ => 0,
+/// Each region's status off `inputs`, in `0x806eb8`'s order, with the tutorial its arm fires: a
+/// region broken by durability fires Broken Items (`0x4c8002`) and a damaged one Damaged Items
+/// (`0x4c802e`); the force-red arm (`0x4c7fb0`), the temporary-enchant arm and the ammo arm
+/// (`0x4c7f78`: 3 at 20 or fewer) fire nothing.
+fn alert_statuses(inputs: &AlertInputs) -> [(u8, Option<u32>); 12] {
+    let mut out = [(0u8, None); 12];
+    for (i, &item) in inputs.worn.iter().enumerate() {
+        let status = alert_status(item);
+        let forced = item.is_some_and(|v| v.flags & 0x10 != 0);
+        let tutorial = match status {
+            4 if !forced => Some(TUTORIAL_BROKEN_ITEMS),
+            3 => Some(TUTORIAL_DAMAGED_ITEMS),
+            _ => None,
+        };
+        out[i] = (status, tutorial);
     }
+    out[11].0 = match inputs.ammo {
+        Some(count) if count <= 20 => 3,
+        _ => 0,
+    };
+    out
+}
+
+/// The doll snapshot's reads, for a VM with no host to ask: each worn region's view, and the ammo
+/// view's count.
+fn snapshot_alert_inputs(model: &Model) -> AlertInputs {
+    let slots = &model.inventory_slots;
+    let worn = std::array::from_fn(|i| {
+        slots[ALERT_SLOTS[i]]
+            .as_ref()
+            .filter(|v| v.item_id != 0)
+            .map(|v| {
+                let (durability, max_durability) = v.durability.unwrap_or((0, 0));
+                // The snapshot holds no temporary enchantment: its arm reads none.
+                AlertItem {
+                    flags: v.flags,
+                    durability,
+                    max_durability,
+                    ..AlertItem::default()
+                }
+            })
+    });
+    let ammo = slots[ALERT_SLOTS[11]]
+        .as_ref()
+        .filter(|v| v.item_id != 0)
+        .map(|v| v.count);
+    AlertInputs { worn, ammo }
+}
+
+/// The recompute's reads through the lent host, as of here, else off the doll snapshot; `None`
+/// while no active player is held.
+fn alert_inputs(lua: &Lua) -> Option<AlertInputs> {
+    match super::live::ask(lua, &InventoryAlertInputs) {
+        Some(inputs) => inputs,
+        None => {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Some(snapshot_alert_inputs(&model))
+        }
+    }
+}
+
+/// `0x4c7ee0`'s pass over the stored statuses (`0xb71f60`), region by region: each set to 0 and
+/// recomputed (`0x4c7f1b`), its tutorial fired at once (`0x4b5390` with delay 0), so a
+/// `TUTORIAL_TRIGGER` listener reads the regions before it recomputed and those after it as the
+/// last pass left them; the caller signals. The caller holds no borrow of the model.
+fn store_inventory_alerts(lua: &Lua, inputs: &AlertInputs) {
+    for (i, (status, tutorial)) in alert_statuses(inputs).into_iter().enumerate() {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .inventory_alerts[i] = status;
+        if let Some(id) = tutorial {
+            super::tutorial::trigger_in_place(lua, id);
+        }
+    }
+}
+
+/// The alert recompute in a verb's call (`UpdateInventoryAlertStatus`, `0x4c9560`): the statuses
+/// stored and `UPDATE_INVENTORY_ALERTS` raised at the pass's end (`0x4c8085`); nothing while no
+/// active player is held.
+pub(super) fn recompute_inventory_alerts_in_verb(lua: &Lua) {
+    let Some(inputs) = alert_inputs(lua) else {
+        return;
+    };
+    store_inventory_alerts(lua, &inputs);
+    super::tick::verb(lua, |model| {
+        model.raise("UPDATE_INVENTORY_ALERTS", Vec::new());
+    });
 }
 
 impl super::UiScript {
@@ -249,15 +371,23 @@ impl super::UiScript {
         })
     }
 
-    /// Push the doll snapshot, recompute the 12 alert statuses and fire `UPDATE_INVENTORY_ALERTS`.
+    /// Push the doll snapshot. The alert statuses are the recompute's alone
+    /// ([`Self::recompute_inventory_alerts`]).
     pub fn set_inventory_slots(&mut self, slots: InventorySlots) {
-        {
-            let mut model = self.model_mut();
-            model.inventory_slots = slots;
-            recompute_inventory_alerts(&mut model);
-        }
-        // Every recompute fires it, never diffed against the last (`0x4c7ee0`); the app pushes
-        // only on a real change.
+        self.model_mut().inventory_slots = slots;
+    }
+
+    /// The alert recompute `0x4c7ee0`, where a field watcher, the world entry's set-up
+    /// (`0x4c6d30`) or the verb runs it: its reads as of here through the lent host
+    /// ([`InventoryAlertInputs`]), else off the doll snapshot; the 12 statuses stored, their
+    /// tutorials, and `UPDATE_INVENTORY_ALERTS` on every pass, whether or not a status changed
+    /// (`0x4c8085`). Nothing while no active player is held (`0x4c7f06`).
+    pub fn recompute_inventory_alerts(&mut self) {
+        let lua = self.lua().clone();
+        let Some(inputs) = alert_inputs(&lua) else {
+            return;
+        };
+        store_inventory_alerts(&lua, &inputs);
         self.fire_event("UPDATE_INVENTORY_ALERTS", vec![]);
     }
 
@@ -274,36 +404,6 @@ impl super::UiScript {
             super::ScriptCall::UseInventoryItem { slot, .. } => Some(*slot),
             _ => None,
         })
-    }
-}
-
-/// The 12 alert statuses off the doll snapshot (`0x4c7ee0`'s recompute), without the event. A
-/// slot it finds broken by durability triggers Broken Items (`0x4c8002`) and one it finds damaged
-/// Damaged Items (`0x4c802e`); the force-red arm (`0x4c7fb0`) and the ammo arm trigger nothing.
-pub(super) fn recompute_inventory_alerts(model: &mut Model) {
-    let slots = &model.inventory_slots;
-    let alerts: [u8; 12] = std::array::from_fn(|i| {
-        if i == 11 {
-            ammo_alert_status(&slots[ALERT_SLOTS[i]])
-        } else {
-            alert_status(&slots[ALERT_SLOTS[i]])
-        }
-    });
-    let forced = |i: usize| {
-        slots[ALERT_SLOTS[i]]
-            .as_ref()
-            .is_some_and(|v| v.flags & 0x10 != 0)
-    };
-    let owed: Vec<u32> = (0..11)
-        .filter_map(|i| match alerts[i] {
-            4 if !forced(i) => Some(TUTORIAL_BROKEN_ITEMS),
-            3 => Some(TUTORIAL_DAMAGED_ITEMS),
-            _ => None,
-        })
-        .collect();
-    model.inventory_alerts = alerts;
-    for id in owed {
-        model.tutorial_triggers.push(id);
     }
 }
 
@@ -1375,7 +1475,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        weapon_subclass_skill, RESISTANCE_INDEX_ERROR, SKILL_UNARMED, STAT_INDEX_ERROR, STAT_USAGE,
+        weapon_subclass_skill, AlertInputs, AlertItem, InventoryAlertInputs,
+        RESISTANCE_INDEX_ERROR, SKILL_UNARMED, STAT_INDEX_ERROR, STAT_USAGE,
     };
     use crate::script::{InvSlotView, UiScript, UnitCombatStats, UnitGuids, UnitState};
 
@@ -2706,15 +2807,146 @@ mod tests {
             ..Default::default()
         });
         s.set_inventory_slots(slots.clone());
+        s.recompute_inventory_alerts();
         assert!(
             s.take_tutorial_triggers().is_empty(),
             "force-red and low ammo"
         );
         slots[3] = worn((4, 50), 0);
         s.set_inventory_slots(slots.clone());
+        s.recompute_inventory_alerts();
         assert_eq!(s.take_tutorial_triggers(), [0x23], "damaged");
         slots[3] = worn((0, 50), 0);
         s.set_inventory_slots(slots);
+        s.recompute_inventory_alerts();
         assert_eq!(s.take_tutorial_triggers(), [0x24], "broken");
+    }
+
+    /// The recompute reads the lent host as it runs, never the doll snapshot, and signals
+    /// `UPDATE_INVENTORY_ALERTS` on every pass whether or not a status moved (`0x4c8085`); with no
+    /// active player it stores and signals nothing (`0x4c7f06`). So does the verb (`0x4c9560`).
+    #[test]
+    fn the_recompute_reads_the_host_and_signals_every_pass() {
+        use crate::script::live::LiveAsk;
+        use crate::script::{CallHost, CallTail, ScriptCall};
+        struct Host(Option<AlertInputs>);
+        impl CallHost for Host {
+            fn apply(&mut self, _: &mut UiScript, _: ScriptCall) -> Option<CallTail> {
+                None
+            }
+            fn read_live(&mut self, ask: &mut LiveAsk<'_>) -> bool {
+                let inputs = self.0;
+                ask.answer(|_: &InventoryAlertInputs| Some(inputs))
+            }
+        }
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"Heard = {}
+               local f = CreateFrame("Frame")
+               f:RegisterEvent("UPDATE_INVENTORY_ALERTS")
+               f:SetScript("OnEvent", function()
+                   table.insert(Heard, GetInventoryAlertStatus(1) .. GetInventoryAlertStatus(12))
+               end)"#,
+        )
+        .unwrap();
+        // The snapshot's helm is whole; the host's is broken.
+        let mut slots: crate::script::InventorySlots = Default::default();
+        slots[1] = Some(InvSlotView {
+            item_id: 7366,
+            durability: Some((40, 40)),
+            ..Default::default()
+        });
+        s.set_inventory_slots(slots);
+        let mut worn = [None; 11];
+        worn[0] = Some(AlertItem {
+            durability: 0,
+            max_durability: 40,
+            ..AlertItem::default()
+        });
+        let mut host = Host(Some(AlertInputs {
+            worn,
+            ammo: Some(20),
+        }));
+        s.hosted(&mut host, |s| {
+            s.recompute_inventory_alerts();
+            s.recompute_inventory_alerts();
+            s.run("UpdateInventoryAlertStatus()").unwrap();
+        });
+        let mut none = Host(None);
+        s.hosted(&mut none, |s| {
+            s.recompute_inventory_alerts();
+            s.run("UpdateInventoryAlertStatus()").unwrap();
+        });
+        assert_eq!(
+            s.eval::<Vec<String>>("return Heard").unwrap(),
+            ["43", "43", "43"],
+            "the host's statuses, once a pass, none with no player"
+        );
+    }
+
+    /// The temporary-enchant arm (`0x4c8035`-`0x4c806d`): a worn item no durability arm claims
+    /// reads 1 with a temporary enchantment, 2 at 30000 ms or fewer left, the boundary included
+    /// and an unset or run-out deadline (0) too; a charter record's (`0x2000`) or no enchantment
+    /// reads 0, and a damaged or broken item keeps its 3 or 4.
+    #[test]
+    fn the_temporary_enchant_arm_reads_one_or_two() {
+        let status = |item: AlertItem| {
+            let mut worn = [None; 11];
+            worn[8] = Some(item);
+            super::alert_statuses(&AlertInputs { worn, ammo: None })[8].0
+        };
+        let enchanted = |left: u32| AlertItem {
+            durability: 40,
+            max_durability: 40,
+            temp_enchant: 7,
+            temp_enchant_left_ms: left,
+            ..AlertItem::default()
+        };
+        assert_eq!(status(enchanted(30_001)), 1);
+        assert_eq!(status(enchanted(30_000)), 2);
+        assert_eq!(status(enchanted(0)), 2, "unset or run out");
+        assert_eq!(
+            status(AlertItem {
+                flags: 0x08,
+                ..enchanted(60_000)
+            }),
+            1,
+            "wrapped skips the durability arms"
+        );
+        assert_eq!(
+            status(AlertItem {
+                max_durability: 0,
+                ..enchanted(60_000)
+            }),
+            1
+        );
+        assert_eq!(
+            status(AlertItem {
+                record_flags: 0x2000,
+                ..enchanted(60_000)
+            }),
+            0
+        );
+        assert_eq!(
+            status(AlertItem {
+                temp_enchant: 0,
+                ..enchanted(10)
+            }),
+            0
+        );
+        assert_eq!(
+            status(AlertItem {
+                durability: 5,
+                ..enchanted(10)
+            }),
+            3
+        );
+        assert_eq!(
+            status(AlertItem {
+                flags: 0x10,
+                ..enchanted(10)
+            }),
+            4
+        );
     }
 }

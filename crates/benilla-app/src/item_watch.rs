@@ -67,6 +67,10 @@ pub(crate) enum ItemNotice {
     /// One of our visible items changed (`0x5dee30`, for the active player): the old and new
     /// `PLAYER_VISIBLE_ITEM_<n>_0`.
     Visible { old: u32, new: u32 },
+    /// Another player's visible item changed (`0x5dee30` ahead of its test for the active player,
+    /// `0x5dee82`): the profession and craft lists' rebuilds (`0x5dee70`, `0x5dee75`) and the
+    /// alert recompute (`0x5dee7a`) alone, with no recount.
+    ForeignVisible,
     /// The record a trade getter asked for landed: its callback `0x4c0340` signals `TRADE_UPDATE`
     /// (`0x4c034f`), for a ready record only. Each getter call that missed registered one callback
     /// with no dedupe (`0x4c017f`, `0x4c0582`), so an answer writes one notice per call, after the
@@ -133,6 +137,11 @@ pub(crate) struct Run {
     pub(crate) signals: Vec<FieldNotice>,
     pub(crate) unlocks: Vec<Unlock>,
     pub(crate) bags: Vec<BagEvent>,
+    /// The handler runs the alert recompute `0x4c7ee0`, which signals `UPDATE_INVENTORY_ALERTS`
+    /// (`0x4c8085`): the ammunition's stack count (`0x5d952a`), the enchantment (`0x5d9b2f`) and a
+    /// visible item (`0x5dee7a`) among their steps, and alone the flags' force-red bit
+    /// (`0x5d97aa`) and the durability (`0x5d9920`).
+    pub(crate) alerts: bool,
 }
 
 impl Run {
@@ -142,6 +151,15 @@ impl Run {
             && self.signals.is_empty()
             && self.unlocks.is_empty()
             && self.bags.is_empty()
+            && !self.alerts
+    }
+
+    /// A handler's run that does nothing but the alert recompute.
+    fn alerts() -> Self {
+        Self {
+            alerts: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -342,7 +360,9 @@ impl ItemNotice {
             Self::Seat { old, new } => old.iter().chain(new.iter()).copied().collect(),
             Self::Bag { entries } => entries.clone(),
             Self::Visible { old, new } => vec![*old, *new],
-            Self::TradeRecord { .. } | Self::TooltipRecord { .. } => Vec::new(),
+            Self::TradeRecord { .. } | Self::TooltipRecord { .. } | Self::ForeignVisible => {
+                Vec::new()
+            }
         }
     }
 
@@ -383,6 +403,15 @@ enum SeatWatcher {
 fn inventory_watched(seat: u8) -> bool {
     matches!(seat, 0..=22 | 39..=68 | 81..=112)
 }
+
+/// `ITEM_FIELD_FLAGS` and `ITEM_FIELD_DURABILITY`, the watches `0x5d9360` registers at item
+/// offsets `0x3c` and `0xa0` (`0x5d93d0`, `0x5d93ea`).
+const FIELD_ITEM_FLAGS: u16 = 21;
+const FIELD_ITEM_DURABILITY: u16 = 46;
+
+/// `INVTYPE_AMMO` (vmangos `ItemPrototype.h`), the stack-count watcher's recompute gate
+/// (`0x5d9525`).
+const INVTYPE_AMMO: u32 = 0x18;
 
 /// The equipment slots with a visible-item watcher: mask `0x7c3fd` of `0x5e2510`, slots 0 and 2-9
 /// and 14-18; the neck, rings and trinkets have none.
@@ -507,8 +536,27 @@ where
                     }
                 }
                 out.extend(notices.into_iter().map(|(at, n)| (at, self.run(n, bags))));
+                // `0x5d96e0`: the force-red bit (`0x10`) moved (`0x5d9722`) on an item the active
+                // player, found live, wears in slots 0 to 18 of its list (`0x5d97a1`-`0x5d97a8`).
+                let force_red_moved = block
+                    .edge(FIELD_ITEM_FLAGS)
+                    .is_some_and(|(old, new)| (old ^ new) & 0x10 != 0);
+                if let Some(at) = place(FIELD_ITEM_FLAGS..FIELD_ITEM_FLAGS + 1, List::Type) {
+                    let me = self.me.and_then(|g| (self.lookup)(g));
+                    let worn = me.is_some_and(|me| (0..19).any(|n| seat_guid(me, n) == guid));
+                    if force_red_moved && worn {
+                        out.push((at, Run::alerts()));
+                    }
+                }
             }
             _ => {}
+        }
+        // `0x5d97c0` on any item, ours or not: whatever it finds, it ends in the recompute
+        // (`0x5d97fb`, `0x5d9829` and the fall-through all reach `0x5d9920`).
+        if matches!(kind, ObjectType::Item | ObjectType::Container) {
+            if let Some(at) = place(FIELD_ITEM_DURABILITY..FIELD_ITEM_DURABILITY + 1, List::Type) {
+                out.push((at, Run::alerts()));
+            }
         }
         // A bag's own seats, watched while it is in the bag cache (`0x4f932a`, `0x4f9299`).
         if kind == ObjectType::Container {
@@ -539,6 +587,20 @@ where
                     run.unlocks.extend(unlock_of(now));
                 }
                 out.push((at, run));
+            }
+        }
+        // `0x5dee30` on another player's visible item: the rebuilds and the recompute ahead of
+        // its test for the active player (`0x5dee70`-`0x5dee7a`, `0x5dee82`); the rest is the
+        // active player's.
+        if kind == ObjectType::Player && self.me != Some(guid) {
+            for i in 0..19u8 {
+                if VISIBLE_WATCHED & (1 << i) == 0 {
+                    continue;
+                }
+                let base = FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 12 * u16::from(i);
+                if let Some(at) = place(base..base + 12, List::Type) {
+                    out.push((at, self.run(ItemNotice::ForeignVisible, bags)));
+                }
             }
         }
         if kind == ObjectType::Player && self.me == Some(guid) {
@@ -643,13 +705,23 @@ where
                 run.unlocks
                     .extend(self.entry_unlock(guid, entry, Walk::Stack));
                 run.bags.extend(self.item_bag(guid, bags));
+                // `0x5d9520`: the record's inventory type (`0x5d9ff0`, `[rec+0x2c]`, 0 uncached)
+                // is ammunition.
+                run.alerts = self
+                    .items
+                    .template(entry, 0, Ask::Read)
+                    .is_some_and(|t| t.inventory_type == INVTYPE_AMMO);
             }
             ItemNotice::Entry {
                 guid,
                 new_cached: true,
                 ..
+            } => run.bags.extend(self.item_bag(guid, bags)),
+            ItemNotice::Enchantment { guid, .. } => {
+                run.bags.extend(self.item_bag(guid, bags));
+                run.alerts = true;
             }
-            | ItemNotice::Enchantment { guid, .. } => run.bags.extend(self.item_bag(guid, bags)),
+            ItemNotice::Visible { .. } | ItemNotice::ForeignVisible => run.alerts = true,
             _ => {}
         }
         run.notice = Some(notice);
@@ -1163,9 +1235,13 @@ mod tests {
         // A ring (slot 10) has no watcher.
         let ring = FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 12 * 10;
         assert!(w.values(ME, &[(ring + 2, 1)]).is_empty());
-        // Another player's visible items run nothing for us.
+        // Another player's visible item runs the rebuilds and the recompute alone (`0x5dee70`-
+        // `0x5dee7a`, ahead of `0x5dee82`'s test for us).
         w.objects.insert(OTHER, player(&[]));
-        assert!(w.values(OTHER, &[(base + 2, 1)]).is_empty());
+        assert_eq!(
+            w.values(OTHER, &[(base + 2, 1)]),
+            [ItemNotice::ForeignVisible]
+        );
     }
 
     #[test]
