@@ -496,3 +496,215 @@ fn the_pets_happiness_signals_at_its_packet() {
         [FELL, "UNIT_HAPPINESS:pet", FELL, "UNIT_HAPPINESS:pet"]
     );
 }
+
+/// `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE` ends far sight inside its handler (`0x5e441d` → `0x5ee590`),
+/// and `HasFullControl` reads the bit where it runs (`0x51a142`): with no frame after the packet
+/// the getter answers 1 again through the host, where the VM's seat, which nothing pushes, holds
+/// what it was.
+#[test]
+fn has_full_control_reads_the_far_sight_bit_at_the_call() {
+    /// The far-sight object, a unit the index holds.
+    const EYE: u64 = 0xF130_0000_0044_0001;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .set_player_control(true);
+    let live = |app: &mut App| {
+        crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
+            s.expect("a VM")
+                .eval::<Option<i64>>("return HasFullControl()")
+                .expect("runs")
+        })
+    };
+    assert_eq!(live(&mut app), Some(1));
+    {
+        let world = app.world_mut();
+        let net = crate::net::NetCommands(world.resource::<crate::net::NetCommands>().0.clone());
+        world
+            .resource::<crate::player::FarSight>()
+            .update(Some(EYE), |_| true, &net);
+    }
+    assert_eq!(live(&mut app), None, "far sight on refuses");
+    crate::net::handlers::dispatch(app.world_mut(), vec![SessionEvent::FarSightCleared]);
+    assert_eq!(live(&mut app), Some(1), "the clear's handler ended it");
+}
+
+/// `PLAYER_FARSIGHT`, the guid's low word.
+const FARSIGHT: u16 = 712;
+/// [`client`]'s wolf, held.
+const WOLF: u64 = 0xF130_0000_0044_0001;
+
+/// Our `PLAYER_FARSIGHT` set to `guid`.
+fn far_sight_field(guid: u64) -> SessionEvent {
+    values(
+        ME,
+        &[(FARSIGHT, guid as u32), (FARSIGHT + 1, (guid >> 32) as u32)],
+    )
+}
+
+/// The `CMSG_FAR_SIGHT` sent since the last look, as engage booleans.
+fn far_sight_votes(rx: &crossbeam_channel::Receiver<crate::net::ClientCommand>) -> Vec<bool> {
+    rx.try_iter()
+        .filter_map(|c| match c {
+            crate::net::ClientCommand::FarSight { engage } => Some(engage),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`client`] in full control, its commands on the channel returned, with a spy on `event` that
+/// records `HasFullControl()` as `"<event>:<answer>"`.
+fn far_sight_client(event: &str) -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
+    let mut app = client();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx));
+    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    script.set_player_control(true);
+    script
+        .run(&format!(
+            r#"
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("{event}")
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, "{event}:" .. tostring(HasFullControl()))
+            end)
+            "#
+        ))
+        .unwrap();
+    (app, rx)
+}
+
+/// `PLAYER_FARSIGHT`'s change on our player (`0x5de0d0`) starts far sight on a held object
+/// (`0x5de144` → `0x5ee270`), `CMSG_FAR_SIGHT` 1 out, then signals
+/// `PLAYER_FARSIGHT_FOCUS_CHANGED` (`0x5de14e`), whose listener's `HasFullControl()` refuses on
+/// the bit (`0x51a142`); the clear ends it (`0x5de15d` → `0x5ee590`), 0 out, ahead of its signal
+/// (`0x5de167`).
+#[test]
+fn a_far_sight_change_starts_and_ends_at_its_packet_ahead_of_its_signal() {
+    let (mut app, rx) = far_sight_client("PLAYER_FARSIGHT_FOCUS_CHANGED");
+    let seen = frame(&mut app, vec![far_sight_field(WOLF)]);
+    assert_eq!(seen, ["PLAYER_FARSIGHT_FOCUS_CHANGED:nil"]);
+    assert_eq!(far_sight_votes(&rx), [true]);
+    let seen = frame(&mut app, vec![far_sight_field(0)]);
+    assert_eq!(seen, ["PLAYER_FARSIGHT_FOCUS_CHANGED:1"]);
+    assert_eq!(far_sight_votes(&rx), [false]);
+}
+
+/// A far-sight field naming an object not yet held starts nothing (`0x5de15d` → `0x5ee590`, far
+/// sight off); the object's create does, a unit's `PostInit` (`0x5fbb1a` → `0x5ee270`):
+/// `CMSG_FAR_SIGHT` 1 out inside its packet, and a listener later in the frame finds
+/// `HasFullControl()` refusing on the bit (`0x51a142`).
+#[test]
+fn a_far_sight_objects_create_starts_far_sight_at_its_packet() {
+    /// Not yet streamed.
+    const EYE: u64 = 0xF130_0000_0046_0003;
+    let (mut app, rx) = far_sight_client("UNIT_COMBAT");
+    frame(&mut app, vec![far_sight_field(EYE)]);
+    assert!(far_sight_votes(&rx).is_empty(), "no object, no start");
+    let seen = frame(&mut app, vec![created(EYE, EntityKind::Unit, &[]), fall(5)]);
+    assert_eq!(far_sight_votes(&rx), [true], "the create starts it");
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.starts_with("UNIT_COMBAT:") && !s.starts_with("UNIT_COMBAT:player"))
+            .collect::<Vec<_>>(),
+        ["UNIT_COMBAT:nil"],
+        "{seen:?}"
+    );
+}
+
+/// A dynamic object's `OnCreate` (`0x5d5420`) starts far sight (`0x5d552d`) only for a far-sight
+/// focus, its bytes' low byte 2 (`0x5d54a7`), that the active player cast (`0x5d54b6`), and only
+/// when our `PLAYER_FARSIGHT` names it (`0x5d5520`).
+#[test]
+fn a_far_sight_focus_we_cast_starts_far_sight_at_its_create() {
+    /// The caster's guid (fields 6 and 7) and the bytes (field 8).
+    const CASTER: u16 = 6;
+    const BYTES: u16 = 8;
+    const OTHER: u64 = 0x52;
+    let focus = |guid: u64, caster: u64, bytes: u32| SessionEvent::ObjectCreate {
+        guid,
+        kind: EntityKind::DynamicObject,
+        display_id: None,
+        position: [0.0; 3],
+        orientation: 0.0,
+        scale: 1.0,
+        speeds: None,
+        mover: None,
+        transport_progress: None,
+        transport: None,
+        spline: None,
+        fields: benilla_protocol::ObjectFields::from_pairs(&[
+            (2, 0x41),
+            (CASTER, caster as u32),
+            (CASTER + 1, (caster >> 32) as u32),
+            (BYTES, bytes),
+        ])
+        .into_created(benilla_protocol::messages::ObjectType::DynamicObject),
+    };
+    let starts = |caster: u64, bytes: u32, named: bool| {
+        const EYE: u64 = 0xF130_0000_0047_0004;
+        let (mut app, rx) = far_sight_client("UNIT_COMBAT");
+        frame(
+            &mut app,
+            vec![far_sight_field(if named { EYE } else { EYE + 1 })],
+        );
+        far_sight_votes(&rx);
+        frame(&mut app, vec![focus(EYE, caster, bytes)]);
+        far_sight_votes(&rx) == [true]
+    };
+    assert!(starts(ME, 2, true), "our focus, named: the start");
+    assert!(!starts(OTHER, 2, true), "another's focus");
+    assert!(!starts(ME, 1, true), "an area spell's object");
+    assert!(!starts(ME, 2, false), "a focus the field does not name");
+}
+
+/// Our player goes with every object at a world's end and at a cross-map load (`0x467800`), its
+/// far-sight bit with it, and the next player's constructor zeroes it (`0x5dd33d`): a world left
+/// far-sighted owes the next one no `CMSG_FAR_SIGHT` 0 at the clear packet (`0x5e441d` →
+/// `0x5ee590`), and the next start sends its 1.
+#[test]
+fn a_world_left_far_sighted_starts_the_next_with_far_sight_off() {
+    let ends = [
+        SessionEvent::LoggedOut,
+        SessionEvent::Disconnected {
+            reason: String::new(),
+            end: benilla_protocol::SessionEnd::Lost,
+        },
+        SessionEvent::Worldport {
+            map_id: 1,
+            position: [0.0; 3],
+            orientation: 0.0,
+            needs_ack: false,
+        },
+    ];
+    for end in ends {
+        let label = format!("{end:?}");
+        let (mut app, rx) = far_sight_client("UNIT_COMBAT");
+        frame(&mut app, vec![far_sight_field(WOLF)]);
+        assert_eq!(far_sight_votes(&rx), [true], "{label}");
+        frame(&mut app, vec![end]);
+        assert!(
+            far_sight_votes(&rx).is_empty(),
+            "{label}: the end sends nothing"
+        );
+        // The next world: our player and the wolf again.
+        app.world_mut().resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+        frame(
+            &mut app,
+            vec![
+                created(ME, EntityKind::Player, &[]),
+                created(WOLF, EntityKind::Unit, &[]),
+            ],
+        );
+        let world = app.world_mut();
+        let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+        world.entity_mut(me).insert(crate::net::SelfPlayer);
+        frame(&mut app, vec![SessionEvent::FarSightCleared]);
+        assert!(
+            far_sight_votes(&rx).is_empty(),
+            "{label}: the new player's far sight is off"
+        );
+        frame(&mut app, vec![far_sight_field(WOLF)]);
+        assert_eq!(far_sight_votes(&rx), [true], "{label}: and starts again");
+    }
+}

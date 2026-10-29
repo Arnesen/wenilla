@@ -734,7 +734,7 @@ mod tests {
         let (input, mouse, feed, tick) = (
             at("::dispatch_input_records"),
             at("::latch_world_mouse"),
-            at("::ui_unit::feed_far_sight_bit"),
+            at("::ui_items::feed::feed_random_properties"),
             at("::tick_script"),
         );
         let (drain, paint) = (at("::drain_chat_input"), at("::paint_script"));
@@ -798,7 +798,7 @@ mod tests {
         unordered.sort();
         // A floor that shows the census found the hosts at all; it falls as feeds go live.
         assert!(
-            update.hosted.len() > 80,
+            update.hosted.len() > 70,
             "the census finds the hosts: {}",
             update.hosted.len()
         );

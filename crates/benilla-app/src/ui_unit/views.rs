@@ -233,7 +233,8 @@ pub(crate) fn mark_frame_start(
     log: Res<ViewLog>,
     mut start: ResMut<FrameStart>,
     selection: Option<Res<Selection>>,
-    interact: Option<Res<crate::ui_session::InteractNpc>>,
+    // `"npc"`, the interaction latch itself (`0x515c00`).
+    interact: Option<Res<crate::ui_session::InteractLatch>>,
     index: Option<Res<GuidIndex>>,
     all: Query<&ObjectStore>,
     me: Query<(Entity, &Guid), With<SelfPlayer>>,
@@ -258,7 +259,8 @@ pub(crate) fn mark_frame_start(
             stores.entry(hop).or_insert_with(|| (e, store(e)));
         }
     }
-    if let Some((guid, entity)) = interact.as_deref().and_then(|i| Some((i.1?, i.0))) {
+    let npc = interact.and_then(|l| l.guid());
+    if let Some((guid, entity)) = npc.map(|g| (g, by_guid(g))) {
         stores
             .entry(guid)
             .or_insert_with(|| (entity, store(entity)));
@@ -274,7 +276,7 @@ pub(crate) fn mark_frame_start(
             script.as_deref().and_then(UiScript::world_mouseover),
             held,
         ),
-        npc: interact.as_deref().and_then(|i| i.1).unwrap_or(0),
+        npc: npc.unwrap_or(0),
         held,
     });
     for &guid in reached.held.keys() {
@@ -1008,7 +1010,8 @@ impl UnitViews {
 #[derive(SystemParam)]
 pub(crate) struct ViewSources<'w, 's> {
     index: Option<Res<'w, GuidIndex>>,
-    interact: Option<Res<'w, crate::ui_session::InteractNpc>>,
+    /// `"npc"`, the interaction latch itself (`0x515c00`).
+    interact: Option<Res<'w, crate::ui_session::InteractLatch>>,
     all: Query<'w, 's, &'static ObjectStore>,
     self_q: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,
     start: Option<Res<'w, FrameStart>>,
@@ -1041,7 +1044,10 @@ fn fire_unit_views(
         } = &src;
         let live = |e: Entity| all.get(e).ok().cloned();
         let by_guid = |guid: u64| index.as_ref().and_then(|i| i.0.get(&guid).copied());
-        let npc_seat = interact.as_deref().and_then(|i| Some((i.1?, i.0)));
+        let npc_seat = interact
+            .as_deref()
+            .and_then(|l| l.guid())
+            .map(|g| (g, by_guid(g)));
         let Some(script) = script else {
             log.take();
             views.clear();

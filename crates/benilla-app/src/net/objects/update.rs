@@ -860,8 +860,9 @@ fn deactivate(sc: &mut Scene, guid: u64, script: Option<&UiScript>) {
 }
 
 /// Whether the mover's input tick takes its teardown leg (`0x5146c1`-`0x5146ce`): it may neither
-/// translate (`0x514560`) nor turn (`0x5145b0`), off its health, the far-sight latch, the root and
-/// the stun its new flags hold ([`crate::player::MoverInput`]).
+/// translate (`0x514560`) nor turn (`0x5145b0`), off its health, the far-sight latch as the packet
+/// leaves it (`[mover+0x1c70] & 1`, `0x514540`, past the active-player test `0x514537`), the root
+/// and the stun its new flags hold ([`crate::player::MoverInput`]).
 fn tick_tears_down(sc: &Scene, fields: &ObjectFields) -> bool {
     let driving_own_body = sc
         .mover_lock
@@ -871,9 +872,9 @@ fn tick_tears_down(sc: &Scene, fields: &ObjectFields) -> bool {
         dead: fields.unit_is_dead(),
         view_is_out: crate::player::view_is_out(
             driving_own_body,
-            sc.view_subject
+            sc.far_sight
                 .as_deref()
-                .is_some_and(|v| v.remote.is_some()),
+                .is_some_and(crate::player::FarSight::on),
         ),
     };
     let rooted = sc
@@ -896,6 +897,69 @@ pub(super) fn stop_auto_move(
 ) {
     if mover.is_some_and(|m| m.holds(guid)) {
         crate::player::end_auto_move(follow, approach, autorun, Some(lane));
+    }
+}
+
+/// `StartFarSight` (`0x5ee270`) on our player `me`, whose `PLAYER_FARSIGHT` names `object`, held:
+/// the update while far sight is off. A start (`0x5ee39c` on, past the unresolved return) stops
+/// the auto-move: a unit we control takes the active mover (`0x5ee45d` → `0x5ee477`), whose switch
+/// stops the outgoing one's (`0x600742`) and is a no-op when it already holds it (`0x6006fb`); the
+/// switch itself is possession's control update's. Any other object runs the mover's tick
+/// (`0x5ee4a2`), which the view's going out tears down.
+fn start_far_sight(sc: &mut Scene, me: u64, object: u64) {
+    let started = match sc.far_sight.as_deref() {
+        Some(far_sight) => {
+            let was_on = far_sight.on();
+            let index = &sc.index;
+            far_sight.start(Some(object), |g| index.0.contains_key(&g), &sc.net);
+            !was_on
+        }
+        // A harness without the machine: the start's stop.
+        None => true,
+    };
+    if !started {
+        return;
+    }
+    let active = sc.mover.as_deref().and_then(crate::net::MoverClaim::get);
+    // `IsClientControlled` (`0x5fa5f0`): our own control, or the unit's own bit.
+    let controlled = if object == me {
+        !sc.own_control_lost.as_deref().is_some_and(|l| l.0)
+    } else {
+        sc.client_controlled.contains(sc.index.0[&object])
+    };
+    let stops = if controlled {
+        active.filter(|&m| m != object)
+    } else {
+        Some(me)
+    };
+    if let Some(mover) = stops {
+        stop_auto_move(
+            sc.mover.as_deref(),
+            sc.follow.as_deref_mut(),
+            sc.approach.as_deref_mut(),
+            sc.call_autorun.as_deref_mut(),
+            &mut sc.field_notices,
+            mover,
+        );
+    }
+}
+
+/// The far-sight arrival of a new object: a unit's `PostInit` (`0x5fbb1a`) and a dynamic object's
+/// `OnCreate` (`0x5d552d`) look up the active player (`0x468460`, as a player) and, when its
+/// `PLAYER_FARSIGHT` (`[player+0xe68]+0x830`) names the new object, start far sight on it
+/// ([`start_far_sight`]).
+fn far_sight_arrives(sc: &mut Scene, guid: u64) {
+    let Some(me) = sc.self_guid.0 else {
+        return;
+    };
+    let field = sc
+        .index
+        .0
+        .get(&me)
+        .and_then(|&e| sc.stores.get(e).ok())
+        .and_then(|s| s.0.player_farsight());
+    if field == Some(guid) {
+        start_far_sight(sc, me, guid);
     }
 }
 
@@ -1191,7 +1255,11 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
             }
             // The stun's tick (`0x5ff501` → `0x514640`): its teardown leg (`0x5146d6`).
             crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::InputTick) => {
-                if tick_tears_down(sc, fields) {
+                if sc
+                    .stores
+                    .get(e)
+                    .is_ok_and(|store| tick_tears_down(sc, &store.0))
+                {
                     stop_auto_move(
                         sc.mover.as_deref(),
                         sc.follow.as_deref_mut(),
@@ -1202,38 +1270,18 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
                     );
                 }
             }
-            // A far sight on a held object (`0x5ee39c` on, past the unresolved return). A unit we
-            // control takes the active mover (`0x5ee45d` → `0x5ee477`), whose switch stops the
-            // outgoing one's auto-move (`0x600742`) and is a no-op when it already holds it
-            // (`0x6006fb`); the switch itself is possession's control update's. Any other object
-            // runs the mover's tick (`0x5ee4a2`), which the view's going out tears down.
-            crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::FarSightStop {
+            // The far-sight field's change (`0x5de0d0`): on a held object the start
+            // (`0x5de144` → `0x5ee270`, [`start_far_sight`]); else the end (`0x5de15d` →
+            // `0x5ee590`).
+            crate::field_watch::Step::Notice(crate::field_watch::FieldNotice::FarSight {
                 object,
             }) => {
-                if !sc.index.0.contains_key(&object) {
-                    continue;
-                }
-                let active = sc.mover.as_deref().and_then(crate::net::MoverClaim::get);
-                // `IsClientControlled` (`0x5fa5f0`): our own control, or the unit's own bit.
-                let controlled = if object == guid {
-                    !sc.own_control_lost.as_deref().is_some_and(|l| l.0)
-                } else {
-                    sc.client_controlled.contains(sc.index.0[&object])
-                };
-                let stops = if controlled {
-                    active.filter(|&m| m != object)
-                } else {
-                    Some(guid)
-                };
-                if let Some(mover) = stops {
-                    stop_auto_move(
-                        sc.mover.as_deref(),
-                        sc.follow.as_deref_mut(),
-                        sc.approach.as_deref_mut(),
-                        sc.call_autorun.as_deref_mut(),
-                        &mut sc.field_notices,
-                        mover,
-                    );
+                let field = (object != 0).then_some(object);
+                if field.is_some_and(|g| sc.index.0.contains_key(&g)) {
+                    start_far_sight(sc, guid, object);
+                } else if let Some(far_sight) = sc.far_sight.as_deref() {
+                    let index = &sc.index;
+                    far_sight.end(field, |g| index.0.contains_key(&g), &sc.net);
                 }
             }
             // The ghost flag's clear (`0x5dea20`): `SetAreaSpiritHealer(0, 0)` runs at the packet,
@@ -1246,7 +1294,8 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
                     continue;
                 };
                 if spirit.set_healer(None).cancel_aura {
-                    let player = Some((e, fields.player_farsight()));
+                    let farsight = sc.stores.get(e).ok().and_then(|s| s.0.player_farsight());
+                    let player = Some((e, farsight));
                     let held = |guid: u64| sc.index.0.contains_key(&guid);
                     let spell = crate::ui_dialog_verbs::AREA_SPIRIT_HEALER_AURA;
                     if sc.aura.cancel_at_packet(player, held, spell) {
@@ -1290,7 +1339,8 @@ fn notify(sc: &mut Scene, guid: u64, block: Notified, bridged: bool) {
             .edges()
             .any(|(index, _, _)| index == benilla_protocol::field::FIELD_PLAYER_FIELD_COINAGE)
     {
-        if let (Some(trade), Some(purse)) = (sc.trade.as_mut(), fields.player_money()) {
+        let purse = sc.stores.get(e).ok().and_then(|s| s.0.player_money());
+        if let (Some(trade), Some(purse)) = (sc.trade.as_mut(), purse) {
             crate::ui_trade::trim_offer_to_purse(trade, purse, &sc.net);
         }
     }
@@ -1324,11 +1374,14 @@ fn mirror_guild(sc: &mut Scene) {
 
 /// The create hook of an object not yet shown (the table `0x465e78`), which alone asks the
 /// object's record: an item's record set-up (`0x5d8400` → `0x5d8300`); a unit's `PostInit`
-/// (`0x5fb880`), whose display resolve asks a creature's record (`0x60afb0`, at `0x60b15b`); a
-/// player's (`0x5debe0`), its name (`0x5dec12` → `0x609210`) and guild tag (`0x5dec19`) ahead of another
-/// player's party record (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`), and for
-/// the active player its arrival last (`0x5dec7b`, [`super::arrival`]); a game object's template
-/// (`0x5f7c40`, at `0x5f7d81`), whose lockId decides use-vs-cast.
+/// (`0x5fb880`), whose display resolve asks a creature's record (`0x60afb0`, at `0x60b15b`) and
+/// which starts far sight late, ahead of its tail (`0x60c520`, `0x606fe0`, `0x607710`,
+/// `0x5ff130`, `0x612a30`; [`far_sight_arrives`]); a player's (`0x5debe0`), the unit's
+/// first (`0x5dec09`), then its name (`0x5dec12` → `0x609210`) and guild tag (`0x5dec19`) ahead of
+/// another player's party record (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`),
+/// and for the active player its arrival last (`0x5dec7b`, [`super::arrival`]); a game object's
+/// template (`0x5f7c40`, at `0x5f7d81`), whose lockId decides use-vs-cast; a dynamic object's
+/// `OnCreate` (`0x5d5420`), a far-sight focus's arrival.
 fn create_hook(
     sc: &mut Scene,
     guid: u64,
@@ -1386,6 +1439,9 @@ fn create_hook(
                 sc.bag_cache.seat(&fields, &lookup);
             }
             resolve_display_records(sc, guid, &fields);
+            // The unit's `PostInit` (`0x5dec09` → `0x5fb880`): its far-sight arrival, ahead of
+            // its tail (`0x60c520`, `0x606fe0`, `0x607710`, `0x5ff130`, `0x612a30`).
+            far_sight_arrives(sc, guid);
             sc.names.lookup_fields(guid, &fields, &sc.net);
             sc.field_notices
                 .write_batch(crate::field_watch::guild_tag(guid));
@@ -1400,6 +1456,18 @@ fn create_hook(
         Created::World(EntityKind::Unit) => {
             resolve_display_records(sc, guid, &fields);
             sc.names.lookup_fields(guid, &fields, &sc.net);
+            far_sight_arrives(sc, guid);
+        }
+        // `OnCreate` (`0x5d5420`): a far-sight focus (the bytes' low byte 2, `0x5d54a7`) that
+        // the active player cast (`0x5d54b6`) is the far-sight arrival's.
+        Created::World(EntityKind::DynamicObject) => {
+            let focus = fields.dynamicobject_bytes().is_some_and(|b| b & 0xff == 2);
+            let ours = fields
+                .dynamicobject_caster()
+                .is_some_and(|caster| sc.self_guid.0 == Some(caster));
+            if focus && ours {
+                far_sight_arrives(sc, guid);
+            }
         }
         Created::World(EntityKind::GameObject) => {
             sc.go_templates.request_at_create(guid, &fields, &sc.net)

@@ -310,16 +310,15 @@ pub(crate) struct ServiceArms<'w> {
     pub(crate) quest: Res<'w, crate::ui_quest::QuestGiver>,
     /// Bit 6 sends through the cache the proximity poll writes, so the two agree on the healer.
     pub(crate) spirit: ResMut<'w, crate::ui_dialog_verbs::AreaSpiritHealer>,
-    /// The NPC whose window is open (`[0xb4e2d0]`), checked before the ladder.
-    pub(crate) interact: Res<'w, crate::ui_session::InteractNpc>,
+    /// The NPC whose window is open (`[0xb4e2d0]`), the latch itself, checked before the ladder.
+    pub(crate) interact: Res<'w, crate::ui_session::InteractLatch>,
 }
 
 /// The re-click gate (`0x5f0251`), before the ladder: a right-click on the NPC whose window is
 /// open (`[0xb4e2d0]`) does nothing, no packet, no error, no gesture. The reference arms that NPC
-/// only from window openers (`0x4930d0`, cleared at `0x493310`), never on the click, the set
-/// [`crate::ui_session::feed_interact_npc`] publishes.
-fn interaction_already_open_on(target: u64, interact: &crate::ui_session::InteractNpc) -> bool {
-    interact.1 == Some(target)
+/// only from window openers (`0x4930d0`, cleared at `0x493310`), never on the click.
+fn interaction_already_open_on(target: u64, latch: &crate::ui_session::InteractLatch) -> bool {
+    latch.guid() == Some(target)
 }
 
 /// The refusals and openers the dispatchers raise.
@@ -2647,22 +2646,20 @@ mod tests {
         }
     }
 
-    /// The re-click gate through the real [`crate::ui_session::feed_interact_npc`]: nothing arms
-    /// it before a window opens, a window arms its own NPC, and a close disarms it.
+    /// The re-click gate on the real latch: nothing arms it before a window opens, a window arms
+    /// its own NPC, and a close disarms it.
     #[test]
     fn the_reclick_gate_fires_only_while_that_npc_s_window_is_open() {
-        use crate::ui_session::{feed_interact_npc, InteractNpc};
-        use bevy::ecs::system::RunSystemOnce;
+        use crate::ui_session::InteractLatch;
 
         const NPC: u64 = 0xF130_0000_0000_0042;
         const OTHER: u64 = 0xF130_0000_0000_0043;
 
         let armed = |seed: &dyn Fn(&mut World)| {
             let mut world = World::new();
-            world.init_resource::<InteractNpc>();
+            world.init_resource::<InteractLatch>();
             seed(&mut world);
-            world.run_system_once(feed_interact_npc).unwrap();
-            world.remove_resource::<InteractNpc>().unwrap()
+            world.remove_resource::<InteractLatch>().unwrap()
         };
 
         // Nothing open: a first click on any NPC reaches the ladder.
@@ -2701,7 +2698,7 @@ mod tests {
             ("quest", &with_quest),
             ("trainer", &with_trainer),
         ] {
-            assert_eq!(armed.1, Some(NPC), "{what} did not arm the npc token");
+            assert_eq!(armed.guid(), Some(NPC), "{what} did not arm the latch");
             // A re-click on that NPC is eaten...
             assert!(
                 interaction_already_open_on(NPC, armed),
@@ -2720,7 +2717,7 @@ mod tests {
             crate::ui_trainer::open_trainer(w, NPC, 0, Vec::new(), String::new());
             crate::ui_trainer::close_core(w);
         });
-        assert_eq!(closed.1, None);
+        assert_eq!(closed.guid(), None);
         assert!(!interaction_already_open_on(NPC, &closed));
     }
 
@@ -2838,7 +2835,7 @@ mod tests {
         world.init_resource::<crate::ui_binder::BinderState>();
         world.init_resource::<crate::death::DeathNet>();
         world.init_resource::<crate::ui_dialog_verbs::AreaSpiritHealer>();
-        world.init_resource::<crate::ui_session::InteractNpc>();
+        world.init_resource::<crate::ui_session::InteractLatch>();
         world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::ui_cast::CastReports>();
         world.init_resource::<crate::spell::PendingCast>();
@@ -3066,6 +3063,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The re-click gate (`0x5f0251`) reads the latch as the click finds it (`[0xb4e2d0]`): a
+    /// window an earlier record of the frame closed leaves the frame's copy of the latch naming its
+    /// NPC, and a right-click on that NPC still greets it.
+    #[test]
+    fn the_reclick_gate_reads_the_latch_as_the_click_finds_it() {
+        const F_NPC_FLAGS: u16 = 147;
+        const NPC: u64 = BOAR + 1;
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let (mut world, _boar) = right_click_world();
+        world.insert_resource(NetCommands(tx));
+        let me = world
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(me).insert((
+            store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+            Transform::default(),
+        ));
+        let npc = world
+            .spawn((
+                Guid(NPC),
+                store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100), (F_NPC_FLAGS, 0x1)]),
+                Transform::from_xyz(3.0, 0.0, 0.0),
+                crate::net::NetEntity {
+                    kind: benilla_protocol::EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(NPC, npc);
+        // The frame's copy, as the last frame's packets left it, and the latch the close cleared.
+        world.insert_resource(crate::ui_session::InteractNpc(Some(npc), Some(NPC)));
+        world.insert_resource(crate::ui_session::InteractLatch::default());
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered: Hovered {
+                target: Some(npc),
+                guid: Some(NPC),
+                distance: 3.0,
+                ..Hovered::default()
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Interact,
+                unable: false,
+            },
+            ..PressPick::default()
+        };
+        crate::script_calls::run_cached(&mut world, act_on_right_click).unwrap();
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            sent.iter()
+                .any(|c| matches!(c, ClientCommand::GossipHello { guid } if *guid == NPC)),
+            "the closed window's NPC is greeted again: {sent:?}"
+        );
     }
 
     /// The dispatcher's attack arm (`0x60c18c`) is taken on the fork, not the sword: a ghost over

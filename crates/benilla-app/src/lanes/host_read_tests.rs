@@ -4,11 +4,12 @@
 //! its sends go out in packet order. That move is right once five lists are empty, each the whole
 //! of its remaining work and only shrinking; [`flip_readiness`] prints where they stand.
 //!
-//! - [`super::guard_tests::READS_FRAME_FINAL`], held here to its count: the feeds that push a
-//!   view of what a handler writes, which a getter reads in place of the live state. A family's
-//!   getters going live ([`crate::script_calls::live`]) drops its feed's row; a hover's build the
-//!   reference too makes outside every packet is
-//!   [`super::guard_tests::BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE`]'s, which stays.
+//! - [`super::guard_tests::READS_FRAME_FINAL`], held here to its count: the systems, in any
+//!   schedule or set, that push a view of what a handler writes, which a getter reads in place of
+//!   the live state. A family's getters going live ([`crate::script_calls::live`]) drops its
+//!   feed's row; a build the reference too makes outside every packet is
+//!   [`super::guard_tests::BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE`]'s, and a system that
+//!   writes the VM and pushes no view is [`super::guard_tests::WRITES_NO_VIEW`]'s; both stay.
 //! - [`BETWEEN_THE_DISPATCH_AND_THE_DRAIN`]: the systems after the dispatch and ahead of the drain
 //!   that write what a call or a handler reads inside a packet (the host's live reads, the rest of
 //!   the call host's state, and what the handlers read without writing), or push a view the drain
@@ -43,15 +44,17 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 7;
-const FRAME_FINAL_INPUTS: usize = 30;
+const FRAME_FINAL_FEEDS: usize = 16;
+const FRAME_FINAL_INPUTS: usize = 129;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
 /// listener's call or a handler reads inside a packet, by its name in the crate, and why: the
 /// host's live reads ([`crate::script_calls::live::LiveReads`]), the rest of the call host's
 /// state, which its verbs read, and what the handlers read without writing
-/// ([`super::guard_tests::READ_ONLY_TO_HANDLERS`]), the queues apart. These are the
+/// ([`super::guard_tests::READ_ONLY_TO_HANDLERS`]), the lanes and the message buffers apart; a
+/// read of what the handlers fill through a shared reference
+/// ([`super::guard_tests::FILLED_THROUGH_A_READ`]) counts as the write it is. These are the
 /// obstacles to the flip, each a write the reference makes inside a packet, or a view pushed in
 /// its place. A listener fired inside the dispatch would read each of these as the frame before
 /// left it. The writers the reference also runs after the packets are
@@ -61,12 +64,10 @@ const FRAME_FINAL_INPUTS: usize = 30;
 /// access does not show; `exclusive` a system whose access Bevy does not report.
 #[rustfmt::skip]
 const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
-    ("::player::camera_saved::load_camera_pose", &["player::camera::CameraControl",
-        "player::camera::FlyCam", "player::state::Player"],
-        "restores the rig's distances and the camera's pitch from the per-character file once the \
-         roster names the character, which `SaveView` reads inside its call (`0x50fa30`); the \
-         reference reads the file as the world frame constructs its camera at the interface load \
-         (`0x481b4e` → `0x50c0e0`, `LoadSettings 0x50c5a0` at `0x50c3ea`), before any listener"),
+    ("::bindings::reread_arrived_bindings", &["account_data::AccountData"],
+        "takes the binding sections a download owes it through `&self` and rereads them after \
+         the dispatch, where the reference runs the reader (`ReadBindingCache` `0x4b6240`) inside \
+         the settle its section's digest or download handler makes (`0x5afaca`, `0x5afd19`)"),
     ("::net::motion::remote::extrapolate_remote_units", &["Commands net::motion::spline::Spline",
         "Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
@@ -76,22 +77,18 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "a field event's listeners read its push, and it takes the ammo getters' record hits, a \
          `UNIT_INVENTORY_CHANGED` each behind it, where the reference's hit registers no callback \
          and the call reads the record itself (`0x4c83bc`, `0x4c89cf`)"),
-    ("::ui_chat::language::feed_language_skills", &["ui_chat::language::ChatLanguages"],
-        "recomputes the language skills off the book and the skill lines, which a page's show \
-         reads inside its packet (`0x4e3856`), where the reference reads the skill live at the \
-         show (`0x4e3837`)"),
     ("::ui_item_text::apply_reads", &["ui_item_text::ItemTextOpen"],
         "a click's or a bag use's read, queued in its input or its call, which the reference \
          opens inside them (`0x5f58c0`, `0x4e32e0`), ahead of the packets (`0x420d23`)"),
-    ("::ui_macro::load_macros", &["ui_action::ActionSlots"],
-        "the macro reader (`LoadMacroFiles` `0x4f0600`), run as its sections settle, moves a \
-         character's buttons off benilla's older numbering through the bar verbs, a move with no \
-         reference fact; the reference runs the reader inside the account-data settle \
-         (`0x5afaca`, `0x5afd19`)"),
-    ("::ui_session::feed_interact_npc", &["ui_session::InteractNpc"],
-        "copies the interaction latch into the `npc` unit the token lookups read, where the \
-         reference's `npc` is the latch itself (`0x515c00`), set inside the handlers through \
-         `SetInteractionTarget` `0x4930d0`"),
+    ("::ui_layout::load_layout", &["account_data::AccountData"],
+        "takes the layout section a download owes it through `&self` and reads it after the \
+         dispatch, where the reference runs the reader (`LayoutCacheRead` `0x490380`) inside the \
+         settle (`0x5afaca`, `0x5afd19`)"),
+    ("::ui_macro::load_macros", &["account_data::AccountData", "ui_action::ActionSlots"],
+        "the macro reader (`LoadMacroFiles` `0x4f0600`), run as its sections settle, takes the \
+         sections a download owes it through `&self`, and moves a character's buttons off \
+         benilla's older numbering through the bar verbs, a move with no reference fact; the \
+         reference runs the reader inside the account-data settle (`0x5afaca`, `0x5afd19`)"),
 ];
 
 /// The systems between the dispatch and the drain that write what the host's live reads read,
@@ -183,18 +180,20 @@ fn writers_between(app: &mut App) -> Option<BTreeMap<String, BTreeSet<String>>> 
     // What a listener inside the dispatch reads past the live families: every resource and
     // component a call's verbs touch through the host, and what the handlers read without writing
     // ([`super::guard_tests::READ_ONLY_TO_HANDLERS`]), each a read made inside a packet in the
-    // reference. The queues are not state: the lanes, the message buffers and what a handler fills
-    // through a shared reference.
+    // reference, and what the handlers fill through a shared reference, which a system writes
+    // through `&self`. The lanes and the message buffers are not state.
     crate::net::handlers::measure(world);
     let queues: HashSet<ComponentId> = super::guard_tests::lane_types()
         .into_iter()
         .filter_map(|t| world.components().get_resource_id(t))
         .collect();
     let is_state = |world: &World, id: ComponentId| {
-        let n = super::guard_tests::name(world, id);
-        !queues.contains(&id)
-            && !super::guard_tests::is_messages(world, id)
-            && !super::guard_tests::ends_with_any(&n, super::guard_tests::FILLED_THROUGH_A_READ)
+        !queues.contains(&id) && !super::guard_tests::is_messages(world, id)
+    };
+    // What the handlers and the host fill through a shared reference: a system's read of one is
+    // a write, which its access shows as a read.
+    let through_a_read = |world: &World, id: ComponentId| {
+        super::guard_tests::filled_through_a_read(&super::guard_tests::name(world, id)).is_some()
     };
     let handlers = world.resource::<crate::net::handlers::NetHandlers>();
     let mut handler_reads = HashSet::new();
@@ -317,6 +316,7 @@ fn writers_between(app: &mut App) -> Option<BTreeMap<String, BTreeSet<String>>> 
             let a = fa.access();
             writes.extend(
                 a.resource_writes()
+                    .chain(a.resource_reads().filter(|id| through_a_read(world, *id)))
                     .filter(|id| read_resources.contains(id) && Some(*id) != vm)
                     .map(name),
             );
@@ -486,6 +486,11 @@ fn flip_readiness() {
             String::new(),
         ),
         (
+            "WRITES_NO_VIEW (stays)",
+            g::WRITES_NO_VIEW.len(),
+            String::new(),
+        ),
+        (
             "QUEUED_FOR_THE_TICK (behind every packet, flip or not)",
             g::QUEUED_FOR_THE_TICK.len(),
             String::new(),
@@ -501,4 +506,33 @@ fn flip_readiness() {
         out += &format!("  {n:>4}  {list}{extra}\n");
     }
     eprint!("{out}");
+}
+
+/// No list here names a system twice, and no row lists an input twice.
+#[test]
+fn no_host_read_list_names_an_entry_twice() {
+    use super::guard_tests::named_twice;
+    let mut twice = Vec::new();
+    for (list, rows) in [
+        (
+            "BETWEEN_THE_DISPATCH_AND_THE_DRAIN",
+            BETWEEN_THE_DISPATCH_AND_THE_DRAIN,
+        ),
+        (
+            "AFTER_THE_PACKETS_IN_THE_REFERENCE",
+            AFTER_THE_PACKETS_IN_THE_REFERENCE,
+        ),
+    ] {
+        twice.extend(named_twice(
+            list,
+            rows.iter().map(|(s, _, _)| s.to_string()),
+        ));
+        for (s, inputs, _) in rows {
+            twice.extend(named_twice(
+                &format!("{list} {s}"),
+                inputs.iter().map(|i| i.to_string()),
+            ));
+        }
+    }
+    assert!(twice.is_empty(), "named twice:\n  {}", twice.join("\n  "));
 }
