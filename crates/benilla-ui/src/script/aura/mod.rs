@@ -146,9 +146,9 @@ fn returns(lua: &Lua, a: &AuraState, with_dispel_type: bool) -> mlua::Result<Mul
     Ok(MultiValue::from_vec(out))
 }
 
-/// The list of the unit `token` names off the snapshots, for a reader outside any call: the pushed
-/// resolver inputs (`0x515970`, which `UnitBuff` calls at `0x519542`), the player's by slot as any
-/// unit's; `None` for nobody, a unit with no list, and a token the resolver does not recognise.
+/// The list of the unit `token` names off the snapshots, for a reader outside any call: the
+/// resolver's stand-in (`0x515970`, which `UnitBuff` calls at `0x519542`), the player's by slot as
+/// any unit's; `None` for nobody, a unit with no list, and a token the resolver does not recognise.
 pub(crate) fn auras_of<'m>(model: &'m Model, token: &str) -> Option<&'m UnitAuraList> {
     model
         .unit_guids
@@ -241,7 +241,8 @@ impl super::UiScript {
         model.unit_auras.clear();
     }
 
-    /// Push the unit-token resolver's inputs, copied only when they moved.
+    /// Set the unit-token resolver's no-host stand-in ([`super::UnitGuids`]) whole, copied only
+    /// when it moved: a harness's units, or the session end's clear.
     pub fn set_unit_guids(&mut self, guids: &super::UnitGuids) {
         let mut model = self.model_mut();
         if model.unit_guids != *guids {
@@ -249,8 +250,8 @@ impl super::UiScript {
         }
     }
 
-    /// Seat the player's own guid in the unit-token resolver ahead of a full
-    /// [`Self::set_unit_guids`] push, so `"player"` names us from the world-enter cascade on.
+    /// Seat the player's own guid in the unit-token resolver's stand-in at the world entry, so
+    /// `"player"` names us from the world-enter cascade on with no host to ask too.
     pub fn seat_player_guid(&mut self, guid: u64) {
         let mut model = self.model_mut();
         if model.unit_guids.player != guid {
