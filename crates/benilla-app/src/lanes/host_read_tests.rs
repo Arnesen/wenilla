@@ -43,8 +43,8 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 9;
-const FRAME_FINAL_INPUTS: usize = 43;
+const FRAME_FINAL_FEEDS: usize = 8;
+const FRAME_FINAL_INPUTS: usize = 34;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
@@ -72,11 +72,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::ui_cast::feed_cast_reports", &["ui_action::cast_lines::CastFailRedisplays"],
-        "holds the refusals that wait on their item's record, which it tests to queue the cast \
-         lane's retry behind the frame's packets, where the reference shows each in the record's \
-         callback (`ShowItemCastFailure` `0x6e29b0`), inside `ItemCacheReceive` `0x55bdb0` in the \
-         answer's handler"),
     ("::ui_char::feed_char", &["UiScript", "ui_char::AmmoRecordHits"],
         "a field event's listeners read its push, and it takes the ammo getters' record hits, a \
          `UNIT_INVENTORY_CHANGED` each behind it, where the reference's hit registers no callback \
@@ -139,6 +134,9 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
     ("::ui_action::cooldown_lane::drop_cooldown_log<benilla_app::ui_pet::PetBar>",
         &["ui_pet::PetBar"],
         "drops the pet's cooldown log, run only while no in-game interface \
+         is up, so no listener exists; it goes with the log"),
+    ("::ui_cast::views::drop_cast_views", &["ui_cast::views::CastViews"],
+        "drops the cast views' log, run only while no in-game interface \
          is up, so no listener exists; it goes with the log"),
     ("::ui_chat::language::load_language_words", &["ui_chat::language::ChatLanguages"],
         "loads `LanguageWords.dbc` once, the first frame the install is open, ahead of every \

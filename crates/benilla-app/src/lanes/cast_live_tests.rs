@@ -459,3 +459,230 @@ fn a_failed_results_gcd_clear_reads_the_targeting_word_still_up() {
         "{seen:?}"
     );
 }
+
+/// A reagent the refusal below names, whose record the item cache lacks until its answer.
+const SHARD: u32 = 6265;
+
+/// The reagent line's strings, and a spy on the lines, each `UI_ERROR_MESSAGE` as `LINE:<text>`.
+fn spy_lines(c: &mut Client) {
+    c.eval::<()>(
+        false,
+        r#"SPELL_FAILED_REAGENTS = "Missing reagent: %s"
+        ERR_SPELL_FAILED_REAGENTS = "%s"
+        local g = CreateFrame("Frame")
+        g:RegisterEvent("UI_ERROR_MESSAGE")
+        g:SetScript("OnEvent", function() table.insert(Seen, "LINE:" .. arg1) end)"#,
+    );
+}
+
+/// Our cast of `spell_id` refused for a missing reagent, its item word `arg`.
+fn refuse_for_a_reagent(c: &mut Client, spell_id: u32, arg: Option<u32>) {
+    c.frame(vec![vec![SessionEvent::CastResult {
+        spell_id,
+        success: false,
+        reason: Some(0x5c),
+        arg,
+    }]]);
+}
+
+/// [`client`] with [`spy_lines`]; then our cast refused for [`SHARD`], which the cache lacks: the
+/// reporter's lookup asks for it and leaves past the line and its log line (`0x6e1ea4`,
+/// `0x6e1eab`).
+fn refused_for_a_reagent() -> Client {
+    let mut c = client();
+    spy_lines(&mut c);
+    refuse_for_a_reagent(&mut c, HEAL, Some(SHARD));
+    assert!(
+        c.seen(&["LINE"]).is_empty(),
+        "no line while the record is asked"
+    );
+    c
+}
+
+/// The answer for [`SHARD`]: its record, or the server's refusal.
+fn shard_answer(name: Option<&str>) -> SessionEvent {
+    SessionEvent::ItemTemplate {
+        entry: SHARD,
+        info: name.map(|n| Box::new(crate::items::test_template(n))),
+    }
+}
+
+/// The record's answer runs the refusal's callback (`ShowItemCastFailure 0x6e29b0`) inside its
+/// packet (`ItemCacheReceive 0x55bdb0`): the line fires between the power packets around it.
+#[test]
+fn a_reagent_line_shows_at_its_records_answer() {
+    let mut c = refused_for_a_reagent();
+    c.frame(vec![
+        vec![values(ME, &[(MANA, 90)])],
+        vec![shard_answer(Some("Soul Shard"))],
+        vec![values(ME, &[(MANA, 80)])],
+    ]);
+    assert_eq!(
+        c.seen(&["UNIT_MANA", "LINE"]),
+        [
+            "UNIT_MANA:nil:nil",
+            "LINE:Missing reagent: Soul Shard",
+            "UNIT_MANA:nil:nil",
+        ]
+    );
+    c.frame(vec![]);
+    assert!(c.seen(&["LINE"]).is_empty(), "the callback ran once");
+}
+
+/// A refusal runs the callback too, whose lookup finds no record: `UNKNOWN` (`0x6e2a49`).
+#[test]
+fn a_refused_reagent_record_shows_unknown_at_its_answer() {
+    let mut c = refused_for_a_reagent();
+    c.frame(vec![
+        vec![values(ME, &[(MANA, 90)])],
+        vec![shard_answer(None)],
+        vec![values(ME, &[(MANA, 80)])],
+    ]);
+    assert_eq!(
+        c.seen(&["UNIT_MANA", "LINE"]),
+        [
+            "UNIT_MANA:nil:nil",
+            "LINE:Missing reagent: UNKNOWN",
+            "UNIT_MANA:nil:nil",
+        ]
+    );
+}
+
+/// With no frame after them, the getters read through the host the cast state each packet left,
+/// inside the call (`0x4e53a0`, `0x6e6e80`): Heal in flight after its start, popped after its
+/// result, where the VM's copy, which no feed pushes, still holds it in flight; and
+/// `SpellStopCasting` finds nothing to stop.
+#[test]
+fn the_cast_getters_read_each_packets_state_at_the_call() {
+    let mut c = client();
+    cast_heal(&mut c);
+    let chunk = "return IsCurrentAction(1), SpellIsTargeting()";
+    crate::net::handlers::dispatch(
+        c.app.world_mut(),
+        vec![SessionEvent::SpellStart {
+            caster: ME,
+            spell_id: HEAL,
+            cast_flags: 0,
+            cast_time_ms: 2500,
+            target: None,
+            ammo_display_id: None,
+        }],
+    );
+    assert_eq!(
+        c.eval::<(Option<i64>, Option<i64>)>(true, chunk),
+        (Some(1), None)
+    );
+    crate::net::handlers::dispatch(
+        c.app.world_mut(),
+        vec![SessionEvent::CastResult {
+            spell_id: HEAL,
+            success: true,
+            reason: None,
+            arg: None,
+        }],
+    );
+    assert_eq!(
+        c.eval::<(Option<i64>, Option<i64>)>(true, chunk),
+        (None, None)
+    );
+    assert_eq!(
+        c.eval::<(Option<i64>, Option<i64>)>(false, chunk),
+        (Some(1), None),
+        "the VM's copy"
+    );
+    c.press("Stopped = SpellStopCasting()");
+    assert_eq!(c.eval::<Option<i64>>(false, "return Stopped"), None);
+}
+
+/// The targeting word and the auto-repeat key read at the call too (`0x6e6cd0`, `0x6e9fd0`), each
+/// written with no push after it: the cursor up for Heal and Heal repeating. `SpellStopTargeting`
+/// tests the word at the call and ends it inside it (`0x6e6e30` → `0x6e4900`).
+#[test]
+fn the_targeting_word_and_the_auto_repeat_key_read_at_the_call() {
+    let mut c = client();
+    let world = c.app.world_mut();
+    world.resource_mut::<crate::spell::SpellTargeting>().enter(
+        HEAL,
+        crate::spell::CastCommit::Spell,
+        0x0002,
+    );
+    world.resource_mut::<crate::spell::AutoRepeatActive>().0 = Some(HEAL);
+    let chunk = "return SpellIsTargeting(), IsAutoRepeatAction(1)";
+    assert_eq!(
+        c.eval::<(Option<i64>, Option<i64>)>(true, chunk),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        c.eval::<(Option<i64>, Option<i64>)>(false, chunk),
+        (None, None),
+        "the VM's copy"
+    );
+    c.press("Stopped = SpellStopTargeting()");
+    assert_eq!(c.eval::<Option<i64>>(false, "return Stopped"), Some(1));
+    assert!(!c
+        .app
+        .world()
+        .resource::<crate::spell::SpellTargeting>()
+        .active());
+}
+
+/// A refusal of ours with no item word reads -1 (`0x6e736e`), whose ask no answer ever matches
+/// (`0x55bdf7`, `0x55be5d`), and one with a word of 0 asks nothing (`0x55ba42`): neither shows a
+/// line, now or at an answer, though Heal's reagent is cached and missing from our bags.
+#[test]
+fn a_reagent_refusal_with_no_item_word_shows_no_line() {
+    let mut c = client();
+    let mut reagents = [(0, 0); 8];
+    reagents[0] = (SHARD, 1);
+    c.app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            HEAL,
+            SpellDisplay {
+                id: HEAL,
+                name: "Heal".into(),
+                reagents,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    c.app
+        .world_mut()
+        .resource_mut::<crate::items::Items>()
+        .insert_template(SHARD, Some(crate::items::test_template("Soul Shard")));
+    spy_lines(&mut c);
+    for arg in [None, Some(0)] {
+        refuse_for_a_reagent(&mut c, HEAL, arg);
+        c.frame(vec![vec![shard_answer(Some("Soul Shard"))]]);
+        assert!(c.seen(&["LINE"]).is_empty(), "{arg:?}");
+    }
+    assert!(
+        c.app
+            .world_mut()
+            .resource_mut::<crate::items::Items>()
+            .take_callbacks(0)
+            .is_empty(),
+        "a word of 0 keeps no callback"
+    );
+}
+
+/// The reagent arm reads the item word alone, never the spell record (`0x6e1e7f`): a refusal of
+/// a spell the catalog lacks shows its line at the record's answer under `0xd2`, which the
+/// callback picks off the reason (`0x6e29fe`), and with the record cached under the default id
+/// `0x2c`, as the reporter skips the record's chain (`0x6e1a7c`).
+#[test]
+fn a_reagent_line_shows_for_a_spell_with_no_record() {
+    const UNLISTED: u32 = 99_999;
+    let mut c = client();
+    spy_lines(&mut c);
+    c.eval::<()>(
+        false,
+        r#"ERR_SPELL_FAILED_S = "S:%s" ERR_SPELL_FAILED_REAGENTS = "R:%s""#,
+    );
+    refuse_for_a_reagent(&mut c, UNLISTED, Some(SHARD));
+    assert!(c.seen(&["LINE"]).is_empty(), "the record is asked");
+    c.frame(vec![vec![shard_answer(Some("Soul Shard"))]]);
+    assert_eq!(c.seen(&["LINE"]), ["LINE:R:Missing reagent: Soul Shard"]);
+    refuse_for_a_reagent(&mut c, UNLISTED, Some(SHARD));
+    assert_eq!(c.seen(&["LINE"]), ["LINE:S:Missing reagent: Soul Shard"]);
+}

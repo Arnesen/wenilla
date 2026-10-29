@@ -2,8 +2,8 @@
 //! table, and the combat-log line beside it. `ReportCastFailure 0x6e1a00` builds the text, shows it
 //! (`DisplayError`, `0x6e21dd`) and logs it (`0x62c360`, `0x6e21fc`) inside the cast, so the line
 //! is resolved where the report is signalled: inside the script call that raised it
-//! ([`crate::script_calls`]), or by the frame's report feed ([`crate::ui_cast`]). The text layers
-//! are [`super::cast_fail`]'s.
+//! ([`crate::script_calls`]), or at its place on the cast lane ([`crate::ui_cast`]). The text
+//! layers are [`super::cast_fail`]'s.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -16,14 +16,7 @@ use crate::query_cache::Ask;
 use crate::ui_chat::combat::PendingCombat;
 
 use super::cast_fail::{self, CastFailLine};
-use super::errors::{first_missing_totem, first_short_reagent};
 use super::{CastFail, Caster, Shown, Spells};
-
-/// The refusals whose item had no cached record when their line was due: the reference's first
-/// pass exits past the line (`0x6e1eab`), and the cache callback `0x6e29b0` shows it once the
-/// record answers, with no log line.
-#[derive(Resource, Default)]
-pub(crate) struct CastFailRedisplays(pub(crate) Vec<CastFail>);
 
 /// The DBC name tables the cast-fail argument arms read; each is absent without game data. The
 /// shapeshift forms ride [`Spells`].
@@ -65,10 +58,8 @@ pub(crate) struct CastFailLines<'w, 's> {
     sub_classes: Option<Res<'w, crate::ui_items::ItemSubClasses>>,
     names: FailNameTables<'w>,
     self_q: Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
-    objects: crate::net::Objects<'w, 's>,
     items: Res<'w, Items>,
     commands: Res<'w, NetCommands>,
-    waiting: ResMut<'w, CastFailRedisplays>,
 }
 
 impl CastFailLines<'_, '_> {
@@ -77,14 +68,9 @@ impl CastFailLines<'_, '_> {
         self.spells.as_deref()
     }
 
-    /// Whether a line waits on its item's record.
-    pub(crate) fn any_waiting(&self) -> bool {
-        !self.waiting.0.is_empty()
-    }
-
     /// `fail`'s line and its log line, `None` where the reference leaves before both now; an empty
-    /// line shows nothing and still logs. A line whose item record is not cached waits in
-    /// [`CastFailRedisplays`].
+    /// line shows nothing and still logs. A line whose item record is not cached waits on the
+    /// record's answer ([`crate::items::RecordCallback::CastFailure`]).
     pub(crate) fn resolve(&mut self, script: &UiScript, fail: CastFail) -> Option<ResolvedFail> {
         let line = self.line(script, fail)?;
         // The reason, its wire word and both resolved buffers, so a declined arm is readable
@@ -98,15 +84,6 @@ impl CastFailLines<'_, '_> {
             shown: Shown::keyed(line.key, line.text),
             log,
         })
-    }
-
-    /// The waiting lines whose item record has answered, each shown with no log line; the rest
-    /// keep waiting.
-    pub(crate) fn redisplays(&mut self, script: &UiScript) -> Vec<Shown> {
-        std::mem::take(&mut self.waiting.0)
-            .into_iter()
-            .filter_map(|fail| self.resolve(script, fail).map(|r| r.shown))
-            .collect()
     }
 
     /// The displayed line first, the log reads from it: the reference's order.
@@ -148,41 +125,35 @@ impl CastFailLines<'_, '_> {
                     .requirement_display_name(ITEM_CLASS_PROJECTILE, 1u32 << (arg & 31))
             }),
             // `0x78` and `0x5c` (`0x6e1e7f`), the player's arms only (the pet's table sends both to
-            // its generic arm): the name of argument 1's item, the entry `0x6e4000` found; a
-            // word-less refusal names the failing slot as the pre-send check finds it.
+            // its generic arm): the name of argument 1's item, the entry `0x6e4000` found, read
+            // with no spell record. The server's refusal carries no word for either (vmangos
+            // `Spell.cpp:4407-4431`), which reads -1 (`0x6e736e`): its lookup asks for an entry
+            // whose refusal no node matches (`0x55bdf7`, `0x55be5d`), so neither line nor log ever
+            // shows; a word of 0 asks nothing and shows nothing (`0x55ba42`).
             0x78 | 0x5c if !pet => {
-                let d = d?;
-                let self_store = self.self_q.iter().next();
-                let failing = fail.arg.or_else(|| {
-                    if reason == 0x78 {
-                        self_store
-                            .and_then(|s| first_missing_totem(d, s, &self.objects))
-                            // No self store yet: name the first tool.
-                            .or_else(|| d.totems.iter().copied().find(|&t| t != 0))
-                    } else {
-                        self_store
-                            .and_then(|s| first_short_reagent(d, s, &self.objects))
-                            .or_else(|| d.reagents.iter().map(|&(id, _)| id).find(|&id| id != 0))
-                    }
-                })?;
-                // The failure handler's lookup with the callback `0x6e29b0` (`0x6e1ea4`) on a
-                // first pass; its redisplay only reads.
-                let ask = if fail.redisplay {
-                    Ask::Read
+                let failing = fail.arg.filter(|&entry| entry != 0)?;
+                // The callback `0x6e29b0` looks the record up again with no callback of its own
+                // (`0x6e2a27`), a refusal's finding none: the literal `UNKNOWN` (`0x6e2a49`).
+                if fail.redisplay {
+                    let cached = self.items.template(failing, 0, Ask::Read);
+                    Some(cached.map_or_else(|| "UNKNOWN".to_string(), |i| i.name.clone()))
                 } else {
-                    Ask::Event(&self.commands)
-                };
-                let cached = self.items.template(failing, 0, ask).map(|i| i.name.clone());
-                match cached {
-                    Some(name) => Some(name),
-                    // Answered unknown: the reference's callback literal (`0x838044`).
-                    None if self.items.template_answered_unknown(failing) => {
-                        Some("UNKNOWN".to_string())
-                    }
-                    None => {
-                        // Pending: shown as a redisplay once it answers, never logged.
-                        self.waiting.0.push(fail.requeued());
-                        return None;
+                    // The failure handler's lookup with the callback `0x6e29b0` and the reason, no
+                    // dedupe (`0x6e1e82`-`0x6e1ea4`): a miss leaves past the line and its log
+                    // (`0x6e1eab`), and the record's answer shows it ([`crate::ui_cast`]).
+                    let cached = self.items.template(failing, 0, Ask::Event(&self.commands));
+                    match cached {
+                        Some(info) => Some(info.name.clone()),
+                        None => {
+                            self.items.wait(
+                                failing,
+                                crate::items::RecordCallback::CastFailure {
+                                    spell: spell_id,
+                                    reason,
+                                },
+                            );
+                            return None;
+                        }
                     }
                 }
             }
