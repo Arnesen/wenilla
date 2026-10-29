@@ -535,6 +535,8 @@ mod close_parked_tests;
 #[cfg(test)]
 mod cooldown_live_tests;
 #[cfg(test)]
+mod death_live_tests;
+#[cfg(test)]
 mod dialog_live_tests;
 #[cfg(test)]
 mod duration_live_tests;
@@ -560,6 +562,8 @@ mod item_live_tests;
 mod item_tests;
 #[cfg(test)]
 mod item_text_live_tests;
+#[cfg(test)]
+mod logout_live_tests;
 #[cfg(test)]
 mod loot_live_tests;
 #[cfg(test)]

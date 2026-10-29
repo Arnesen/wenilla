@@ -1777,9 +1777,6 @@ pub(crate) mod schedule_tests {
     enum Because {
         /// The consumed queue is filled only by Lua asking; a frameless VM asks for nothing.
         FilledByVm,
-        /// Filled only by a server reply to a click in the interface, or (noted in the reason)
-        /// another player's act on us, which meets the login burst only by coincidence.
-        PlayerRoundTrip,
         /// Consumed in the window or not, the state is re-asked or re-derived once the UI is up.
         SelfHealing,
         /// The publication is driven by a `VmMemo` diff, so a new VM re-derives and re-fires it.
@@ -1799,10 +1796,10 @@ pub(crate) mod schedule_tests {
          "the drag probe: dev-only (`WOW_PROBE_DRAG`), it starts past `WOW_PROBE_DRAG_AT` with the \
           player's body in the world, and its `.drain(..)` is of the VM's own script errors, \
           raised by the gesture it just made"),
-        ("death/mod.rs", "feed_death", Because::MemoLatched,
-         "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo takes the first snapshot as no edge and re-announces a held offer, confirm and corpse range, and skips the edges of our create's frame, whose arrival item signals the state itself"),
-        ("death/mod.rs", "signal", Because::MemoLatched,
-         "the death state's signal: our death's leg (`signal_death`), run in its packet with the VM deferred, its `PLAYER_DEAD` parked for the deaths lane, whose drain runs only with the interface up (`ingame_ui_up`); and an arrival's, run by the arrival lane's firing inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`). Its memo is `feed.vm`, a `VmMemo<DeathAnnounced>`"),
+        ("death/mod.rs", "signal", Because::Deliberate,
+         "the death state's signal: our death's leg (`signal_death`), run in its packet with the VM deferred, its `PLAYER_DEAD` parked for the deaths lane, whose drain runs only with the interface up (`ingame_ui_up`); and an arrival's, run by the arrival lane's firing inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`)"),
+        ("death/mod.rs", "ask_spirit_healer", Because::Deliberate,
+         "no system: the spirit healer click's world edit runs it, inside the input pass's click legs, with the interface up"),
         ("death/mod.rs", "query_corpse_on_world_enter", Because::Deliberate,
          "no system: a leg the arrival lane's firing runs, inside the drain, which runs only with the interface up; its take is the range latch, which it zeroes into the live VM"),
         ("net/objects/update.rs", "on_update_end", Because::Deliberate,
@@ -1828,8 +1825,6 @@ pub(crate) mod schedule_tests {
          "`feed.vm: VmMemo<FollowFeedMemo>`; a fresh VM re-fires BEGIN for a follow in progress"),
         ("ui_guild/lane.rs", "fire_guild", Because::Deliberate,
          "a lane's firing, run only by the drain, which runs only with the interface up (`ingame_ui_up`): the lane holds what the packets queue until a drain fires it, so the login's message of the day, which lands ahead of the interface, fires into the VM that comes up"),
-        ("ui_logout.rs", "feed_logout", Because::PlayerRoundTrip,
-         "both packets answer the `CMSG_LOGOUT_REQUEST`/cancel the game menu sent"),
         ("ui_loot/mod.rs", "drain_loot", Because::Deliberate,
          "its takes of `LootMoveStart` and `LootCloseAtRest` close on the engine's side and publish nothing to the VM, whose `LOOT_CLOSED` is the loot lane's; the at-rest sweep signals only on a disenchant window, which the interface's own cast opens"),
         ("ui_macro/mod.rs", "load_macros", Because::MemoLatched,
