@@ -109,6 +109,7 @@ pub(crate) use approach::{
 };
 /// `SetStandState` run inside a script call.
 pub(crate) use posture::{stand_up_for_attack, stand_up_refused, StandSetter};
+pub(crate) use press::CommandSteps;
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, RUN_BACK_RATIO, SKIN_WIDTH,
@@ -331,6 +332,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<OwnControlLost>();
         app.init_resource::<MoverLock>();
         app.init_resource::<StandPending>();
+        app.init_resource::<press::CallAutorun>();
         app.init_resource::<camera_dynamics::CameraOptions>();
         // Far sight resolves `PLAYER_FARSIGHT` to a pose before `control` seats the camera: a
         // separate system, as `control` holds our `Transform` mutably and cannot read another's.
