@@ -159,6 +159,7 @@ pub(super) fn feed_ui_input(
     // Carries the `wl_display` the Wayland clipboard backend needs, once winit has a surface.
     window: Query<(&Window, Option<&bevy::window::RawHandleWrapper>), With<PrimaryWindow>>,
     buttons: Res<ButtonInput<MouseButton>>,
+    #[cfg(target_arch = "wasm32")] mut touch: super::web_touch::TouchFeed,
     mut pointer: PointerFeed,
     // One param for clippy's argument ceiling, with the pasteboard the clipboard chords use.
     mut kbd: (
@@ -196,6 +197,8 @@ pub(super) fn feed_ui_input(
     click_consumed.0 = false;
     press_consumed.0 = false;
     let Some(mut script) = script else {
+        #[cfg(target_arch = "wasm32")]
+        touch.clear(None);
         capture.typing = false;
         capture.arrows_fall_through = false;
         capture.consumed.clear();
@@ -203,6 +206,8 @@ pub(super) fn feed_ui_input(
         return;
     };
     let Ok((window, raw_handle)) = window.single() else {
+        #[cfg(target_arch = "wasm32")]
+        touch.clear(Some(&mut script));
         capture.typing = false;
         capture.arrows_fall_through = false;
         capture.consumed.clear();
@@ -218,6 +223,15 @@ pub(super) fn feed_ui_input(
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
         script.set_modifiers(shift, ctrl, alt);
+        #[cfg(target_arch = "wasm32")]
+        let synthetic = {
+            let result = touch.feed(script, window, synthetic, &buttons);
+            if result.handled {
+                hover.0 = result.owner;
+                press_consumed.0 = true;
+            }
+            synthetic || result.handled
+        };
         // ── Mouse ── A cursor off the window skips only the mouse feed.
         // The headless hover probe's aim stands in for a missing cursor, so `PointerOverUi` rises
         // and falls over a panel in an automated run as for a person; a real pointer wins.

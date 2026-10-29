@@ -68,6 +68,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-carries
@@ -75,8 +77,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: browser Lua touch formatting
+        run: rustfmt --edition 2021 --config skip_children=true --check crates/benilla-app/src/ui_script/input.rs crates/benilla-app/src/ui_script/mod.rs crates/benilla-app/src/ui_script/web_touch.rs
       # Compare the small carry against upstream's original math after every merge.
       - name: rig composition equivalence and browser budget
         run: |
           cargo test -p benilla-world --lib rig_anim::compose --no-default-features
           cargo test -p benilla-world --lib web_budget --no-default-features
+      - name: browser Lua touch input
+        run: cargo test -p benilla-app --lib ui_script::web_touch --no-default-features

@@ -26,6 +26,8 @@ pub(crate) mod glue_scene;
 mod input;
 /// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
 pub(crate) mod server_alert;
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_touch;
 #[cfg(test)]
 pub(crate) use input::feed_keys;
 // Test-only: the bindings tests run the UI's wheel sweep ahead of the dispatch pass.
