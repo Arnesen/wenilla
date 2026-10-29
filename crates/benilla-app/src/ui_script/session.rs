@@ -14,8 +14,6 @@ pub(crate) struct VmMemo<T> {
     session: u64,
     /// The world it is about, for [`VmMemo::get_in_world`]: the sweeps run before it was written.
     world: u64,
-    /// A reset that [`VmMemo::get_leaving_reset`] made and the next [`VmMemo::get_reset`] reports.
-    unreported: bool,
     inner: T,
 }
 
@@ -24,7 +22,6 @@ impl<T: Default> Default for VmMemo<T> {
         Self {
             session: 0,
             world: 0,
-            unreported: false,
             inner: T::default(),
         }
     }
@@ -59,14 +56,6 @@ impl<T: Default> VmMemo<T> {
         self.get(script)
     }
 
-    /// [`VmMemo::get`] for a reader ahead of the memo's owner, as a script call ahead of its
-    /// feed: a reset it makes is still reported by the owner's next [`VmMemo::get_reset`].
-    pub(crate) fn get_leaving_reset(&mut self, script: &UiScript) -> &mut T {
-        let (_, reset) = self.get_reset_for(Some(script));
-        self.unreported |= reset;
-        &mut self.inner
-    }
-
     fn get_reset_for(&mut self, script: Option<&UiScript>) -> (&mut T, bool) {
         let now = script.map_or(0, UiScript::session);
         let reset = self.session != now;
@@ -74,7 +63,6 @@ impl<T: Default> VmMemo<T> {
             self.session = now;
             self.inner = T::default();
         }
-        let reset = reset || std::mem::take(&mut self.unreported);
         (&mut self.inner, reset)
     }
 }
@@ -252,12 +240,6 @@ mod tests {
         // The glue booth's stage numbers, which must outlive the VM: a scene parked under the old
         // VM keeps its number until the booth drops it, so a new VM's scenes take fresh ones.
         ("ui_script/glue_scene.rs", "top"),
-        // The reactive spells' list, engine state the reference keeps past a `/reload` and empties
-        // at the active player's arrival (`0x5dea86`), on whose creation the system clears it.
-        ("ui_action/state.rs", "reactive"),
-        // The action bar's usable cache, engine state the reference keeps past a `/reload`: its
-        // zeroing `0x4e4f50` runs only from `InitializeGame 0x48f480`.
-        ("ui_action/state.rs", "cache"),
     ];
 
     use crate::test_support::{fn_parameter_lists, rust_files};

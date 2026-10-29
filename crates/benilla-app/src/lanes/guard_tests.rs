@@ -88,14 +88,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
          auction lists' (`0x4cca10`, `0x4ccc60`, `0x4cceb0`), which `run_answer_tail` runs after \
          the answer's list rather than in it",
     ),
-    (
-        Row::Edge,
-        "::ui_action::state::fire_action_events",
-        "the usable cache's refresh `0x4e5c00` (`ACTIONBAR_UPDATE_USABLE`) of `EditMacro` \
-         (`0x4f132e`) and `RaiseBagUpdate` (`0x4f9374`), which the reference runs in the call and \
-         in the item watcher's run, one pass a frame over the bar's 120 slots diffed against the \
-         cache",
-    ),
 ];
 
 /// The host-held queues a handler fills that no feed fires off, each named quiet beside why: the
@@ -139,8 +131,7 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read through the host by `GetGameTime` (`0x515ee0`), and quiet: no event signals the clock.
     "::net::game_time::ServerTime",
     // Read, and quiet: the control packet's handler and our own create's arrival signal its
-    // changes on the notice lane in place (`0x4958e0`), and the action bar's diff of it is
-    // `fire_action_events`'s edge row.
+    // changes on the notice lane in place (`0x4958e0`), with the usable refresh after them.
     "::player::state::OwnControlLost",
     // Read through the host by the world click's legs (who we drive, the gathering skills its
     // cursor forks on), and quiet: no feed fires off them.
@@ -179,10 +170,18 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // learn, unlearn and supersede handlers write at their packet (`0x4b262c`, `0x5e9e49`,
     // `0x4b2c83`); no feed fires off them.
     "::ui_action::LearnedAbilities",
+    // Quiet: the reactive list, which the learn and supersede handlers' registrar leg grows at
+    // their packet (`0x4b27b3`-`0x4b27c7`) and our create's arrival empties and fills again
+    // (`0x5dea86`); the usable refreshes re-check it in their places, and no feed reads it.
+    "::ui_action::ReactiveSpells",
+    // Quiet: the bar's usable cache, which the game entry's handler zeroes (`0x48f5a4` →
+    // `0x4e4f50`) and the host's slot writes and refreshes store in place (`0x4e590a`,
+    // `0x4e5c00`); the action-state feed pushes its pairs silently.
+    "::ui_action::state::ActionStateMemory",
     // Quiet: the known spells and the book's lists, which the learn, unlearn and supersede handlers
     // write at their packet beside the bar's clears and replaces, whose signals go on the notice
-    // lane there (`0x5ea253`, `0x5e6356`); the feeds that read it push views (`READS_FRAME_FINAL`)
-    // or rebuild the action state's reactive list, and none fires off it.
+    // lane there (`0x5ea253`, `0x5e6356`); the feeds that read it push views (`READS_FRAME_FINAL`),
+    // and none fires off it.
     "::ui_action::PlayerActions",
     // Read through the host by the auction getters, and quiet: the hello's show, the lines, the
     // patches, the removals and the pages fire on the house lane at their handlers.
@@ -362,8 +361,7 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         // moves it inside its call, and the push reads it as the frame left it.
         "spell::cast_target::AutoSelfCast", "spell::cooldowns::Cooldowns",
         "spell::group_relation::GroupRoster", "spell::mods::SpellModifiers", "target::Selection",
-        "ui_action::ActionSlots", "ui_action::PlayerActions", "ui_action::state::ActionStateMemory",
-        "ui_pet::PetBar"]),
+        "ui_action::ActionSlots", "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
     // The resolver's guids, pushed before the drain and read with the host lent too: the
     // mouseover, the group rows past a token's own, the pet records and every row of the field
     // events' fan-out, which the `UNIT_HAPPINESS` gate reads. The aura getters walk each unit

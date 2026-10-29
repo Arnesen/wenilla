@@ -19,10 +19,11 @@ use bevy::ecs::system::{SystemParam, SystemParamItem};
 use bevy::prelude::*;
 
 use benilla_ui::script::{
-    AuctionCall, AuraCall, BankCall, BinderCall, CallHost, CallTail, CraftCall, DeathAction,
-    DuelRequest, GmTicketCall, GossipCall, InstanceCall, ItemTextCall, LootRollCall, MailCall,
-    MeetingStoneCall, MerchantCall, MinimapCall, PetitionCall, PostureCall, PvpCall, ScriptCall,
-    StableCall, SummonCall, TabardCall, TaxiCall, TradeCall, TradeSkillCall, TrainerCall, UiScript,
+    ActionBarCall, AuctionCall, AuraCall, BankCall, BinderCall, CallHost, CallTail, CraftCall,
+    DeathAction, DuelRequest, GmTicketCall, GossipCall, InstanceCall, ItemTextCall, LootRollCall,
+    MailCall, MeetingStoneCall, MerchantCall, MinimapCall, PetitionCall, PostureCall, PvpCall,
+    ScriptCall, StableCall, SummonCall, TabardCall, TaxiCall, TradeCall, TradeSkillCall,
+    TrainerCall, UiScript,
 };
 
 pub(crate) mod disjoint;
@@ -295,20 +296,64 @@ impl ScriptCallHost<'_, '_> {
     }
 
     /// The world-enter cascade's usable cache refresh (`0x490979` → `0x4e4f90` → `0x4e5c00`),
-    /// in its place ([`crate::ui_action::ActionStates::enter_world_refresh`]): whether a pair
+    /// in its place ([`crate::ui_action::ActionStates::cache_refresh`]): whether a pair
     /// changed. A harness without the action feed's inputs refreshes nothing.
     pub(crate) fn engine_enter_world_refresh(&mut self, script: &mut UiScript) -> bool {
         self.appliers
             .action_states()
             .as_mut()
-            .is_some_and(|states| states.enter_world_refresh(script))
+            .is_some_and(|states| states.cache_refresh(script))
     }
 
-    /// A recount's slot write outside any call (`0x4e58e0`): the slot's usable pair stored and
-    /// pushed, with nothing signalled ([`crate::ui_action::ActionStates::slot_written`]).
-    pub(crate) fn engine_slot_written(&mut self, script: &mut UiScript) {
+    /// The bar's usable cache refreshed outside the usable refresh (`RefreshActionBarUsable
+    /// 0x4e5c00`), `RaiseBagUpdate`'s in an item watcher's run (`0x4f9374`): every pair recomputed
+    /// and stored, and `ACTIONBAR_UPDATE_USABLE` signalled with the host lent when one changed
+    /// (`0x4e5c53`). A harness without the action feed's inputs refreshes nothing.
+    pub(crate) fn engine_usable_cache_refresh(&mut self, script: &mut UiScript) {
+        let changed = self
+            .appliers
+            .action_states()
+            .as_mut()
+            .is_some_and(|states| states.cache_refresh(script));
+        if changed {
+            script.hosted(self, |script| {
+                script.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
+            });
+        }
+    }
+
+    /// `EditMacro`'s refresh of the bar's usable cache (`0x4f132e` into `0x4e5c00`), inside the
+    /// call: `ACTIONBAR_UPDATE_USABLE` at its signal point when a pair changed (`0x4e5c53`).
+    fn refresh_usable_cache(
+        &mut self,
+        script: &mut UiScript,
+        mark: &mut crate::ui_cast::ReportMark,
+    ) {
+        let changed = self
+            .appliers
+            .action_states()
+            .as_mut()
+            .is_some_and(|states| states.cache_refresh(script));
+        if changed {
+            script.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
+            self.at_point(script, mark);
+        }
+    }
+
+    /// A slot write outside any call (`0x4e58e0`), a recount's or a spell packet's: the 1-based
+    /// `action`'s usable pair stored and pushed, with nothing signalled
+    /// ([`crate::ui_action::ActionStates::slot_written`]).
+    pub(crate) fn engine_slot_written(&mut self, script: &mut UiScript, action: u32) {
         if let Some(states) = self.appliers.action_states().as_mut() {
-            states.slot_written(script);
+            states.slot_written(script, action);
+        }
+    }
+
+    /// Our player's arrival's slot pass (`0x5deafc`): every slot's usable pair stored but an
+    /// unknown spell's ([`crate::ui_action::ActionStates::arrival_slots`]).
+    pub(crate) fn engine_arrival_slots(&mut self, script: &mut UiScript) {
+        if let Some(states) = self.appliers.action_states().as_mut() {
+            states.arrival_slots(script);
         }
     }
 
@@ -917,7 +962,19 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Instance(InstanceCall::Reset) => appliers.instance().reset(),
             ScriptCall::Pvp(PvpCall::Toggle) => appliers.pvp().toggle(),
             ScriptCall::WornDisplay(set) => appliers.worn().set(set),
-            ScriptCall::ActionBar(call) => appliers.action_bar().apply(call),
+            ScriptCall::ActionBar(ActionBarCall::RefreshUsable) => {
+                self.refresh_usable_cache(script, &mut at.mark);
+            }
+            ScriptCall::ActionBar(call) => {
+                appliers.action_bar().apply(call);
+                // The write's store of the slot's pair (`0x4e5903`-`0x4e5914`), ahead of its
+                // signal.
+                if let ActionBarCall::Set { id, .. } | ActionBarCall::Notify { id } = call {
+                    if let Some(states) = appliers.action_states().as_mut() {
+                        states.slot_written(script, id);
+                    }
+                }
+            }
             ScriptCall::GmTicket(GmTicketCall::Ticket(intent)) => {
                 appliers.gm_ticket().ticket(intent);
             }
@@ -1229,12 +1286,31 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
         }
     }
 
-    /// A recount's slot write with the host ([`ScriptCallHost::engine_slot_written`]); with no VM
-    /// or no host, the next feed stores the pair.
-    pub(crate) fn engine_slot_written(&mut self) {
+    /// `RaiseBagUpdate`'s cache refresh with the host
+    /// ([`ScriptCallHost::engine_usable_cache_refresh`]); with no VM or no host, nobody listens.
+    pub(crate) fn engine_usable_cache_refresh(&mut self) {
         if let Some(script) = self.script.as_deref_mut() {
             if let Some(host) = self.set.p1().as_mut() {
-                host.engine_slot_written(script);
+                host.engine_usable_cache_refresh(script);
+            }
+        }
+    }
+
+    /// A slot write with the host ([`ScriptCallHost::engine_slot_written`]); with no VM or no
+    /// host, nothing stores the pair.
+    pub(crate) fn engine_slot_written(&mut self, action: u32) {
+        if let Some(script) = self.script.as_deref_mut() {
+            if let Some(host) = self.set.p1().as_mut() {
+                host.engine_slot_written(script, action);
+            }
+        }
+    }
+
+    /// Our player's arrival's slot pass with the host ([`ScriptCallHost::engine_arrival_slots`]).
+    pub(crate) fn engine_arrival_slots(&mut self) {
+        if let Some(script) = self.script.as_deref_mut() {
+            if let Some(host) = self.set.p1().as_mut() {
+                host.engine_arrival_slots(script);
             }
         }
     }

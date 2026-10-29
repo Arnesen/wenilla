@@ -44,7 +44,7 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
 const FRAME_FINAL_FEEDS: usize = 12;
-const FRAME_FINAL_INPUTS: usize = 74;
+const FRAME_FINAL_INPUTS: usize = 73;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
@@ -72,10 +72,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::ui_action::state::feed_action_state", &["ui_action::state::ActionStateMemory"],
-        "stores the slots' usable pairs the frame's writes owe and the reactive list the frame's \
-         learns grew, which the usable refreshes inside the packets read, where the reference \
-         stores each at its write (`0x4e590a`, `0x4b27c7`)"),
     ("::ui_cast::feed_cast_reports", &["ui_action::cast_lines::CastFailRedisplays"],
         "holds the refusals that wait on their item's record, which it tests to queue the cast \
          lane's retry behind the frame's packets, where the reference shows each in the record's \
