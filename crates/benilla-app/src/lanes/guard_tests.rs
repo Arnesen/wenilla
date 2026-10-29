@@ -119,24 +119,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::HostHeld,
-        "::ui_craft::CraftOpen",
-        "the craft window's line, which `feed_craft` fires from; `CloseCraft`, acting in its call, holds it in the host",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_tradeskill::TradeSkillOpen",
-        "the profession window's line, which `feed_trade_skill` fires from; `CloseTradeSkill`, acting in its call, holds it in the host",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_tradeskill::TradeSkillOpens",
-        "the profession openers a cast intercepted (`0x6e4bd7`), which `open_trade_skill` opens in \
-         the feed and `feed_trade_skill` and `feed_craft` signal `TRADE_SKILL_SHOW` and \
-         `CRAFT_SHOW` from, where the reference opens and signals inside the cast (`0x4fc910`, \
-         `0x4f6000`)",
-    ),
-    (
-        Row::HostHeld,
         "::items::Items",
         "the record answers' callbacks still run off the frame's records rather than in the \
          answer's list (`ItemCacheReceive` `0x55bdb0`, `0x55bf12`-`0x55bf39`): the action bar's \
@@ -268,6 +250,14 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read through the host by the auction getters, and quiet: the hello's show, the lines, the
     // patches, the removals and the pages fire on the house lane at their handlers.
     "::ui_auction::AuctionOpen",
+    // Quiet: the craft and profession windows' open type and line, which an opener's cast
+    // toggles and signals inside its call (`0x4fc910`, `0x4f6000`) and the closes zero in theirs;
+    // the feeds only push the lists off them, silently.
+    "::ui_craft::CraftOpen",
+    "::ui_tradeskill::TradeSkillOpen",
+    // Quiet: the profession openers a cast intercepted (`0x6e4bd7`), which the call host toggles
+    // before the call returns; no feed reads it.
+    "::ui_tradeskill::TradeSkillOpens",
     // Read through the host by the bank getters, and quiet: its events fire on the bank lane at
     // their handlers, and `PurchaseSlot` and `CloseBankFrame` hold it in their calls.
     "::ui_bank::BankOpen",
@@ -1275,11 +1265,7 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 
 /// The systems outside the phase that lend the call host and take a handler queue, firing off it
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
-pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[(
-    "::ui_tradeskill::drain_trade_skill",
-    "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
-         `0x4fd7b0` (`0x6e81e7`), off the cast events",
-)];
+pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[];
 
 /// The systems that take a placed queue ([`placed_queues`]) after the dispatch and push onto a
 /// lane, at the item's place or, from their commands, at their own, by a suffix of the system's
