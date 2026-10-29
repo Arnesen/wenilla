@@ -348,20 +348,25 @@ impl ScriptCallHost<'_, '_> {
         }
     }
 
-    /// Our player's arrival's slot pass (`0x5deafc`): every word into the VM's copy, each item
-    /// word recounted and every slot's usable pair stored but an unknown spell's
+    /// Our player's arrival's slot pass (`0x5deae2`-`0x5deb12`): the staged words loaded into the
+    /// bar but an unknown spell's ([`crate::ui_action::ActionSlots::load_staged`]), then each
+    /// loaded word into the VM's copy, each item word recounted and its usable pair stored
     /// ([`crate::ui_action::ActionStates::arrival_slots`]).
     pub(crate) fn engine_arrival_slots(&mut self, script: &mut UiScript) {
+        let Some(known) = self
+            .appliers
+            .action_states()
+            .as_ref()
+            .map(|states| states.known_spells())
+        else {
+            return;
+        };
+        let loaded = self
+            .appliers
+            .action_bar()
+            .load_staged(|word| known.contains(&word));
         if let Some(states) = self.appliers.action_states().as_mut() {
-            states.arrival_slots(script);
-        }
-    }
-
-    /// A new VM's copy of the bar, its counts and its states, with nothing signalled
-    /// ([`crate::ui_action::ActionStates::seed`]).
-    pub(crate) fn engine_seed_action_slots(&mut self, script: &mut UiScript) {
-        if let Some(states) = self.appliers.action_states().as_mut() {
-            states.seed(script);
+            states.arrival_slots(script, &loaded);
         }
     }
 
@@ -1371,15 +1376,6 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
         if let Some(script) = self.script.as_deref_mut() {
             if let Some(host) = self.set.p1().as_mut() {
                 host.engine_arrival_slots(script);
-            }
-        }
-    }
-
-    /// A new VM's seed of the bar with the host ([`ScriptCallHost::engine_seed_action_slots`]).
-    pub(crate) fn engine_seed_action_slots(&mut self) {
-        if let Some(script) = self.script.as_deref_mut() {
-            if let Some(host) = self.set.p1().as_mut() {
-                host.engine_seed_action_slots(script);
             }
         }
     }
@@ -4942,10 +4938,10 @@ mod tests {
             crate::dev::add_every_instrument,
         );
         let (writers, unhosted) = vm_writers_and_the_unhosted(&mut app);
-        // The census reads the client's systems: a hundred writers at least in either build, and
+        // The census reads the client's systems: ninety writers at least in either build, and
         // where the build carries type names, a feed and two frame polls among them.
         assert!(
-            writers.len() >= 100,
+            writers.len() >= 90,
             "the census reads the client's VM writers: {} read",
             writers.len()
         );

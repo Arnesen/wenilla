@@ -5,8 +5,7 @@
 //! read the active player's object inside the call: `IsCurrentAction`'s form arm the form byte
 //! (`0x4e558b`, `[unit+0x110]+0x212`) and `IsEquippedAction` the worn slots (`0x4e5310` →
 //! `0x622270` at mask 1). The bonus bar's offset is stored where the form watcher runs
-//! (`0x5de01b` → `0x4e4fc0`), off that packet's form. The live answer and the frame's snapshot
-//! agree on every getter wherever the snapshot is current.
+//! (`0x5de01b` → `0x4e4fc0`), off that packet's form. Every getter reads through the lent host.
 
 use std::collections::HashMap;
 
@@ -36,6 +35,8 @@ const FROSTBOLT_2: u32 = 205;
 const CAT: u32 = 768;
 const BEAR: u32 = 5487;
 const ATTACK: u32 = 6603;
+/// A ranged auto-repeat shot (`Attributes & 0x2`, `AttributesEx2 & 0x20`), off the bar.
+const AUTO_SHOT: u32 = 75;
 /// Two reactive spells (`AttributesEx4 & 0x200`) that need the defense aura state, off the bar,
 /// which the login lists Overpower first.
 const OVERPOWER: u32 = 7384;
@@ -178,6 +179,10 @@ fn spells() -> crate::ui_action::Spells {
         row(BEAR, |d| d.shapeshift_form = Some(BEAR_FORM)),
         // `SPELL_EFFECT_ATTACK`, which makes the slot the Attack slot (`0x4e59de`).
         row(ATTACK, |d| d.effects[0] = 78),
+        row(AUTO_SHOT, |d| {
+            d.attributes = 0x2;
+            d.attributes_ex2 = 0x20;
+        }),
         row(OVERPOWER, reactive),
         row(REVENGE, reactive),
         row(TOGGLE, |d| {
@@ -206,6 +211,11 @@ fn client() -> Client {
 
 /// [`client`] with `more` run on its world before our player's create.
 fn client_with(more: impl FnOnce(&mut World)) -> Client {
+    client_created_with(more, &[])
+}
+
+/// [`client_with`], our player's create carrying the fields `extra` too.
+fn client_created_with(more: impl FnOnce(&mut World), extra: &[(u16, u32)]) -> Client {
     let mut app = crate::game_plugins::schedule_tests::headless_client();
     app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
         bevy::ecs::error::ignore,
@@ -272,7 +282,7 @@ fn client_with(more: impl FnOnce(&mut World)) -> Client {
             (6, POTION, benilla_protocol::messages::ACTION_KIND_ITEM),
         ] {
             slots
-                .buttons
+                .staged
                 .insert(slot, ActionButton { slot, action, kind });
         }
     }
@@ -303,20 +313,18 @@ fn client_with(more: impl FnOnce(&mut World)) -> Client {
         inbound,
         _sent: sent,
     };
-    c.frame(vec![vec![created(
-        ME,
-        EntityKind::Player,
-        &[
-            (OBJECT_TYPE, TYPE_PLAYER),
-            (FIELD_UNIT_HEALTH, 100),
-            (FIELD_UNIT_MAXHEALTH, 100),
-            (MANA, 100),
-            (MAX_MANA, 100),
-            (FLAGS, PLAYER_CONTROLLED),
-            (PACK_SLOT_1, POTION_GUID as u32),
-            (PACK_SLOT_1 + 1, (POTION_GUID >> 32) as u32),
-        ],
-    )]]);
+    let mut fields = vec![
+        (OBJECT_TYPE, TYPE_PLAYER),
+        (FIELD_UNIT_HEALTH, 100),
+        (FIELD_UNIT_MAXHEALTH, 100),
+        (MANA, 100),
+        (MAX_MANA, 100),
+        (FLAGS, PLAYER_CONTROLLED),
+        (PACK_SLOT_1, POTION_GUID as u32),
+        (PACK_SLOT_1 + 1, (POTION_GUID >> 32) as u32),
+    ];
+    fields.extend_from_slice(extra);
+    c.frame(vec![vec![created(ME, EntityKind::Player, &fields)]]);
     c.frame(vec![]);
     c.frame(vec![]);
     c.seen(&[]);
@@ -337,18 +345,14 @@ fn form(form: u32) -> [(u16, u32); 1] {
     [(BYTES_1, form << 16)]
 }
 
-/// Wherever the frame's snapshots are current, every census getter answers the same live as off
-/// the snapshot, for every slot: at load, in each form, with the sword worn and short of mana.
+/// Every census getter answers through the lent host for every slot, each leg the fixture means to
+/// reach: at load, in each form, with the sword worn and short of mana.
 #[test]
-fn every_action_getter_answers_the_same_live_as_off_the_snapshot() {
+fn every_action_getter_reads_its_leg_live() {
     let mut c = client();
     let agree = |c: &mut Client, why: &str| -> Vec<String> {
-        let snapshot = c.answers(false);
         let live = c.answers(true);
-        assert_eq!(snapshot.len(), SLOTS.len() * 14 + 1, "{why}");
-        let differ: Vec<(&String, &String)> =
-            snapshot.iter().zip(&live).filter(|(s, l)| s != l).collect();
-        assert!(differ.is_empty(), "{why}: snapshot vs live: {differ:#?}");
+        assert_eq!(live.len(), SLOTS.len() * 14 + 1, "{why}");
         live
     };
     let at_load = agree(&mut c, "at load");
@@ -384,9 +388,8 @@ fn every_action_getter_answers_the_same_live_as_off_the_snapshot() {
     }
 }
 
-/// A store a packet moved after the frame's pushes reads as the object holds it, through the
-/// host: the form byte for `IsCurrentAction`, the main hand for `IsEquippedAction`; the snapshot
-/// still holds the push.
+/// A store a packet moved reads as the object holds it, through the host: the form byte for
+/// `IsCurrentAction`, the main hand for `IsEquippedAction`.
 #[test]
 fn the_object_getters_read_the_player_as_they_run() {
     let mut c = client();
@@ -395,8 +398,6 @@ fn the_object_getters_read_the_player_as_they_run() {
     let chunk = "return IsCurrentAction(2), IsEquippedAction(4)";
     let live: (Option<i64>, Option<i64>) = c.eval(true, chunk);
     assert_eq!(live, (Some(1), Some(1)));
-    let snapshot: (Option<i64>, Option<i64>) = c.eval(false, chunk);
-    assert_eq!(snapshot, (None, None));
 }
 
 /// Two power packets in one frame, the first leaving the player short of Frostbolt's 50 mana and
@@ -617,7 +618,7 @@ fn a_bar_items_record_repaints_its_slot_at_the_answer_and_the_getters_read_it_li
         );
         world
             .resource_mut::<crate::ui_action::ActionSlots>()
-            .buttons
+            .staged
             .insert(
                 7,
                 ActionButton {
@@ -694,6 +695,96 @@ fn a_bar_items_record_repaints_its_slot_at_the_answer_and_the_getters_read_it_li
     );
 }
 
+/// A bar slot holding [`RATION`], its record refused after our player's arrival asked it
+/// (`0x4e6d20`), and `rations` of them in backpack slot 2 at the create, which the arrival's
+/// recount stores (`0x4e5d90`); and a counter of the record's asks.
+fn refused_ration(rations: u32) -> (Client, impl Fn(&Client) -> usize) {
+    let mut extra = Vec::new();
+    if rations > 0 {
+        extra.extend([
+            (PACK_SLOT_1 + 2, RATION_GUID as u32),
+            (PACK_SLOT_1 + 3, (RATION_GUID >> 32) as u32),
+        ]);
+    }
+    let mut c = client_created_with(
+        |world| {
+            crate::items::test_spawn_item(
+                world,
+                RATION_GUID,
+                ObjectFields::from_pairs(&[
+                    (OBJECT_TYPE, 0x3),
+                    (3, RATION),
+                    (6, ME as u32),
+                    (7, (ME >> 32) as u32),
+                    (STACK_COUNT, rations),
+                ])
+                .into_created(benilla_protocol::messages::ObjectType::Item),
+                false,
+            );
+            world
+                .resource_mut::<crate::ui_action::ActionSlots>()
+                .staged
+                .insert(
+                    7,
+                    ActionButton {
+                        slot: 7,
+                        action: RATION,
+                        kind: benilla_protocol::messages::ACTION_KIND_ITEM,
+                    },
+                );
+        },
+        &extra,
+    );
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: RATION,
+        info: None,
+    }]]);
+    c.seen(&[]);
+    let asked = |c: &Client| {
+        crate::query_cache::queries(&c._sent)
+            .into_iter()
+            .filter(|q| matches!(q, ClientCommand::ItemQuery { entry, .. } if *entry == RATION))
+            .count()
+    };
+    asked(&c);
+    let count: i64 = c.eval(true, "return GetActionCount(8)");
+    assert_eq!(count, i64::from(rations), "the arrival's stored count");
+    (c, asked)
+}
+
+/// The usable test's item lookup carries the bar's callback and its dedupe (`0x4e5050` →
+/// `0x4e5a50` → `0x4e5ae0`, `0x4e5b30`), so a refused record it asks again answers through
+/// `0x4e5b80` → `0x4e5c70`: after the refusal, a power packet's usable refresh (`0x604876` →
+/// `0x4b31c0`) is the one lookup, and the record's answer signals the slot's
+/// `ACTIONBAR_SLOT_CHANGED`.
+#[test]
+fn a_usable_refreshs_lookup_of_a_refused_record_repaints_its_slot_at_the_answer() {
+    let (mut c, asked) = refused_ration(3);
+    c.frame(vec![vec![values(ME, &[(MANA, 90)])]]);
+    assert_eq!(asked(&c), 1, "the refresh asks the refused record again");
+    c.seen(&[]);
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: RATION,
+        info: Some(Box::new(crate::items::test_template("Ration"))),
+    }]]);
+    let slot: Vec<String> = c
+        .seen(&["ACTIONBAR_SLOT_CHANGED"])
+        .into_iter()
+        .filter(|l| l.starts_with("ACTIONBAR_SLOT_CHANGED:8:"))
+        .collect();
+    assert_eq!(slot.len(), 1, "the slot repaints at the answer: {slot:?}");
+}
+
+/// The usable test asks nothing of an item slot whose stored count is 0: it returns at
+/// `0x4e50ab`, ahead of both lookups (`0x4e50d0`, `0x4e50e7`), so a refresh leaves a refused
+/// record refused.
+#[test]
+fn a_usable_refresh_asks_nothing_of_an_empty_item_slot() {
+    let (mut c, asked) = refused_ration(0);
+    c.frame(vec![vec![values(ME, &[(MANA, 90)])]]);
+    assert_eq!(asked(&c), 0);
+}
+
 /// The active player's aura add and removal each notify the bar's slots that stand for the spell
 /// (`0x612440`, `0x61237e` → `0x4e5de0`): a toggle's `ACTIONBAR_SLOT_CHANGED` fires inside each
 /// aura packet, between its neighbours' events, after the add's line and ahead of the removal's
@@ -703,8 +794,12 @@ fn a_bar_items_record_repaints_its_slot_at_the_answer_and_the_getters_read_it_li
 fn an_aura_packet_notifies_its_spells_slots_between_its_neighbours() {
     let mut c = client_with(|world| {
         world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .spells
+            .insert(TOGGLE);
+        world
             .resource_mut::<crate::ui_action::ActionSlots>()
-            .buttons
+            .staged
             .insert(
                 7,
                 ActionButton {
@@ -748,7 +843,7 @@ fn an_aura_packet_notifies_its_spells_slots_between_its_neighbours() {
 
 /// `GameTooltip:SetAction` runs the slot's cooldown query at the call (`0x5323a6` → `0x4e6ca0`),
 /// so a hover inside the packet that armed a two-minute cooldown builds the remaining time and
-/// answers 1 (`0x532597`, `0x5325a9`), where the frame's push still holds none.
+/// answers 1 (`0x532597`, `0x5325a9`).
 #[test]
 fn set_action_reads_the_slots_cooldown_at_the_call() {
     let mut c = client_with(|world| {
@@ -758,7 +853,7 @@ fn set_action_reads_the_slots_cooldown_at_the_call() {
             .insert(FROSTBOLT_2);
         world
             .resource_mut::<crate::ui_action::ActionSlots>()
-            .buttons
+            .staged
             .insert(
                 7,
                 ActionButton {
@@ -788,18 +883,39 @@ fn set_action_reads_the_slots_cooldown_at_the_call() {
         Some(1),
         "live: the armed cooldown"
     );
-    assert_eq!(
-        c.eval::<Option<i64>>(false, hover),
-        None,
-        "the frame's push holds none"
-    );
 }
 
-/// A new VM's copy of the bar is the bar's own, its counts as the last recount stored them: the
-/// tables outlive a VM (`0x4e4f50` runs only at the game entry), so a stack that moved with no
-/// recount reads the stored count after a reload too, and no slot signals.
+/// A `/reload` keeps the bar in the engine (`0xbc6980`, `0xbc6390`; `0x4e4f50` runs only at the
+/// game entry), so the new interface reads it from its first file: an addon's file scope finds the
+/// bar's words and icons, and the counts as the last recount stored them, a stack that moved with
+/// no recount included; no slot signals.
 #[test]
-fn a_new_vm_is_seeded_with_the_bars_words_and_stored_counts() {
+fn a_reloads_files_read_the_bar_it_left() {
+    use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = std::env::temp_dir().join(format!("benilla-bar-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let home = tmp.join("benilla-config");
+    let dir = home.join("AddOns").join("BarProbe");
+    std::fs::create_dir_all(&dir).expect("probe addon dir");
+    std::fs::write(
+        dir.join("BarProbe.toc"),
+        "## Interface: 11200\nBarProbe.lua\n",
+    )
+    .expect("probe toc");
+    std::fs::write(
+        dir.join("BarProbe.lua"),
+        "BarProbe = { HasAction(1), HasAction(6), GetActionCount(7), GetActionTexture(1) } \
+         BarProbeSlotSignals = 0 \
+         local f = CreateFrame('Frame') f:RegisterEvent('ACTIONBAR_SLOT_CHANGED') \
+         f:SetScript('OnEvent', function() BarProbeSlotSignals = BarProbeSlotSignals + 1 end)",
+    )
+    .expect("probe lua");
+    let _capture = EnvGuard::unset("WOW_CAPTURE");
+    let _home = EnvGuard::set("BENILLA_HOME", home.to_str().expect("utf-8 temp path"));
+
     let mut c = client();
     let potions = c.app.world().resource::<crate::net::GuidIndex>().0[&POTION_GUID];
     c.app
@@ -808,29 +924,25 @@ fn a_new_vm_is_seeded_with_the_bars_words_and_stored_counts() {
         .expect("the potions")
         .0
         .merge(ObjectFields::from_pairs(&[(STACK_COUNT, 5)]));
-    c.app
-        .world_mut()
-        .insert_non_send_resource(UiScript::new().expect("a VM"));
-    c.eval::<()>(
+    let world = c.app.world_mut();
+    world.resource_mut::<crate::ui_script::ReloadUiPending>().0 = true;
+    crate::ui_script::run_pending_reload(world);
+    let probe: (Option<i64>, Option<i64>, i64, String, i64) = c.eval(
         false,
-        "Seen = {} local f = CreateFrame('Frame') f:RegisterEvent('ACTIONBAR_SLOT_CHANGED') \
-         f:SetScript('OnEvent', function() table.insert(Seen, event) end)",
+        "return BarProbe[1], BarProbe[2], BarProbe[3], BarProbe[4], BarProbeSlotSignals",
     );
-    c.frame(vec![]);
-    let chunk = "return HasAction(1), HasAction(6), GetActionCount(7), GetActionTexture(1)";
-    let seeded: (Option<i64>, Option<i64>, i64, String) = c.eval(false, chunk);
     assert_eq!(
-        seeded,
+        probe,
         (
             Some(1),
             None,
             2,
-            format!("Interface\\Icons\\Spell_{FROSTBOLT}")
+            format!("Interface\\Icons\\Spell_{FROSTBOLT}"),
+            0
         )
     );
-    let live: (Option<i64>, Option<i64>, i64, String) = c.eval(true, chunk);
-    assert_eq!(live, seeded);
-    assert!(c.seen(&["ACTIONBAR_SLOT_CHANGED"]).is_empty());
+    drop(c);
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Our create's arrival empties the reactive list and its registrar runs take the initial spells in
@@ -882,11 +994,157 @@ fn an_equipped_listener_finds_an_item_a_later_packet_destroys() {
     assert_eq!(seen, ["UNIT_MANA:1"]);
 }
 
+/// `SMSG_ACTION_BUTTONS` only stages its words (`0x5e6680` into `0xc4c2b4`); our player's arrival
+/// loads them into the bar and skips each spell word the player does not know (`0x5deaee` →
+/// `0x60c740`, `0x5deaf5`). vmangos sends saved words with no such check
+/// (`MasterPlayer.cpp:341`), so a slot saved with a rank the character lost stays empty: no
+/// action, no icon, nothing in the bar, while the known words beside it load.
+#[test]
+fn an_arrival_leaves_a_saved_unknown_spells_slot_empty() {
+    let mut c = client_with(|world| {
+        let mut words: Vec<ActionButton> = world
+            .resource::<crate::ui_action::ActionSlots>()
+            .staged
+            .values()
+            .copied()
+            .collect();
+        words.push(ActionButton {
+            slot: 7,
+            action: FROSTBOLT_2,
+            kind: benilla_protocol::messages::ACTION_KIND_SPELL,
+        });
+        crate::net::handlers::dispatch(world, vec![SessionEvent::ActionButtons { buttons: words }]);
+        assert!(
+            world
+                .resource::<crate::ui_action::ActionSlots>()
+                .buttons
+                .is_empty(),
+            "the packet only stages"
+        );
+    });
+    let chunk = "return HasAction(8), GetActionTexture(8), HasAction(1)";
+    let read: (Option<i64>, Option<String>, Option<i64>) = c.eval(true, chunk);
+    assert_eq!(read, (None, None, Some(1)));
+    let bar = c.app.world().resource::<crate::ui_action::ActionSlots>();
+    assert!(!bar.buttons.contains_key(&7), "the bar holds no word there");
+    assert_eq!(bar.buttons.len(), 6, "the known words loaded");
+}
+
+/// A macro slot's icon is its record's but where its bound spell is Attack or a ranged shot:
+/// `0x4e6a50` runs both tests on the slot's spell through the record (`0x4e6ab2` → `0x4e59b0`,
+/// `0x4e6acb` → `0x4e5a00`, each through `0x4e5a50` → `0x4e5ba0`) ahead of its kind arms, so a
+/// macro bound to Attack shows the main hand's icon and one bound to Auto Shot the bow's. An item
+/// slot runs them on its on-use spell (`0x4e5a50` → `0x4e5ae0`).
+#[test]
+fn a_macro_bound_to_an_attack_shows_its_weapons_icon() {
+    use crate::ui_macro::{Bound, BoundSpell};
+    const BOW_GUID: u64 = 0x4000_0000_0000_00F3;
+    const BOW: u32 = 2504;
+    const RANGED: u16 = 486 + 2 * 17;
+    const SWORD_ICON: &str = "Interface\\Icons\\INV_Sword_04";
+    const BOW_ICON: &str = "Interface\\Icons\\INV_Weapon_Bow_02";
+    const QUIVER: u32 = 2101;
+    let mut c = client_with(|world| {
+        crate::items::test_spawn_item(
+            world,
+            BOW_GUID,
+            ObjectFields::from_pairs(&[(3, BOW), (14, 1)]),
+            false,
+        );
+        let mut items = world.resource_mut::<crate::items::Items>();
+        for (entry, subclass, display) in [(SWORD, 7, 950), (BOW, 2, 951)] {
+            items.insert_template(
+                entry,
+                Some(benilla_protocol::messages::ItemInfo {
+                    class: 2,
+                    subclass,
+                    display_info_id: display,
+                    ..crate::items::test_template("Weapon")
+                }),
+            );
+        }
+        // An item whose on-use spell is the ranged shot.
+        items.insert_template(
+            QUIVER,
+            Some(benilla_protocol::messages::ItemInfo {
+                display_info_id: 952,
+                use_spell: Some(benilla_protocol::messages::ItemUseSpell {
+                    spell_id: AUTO_SHOT,
+                    cooldown_ms: -1,
+                    category: 0,
+                    category_cooldown_ms: -1,
+                }),
+                ..crate::items::test_template("Quiver")
+            }),
+        );
+        let display = |icon: &str| benilla_formats::ItemDisplay {
+            icon: Some(icon.to_string()),
+            ..Default::default()
+        };
+        world.insert_resource(crate::entities::ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(HashMap::from([
+                (950, display(SWORD_ICON)),
+                (951, display(BOW_ICON)),
+                (952, display("Interface\\Icons\\INV_Misc_Quiver_09")),
+            ])),
+        ));
+    });
+    {
+        let world = c.app.world_mut();
+        crate::ui_macro::bind_for_test(
+            &mut world.non_send_resource_mut::<UiScript>(),
+            &[
+                (1, Bound::from(BoundSpell::Spell(ATTACK))),
+                (2, Bound::from(BoundSpell::Spell(AUTO_SHOT))),
+                (3, Bound::from(BoundSpell::Spell(FROSTBOLT))),
+            ],
+        );
+        for (action, id) in [(9, 1), (10, 2), (11, 3)] {
+            crate::ui_action::hold_for_test(
+                world,
+                action,
+                benilla_protocol::messages::ACTION_KIND_MACRO,
+                id,
+            );
+        }
+        crate::ui_action::hold_for_test(
+            world,
+            12,
+            benilla_protocol::messages::ACTION_KIND_ITEM,
+            QUIVER,
+        );
+    }
+    c.frame(vec![vec![values(
+        ME,
+        &[
+            wield(true)[0],
+            wield(true)[1],
+            (RANGED, BOW_GUID as u32),
+            (RANGED + 1, (BOW_GUID >> 32) as u32),
+        ],
+    )]]);
+    let chunk = "return GetActionTexture(9), GetActionTexture(10), GetActionTexture(11)";
+    assert_eq!(
+        c.eval::<(String, String, String)>(true, chunk),
+        (
+            SWORD_ICON.to_string(),
+            BOW_ICON.to_string(),
+            "Interface\\Icons\\".to_string()
+        ),
+        "the weapons' icons, then the Frostbolt macro's own"
+    );
+    assert_eq!(
+        c.eval::<String>(true, "return GetActionTexture(12)"),
+        BOW_ICON,
+        "the item's on-use shot"
+    );
+}
+
 /// `SMSG_SUPERCEDED_SPELL` gives a bar macro that cast the old rank the new one in its record
 /// (`0x5e6356` → `0x4e5e60`, `0x4e5ec4`), with no signal; `GetActionCooldown` resolves the slot
 /// through that record at the call (`0x4e6ca0` → `0x4e5a50` → `0x4e5ba0`) and queries the new
 /// rank's cooldown (`0x6e2ea0`). So a getter inside the packet that rewrote the record reads the
-/// new rank's 10 s, where the frame's push still names the old rank.
+/// new rank's 10 s.
 #[test]
 fn a_superseded_macro_slots_cooldown_reads_the_new_rank_inside_its_packet() {
     use crate::ui_macro::{Bound, BoundSpell};
@@ -918,11 +1176,6 @@ fn a_superseded_macro_slots_cooldown_reads_the_new_rank_inside_its_packet() {
         }],
     );
     assert_eq!(c.eval::<f64>(true, chunk), 10.0, "live: the new rank's");
-    assert_eq!(
-        c.eval::<f64>(false, chunk),
-        0.0,
-        "the frame's push names rank 1"
-    );
 }
 
 /// The bar's getters' per-call cost with the host lent and off the snapshots: 10k calls of each.
