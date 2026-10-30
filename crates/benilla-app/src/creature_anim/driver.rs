@@ -109,6 +109,17 @@ fn armed_id(
     })
 }
 
+/// The manual toggle's model tests (`0x5eb542`, `0x5eb580`) on the animation armed now
+/// (`0x5fdb50`), for a toggle made inside its call.
+pub(crate) fn toggle_model_refuses(
+    drv: &AnimDriver,
+    player: &AnimationPlayer,
+    tr: &AnimationTransitions,
+    anims: &ModelAnimations,
+) -> bool {
+    model_refuses_toggle(anims, armed_id(drv, player, tr, anims))
+}
+
 /// Whether a one-shot is live on the unit; the missile queue polls it to launch a missile whose
 /// release keyframe never fired when the cast ends (the reference's `0x5fc920` → `0x60c9b0`).
 pub(crate) fn oneshot_is_live(
@@ -721,7 +732,7 @@ pub(super) fn drive_animations(
         // ── Sheath state: the committed cache (`[+0xd40]`), not the descriptor byte, adopting the
         // byte whenever it changes (`0x604c70`). Every SetSheatheState (`0x611cf0`) snaps except
         // the manual toggle's ceremony, which carries the draw/stow sound.
-        let sheath_frame_start = committed.cur;
+        let sheath_frame_start = committed.driven;
         let fields = store.map(|s| &s.0);
         let sheath_byte = fields.and_then(|f| f.unit_sheath_state()).unwrap_or(0);
         // The constructor seeds the state from the byte untested (`0x5fafa0`), once per unit: a
@@ -739,6 +750,20 @@ pub(super) fn drive_animations(
         // The setter: a no-op when unchanged (`newState == CUR`), else commit, volunteer
         // `CMSG_SETSHEATHED` for the local player, and for the manual toggle play the ceremony,
         // per-arm masked overlays (`0x60b770`) by each item's stow family (hip 90, back 89).
+        // A toggle committed inside its call plays its ceremony from the state it left.
+        if let Some((from, to)) = committed.owed_ceremony.take() {
+            start_sheath_ceremony(
+                &mut commands,
+                entity,
+                &mut drv,
+                &mut player,
+                anims,
+                wielded,
+                from,
+                to,
+                catalog,
+            );
+        }
         if let Some(req) = pending_sheath.get(&entity) {
             let cur = committed.cur.unwrap_or(0);
             // Deviation: a mounted draw is refused at the setter, because our rider track never
@@ -1419,6 +1444,7 @@ pub(super) fn drive_animations(
                 .entity(entity)
                 .remove::<(super::NockedAmmo, super::NockLatch)>();
         }
+        committed.driven = committed.cur;
         // Translating or swimming un-nocks too, keeping the ammo and the draw: `0x60e480` arm 0
         // (`0x60e4ac call 0x60f530`) runs on MSG_MOVE_START_{FORWARD, BACKWARD, STRAFE_LEFT,
         // STRAFE_RIGHT, SWIM} (181/182/184/185/202); turning and stopping do not. A level test

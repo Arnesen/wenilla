@@ -22,6 +22,7 @@ fn window(s: &UiScript, id: i64) -> String {
 fn bag_bar_icons_draw_above_the_action_bar_art() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     // At this size the bag bar sits over the right end of the XP bar's notched art.
     s.set_screen_size(1600.0, 900.0);
     for file in BAG_UI {
@@ -55,6 +56,7 @@ fn bag_bar_icons_draw_above_the_action_bar_art() {
 fn backpack_toggle_plays_open_and_close_kits() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in BAG_UI {
         load_xml(&s, file);
@@ -100,6 +102,7 @@ fn backpack_toggle_plays_open_and_close_kits() {
 fn b_opens_the_backpack_alone_and_closes_every_bag() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -174,6 +177,7 @@ fn b_opens_the_backpack_alone_and_closes_every_bag() {
 fn shift_b_toggles_every_bag_at_once() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -256,6 +260,7 @@ fn shift_b_toggles_every_bag_at_once() {
 fn bag_bar_buttons_light_while_their_bag_is_open() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -366,6 +371,7 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
 fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The stock tooltip sizes from its lines, so reading its rect needs a text measurer.
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
@@ -385,6 +391,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -458,6 +465,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
 fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -475,6 +483,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -578,6 +587,8 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     use benilla_ui::script::{MerchantState, UiCursorMode};
 
     let mut s = UiScript::new().unwrap();
+
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -595,6 +606,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -630,6 +642,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         2,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -742,6 +755,8 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
     use benilla_ui::script::UiCursorMode;
 
     let mut s = UiScript::new().unwrap();
+
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -813,6 +828,7 @@ fn readable_letter_hover_shows_the_inspect_magnifier() {
 fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -830,6 +846,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -912,6 +929,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
 fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -929,6 +947,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -1000,6 +1019,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
 fn equipped_bag_window_snug_fits_its_row_count() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -1078,6 +1098,7 @@ pub(super) fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -1131,6 +1152,7 @@ pub(super) fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
 fn shift_click_on_a_stack_opens_the_split_frame() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
 
@@ -1159,6 +1181,7 @@ fn shift_click_on_a_stack_opens_the_split_frame() {
 fn the_split_frame_plate_fills_the_dialog() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
 
@@ -1209,6 +1232,7 @@ fn the_split_frame_plate_fills_the_dialog() {
 fn the_split_frame_raises_over_a_same_stratum_window() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
 
@@ -1271,6 +1295,7 @@ fn the_split_frame_raises_over_a_same_stratum_window() {
 fn typing_a_number_into_the_split_spinner_sets_the_count() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
 
@@ -1327,6 +1352,7 @@ fn typing_a_number_into_the_split_spinner_sets_the_count() {
 fn split_okay_then_a_placement_queues_the_split_move() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
     s.set_modifiers(true, false, false);
@@ -1371,6 +1397,7 @@ fn split_okay_then_a_placement_queues_the_split_move() {
 fn a_plain_click_hides_an_open_split_frame() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
     s.set_modifiers(true, false, false);
@@ -1394,6 +1421,7 @@ fn a_plain_click_hides_an_open_split_frame() {
 fn bag_slot_cooldown_sweeps_through_the_xml() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -1452,6 +1480,7 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
 fn the_bar_bag_buttons_name_themselves_on_hover() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     // `GetBindingKey` reads the registered command set, seeded as the app seeds it.
     crate::ui_script::load_stock_bindings(&mut s);
     s.set_screen_size(1024.0, 768.0);
@@ -1497,6 +1526,8 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     // inventory slot 20.
     let mut inv: benilla_ui::script::InventorySlots = Default::default();
     inv[20] = Some(benilla_ui::script::InvSlotView {
+        roll: Default::default(),
+        uncached_link: None,
         duration_ms: None,
         field_duration: 0,
         already_bound: false,
@@ -1527,6 +1558,8 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         spell_0: false,
     });
     s.set_inventory_slots(inv);
+    // The worn item's watcher runs the alert recompute, whose event repaints the slots.
+    s.recompute_inventory_alerts();
     hover(&mut s, "CharacterBag0Slot");
     let line = s
         .eval::<String>("return GameTooltipTextLeft1:GetText()")
@@ -1615,6 +1648,7 @@ fn keyring_surface(s: &UiScript) {
 fn the_first_key_puts_the_keyring_on_the_bar() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     keyring_surface(&s);
     s.set_money(0);
@@ -1696,6 +1730,7 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
 fn the_keyring_button_opens_a_keyring_window() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     keyring_surface(&s);
     s.set_money(0);
@@ -1757,6 +1792,7 @@ fn the_keyring_button_opens_a_keyring_window() {
 fn a_hovered_key_shows_its_tooltip_through_its_inventory_slot() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     keyring_surface(&s);
@@ -1802,6 +1838,7 @@ fn a_hovered_key_shows_its_tooltip_through_its_inventory_slot() {
 fn a_key_dropped_on_the_button_files_itself() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     keyring_surface(&s);
     s.set_money(0);
@@ -1887,6 +1924,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
 
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -2048,6 +2086,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
 fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -2097,6 +2136,7 @@ fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
 fn the_bag_slots_carry_the_references_names_and_icon_names() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -2151,6 +2191,7 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
 fn the_backpack_buttons_ring_follows_its_own_window_through_real_clicks() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,

@@ -1,7 +1,9 @@
 //! Benilla's options window (`OptionsFrame.xml`): the shell, the search and scroll, and every
 //! page's rows against the real CVar set, the saved option globals and the API rows.
 
-use benilla_ui::script::{QuadContent, SoundRequest, UiScript, WornDisplay};
+use benilla_ui::script::{
+    QuadContent, SoundRequest, TutorialCall, UiScript, WornDisplay, WornDisplaySet,
+};
 
 /// The options window and the game menu over the manifest slice they need.
 fn harness() -> UiScript {
@@ -17,6 +19,8 @@ fn harness_on(s: UiScript) -> UiScript {
 /// [`harness_on`] with a page's `definers` merged in: the files its rows read, each loaded once
 /// and in the production order.
 fn harness_with(mut s: UiScript, definers: &[&str]) -> UiScript {
+    // No engine: what `UIParent`'s `OnUpdate` calls each tick is kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     const WINDOW: &[&str] = &[
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -666,7 +670,8 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
 
 /// A VM with the real registered CVar set, before any XML loads, as the app boots.
 fn audio_harness() -> UiScript {
-    let s = UiScript::new().unwrap();
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.register_cvars(crate::cvars::registered_pairs());
     s
 }
@@ -685,6 +690,8 @@ fn combat_harness() -> UiScript {
 fn interface_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
+    // No host: the tutorial row's calls are kept for the tests to read, not applied.
+    s.keep_calls();
     harness_with(
         s,
         &[
@@ -2324,7 +2331,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     let src = chain
         .read_file("Interface\\FrameXML\\GlobalStrings.lua")
         .expect("GlobalStrings.lua in the chain");
-    let strings = UiScript::new().expect("VM");
+    let mut strings = UiScript::new().expect("VM");
+    strings.keep_calls();
     strings
         .run(&String::from_utf8_lossy(&src))
         .expect("GlobalStrings runs clean");
@@ -3017,8 +3025,8 @@ fn the_target_of_target_switch_leaves_the_frame_to_its_own_updates() {
 }
 
 /// Show Cloak and Show Helm are bits of the character's `PLAYER_FLAGS`, read and written through
-/// 1.12's `func`/`setFunc` pair (`UIOptionsFrame.lua:18-19`). The getter follows the click before
-/// the server answers: the wire verb is a blind flip, so a second click must see the new state.
+/// 1.12's `func`/`setFunc` pair (`UIOptionsFrame.lua:18-19`). The getter reads the bit, so the row
+/// follows the server's answer, not the click (`0x48dd8b`).
 #[test]
 fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
     benilla_formats::wow_data_or_skip!();
@@ -3026,66 +3034,45 @@ fn the_equipment_display_rows_read_and_write_through_the_api_not_a_store() {
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
+    let checked = |s: &mut UiScript, row: &str| {
+        s.eval::<bool>(&format!(
+            "return BenillaOptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
+        ))
+        .unwrap()
+    };
 
     // Both ship shown, the reference's hand-written default (`UIOptionsFrame.lua:631-634`).
     for row in ["RowShowHelm", "RowShowCloak"] {
-        assert!(
-            s.eval::<bool>(&format!(
-                "return BenillaOptionsFrameContainerBodyInterface{row}Check:GetChecked() and true or false"
-            ))
-            .unwrap(),
-            "{row} reads the API"
-        );
+        assert!(checked(&mut s, row), "{row} reads the API");
     }
 
     let _ = s.take_cvar_changes();
-    let _ = s.take_worn_display_toggles();
+    let _ = s.take_worn_display_sets();
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowHelmCheck:Click()")
         .unwrap();
     assert_eq!(
-        s.take_worn_display_toggles(),
-        vec![WornDisplay::Helm],
-        "the click is a CMSG_TOGGLE_HELM intent, not a stored value"
+        s.take_worn_display_sets(),
+        vec![WornDisplaySet {
+            piece: WornDisplay::Helm,
+            show: false
+        }],
+        "the click is a ShowHelm(0) ask, not a stored value"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
         "an API row must not touch the CVar table"
     );
-    assert!(
-        !s.eval::<bool>("return ShowingHelm() and true or false")
-            .unwrap(),
-        "the getter follows the click at once — the server has not answered yet"
-    );
-    assert!(
-        s.eval::<bool>("return ShowingCloak() and true or false")
-            .unwrap(),
-        "and the other slot is a different bit"
-    );
 
+    // The server answers with HIDE_HELM set; the revisit re-asks the getter.
+    s.set_worn_display(false, true);
     s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
         .unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
+    assert!(!checked(&mut s, "RowShowHelm"), "the bit says hidden");
     assert!(
-        !s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
-             and true or false"
-        )
-        .unwrap(),
-        "the revisit re-asks the getter"
-    );
-
-    // A descriptor edge that disagrees wins over the optimistic flip.
-    s.set_worn_display(true, true);
-    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
-        .unwrap();
-    assert!(
-        s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyInterfaceRowShowHelmCheck:GetChecked() \
-             and true or false"
-        )
-        .unwrap(),
-        "the server said the helm is shown, so the row says so"
+        checked(&mut s, "RowShowCloak"),
+        "and the other slot is a different bit"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -3111,13 +3098,15 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
     );
 
     let _ = s.take_cvar_changes();
-    let _ = s.take_tutorial_clears();
-    let _ = s.take_tutorial_resets();
+    let _ = s.take_tutorial_calls();
 
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
         .unwrap();
-    assert_eq!(s.take_tutorial_clears(), 1, "off clears the bank");
-    assert_eq!(s.take_tutorial_resets(), 0);
+    assert_eq!(
+        s.take_tutorial_calls(),
+        [TutorialCall::Clear],
+        "off clears the bank"
+    );
     assert!(
         s.take_cvar_changes().is_empty(),
         "there is no tutorial CVar in 1.12 — the row must not invent one"
@@ -3140,8 +3129,11 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
 
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
         .unwrap();
-    assert_eq!(s.take_tutorial_resets(), 1, "on resets the bank");
-    assert_eq!(s.take_tutorial_clears(), 0);
+    assert_eq!(
+        s.take_tutorial_calls(),
+        [TutorialCall::Reset],
+        "on resets the bank"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -3155,48 +3147,48 @@ fn a_no_op_write_does_not_re_arm_the_tutorials() {
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
-    let _ = s.take_tutorial_clears();
-    let _ = s.take_tutorial_resets();
+    let _ = s.take_tutorial_calls();
 
     // Defaults writes "1" over a row that already reads "1".
     s.run("BenillaOptionsFrameContainerDefaults:Click()")
         .unwrap();
     assert_eq!(
-        (s.take_tutorial_resets(), s.take_tutorial_clears()),
-        (0, 0),
+        s.take_tutorial_calls(),
+        [],
         "the guard held: no bank write for a value that had not moved"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The setter is a set over a wire verb that toggles, so Defaults flips only the row that moved.
+/// Defaults asks both rows to show; the host's live bit test sends a toggle for the one that
+/// differs alone (`0x5ee6c4`).
 #[test]
-fn defaults_sends_a_flip_only_for_the_row_that_moved() {
+fn defaults_asks_both_pieces_to_show() {
     benilla_formats::wow_data_or_skip!();
     let mut s = interface_harness();
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
-    s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowCloakCheck:Click()")
-        .unwrap();
-    let _ = s.take_worn_display_toggles();
-    assert!(!s
-        .eval::<bool>("return ShowingCloak() and true or false")
-        .unwrap());
+    s.set_worn_display(true, false);
+    let _ = s.take_worn_display_sets();
 
     s.run("BenillaOptionsFrameContainerDefaults:Click()")
         .unwrap();
+    let mut asked = s.take_worn_display_sets();
+    asked.sort_by_key(|a| a.piece == WornDisplay::Helm);
     assert_eq!(
-        s.take_worn_display_toggles(),
-        vec![WornDisplay::Cloak],
-        "only the cloak had moved"
+        asked,
+        vec![
+            WornDisplaySet {
+                piece: WornDisplay::Cloak,
+                show: true
+            },
+            WornDisplaySet {
+                piece: WornDisplay::Helm,
+                show: true
+            },
+        ]
     );
-    assert!(s
-        .eval::<bool>("return ShowingCloak() and true or false")
-        .unwrap());
-    assert!(s
-        .eval::<bool>("return ShowingHelm() and true or false")
-        .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -4109,6 +4101,7 @@ impl benilla_ui::script::TextMeasure for SteppedFont {
 fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_text_measurer(Box::new(SteppedFont(6.0)));
     let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();

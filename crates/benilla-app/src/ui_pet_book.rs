@@ -7,145 +7,53 @@
 //! carries the raw word's autocast bits (31, 30) and the word itself, which `PickupSpell` puts on
 //! the cursor. The order is shared: `0x4b2fd0` sorts with `0x4b30c0`, the player book's comparator.
 //!
-//! A book cooldown is the pet's own store, the one `GetPetActionCooldown` reads (`0x6e2ea0` with
-//! `isPet`, `0x4b40dd`), so bar and book share one timer. `CastSpell(id, "pet")` sends
+//! The getters read it at the call through the host ([`pet_book`]). A book cooldown is the pet's
+//! own store, the one `GetPetActionCooldown` reads (`0x6e2ea0` with `isPet`, `0x4b40dd`), so bar
+//! and book share one timer. `CastSpell(id, "pet")` sends
 //! `CMSG_PET_ACTION` with a word built for the send, so the book casts spells not on the bar.
 //! `ToggleSpellAutocast(id, "pet")` sends `CMSG_PET_SPELL_AUTOCAST` (0x2F3) after `0x4bccb0` flips
 //! bit 30 locally, mirrors it onto the bar and fires `PET_BAR_UPDATE`.
 
-// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
-use bevy::platform::time::Instant;
-
 use bevy::prelude::*;
 
-use benilla_formats::SpellDisplay;
+use benilla_formats::{SpellCatalog, SpellDisplay};
 use benilla_protocol::messages::PetActionEntry;
 use benilla_ui::script::{PetBookState, SpellSlotView};
 
-use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::Spells;
-use crate::ui_pet::{PetBar, PetUnit};
-use crate::ui_unit::UnitFeed;
+use crate::net::{ClientCommand, ObjectStore};
+use crate::ui_pet::PetBar;
 
-pub(crate) struct UiPetBookPlugin;
-
-impl Plugin for UiPetBookPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                // Before the input pass, so a tab flipped this frame reads a populated book.
-                feed_pet_book
-                    .in_set(UnitFeed)
-                    .before(crate::ui_action::CooldownEvents),
-                // After the input pass, whose pet book casts applied inside their calls; it writes
-                // back into `PetBar`, whose next feed carries the mirrored autocast bit.
-                drain_pet_book.in_set(crate::ui_script::UiDrain),
-            ),
-        );
-    }
-}
-
-/// What the feed last pushed, so `SPELLS_CHANGED` fires only on a real change.
-#[derive(Default)]
-pub(crate) struct FeedMemory {
-    pushed: PetBookState,
-}
-
-pub(crate) fn feed_pet_book(
-    mut vm: crate::script_calls::VmWith<Res<'static, PetBar>>,
-    spells: Option<Res<Spells>>,
-    classes: Option<Res<crate::chr_classes::ChrClassTable>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
-    clock: Res<crate::ui_script::UiClock>,
-    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
-) {
-    vm.feed(|script, bar, fires| {
-        let Some(script) = script else {
-            return;
-        };
-        let memory = memory.get(script);
-        // Without `Spell.dbc` the book has no slots at all; try again once it lands.
-        let Some(spells) = spells.as_deref() else {
-            return;
-        };
-        let now = Instant::now();
-        let (anchor, ui_now) = (clock.anchor, clock.ui_now);
-        let pet_store = index
-            .0
-            .get(&bar.spells.pet_guid)
-            .and_then(|&e| stores.get(e).ok());
-
-        let mut fresh = PetBookState {
-            // `HasPetSpells`'s token is the player's class, not the pet's (`0x4b4463` reads
-            // `player.fields + 0x79`), named by `ChrClasses.dbc` field 4.
-            token: self_q.single().ok().and_then(|s| {
-                let class = u32::from(s.0.unit_class()?);
-                classes
-                    .as_deref()
-                    .map(|t| t.0.pet_name_token(class).to_string())
-            }),
-            slots: Vec::new(),
-        };
-        if bar.has_bar() {
-            for &entry in &bar.spells.spells {
-                let spell_id = entry.action();
-                let Some(d) = spells.catalog.get(spell_id) else {
-                    // `0x4b2f90`'s first gate: no `Spell.dbc` record, no book slot.
-                    continue;
-                };
-                if !d.in_pet_book() {
-                    continue;
-                }
-                fresh
-                    .slots
-                    .push(slot_view(entry, d, &bar, pet_store, now, anchor, ui_now));
-            }
-            // `0x4b2fd0`'s re-sort, with the player book's own comparator.
-            fresh.slots.sort_by_key(|s| {
-                crate::ui_spellbook::spell_sort_key_of(&s.name, s.rank.as_deref())
-            });
-        }
-
-        if fresh != memory.pushed {
-            debug!("ui_pet_book: fed {} pet spell(s)", fresh.slots.len());
-            let changed = book_changed(&fresh, &memory.pushed);
-            script.set_pet_book(fresh.clone());
-            memory.pushed = fresh;
-            // One `SPELLS_CHANGED` for both books off the shared re-sort (`0x4b2fd0` tail-jumps
-            // `SignalEvent(0x104)`). A cooldown repaints the pet page through the flush's
-            // `SPELL_UPDATE_COOLDOWN` (`SpellBookFrame.lua:209`, `221`), which `ui_pet`'s
-            // `fire_pet_cooldown_events` fires after this feed's push; autocast, through
-            // `PET_BAR_UPDATE` (`227-231`), which `ui_pet`'s feed fires.
-            if changed {
-                fires.post("SPELLS_CHANGED", vec![]);
-            }
-        }
-    })
-}
-
-/// Whether the book itself changed; a slot's cooldown reaches the buttons through the flush's
-/// `SPELL_UPDATE_COOLDOWN`, its autocast and ring through `PET_BAR_UPDATE`, instead.
-fn book_changed(fresh: &PetBookState, old: &PetBookState) -> bool {
-    fresh.token != old.token
-        || fresh.slots.len() != old.slots.len()
-        || fresh.slots.iter().zip(&old.slots).any(|(a, b)| {
-            (a.spell_id, &a.name, &a.rank, &a.texture, a.passive)
-                != (b.spell_id, &b.name, &b.rank, &b.texture, b.passive)
+/// The pet's book as it stands off the bar's raw words, which `PetLive` hands the getters: the
+/// last packet's spells with or without its guid, as `HasPetSpells` counts it alone (`0x4b4416`)
+/// and only a packet empties it (`0x4bda15`, `0x4bdacf`). `token` is the player's class's
+/// (`0x4b4463`), `pet` the unit the guid names. Each slot's cooldown is the pet's list, which the
+/// book's cooldown getter asks itself (`0x4b40dd`).
+pub(crate) fn pet_book(
+    bar: &PetBar,
+    catalog: &SpellCatalog,
+    token: Option<String>,
+    pet: Option<&ObjectStore>,
+) -> PetBookState {
+    let mut slots: Vec<SpellSlotView> = bar
+        .spells
+        .spells
+        .iter()
+        .filter_map(|&entry| {
+            // `0x4b2f90`: a `Spell.dbc` record without `DO_NOT_DISPLAY`.
+            let d = catalog.get(entry.action()).filter(|d| d.in_pet_book())?;
+            Some(slot_view(entry, d, pet))
         })
+        .collect();
+    // `0x4b2fd0`'s re-sort, with the player book's own comparator.
+    slots.sort_by_key(|s| crate::ui_spellbook::spell_sort_key_of(&s.name, s.rank.as_deref()));
+    PetBookState { token, slots }
 }
 
 /// One book slot, fully resolved.
 fn slot_view(
     entry: PetActionEntry,
     d: &SpellDisplay,
-    bar: &PetBar,
     pet_store: Option<&ObjectStore>,
-    now: Instant,
-    anchor: Instant,
-    ui_now: f64,
 ) -> SpellSlotView {
     let spell_id = entry.action();
     SpellSlotView {
@@ -158,11 +66,7 @@ fn slot_view(
         // spell's aura is on the pet (`[pet.fields + 0xa4]`), the bar's own predicate.
         current: pet_store
             .is_some_and(|s| crate::ui_action::toggle::active_action_toggle(spell_id, d, s)),
-        // The pet's own cooldown store, the one `GetPetActionCooldown` reads.
-        cooldown: bar
-            .cooldowns
-            .info(spell_id, 0, Some(d), now)
-            .ui_triple(anchor, ui_now),
+        cooldown: None,
         // Off the raw word; `0x4bdd65` also requires a `Spell.dbc` record, which every slot has.
         autocast: Some((entry.autocast_allowed(), entry.autocast_on())),
         packed: entry.packed,
@@ -232,54 +136,11 @@ pub(crate) fn finish_pet_book_cast(p: &mut crate::ui_pet::PetPress, send: PetBoo
     });
 }
 
-/// Drains the pet book's `ToggleSpellAutocast` intents. Each asks the usability predicate before
-/// it looks anything up (`0x4bccce`), so an unusable pet's toggle flips, repaints and sends
-/// nothing.
-pub(crate) fn drain_pet_book(
-    mut vm: crate::script_calls::VmWith<ResMut<'static, PetBar>>,
-    commands: Res<NetCommands>,
-    pet: PetUnit,
-) {
-    vm.turn(|script, mut bar| {
-        let Some(script) = script else {
-            return;
-        };
-        let autocasts = script.take_pet_spell_autocasts();
-        if autocasts.is_empty() {
-            return;
-        }
-        let pet_guid = bar.spells.pet_guid;
-        if pet_guid == 0 {
-            debug!("ui_pet_book: dropping queued pet book intents — the bar is gone");
-            return;
-        }
-        for spell_id in autocasts {
-            if !pet.actions_usable(&bar) {
-                debug!(
-                    "ui_pet_book: autocast {spell_id} refused, the pet's actions are not usable"
-                );
-                continue;
-            }
-            let Some(on) = flip_autocast(&mut bar.spells, spell_id) else {
-                continue;
-            };
-            // The VM flipped its own book and bar and fired `PET_BAR_UPDATE` in the verb
-            // (`0x4bcdcb`).
-            debug!("ui_pet_book: autocast {spell_id} -> {on}");
-            let _ = commands.0.send(ClientCommand::PetSpellAutocast {
-                pet_guid,
-                spell_id,
-                enabled: on,
-            });
-        }
-    })
-}
-
 /// `0x4bccb0`'s local half: flip bit 30 of the spell's raw word, then copy it onto every bar slot
 /// whose type and action match under `& 0x3FFFFFFF` (`0x4bcd20`-`0x4bcd5a`), or the bar's sparkle
 /// stays stale until the next `SMSG_PET_SPELLS`. `None` where the reference aborts unsent: the
 /// word is not autocast-allowed (`0x4bccf5`), as a passive's and a command token's are not.
-fn flip_autocast(
+pub(crate) fn flip_autocast(
     spells: &mut benilla_protocol::messages::PetSpells,
     spell_id: u32,
 ) -> Option<bool> {

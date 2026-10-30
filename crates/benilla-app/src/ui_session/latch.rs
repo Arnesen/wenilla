@@ -12,12 +12,13 @@
 //! `*_CLOSED` fires twice; entered through `0x493310`, it finds the latch clear and fires once.
 //! Quest's core zeroes its cell before the release (`0x501201`), so it never re-enters.
 //!
-//! The cores fire their events into the VM as they run, so a close lands ahead of the open that
-//! caused it; a window's feed fires its opens and updates and starts over from closed after each
-//! core run ([`InteractLatch::closes`]). A handler that calls its window's close verb, as stock
+//! A core run where its window's lane still holds an earlier item, its open among them, clears
+//! its cell at once and queues its signals behind that item, so a close never lands ahead of the
+//! open it closes; else it fires them into the VM as it runs. A handler that calls its window's close verb, as stock
 //! `HideUIPanel` → `OnHide` does, re-enters that core in the reference before the fire returns;
-//! [`fire`] runs such a call before going on, as a core that fires before it clears its cell
-//! (trainer, bank, auction) is re-entered with the cell still set.
+//! every close verb runs its core inside its call, through the host ([`LatchSteps`]), so a core
+//! that fires before it clears its cell (trainer, bank, auction) is re-entered with the cell still
+//! set.
 //!
 //! The NPC's voice rides the same two calls ([`LatchVocal`]): `0x4930d0` greets a different
 //! non-player unit it latches, and `0x4931c0` says goodbye to the unit it releases, unless its
@@ -62,26 +63,43 @@ pub(crate) enum NpcWindow {
 }
 
 impl NpcWindow {
-    /// Every window, in `0x493310`'s order.
-    pub(crate) const ALL: [NpcWindow; 13] = [
-        NpcWindow::Trade,
-        NpcWindow::ItemText,
-        NpcWindow::Gossip,
-        NpcWindow::Quest,
-        NpcWindow::Merchant,
-        NpcWindow::Taxi,
-        NpcWindow::Trainer,
-        NpcWindow::Bank,
-        NpcWindow::Registrar,
-        NpcWindow::Tabard,
-        NpcWindow::Mail,
-        NpcWindow::Auction,
-        NpcWindow::Stable,
-    ];
-
-    fn index(self) -> usize {
-        self as usize
+    /// The window's bit among [`PARKED_CLOSES`].
+    const fn bit(self) -> u16 {
+        1 << self as u16
     }
+}
+
+thread_local! {
+    /// The windows whose parked close is running its interface half on this thread
+    /// ([`in_parked_close`]).
+    static PARKED_CLOSES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f`, the interface half of `window`'s close that a handler or a lane's earlier item held
+/// back ([`crate::lanes::behind`]): its signals, and the VM's view of the window, at the close's
+/// place on its lane. The engine half, the cell, the latch and the sends, ran where the close was
+/// entered, as the reference runs them inside the handler, so the live window may by now be a
+/// session a later open began. A close verb the half's listeners re-enter ([`parked_close`])
+/// therefore acts on the session this close closed, never on that newer one.
+pub(crate) fn in_parked_close<R>(window: NpcWindow, f: impl FnOnce() -> R) -> R {
+    struct Reset(u16);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PARKED_CLOSES.set(self.0);
+        }
+    }
+    let outer = PARKED_CLOSES.get();
+    let _reset = Reset(outer);
+    PARKED_CLOSES.set(outer | window.bit());
+    f()
+}
+
+/// Whether `window`'s parked close is running its interface half ([`in_parked_close`]): its close
+/// verb, re-entered from the half's listeners, runs only what the reference's re-entry runs at that
+/// point of the core against the session the close closed, its signals, and leaves the live
+/// session and the wire alone.
+pub(crate) fn parked_close(window: NpcWindow) -> bool {
+    PARKED_CLOSES.get() & window.bit() != 0
 }
 
 /// What the latch asks the latched NPC to say. The unit's kind and state gate it where it is
@@ -94,32 +112,21 @@ pub(crate) enum LatchVocal {
     Goodbye(u64),
 }
 
-/// How deep [`fire`]'s answers to close verbs may nest. The reference recurses without bound, so
-/// a handler that calls its own close verb on every fire overflows its stack; three levels cover
-/// every stock route.
-const MAX_REENTRY: u32 = 8;
-
 /// The interaction latch, `[0xb4e2d0]`: the guid the open NPC window registered, until a close
 /// core releases it. A UI shutdown leaves it to the leave-world sweep; a disconnect clears it.
 #[derive(Resource, Default)]
 pub(crate) struct InteractLatch {
     guid: Option<u64>,
-    /// Per window, how many times its core cleared its cell.
-    closes: [u64; NpcWindow::ALL.len()],
-    /// [`fire`]'s nesting, against a handler that re-closes forever.
-    depth: u32,
+    /// The guids [`LatchSteps::release`] released inside a call, for the world's check after it
+    /// ([`check_call_releases`]).
+    #[cfg(debug_assertions)]
+    released: Vec<u64>,
 }
 
 impl InteractLatch {
     /// The latched guid.
     pub(crate) fn guid(&self) -> Option<u64> {
         self.guid
-    }
-
-    /// How many times `window`'s close core has cleared its cell: the core told the VM, so a feed
-    /// that sees this move forgets what it last announced and starts over from closed.
-    pub(crate) fn closes(&self, window: NpcWindow) -> u64 {
-        self.closes[window.index()]
     }
 
     /// Latch `guid` with no close, for a test that seats a window directly.
@@ -129,38 +136,52 @@ impl InteractLatch {
     }
 }
 
-/// A window feed's view of its core: the feed fires its window's opens and updates, never its
-/// close, which the core told the VM as it ran.
+/// The latch inside a script call: the engine half a close verb's core reaches it by
+/// ([`crate::script_calls::ScriptCallHost`]), so the release, the latch's clear and the core's
+/// signal all happen before the verb returns, as `0x4931c0` and `0x493310` run inside the core
+/// that calls them.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct CoreCloses<'w, 's> {
+pub(crate) struct LatchSteps<'w> {
     /// Absent in a harness with no window on the latch.
-    latch: Option<Res<'w, InteractLatch>>,
-    seen: crate::ui_script::WindowMemo<'w, 's, u64>,
+    latch: Option<ResMut<'w, InteractLatch>>,
+    vocal: Option<ResMut<'w, Messages<LatchVocal>>>,
 }
 
-impl CoreCloses<'_, '_> {
-    /// Whether `window`'s core cleared its cell since this feed last asked: what the feed last
-    /// announced is gone, and it starts over from closed.
-    pub(crate) fn since_last(&mut self, script: &UiScript, window: NpcWindow) -> bool {
-        let now = self.latch.as_ref().map_or(0, |l| l.closes(window));
-        std::mem::replace(self.seen.get(script), now) != now
+impl LatchSteps<'_> {
+    /// `0x4931c0(cell, dl = 0)` from a window's close core: while the latch names `cell`, the
+    /// goodbye (`0x493210`), then `0x493310`, which clears the latch (`0x49334b`) and closes the
+    /// first window in its order whose cell holds the guid: the caller's own, whose core then
+    /// re-enters while its cell is still set, so its signal fires twice. Whether it re-enters. No
+    /// other cell holds a latched guid: every opener registers before it writes its cell
+    /// ([`register`] closes the holder first), and the two that write first, the designer's and
+    /// the item text's, are closed by that register, or hold an item's or an object's guid. A debug
+    /// build checks it, as for every walk ([`debug_assert_one_holder`]), once the call is done
+    /// ([`check_call_releases`]): this cannot read the other windows' cells beside the host.
+    pub(crate) fn release(&mut self, cell: u64) -> bool {
+        let Some(latch) = self.latch.as_deref_mut() else {
+            return false;
+        };
+        if latch.guid != Some(cell) {
+            return false;
+        }
+        if let Some(vocal) = self.vocal.as_deref_mut() {
+            vocal.write(LatchVocal::Goodbye(cell));
+        }
+        latch.guid = None;
+        #[cfg(debug_assertions)]
+        latch.released.push(cell);
+        true
     }
 }
 
-/// A window on the latch: its cell, its close core as `0x493310` calls it, and its Lua close
-/// verb.
+/// A window on the latch: its cell, and its close core as `0x493310` calls it. Its Lua close verb
+/// runs the core inside its call ([`LatchSteps`]).
 pub(crate) trait LatchedWindow: Resource + Sized {
     const WINDOW: NpcWindow;
     /// The guid in the window's cell; `None` when it is closed.
     fn cell(&self) -> Option<u64>;
     /// The close core as `0x493310` enters it.
     fn dispatched(world: &mut World);
-    /// Take the window's Lua close verb, if a handler called it.
-    fn take_close_verb(script: &mut UiScript) -> bool;
-    /// What the close verb does: its binding's call into the core.
-    fn close_verb(world: &mut World) {
-        Self::dispatched(world);
-    }
 }
 
 /// One registered window, type-erased for the dispatcher.
@@ -169,8 +190,6 @@ struct Entry {
     window: NpcWindow,
     cell: fn(&World) -> Option<u64>,
     dispatched: fn(&mut World),
-    take_close_verb: fn(&mut UiScript) -> bool,
-    close_verb: fn(&mut World),
 }
 
 /// The windows on the latch, in `0x493310`'s order.
@@ -184,6 +203,9 @@ pub(crate) trait LatchApp {
 
 impl LatchApp for App {
     fn add_latched_window<T: LatchedWindow>(&mut self) -> &mut Self {
+        if !self.world().contains_resource::<LatchedWindows>() {
+            self.add_systems(Last, check_call_releases);
+        }
         let world = self.world_mut();
         world.init_resource::<InteractLatch>();
         let mut windows = world.get_resource_or_init::<LatchedWindows>();
@@ -192,8 +214,6 @@ impl LatchApp for App {
                 window: T::WINDOW,
                 cell: |world| world.get_resource::<T>().and_then(T::cell),
                 dispatched: T::dispatched,
-                take_close_verb: T::take_close_verb,
-                close_verb: T::close_verb,
             });
             windows.0.sort_by_key(|e| e.window);
         }
@@ -218,7 +238,8 @@ pub(crate) fn register(world: &mut World, guid: u64) {
     world.init_resource::<InteractLatch>();
     let before = world.resource::<InteractLatch>().guid;
     if before.is_some() {
-        dispatch(world);
+        // The designer and the book write their cell first, so one may hold the guid it replaces.
+        walk(world, 1);
     }
     world.resource_mut::<InteractLatch>().guid = Some(guid);
     if guid != 0 && before != Some(guid) {
@@ -266,6 +287,11 @@ fn say(world: &mut World, vocal: LatchVocal) {
 /// cell holds the old guid. The watchdog (`0x493305`) and the leave-world sweep (`0x490b5f`)
 /// call it, and so does every core that finds its own guid latched.
 pub(crate) fn dispatch(world: &mut World) {
+    walk(world, 0);
+}
+
+/// [`dispatch`], then the check that at most `left` windows still hold the guid it released.
+fn walk(world: &mut World, left: usize) {
     let Some(guid) = world
         .get_resource_mut::<InteractLatch>()
         .and_then(|mut l| l.guid.take())
@@ -278,12 +304,46 @@ pub(crate) fn dispatch(world: &mut World) {
     {
         (e.dispatched)(world);
     }
+    debug_assert_one_holder(world, guid, left);
 }
 
-/// A core cleared `window`'s cell: its feed starts over from closed.
-pub(crate) fn note_closed(world: &mut World, window: NpcWindow) {
-    world.init_resource::<InteractLatch>();
-    world.resource_mut::<InteractLatch>().closes[window.index()] += 1;
+/// What [`LatchSteps::release`] rests on, checked where every window's cell is readable: one
+/// window's cell at most holds a latched guid, so a core that releases the latch without
+/// `0x493310`'s walk strands no other window. After a walk closed the first holder, no cell holds
+/// the released guid but, inside an open, the opener's own when it wrote its cell first.
+fn debug_assert_one_holder(world: &World, guid: u64, left: usize) {
+    if cfg!(debug_assertions) {
+        let holders: Vec<NpcWindow> = entries(world)
+            .into_iter()
+            .filter(|e| (e.cell)(world) == Some(guid))
+            .map(|e| e.window)
+            .collect();
+        debug_assert!(
+            holders.len() <= left,
+            "windows {holders:?} still hold the released guid {guid:#x}"
+        );
+    }
+}
+
+/// [`debug_assert_one_holder`] for each guid a call's core released without the walk
+/// ([`LatchSteps::release`]), where every cell is readable: none still holds it, unless the latch
+/// took it again since, as an opener's register does.
+pub(crate) fn check_call_releases(world: &mut World) {
+    #[cfg(debug_assertions)]
+    {
+        let Some(mut latch) = world.get_resource_mut::<InteractLatch>() else {
+            return;
+        };
+        let released = std::mem::take(&mut latch.released);
+        let latched = latch.guid;
+        for guid in released {
+            if latched != Some(guid) {
+                debug_assert_one_holder(world, guid, 0);
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = world;
 }
 
 /// Run `f` on the VM, if one is mounted, with no event: a core's own pushes. The host is lent all
@@ -296,30 +356,10 @@ pub(crate) fn with_script(world: &mut World, f: impl FnOnce(&mut UiScript)) {
     });
 }
 
-/// A core's event: `f` fires it into the VM with the host lent, so a handler's script calls apply
-/// inside their verbs; then every close verb its handlers called runs, in `0x493310`'s order, as
-/// the reference's verb would have inside the fire. With no VM there is no handler to call one.
+/// A core's event: `f` fires it into the VM with the host lent, so a handler's script calls,
+/// close verbs among them, apply inside their verbs. With no VM there is no handler.
 pub(crate) fn fire(world: &mut World, f: impl FnOnce(&mut UiScript)) {
-    let fired = crate::script_calls::with_hosted_vm(world, |script| script.map(f).is_some());
-    if !fired {
-        return;
-    }
-    let depth = {
-        let mut latch = world.get_resource_or_init::<InteractLatch>();
-        latch.depth += 1;
-        latch.depth
-    };
-    if depth <= MAX_REENTRY {
-        for e in entries(world) {
-            let called = world
-                .get_non_send_resource_mut::<UiScript>()
-                .is_some_and(|mut s| (e.take_close_verb)(&mut s));
-            if called {
-                (e.close_verb)(world);
-            }
-        }
-    }
-    world.resource_mut::<InteractLatch>().depth -= 1;
+    with_script(world, f);
 }
 
 /// Queue `f` to run on the world at the next command flush: how a system reaches a core.

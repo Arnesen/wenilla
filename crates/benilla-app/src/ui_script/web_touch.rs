@@ -13,6 +13,7 @@ pub(super) struct TouchFeed<'w, 's> {
     worlds: Option<Res<'w, super::SweptWorlds>>,
     primary: Query<'w, 's, Entity, With<bevy::window::PrimaryWindow>>,
     egui: Res<'w, super::EguiPointerOver>,
+    buttons: Res<'w, ButtonInput<MouseButton>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -29,8 +30,8 @@ impl TouchFeed<'_, '_> {
         &mut self,
         script: &mut UiScript,
         window: &Window,
+        screen: super::UiScreen,
         synthetic: bool,
-        buttons: &ButtonInput<MouseButton>,
     ) -> TouchOutcome {
         let state = self
             .memo
@@ -46,11 +47,11 @@ impl TouchFeed<'_, '_> {
         }
         let context = TouchContext {
             window: self.primary.single().ok(),
-            size: Vec2::new(window.width(), window.height()),
+            screen,
             available: window.focused && !self.egui.0,
-            mouse_busy: buttons.get_pressed().next().is_some()
-                || buttons.get_just_pressed().next().is_some()
-                || buttons.get_just_released().next().is_some(),
+            mouse_busy: self.buttons.get_pressed().next().is_some()
+                || self.buttons.get_just_pressed().next().is_some()
+                || self.buttons.get_just_released().next().is_some(),
         };
         state.feed(script, context, self.events.read())
     }
@@ -67,8 +68,8 @@ pub(super) struct TouchOutcome {
 #[derive(Clone, Copy)]
 struct TouchContext {
     window: Option<Entity>,
-    /// Bevy touch positions and Window dimensions are both logical pixels.
-    size: Vec2,
+    /// The mouse feed's screen, including any 4:3 stretch across the logical window.
+    screen: super::UiScreen,
     available: bool,
     mouse_busy: bool,
 }
@@ -108,8 +109,8 @@ impl TouchState {
     ) -> TouchOutcome {
         if !context.available
             || context.window.is_none()
-            || !context.size.is_finite()
-            || context.size.min_element() <= 0.0
+            || !context.screen.window.is_finite()
+            || context.screen.window.min_element() <= 0.0
         {
             events.for_each(|_| {});
             return self.cancel(script);
@@ -132,11 +133,11 @@ impl TouchState {
                 }
                 continue;
             }
-            let at = super::window_to_ui(context.size.y, event.position);
+            let at = super::window_to_ui(context.screen, event.position);
             match event.phase {
                 TouchPhase::Started if self.contact.is_none() && !context.mouse_busy => {
                     let inside = event.position.cmpge(Vec2::ZERO).all()
-                        && event.position.cmple(context.size).all();
+                        && event.position.cmple(context.screen.window).all();
                     if !inside {
                         continue;
                     }
@@ -186,7 +187,7 @@ impl TouchState {
         }
         if let Some(contact) = self.contact {
             if !moved {
-                let at = super::window_to_ui(context.size.y, contact.position);
+                let at = super::window_to_ui(context.screen, contact.position);
                 script.mouse_move(at.x, at.y);
             }
             outcome = TouchOutcome {
@@ -205,7 +206,7 @@ mod tests {
     fn context() -> TouchContext {
         TouchContext {
             window: Some(Entity::PLACEHOLDER),
-            size: Vec2::new(1024.0, 768.0),
+            screen: super::super::UiScreen::of(Vec2::new(1024.0, 768.0), true),
             available: true,
             mouse_busy: false,
         }
@@ -281,13 +282,33 @@ mod tests {
         let mut script = ui();
         let mut touch = TouchState::default();
         let mut context = context();
-        context.size *= 2.0;
+        context.screen = super::super::UiScreen::of(Vec2::new(2048.0, 1536.0), true);
         let events = [
             event(1, TouchPhase::Started, 300.0, 1076.0),
             event(1, TouchPhase::Ended, 300.0, 1076.0),
         ];
         touch.feed(&mut script, context, events.iter());
         assert_eq!(count(&script, "clicks"), 1);
+    }
+
+    #[test]
+    fn a_stretched_four_three_ui_uses_its_screen_for_touch_hit_testing() {
+        for widescreen in [false, true] {
+            let mut script = ui();
+            let mut touch = TouchState::default();
+            let mut context = context();
+            context.screen = super::super::UiScreen::of(Vec2::new(2048.0, 768.0), widescreen);
+            // The 4:3 screen stretches the button's x = 150 across to logical x = 300.
+            // With widescreen on, the same logical point misses the button.
+            let events = [
+                event(1, TouchPhase::Started, 300.0, 538.0),
+                event(1, TouchPhase::Ended, 300.0, 538.0),
+            ];
+            let result = touch.feed(&mut script, context, events.iter());
+            assert_eq!(result.handled, !widescreen);
+            assert_eq!(count(&script, "clicks"), i64::from(!widescreen));
+            assert_eq!(count(&script, "worldClicks"), 0);
+        }
     }
 
     #[test]

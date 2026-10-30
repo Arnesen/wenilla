@@ -1,9 +1,11 @@
 //! `IsInInstance`, `CanShowResetInstances` and `ResetInstances`, the whole Lua side of instance
-//! lockouts; the rest arrives as `CHAT_MSG_SYSTEM` lines. The readers answer off state the app
-//! pushes from `Map.dbc`.
+//! lockouts; the rest arrives as `CHAT_MSG_SYSTEM` lines. The readers ask the host at the call
+//! ([`super::InstanceTypeQuery`], [`super::CanResetInstancesQuery`]), the VM's copy answering
+//! with none.
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::live::ask;
 use super::Model;
 
 /// `IsInInstance()`'s type word for a `Map.dbc` `InstanceType`: the reference's table at
@@ -18,9 +20,9 @@ pub fn instance_type_name(instance_type: u32) -> &'static str {
 }
 
 impl super::UiScript {
-    /// Push the current map's `Map.dbc` `InstanceType`, `None` for a map with no row. Deviation:
-    /// `IsInInstance()` then answers `nil, "none"`, because the reference returns two results
-    /// without pushing either (`0x48a7a9`), a stack bug.
+    /// Set the current map's `Map.dbc` `InstanceType` read with no host lent, `None` for a map with
+    /// no row. Deviation: `IsInInstance()` then answers `nil, "none"`, because the reference
+    /// returns two results without pushing either (`0x48a7a9`), a stack bug.
     pub fn set_instance_type(&mut self, instance_type: Option<u32>) {
         let mut model = self.model_mut();
         if model.instance_type != instance_type {
@@ -28,8 +30,8 @@ impl super::UiScript {
         }
     }
 
-    /// Push `CanShowResetInstances()`'s answer; the app owns its terms (the ownership latch, the
-    /// last dungeon, its age and the current map).
+    /// Set `CanShowResetInstances()`'s answer with no host lent; the app owns its terms (the
+    /// ownership latch, the last dungeon, its age and the current map).
     pub fn set_can_reset_instances(&mut self, can: bool) {
         let mut model = self.model_mut();
         if model.can_reset_instances != can {
@@ -37,10 +39,17 @@ impl super::UiScript {
         }
     }
 
-    /// `ResetInstances()` calls since the last drain, each a `CMSG_RESET_INSTANCES`.
+    /// The `ResetInstances()` calls a harness's VM kept ([`Self::keep_calls`]).
     pub fn take_reset_instance_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().reset_instance_asks)
+        self.take_calls_like(&super::ScriptCall::Instance(InstanceCall::Reset)) as u32
     }
+}
+
+/// The lockouts' verb the host applies inside its call ([`super::ScriptCall::Instance`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceCall {
+    /// `ResetInstances()` (`0x48a6b0`): `CMSG_RESET_INSTANCES` (`0x48a6e6`).
+    Reset,
 }
 
 /// Register the three lockout globals.
@@ -51,10 +60,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsInInstance",
         lua.create_function(|lua, ()| {
-            let ty = {
+            let ty = ask(lua, &super::InstanceTypeQuery).unwrap_or_else(|| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.instance_type
-            };
+            });
             let name = instance_type_name(ty.unwrap_or(0));
             let inside = match ty {
                 Some(t) if t != 0 => Value::Number(1.0),
@@ -71,12 +80,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CanShowResetInstances",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.can_reset_instances {
-                Value::Number(1.0)
-            } else {
-                Value::Nil
-            })
+            let can = ask(lua, &super::CanResetInstancesQuery).unwrap_or_else(|| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.can_reset_instances
+            });
+            Ok(if can { Value::Number(1.0) } else { Value::Nil })
         })?,
     )?;
 
@@ -84,9 +92,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ResetInstances",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.reset_instance_asks += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Instance(InstanceCall::Reset))
         })?,
     )?;
 

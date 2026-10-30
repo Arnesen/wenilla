@@ -181,6 +181,8 @@ pub(super) struct FlareGate<'w, 's> {
     submerged: Res<'w, crate::liquid::SubmergedEye>,
     /// The cloud coverage `occ1` samples; as in the reference, the visible clouds draw from it too.
     clouds: Res<'w, CloudCoverage>,
+    /// Both glares' enabled word; the start-up 1 where none is registered.
+    glare: Option<Res<'w, super::SunGlare>>,
     env: Local<'s, f32>,
     /// Cached cell verdicts (bit = clear); `primed` falls when the probe is skipped.
     mask: Local<'s, u16>,
@@ -202,6 +204,11 @@ fn celestial_alpha_seed(bcc: f32) -> Option<f32> {
 }
 
 impl FlareGate<'_, '_> {
+    /// Whether the glares are on (`SkySunGlare`, [`super::SunGlare`]).
+    fn enabled(&self) -> bool {
+        self.glare.as_deref().copied().unwrap_or_default().enabled
+    }
+
     /// The envelope along `dir`, `half` the quad's angular half-size. The submersion fade is inside
     /// the slew, so surfacing ramps the glare back in: the target `[glare+0x34]` (reset at
     /// `0x6cf499`) takes it at `0x6cf501`/`0x6cf504`, before the limiter reads it at `0x6cf59b`.
@@ -215,7 +222,8 @@ impl FlareGate<'_, '_> {
         rise: f32,
     ) -> f32 {
         let base = dn * horizon_gate(dir) * occ1 * submersion_glare_fade(self.submerged.depth);
-        let target = if base > 0.0 && self.camera_interior.0.is_none() {
+        // A disabled glare's visibility term answers 0 (`0x7e578e`).
+        let target = if base > 0.0 && self.camera_interior.0.is_none() && self.enabled() {
             // Resident ADT terrain first, the whole-map WDL surface elsewhere.
             let (streamer, adt_tiles, wdl) = (&self.streamer, &self.adt_tiles, &self.wdl);
             let tile = std::cell::RefCell::new(None);
@@ -292,6 +300,7 @@ pub(super) fn follow_sun(
         sun_half,
         SUN_FLARE_RISE,
     );
+    let enabled = gate.enabled();
     for (mut tf, mut gt, sprite, mat) in &mut sprites {
         tf.rotation = rot;
         match sprite.part {
@@ -328,9 +337,13 @@ pub(super) fn follow_sun(
                 let units = 3.0 + 17.0 * f;
                 tf.scale = Vec3::splat(if hidden { 0.0 } else { units });
                 // Alpha is `lerp(0.5, 1, f)` (`[glare+0x9c]`) × the envelope × the weather seed,
-                // `0x6cf490`'s `[+0x1b] = floor(255·lerp·[+0x30])` on the seed byte.
-                let env =
-                    benilla_assets::quantize((0.5 + 0.5 * f) * env30 * seed.unwrap_or(1.0), 255.0);
+                // `0x6cf490`'s `[+0x1b] = floor(255·lerp·[+0x30])` on the seed byte; a disabled
+                // glare is not drawn (`0x7e57fe`).
+                let env = if enabled {
+                    benilla_assets::quantize((0.5 + 0.5 * f) * env30 * seed.unwrap_or(1.0), 255.0)
+                } else {
+                    0.0
+                };
                 let color = Color::srgba(tint[0], tint[1], tint[2], env);
                 benilla_assets::write_gated(
                     &mut mats,
@@ -387,6 +400,7 @@ pub(super) fn follow_moons(
             MOON_FLARE_RISE,
         )
     };
+    let enabled = gate.enabled();
     for (mut tf, mut gt, moon, mat) in &mut sprites {
         // moon02 rides its own phase-precessed bearing; the disc and glare share the white moon's.
         let to_moon = match moon.part {
@@ -458,9 +472,13 @@ pub(super) fn follow_moons(
                 tf.scale = Vec3::splat(size);
                 // `lerp(0.1, 1, f)` (`[0xce9794]`) × the envelope, `0x6cf490`'s byte shape.
                 let f = view_lerp(*cam_gt.forward(), to_moon);
-                // × the weather seed on the glare's alpha byte (`0x6d2c74`).
-                let env =
-                    benilla_assets::quantize((0.1 + 0.9 * f) * env30 * seed.unwrap_or(1.0), 255.0);
+                // × the weather seed on the glare's alpha byte (`0x6d2c74`); a disabled glare is
+                // not drawn (`0x7e57fe`).
+                let env = if enabled {
+                    benilla_assets::quantize((0.1 + 0.9 * f) * env30 * seed.unwrap_or(1.0), 255.0)
+                } else {
+                    0.0
+                };
                 let color = Color::srgba(tint[0], tint[1], tint[2], env);
                 benilla_assets::write_gated(
                     &mut mats,
@@ -633,6 +651,72 @@ mod tests {
              {glare_pos:?} want {want:?} error {err} (the old Update wiring measured exactly 1.0 \
              frame of camera motion here)"
         );
+    }
+
+    /// `SkySunGlare 0` clears both glares' enabled word: the draw skips the glare (`0x7e57fe`) and
+    /// its visibility term answers 0 (`0x7e578e`), so nothing of the flare shows; set again, the
+    /// envelope rises from where it fell.
+    #[test]
+    fn a_disabled_glare_draws_nothing() {
+        let dir = Vec3::new(0.0, 0.5, -1.0).normalize();
+        let glare_alpha = |enabled: bool| {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, bevy::transform::TransformPlugin));
+            // A tenth of a second a frame, so the envelope's slew shows within a few frames.
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(100),
+            ));
+            app.init_resource::<TerrainStreamer>();
+            app.init_resource::<CameraInteriorClaim>();
+            app.init_resource::<CloudCoverage>();
+            app.init_resource::<DebugState>();
+            app.init_resource::<crate::liquid::SubmergedEye>();
+            app.insert_resource(super::super::SunGlare { enabled });
+            app.insert_resource(WowLighting {
+                celestial_dir: dir,
+                sun_flare_dn: 1.0,
+                sun_disc_scale: 1.0,
+                celestial_tint: [1.0, 1.0, 1.0],
+                ..default()
+            });
+            app.insert_resource(Assets::<AdtTile>::default());
+            let mut mats = Assets::<CelestialMaterial>::default();
+            let mat = mats.add(CelestialMaterial {
+                base: StandardMaterial::default(),
+                extension: super::super::materials::CelestialExt::default(),
+            });
+            app.insert_resource(mats);
+            app.world_mut().spawn((
+                crate::view::WorldCamera,
+                Transform::default().looking_to(dir, Vec3::Y),
+                GlobalTransform::default(),
+                Projection::Perspective(PerspectiveProjection::default()),
+            ));
+            app.world_mut().spawn((
+                SunSprite {
+                    part: SunPart::Glare,
+                },
+                Transform::default(),
+                GlobalTransform::default(),
+                MeshMaterial3d(mat.clone()),
+            ));
+            app.add_systems(PostUpdate, follow_sun);
+            for _ in 0..4 {
+                app.update();
+            }
+            app.world()
+                .resource::<Assets<CelestialMaterial>>()
+                .get(&mat)
+                .unwrap()
+                .base
+                .base_color
+                .alpha()
+        };
+        assert!(
+            glare_alpha(true) > 0.0,
+            "the control: an enabled glare shows"
+        );
+        assert_eq!(glare_alpha(false), 0.0);
     }
 
     /// Height oracle: a flat plain at WoW z = 0, with a 30-unit ridge crest everywhere more than

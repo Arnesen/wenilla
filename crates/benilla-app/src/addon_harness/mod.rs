@@ -1133,7 +1133,7 @@ fn seat_a_session(script: &mut UiScript) {
     });
     script.set_realm_name("Harness");
     // The bind point: the server sends `SMSG_BINDPOINTUPDATE` at login, before any addon runs.
-    script.set_bind_location("Stormwind City");
+    script.set_bind_location(Some("Stormwind City"));
     script.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -1157,8 +1157,9 @@ fn seat_a_session(script: &mut UiScript) {
             // `UnitFactionGroup("player")`: every playable race has a side, and AceDB-2.0
             // concatenates it into its per-realm key at file scope.
             faction_group: Some("Alliance".into()),
-            // `0x5efe00`'s team digit for Human (race 1), the rank-title key's second `%d`.
-            pvp_team: crate::ui_unit::race_pvp_team(1),
+            // `0x5efe00`'s team digit for Human (race 1), the rank-title key's second `%d`: the
+            // stock row's template has group mask 3, Alliance.
+            pvp_team: 1,
             ..Default::default()
         }),
     );
@@ -1248,7 +1249,8 @@ fn seat_a_session(script: &mut UiScript) {
             ..Default::default()
         };
         script.set_quest_log_player(true);
-        script.quest_log_changed(slots);
+        script.set_quest_slots(slots);
+        script.quest_log_changed();
         script.flush_quest_log_refires();
     }
 
@@ -1316,7 +1318,7 @@ fn seat_a_session(script: &mut UiScript) {
     // The talent tree (`Talent.dbc` x `TalentTab.dbc`), read by position at file scope
     // (`KTM_Data.lua:376`). Zero ranks and the full pool, a fresh 60 (51 points, `level - 9`), so a
     // rank is a number rather than nil.
-    if let Some(state) = talent_snapshot(script) {
+    if let Some(state) = talent_snapshot() {
         script.set_talents(state);
     }
 }
@@ -1345,9 +1347,8 @@ fn auction_item_classes() -> Vec<benilla_ui::script::AuctionCategory> {
 }
 
 /// The seated character's talent pages, built by the live client's `build_pages`. The DBCs are read
-/// once per process; the pages are built per VM, since the requirement lines come from that VM's
-/// `GlobalStrings.lua`. `None` with no install.
-fn talent_snapshot(script: &UiScript) -> Option<benilla_ui::script::TalentUiState> {
+/// once per process; the pages are built per VM. `None` with no install.
+fn talent_snapshot() -> Option<benilla_ui::script::TalentUiState> {
     use std::sync::OnceLock;
     #[allow(clippy::type_complexity)]
     static DBCS: OnceLock<
@@ -1365,23 +1366,17 @@ fn talent_snapshot(script: &UiScript) -> Option<benilla_ui::script::TalentUiStat
             Some((talents, spells))
         })
         .as_ref()?;
-    let get = |key: &str| {
-        script
-            .lua()
-            .globals()
-            .get::<String>(key)
-            .ok()
-            .filter(|t| !t.is_empty())
-    };
     // Human (`ChrRaces.dbc` 1) warrior (`ChrClasses.dbc` 1), the character `seat_a_session` seats.
     Some(crate::ui_talent::build_pages(
         talents,
-        &BTreeSet::new(),
+        crate::ui_talent::Known {
+            spells: &BTreeSet::new(),
+            lines: None,
+        },
         spells,
         1,
         1,
         (51, 0),
-        &get,
     ))
 }
 
@@ -1395,8 +1390,8 @@ fn equip_slot(item_id: u32, name: &str) -> benilla_ui::script::InvSlotView {
         // A cached record of a wearable type.
         inventory_type: Some(1),
         name: Some(name.to_string()),
-        // Full durability: the setter fires `UPDATE_INVENTORY_ALERTS`, and a worn item would light
-        // DurabilityFrame.
+        // Full durability: a worn item short of it would light DurabilityFrame at an alert
+        // recompute.
         durability: Some((100, 100)),
         link: Some(format!("|cff1eff00|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
         ..Default::default()

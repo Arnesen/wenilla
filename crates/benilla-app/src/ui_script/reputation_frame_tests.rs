@@ -300,8 +300,8 @@ fn the_scroll_offset_rebinds_the_fixed_row_slots() {
     load_page(&s);
     s.set_unit("player", Some(player(40)));
 
-    // One header over twenty children: 21 visible rows against 15 slots.
-    let mut entries = vec![header(469, 11, "Alliance")];
+    // One header over twenty children: 21 visible rows against 15 slots, each in a slot of its own.
+    let mut entries = vec![header(469, 30, "Alliance")];
     for i in 1..=20u32 {
         entries.push(entry(1000 + i, i, 469, &format!("Faction {i:02}")));
     }
@@ -658,7 +658,7 @@ fn the_show_as_experience_bar_box_sends_the_watch_and_the_server_brings_the_bar_
     // The checkmark anchors past `GetStringWidth()`, which reads 0 with no measurer installed: a
     // stand-in font, 6 units a character.
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
-    let _ = s.take_reputation_sends();
+    s.keep_calls();
 
     // Ironforge: visible row 2, reputation slot 20.
     click_center(&mut s, "ReputationBar2");
@@ -677,8 +677,8 @@ fn the_show_as_experience_bar_box_sends_the_watch_and_the_server_brings_the_bar_
     // `GetChecked()` branch that watches.
     click_center(&mut s, "ReputationDetailMainScreenCheckBox");
     assert_eq!(
-        s.take_reputation_sends(),
-        [benilla_ui::script::ReputationSend::Watch(Some(20))],
+        s.take_reputation_calls(),
+        [benilla_ui::script::ReputationCall::Watch(20)],
         "one send, carrying Ironforge's reputation SLOT — not its visible row"
     );
     assert!(
@@ -724,11 +724,12 @@ fn the_show_as_experience_bar_box_sends_the_watch_and_the_server_brings_the_bar_
         "the mark sits the name's own string width to its right"
     );
 
-    // Untick: stock passes 0 for none, and the send is `None`, not slot 0, which is a real faction.
+    // Untick: stock passes 0 for none, faction 0, whose slot is -1, not slot 0, which is a real
+    // faction.
     click_center(&mut s, "ReputationDetailMainScreenCheckBox");
     assert_eq!(
-        s.take_reputation_sends(),
-        [benilla_ui::script::ReputationSend::Watch(None)]
+        s.take_reputation_calls(),
+        [benilla_ui::script::ReputationCall::Watch(-1)]
     );
     let mut cleared = state();
     cleared.watched = None;

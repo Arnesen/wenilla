@@ -8,15 +8,16 @@
 //!   [`inert::INERT`] the reference's other script-visible ones, which `GetCVar` and `SetCVar`
 //!   would otherwise raise on. A row's default is the reference's, and
 //!   [`table::Registered::reference`] says where it stands against it.
-//! - The change callback is a Bevy observer on [`CvarChanged`], beside the knob it writes; the
-//!   registry applies nothing itself. A callback that can refuse a write is also the row's
+//! - The change callbacks are plain functions beside the knobs they write, run together by
+//!   [`callbacks::CvarCallbacks`]: inside a Lua verb's call for its writes ([`CvarSteps`]), and for a move
+//!   triggered as [`CvarChanged`]; the registry applies nothing itself. A callback that can refuse a write is also the row's
 //!   [`CvarCheck`], which the registry and the VM's mirror run before storing.
 //! - A latched row's write is staged in [`Row::pending`] until [`Cvars::commit_latched`], the
 //!   reference's `0x639ec0` inside `RestartGx`. A stage never committed is what the save writes,
 //!   as the reference's `SaveConfig` takes the latched text first (`rec+0x38`, `0x63da27`), so it
 //!   applies at the next launch.
-//! - Boot folds `benilla-config/config.toml` in and fires the observers before anything after
-//!   [`CvarLoad`]; each frame drains the VM's writes in and pushes the registry's out; a dirty
+//! - Boot folds `benilla-config/config.toml` in and runs the callbacks before anything after
+//!   [`CvarLoad`]; each frame drains the VM writes no call took in and pushes the registry's out; a dirty
 //!   registry saves after one quiet second or at exit, writing only values off their default and
 //!   keeping unknown keys verbatim.
 //!
@@ -34,6 +35,7 @@ use benilla_ui::script::{CvarCheck, CvarWrite, SeededCvar, UiScript};
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod browser;
+mod callbacks;
 #[cfg(test)]
 mod deviations_doc;
 mod inert;
@@ -41,7 +43,7 @@ mod listing;
 #[cfg(test)]
 mod reference_table;
 mod table;
-#[cfg(test)]
+pub(crate) use callbacks::CvarSteps;
 pub(crate) use listing::list_rank;
 pub(crate) use listing::reference_help;
 #[cfg(test)]
@@ -73,13 +75,13 @@ impl CvarChanged {
         self.name.eq_ignore_ascii_case(name)
     }
 
-    /// The lowercased name, as observers' `match` arms spell it.
+    /// The lowercased name, as the callbacks' `match` arms spell it.
     pub(crate) fn key(&self) -> String {
         self.name.to_ascii_lowercase()
     }
 
     /// The new value as the record's float (`rec+0x24`, `SStrToFloat` at `0x63e130`): text that
-    /// is no number reads as 0, and a string row's observer reads [`Self::new`].
+    /// is no number reads as 0, and a string row's callback reads [`Self::new`].
     pub(crate) fn num(&self) -> f32 {
         record_float(&self.new)
     }
@@ -90,11 +92,7 @@ impl CvarChanged {
     }
 }
 
-/// A record's float as `InternalSet` stores it: `SStrToFloat` (`0x63e130`) kept as a single
-/// (`fstp dword [esi+0x24]`, `0x63e135`).
-pub(crate) fn record_float(text: &str) -> f32 {
-    benilla_ui::script::s_str_to_float(text) as f32
-}
+pub(crate) use benilla_ui::script::record_float;
 
 /// `SStrCmpI` (`0x64a4c0`), the compare `InternalSet` (`0x63e0ec`) and `SaveConfig` (`0x63da4a`)
 /// make: ASCII case-blind.
@@ -121,6 +119,9 @@ pub(crate) struct Row {
     /// registration keeps it (`0x63dc6c`); else the first value the CVar's own console command
     /// stored (`0x63de23`); else none, and the default stands in.
     pub(crate) reset: Option<String>,
+    /// The engine's value shown over the player's, `(shown, held)` ([`Cvars::show`]): the save
+    /// writes `held` while `value` is still `shown`.
+    overlay: Option<(String, String)>,
 }
 
 /// What a write did.
@@ -164,7 +165,7 @@ pub(crate) struct Cvars {
     /// A change since the last save; `last_change` drives the one-quiet-second debounce.
     dirty: bool,
     last_change: Option<Instant>,
-    /// Lines change callbacks and observers printed to the console (`0x63cb50`), which go to the
+    /// Lines the rows' checks and change callbacks printed to the console (`0x63cb50`), which go to the
     /// log, as the reference's go to a console screen nobody has open.
     console: Vec<String>,
     /// The CVars Lua's `RegisterCVar` created this process, the reference's `[0xb4e3c8]`: kept
@@ -215,6 +216,7 @@ impl Cvars {
                 latched: r.latched,
                 check: r.check,
                 reset: None,
+                overlay: None,
             });
         }
         cvars
@@ -437,10 +439,11 @@ impl Cvars {
     /// stage (`+0x38`). So the value reaches `GetCVar` and the save, and the knob at the next
     /// launch.
     ///
-    /// Deviation: for a row that is not latched the observers fire, where the reference runs no
-    /// callback here (`0x63dff0`, `0x63e010`), because a knob moves only through its
-    /// [`CvarChanged`] observer, which also stands in for the reference's direct reads of the
-    /// record; without it knob and value would disagree until the next write.
+    /// Deviation: for a row that is not latched the change callback runs, inside the call that
+    /// restored it, where the reference runs no callback here (`0x63dff0`, `0x63e010`), because a
+    /// knob moves only through its callback ([`callbacks::CvarCallbacks`]), which also stands in
+    /// for the reference's direct reads of the record; without it knob and value would disagree
+    /// until the next write.
     fn restore_from_vm(&mut self, name: &str, value: &str) -> SetOutcome {
         let Some(i) = self.slot(name) else {
             warn!("cvar {name}: not registered — restore ignored");
@@ -464,8 +467,8 @@ impl Cvars {
 
     /// Follow a value the engine already applied, for a second spelling of one knob
     /// (`WorldDetail`/`frillDensity`): the row moves, persists and reaches the mirror, but no
-    /// observer fires, since a full write would queue an event that lands a flush late and wins
-    /// stale. Returns whether the row moved.
+    /// callback runs, since a full write would run the other spelling's callback, which would
+    /// re-derive the knob from the mirrored, rounded value. Returns whether the row moved.
     pub(crate) fn mirror(&mut self, name: &str, value: &str) -> bool {
         let Some(i) = self.slot(name) else {
             warn!("cvar {name}: not registered — mirror ignored");
@@ -519,7 +522,7 @@ impl Cvars {
     }
 
     /// The session owns this row: it is never saved and the file's entry is left alone. `value` is
-    /// what it answers this session; `None` marks it without moving it. No observer fires: the knob
+    /// what it answers this session; `None` marks it without moving it. No callback runs: the knob
     /// already read the env.
     pub(crate) fn own_for_session(&mut self, name: &str, value: Option<&str>) {
         let key = name.to_ascii_lowercase();
@@ -559,6 +562,7 @@ impl Cvars {
             check: None,
             // The saved value is the reset text of the record its line made.
             reset: saved,
+            overlay: None,
         });
     }
 
@@ -588,7 +592,7 @@ impl Cvars {
             // value and its answer is not tested: the file is read before these rows are
             // registered (`0x402375`), and `CVar::Register` on the record it made calls the
             // callback and ignores the result (`0x63dc58`), so the value stands. A refusing
-            // callback applied nothing, so no observer fires for it.
+            // callback applied nothing, so its callback does not run for it.
             let applies = verdict.is_none_or(|verdict| {
                 self.console.extend(verdict.lines);
                 verdict.accept
@@ -675,7 +679,7 @@ impl Cvars {
         !self.console.is_empty()
     }
 
-    /// A line an observer prints to the console, such as `spellEffectLevel`'s "Spell effect level
+    /// A line a change callback prints to the console, such as `spellEffectLevel`'s "Spell effect level
     /// set to %d." (`0x689537`-`0x689554`); logged with the callbacks' at the next sync.
     pub(crate) fn print(&mut self, line: String) {
         self.console.push(line);
@@ -724,7 +728,12 @@ impl Cvars {
                 .keys()
                 .find(|k| k.eq_ignore_ascii_case(&row.name))
                 .cloned();
-            let text = row.pending.as_ref().unwrap_or(&row.value);
+            let held = row
+                .overlay
+                .as_ref()
+                .filter(|(shown, _)| *shown == row.value)
+                .map(|(_, held)| held);
+            let text = row.pending.as_ref().or(held).unwrap_or(&row.value);
             // `SaveConfig` skips a value equal to its default case-blind (`0x63da4a`).
             if same_text(text, &row.default) {
                 if let Some(k) = existing {
@@ -735,6 +744,48 @@ impl Cvars {
             }
         }
         out
+    }
+
+    /// The engine's value [`Self::show`] put over a row, while the row still answers it.
+    pub(crate) fn shown(&self, name: &str) -> Option<&str> {
+        let row = self.row(name)?;
+        row.overlay
+            .as_ref()
+            .filter(|(shown, _)| *shown == row.value)
+            .map(|(shown, _)| shown.as_str())
+    }
+
+    /// Show the engine's own value for a row over the player's, or end it with `None`: what the
+    /// row answers (`GetCVar`, the console, a new VM's mirror) is the shown value, the save writes
+    /// the player's, and nothing fires, as the engine already applied it. A write that moves the
+    /// row off the shown value is the player's own and ends the overlay; the next show holds it.
+    pub(crate) fn show(&mut self, name: &str, shown: Option<&str>) {
+        let Some(i) = self.slot(name) else {
+            warn!("cvar {name}: not registered — shown value ignored");
+            return;
+        };
+        let row = &mut self.rows[i];
+        // An overlay a write has moved the row off holds nothing any more.
+        if row
+            .overlay
+            .as_ref()
+            .is_some_and(|(was, _)| *was != row.value)
+        {
+            row.overlay = None;
+        }
+        let next = match (shown, row.overlay.take()) {
+            (Some(shown), held) => {
+                let held = held.map_or_else(|| row.value.clone(), |(_, held)| held);
+                row.overlay = Some((shown.to_string(), held));
+                shown.to_string()
+            }
+            (None, Some((_, held))) => held,
+            (None, None) => return,
+        };
+        if row.value != next {
+            row.value = next;
+            self.outbox.push((row.name.clone(), row.value.clone()));
+        }
     }
 
     /// The account name earlier builds kept in a file of its own
@@ -803,22 +854,31 @@ pub(crate) struct CvarPlugin;
 impl Plugin for CvarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Cvars>()
+            .add_observer(callbacks::on_cvar_changed)
             .add_systems(
                 Startup,
                 (load_config, publish_filter_policy)
                     .chain()
                     .in_set(CvarLoad),
             )
-            // After the tick, so a `SetCVar` from this frame reaches the registry and its observers
+            // After the tick, so a write no call took reaches the registry and its callbacks
             // before the frame's drains; `video::drain_restart_gx` orders after this so the commit
-            // finds the stage. Before the world's input stage, so the observers run ahead of the
-            // camera's controller: the reference calls the change callback inside the call
-            // (`CVar::Set` `0x63df50`, `0x63df7d`).
+            // finds the stage. Before the world's input stage, so the callbacks run ahead of the
+            // camera's controller. A Lua verb's write ran them inside its call (`CVar::Set`
+            // `0x63df50`, `0x63df7d`).
             .add_systems(
                 Update,
                 sync_cvars
                     .in_set(crate::ui_script::UiDrain)
                     .before(benilla_world::schedule::WorldStage::Input),
+            )
+            // And after the input records' calls, ahead of the world's mouse, whose look session
+            // reads the knobs their callbacks write.
+            .add_systems(
+                Update,
+                sync_input_cvars
+                    .in_set(crate::ui_script::UiInput)
+                    .after(crate::bindings::BindingSet),
             )
             // In `Last`, after every `Update` writer of the registry, so the save reads the frame's
             // settled state; before the exit flush, which finds it clean on a quiet exit frame.
@@ -897,8 +957,8 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
     out
 }
 
-/// Startup: mark what the session owns, fold `config.toml` in (no file means all defaults) and fire
-/// the observers now, so everything after [`CvarLoad`] finds its knob written. The VM does not
+/// Startup: mark what the session owns, fold `config.toml` in (no file means all defaults) and run
+/// the callbacks now, so everything after [`CvarLoad`] finds its knob written. The VM does not
 /// exist yet; [`sync_cvars`] seeds its mirror.
 fn load_config(world: &mut World) {
     let session = session_values(world);
@@ -992,17 +1052,50 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
     }
 }
 
-/// Per frame: seed a new VM's mirror, drain its registrations and writes into the registry, push
-/// the registry's writes into the mirror, and trigger every accepted move.
+/// After the UI's input pass and its bindings: take in the writes no call took, run their
+/// callbacks and push the registry's writes into the mirror, so the look's rates and the camera's
+/// dynamics have moved before the world's mouse reads them. A Lua verb's write ran its callback
+/// inside its call already ([`CvarSteps`]), as the reference's `CVar::Set` (`0x63df50`) calls it
+/// inside the write (`0x63df7d`). The host's writes outside any call since the last packets (the
+/// tip cursor's, the fullscreen size) reach the mirror here, ahead of the frame's packets. A new VM
+/// is seeded by [`sync_cvars`], which drains its writes first as well.
+pub(crate) fn sync_input_cvars(mut vm: crate::script_calls::VmWith<CvarSteps<'static>>) {
+    vm.turn(|script, mut steps| steps.sync(script))
+}
+
+/// The device's multisample formats as `GetMultisampleFormats` lists them; none before
+/// `view::MsaaSupportPlugin` has enumerated them.
+pub(crate) fn multisample_formats(
+    formats: Option<&benilla_world::view::MsaaFormats>,
+) -> Vec<benilla_ui::script::MultisampleFormat> {
+    formats
+        .map(|f| {
+            f.formats
+                .iter()
+                .map(
+                    |&(color_bits, depth_bits, samples)| benilla_ui::script::MultisampleFormat {
+                        color_bits,
+                        depth_bits,
+                        samples,
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Per frame: seed a new VM's mirror, take in the registrations and the writes no call took, run
+/// their callbacks and push the registry's writes into the mirror.
 pub(crate) fn sync_cvars(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut cvars: ResMut<Cvars>,
+    mut vm: crate::script_calls::VmWith<CvarSteps<'static>>,
     adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
     msaa_formats: Option<Res<benilla_world::view::MsaaFormats>>,
     mut seeded: Local<VmMemo<bool>>,
-    mut commands: Commands,
 ) {
-    hosted_vm.run(|script| {
+    vm.turn(|script, mut steps| {
+        let Some(cvars) = steps.cvars() else {
+            return;
+        };
         // The live render backend; absent headless, where the registered `""` stands.
         if let Some(adapter) = adapter.as_deref() {
             let backend = adapter.backend.to_str();
@@ -1010,52 +1103,24 @@ pub(crate) fn sync_cvars(
                 cvars.own_for_session("gxApi", Some(backend));
             }
         }
-        if cvars.has_console_lines() {
-            cvars.log_console_lines();
-        }
         let Some(script) = script else {
             // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
-            if cvars.has_outbox() {
-                cvars.take_outbox();
-            }
-            if cvars.has_events() {
-                for event in cvars.take_events() {
-                    commands.trigger(event);
-                }
-            }
+            steps.sync(None);
             return;
         };
-        // The VM's writes before the seed: an addon's `SetCVar` at load is already queued, and
-        // seeding first would overwrite the mirror with the older value. Read before taking, so a
-        // quiet frame never deref-muts the registry.
-        if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
-            cvars.drain_vm(script);
-            cvars.log_console_lines();
-        }
         if seeded.claim(script) {
+            // The VM's writes before the seed: an addon's `SetCVar` at load is already queued, and
+            // seeding first would overwrite the mirror with the older value.
+            if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
+                cvars.drain_vm(script);
+            }
             cvars.seed_vm(script);
             if cvars.has_outbox() {
                 cvars.take_outbox(); // the seed just carried everything
             }
             // The Video dropdown's menu: what this device accepts, enumerated by
             // `view::MsaaSupportPlugin`.
-            script.set_multisample_formats(
-                msaa_formats
-                    .as_deref()
-                    .map(|f| {
-                        f.formats
-                            .iter()
-                            .map(|&(color_bits, depth_bits, samples)| {
-                                benilla_ui::script::MultisampleFormat {
-                                    color_bits,
-                                    depth_bits,
-                                    samples,
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            );
+            script.set_multisample_formats(multisample_formats(msaa_formats.as_deref()));
             // `GetVideoCaps`, the seven values `OptionsFrame_Load` destructures. Shaders,
             // trilinear, anisotropy and the hardware cursor are always there (`crate::cursor`
             // composites the reference's cursors into an OS cursor); `max_anisotropy` is reported
@@ -1072,23 +1137,14 @@ pub(crate) fn sync_cvars(
                 hardware_cursor: true,
             });
         }
-        if cvars.has_outbox() {
-            for (name, value) in cvars.take_outbox() {
-                script.set_cvar_host(&name, &value);
-            }
-        }
-        if cvars.has_events() {
-            for event in cvars.take_events() {
-                commands.trigger(event);
-            }
-        }
+        steps.sync(Some(script));
     })
 }
 
-/// Fold the dying VM's last writes into the registry. Called from
-/// [`crate::ui_script::end_ui_session`] after the shutdown events (a `PLAYER_LOGOUT` handler may
+/// Fold the dying VM's last writes into the registry. Called from the shutdown
+/// ([`crate::ui_script::SessionEnd::Shutdown`]) after its events (a `PLAYER_LOGOUT` handler may
 /// `SetCVar`, and the reference keeps that write) and before the VM is replaced, so a final-frame
-/// write is not lost to the next VM's seed. The observers fire here.
+/// write is not lost to the next VM's seed. The callbacks run here.
 pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
     // No registry: a test or stripped world without the plugin.
     if !world.contains_resource::<Cvars>() {
@@ -1201,6 +1257,7 @@ fn publish_filter_policy(filter: Res<benilla_assets::TexFilterSetting>) {
 mod tests {
     use super::*;
     use crate::chat_bubble::BubbleConfig;
+    use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
     use crate::minimap::MinimapZoom;
     use crate::nameplates::NameConfig;
     use crate::player::camera::{FollowConfig, FollowStyle, LookConfig};
@@ -1332,8 +1389,9 @@ mod tests {
     /// initial value; a locale that does not leaves every knob where it was.
     #[test]
     fn a_locale_default_reaches_its_knob_at_load() {
+        let env = CvarEnv::hold();
         let boot = |locale: usize| {
-            let mut app = cvar_app();
+            let mut app = cvar_app_in(&env);
             app.insert_resource(Cvars::for_locale(locale));
             app.update();
             let video = *res::<VideoConfig>(&app);
@@ -1440,6 +1498,10 @@ mod tests {
         assert_eq!(d["mousespeed"], LookConfig::default().sensitivity);
         assert_eq!(d["cameraDistanceMax"], ZoomLimit::default().distance_max());
         assert_eq!(d["cameraDistanceMaxFactor"], ZoomLimit::default().factor());
+        assert_eq!(
+            d["cameraDistanceMoveSpeed"],
+            ZoomLimit::default().move_speed
+        );
         let follow = FollowConfig::default();
         assert_eq!(
             d["cameraSmoothStyle"],
@@ -1590,11 +1652,40 @@ mod tests {
         assert!(res::<VideoConfig>(&app).maximize, "the commit applies it");
     }
 
+    /// A move marks only the knob its callback writes: the other callbacks see the event but take
+    /// their knobs mutably only in the arm that writes them.
     #[test]
-    fn the_observers_apply_every_arm() {
+    fn a_move_marks_only_the_knob_its_callback_writes() {
+        let mut app = cvar_app();
+        let click = |app: &App| {
+            app.world()
+                .get_resource_change_ticks::<crate::target::ClickConfig>()
+                .expect("the knob")
+                .changed
+        };
+        let sound = |app: &App| {
+            app.world()
+                .get_resource_change_ticks::<SoundConfig>()
+                .expect("the knob")
+                .changed
+        };
+        let (click_before, sound_before) = (click(&app), sound(&app));
+        app.world_mut().increment_change_tick();
+        apply(&mut app, "deselectOnClick", "0");
+        assert_ne!(click(&app), click_before, "its own knob moved");
+        assert_eq!(sound(&app), sound_before, "another knob stays unmarked");
+    }
+
+    #[test]
+    fn the_callbacks_apply_every_arm() {
         let mut app = cvar_app();
         apply(&mut app, "MusicVolume", "0.7");
         assert_eq!(res::<SoundConfig>(&app).music, 0.7);
+        // `widescreen`'s integer, as `0x48bcac` and `0x4901e0` read it.
+        apply(&mut app, "widescreen", "0");
+        assert!(!res::<crate::video::Widescreen>(&app).0);
+        apply(&mut app, "widescreen", "2");
+        assert!(res::<crate::video::Widescreen>(&app).0);
         // A string row reaches its knob; a value that is not an address leaves the knob alone.
         apply(&mut app, "realmList", "logon.example.org:3724");
         assert_eq!(
@@ -1645,12 +1736,21 @@ mod tests {
         // A sample count, clamped to the reference's [1, 16]; 1 is none.
         apply(&mut app, "gxMultisample", "4");
         assert_eq!(res::<MsaaSetting>(&app).samples, 4);
-        apply(&mut app, "anisotropic", "99");
+        apply(&mut app, "anisotropic", "16");
         assert_eq!(
             res::<benilla_assets::TexFilterSetting>(&app).aniso,
             *benilla_assets::ANISO_RANGE.end()
         );
-        apply(&mut app, "anisotropic", "0");
+        // Outside [1, 16] the callback refuses (`0x689110`) and nothing reaches the knob.
+        for bad in ["99", "0", "-1"] {
+            assert_eq!(apply(&mut app, "anisotropic", bad), SetOutcome::Vetoed);
+            assert_eq!(
+                res::<benilla_assets::TexFilterSetting>(&app).aniso,
+                *benilla_assets::ANISO_RANGE.end(),
+                "anisotropic {bad}"
+            );
+        }
+        apply(&mut app, "anisotropic", "1");
         assert_eq!(
             res::<benilla_assets::TexFilterSetting>(&app).aniso,
             *benilla_assets::ANISO_RANGE.start()
@@ -1737,6 +1837,14 @@ mod tests {
             );
             assert_eq!(res::<FollowConfig>(&app).yaw_speed, 30.0, "{text}");
         }
+        // The custom-view gate's switch (`0x50fc33`).
+        apply(&mut app, "cameraCustomViewSmoothing", "1");
+        assert!(res::<FollowConfig>(&app).custom_view_smoothing);
+        apply(&mut app, "cameraCustomViewSmoothing", "0");
+        assert!(!res::<FollowConfig>(&app).custom_view_smoothing);
+        // The distance axis's speed reaches the zoom (`0x5113d9`).
+        apply(&mut app, "cameraDistanceMoveSpeed", "20");
+        assert_eq!(res::<ZoomLimit>(&app).move_speed, 20.0);
         // The max orbit lands as yards on the knob: `cameraDistanceMax` x the factor, held to
         // [0, 50]; the factor is not held to its slider's 1 to 2.
         apply(&mut app, "cameraDistanceMaxFactor", "1");
@@ -1807,20 +1915,21 @@ mod tests {
         assert_eq!(res::<ClutterConfig>(&app).density, 3.0);
         apply(&mut app, "WorldDetail", "1");
         assert_eq!(res::<ClutterConfig>(&app).density, 2.0);
-        for (wrote, want) in [
-            ("0", 0u8),
-            ("1", 1),
-            ("2", 2),
-            ("3", 3),
-            ("2.9", 2),
-            ("9", 3),
-            ("-4", 0),
-        ] {
+        for (wrote, want) in [("0", 0u8), ("1", 1), ("2", 2), ("3", 3), ("2.9", 2)] {
             apply(&mut app, "weatherDensity", wrote);
             assert_eq!(
                 res::<benilla_world::weather::WeatherState>(&app).weather_density,
                 want,
                 "weatherDensity {wrote}"
+            );
+        }
+        // Outside 0..=3 the callback refuses (`0x67b870`) and the level stands.
+        for bad in ["9", "-4"] {
+            assert_eq!(apply(&mut app, "weatherDensity", bad), SetOutcome::Vetoed);
+            assert_eq!(
+                res::<benilla_world::weather::WeatherState>(&app).weather_density,
+                2,
+                "weatherDensity {bad}"
             );
         }
         // `gamma` is the ramp exponent: `SetGamma` applies `1 - v` before it arrives here. The
@@ -1991,7 +2100,8 @@ mod tests {
 
     /// The video rows whose callbacks refuse (`SmallCull` `0x688b10`, `shadowLevel` `0x688c10`,
     /// `texLodBias` `0x688c90`, `baseMip` `0x689090`, `farclip` `0x688d40`, `frillDensity`
-    /// `0x688de0`): `CVar::Set` keeps the old value
+    /// `0x688de0`, `weatherDensity` `0x67b870`, `anisotropic` `0x689110`, `ErrorLevelMin`
+    /// `0x402f60`, `ErrorLevelMax` `0x4030b0`): `CVar::Set` keeps the old value
     /// (`0x63df85`), and the console shows the callback's line, on the console and on a host write.
     #[test]
     fn a_refusing_callback_keeps_the_value_on_every_write() {
@@ -2027,6 +2137,30 @@ mod tests {
                 "Frill Density must be in range 1 - 256.",
                 "frillDensity",
                 "32",
+            ),
+            (
+                "weatherDensity 9",
+                "Value out of range (0 - 3)",
+                "weatherDensity",
+                "3",
+            ),
+            (
+                "anisotropic 32",
+                "Anisotropy must be between 1 and 16 inclusive",
+                "anisotropic",
+                "1",
+            ),
+            (
+                "ErrorLevelMin 7",
+                "7 is not valid, valid values are 0 - 3",
+                "ErrorLevelMin",
+                "1",
+            ),
+            (
+                "ErrorLevelMax 4",
+                "4 is not valid, valid values are 0 - 3",
+                "ErrorLevelMax",
+                "3",
             ),
             (
                 "gxTripleBuffer 2",
@@ -2347,8 +2481,7 @@ mod tests {
         );
     }
 
-    /// A reference CVar nothing here reads (pfUI's afkcam sets `cameraCustomViewSmoothing`,
-    /// `0x50bad0`) is found by Lua's lookup, so `SetCVar` neither raises nor warns; it persists as
+    /// A reference CVar nothing here reads (`cameraDive`, `0x50be03`) is found by Lua's lookup, so `SetCVar` neither raises nor warns; it persists as
     /// a diff like any row, and its flag-bit1 neighbour stays latched.
     #[test]
     fn a_reference_cvar_nothing_reads_is_settable_and_persists_as_a_diff() {
@@ -2356,19 +2489,19 @@ mod tests {
         let mut script = UiScript::new().expect("VM");
         script.seed_cvars(cvars.vm_seed());
         script
-            .run(r#"SetCVar("cameraCustomViewSmoothing", "1") SetCVar("SoundOutputSystem", "1")"#)
+            .run(r#"SetCVar("cameraDive", "0") SetCVar("SoundOutputSystem", "1")"#)
             .expect("both names are the reference's registered ones");
         assert_eq!(
             script
-                .eval::<String>(r#"return GetCVarDefault("cameraCustomViewSmoothing")"#)
+                .eval::<String>(r#"return GetCVarDefault("cameraDive")"#)
                 .unwrap(),
-            "0"
+            "1"
         );
         assert_eq!(
             script
-                .eval::<String>(r#"return GetCVar("cameraCustomViewSmoothing")"#)
+                .eval::<String>(r#"return GetCVar("cameraDive")"#)
                 .unwrap(),
-            "1"
+            "0"
         );
         assert_eq!(
             script
@@ -2382,10 +2515,7 @@ mod tests {
             cvars.set_from_vm(&name, &value);
         }
         let out = cvars.compose();
-        assert_eq!(
-            out.get("cameraCustomViewSmoothing").map(String::as_str),
-            Some("1")
-        );
+        assert_eq!(out.get("cameraDive").map(String::as_str), Some("0"));
         assert_eq!(
             cvars.get("SoundOutputSystem"),
             Some("-1"),
@@ -2396,8 +2526,8 @@ mod tests {
             Some("1"),
             "but it is saved (`0x63da27`)"
         );
-        cvars.set("cameraCustomViewSmoothing", "0");
-        assert!(!cvars.compose().contains_key("cameraCustomViewSmoothing"));
+        cvars.set("cameraDive", "1");
+        assert!(!cvars.compose().contains_key("cameraDive"));
         // The camera block's range check rides along (`0x50c000`).
         let rate = cvars.set("cameraFoVSmoothSpeed", "9000");
         assert_eq!(rate, SetOutcome::Vetoed);
@@ -2405,19 +2535,12 @@ mod tests {
 
     #[test]
     fn a_change_saves_after_one_quiet_second_with_no_exit() {
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = CvarEnv::hold();
         let tmp = std::env::temp_dir().join(format!("benilla-cvar-quiet-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _u = EnvGuard::unset("WOW_UI_SCALE");
-        let _f = EnvGuard::unset("WOW_FARCLIP");
-        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
 
-        let mut app = cvar_app();
+        let mut app = cvar_app_in(&env);
         app.update();
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -2448,19 +2571,15 @@ mod tests {
     /// boot reads the row.
     #[test]
     fn the_old_saved_account_file_moves_into_config_toml_once() {
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = CvarEnv::hold();
         let tmp = std::env::temp_dir().join(format!("benilla-cvar-acct-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         std::fs::create_dir_all(&tmp).unwrap();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
         let old = tmp.join("account");
         std::fs::write(&old, "PLAYER\n").unwrap();
 
-        let mut app = cvar_app();
+        let mut app = cvar_app_in(&env);
         app.update();
         assert_eq!(res::<Cvars>(&app).get("accountName"), Some("PLAYER"));
         let glue = app
@@ -2479,7 +2598,7 @@ mod tests {
 
         // The next boot reads the row; a stale file beside it is not read over it.
         std::fs::write(&old, "STALE").unwrap();
-        let mut next = cvar_app();
+        let mut next = cvar_app_in(&env);
         next.update();
         assert_eq!(res::<Cvars>(&next).get("accountName"), Some("PLAYER"));
         std::fs::remove_dir_all(&tmp).ok();
@@ -2490,20 +2609,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_old_saved_account_file_outlives_a_failed_save() {
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
         use std::os::unix::fs::PermissionsExt;
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = CvarEnv::hold();
         let tmp = std::env::temp_dir().join(format!("benilla-cvar-acct2-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         std::fs::create_dir_all(&tmp).unwrap();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
         let old = tmp.join("account");
         std::fs::write(&old, "PLAYER").unwrap();
 
-        let mut app = cvar_app();
+        let mut app = cvar_app_in(&env);
         app.update();
         // The folder turns read-only: the write of `config.toml` fails (unless the run is root's,
         // which no mode stops).
@@ -2519,7 +2634,7 @@ mod tests {
         std::fs::write(&old, "PLAYER").unwrap();
 
         std::fs::write(tmp.join("config.toml"), "not [ toml").unwrap();
-        let mut bad = cvar_app();
+        let mut bad = cvar_app_in(&env);
         bad.update();
         assert_eq!(res::<Cvars>(&bad).get("accountName"), Some("PLAYER"));
         assert!(
@@ -2557,16 +2672,9 @@ mod tests {
 
     #[test]
     fn a_lua_setcvar_lands_in_config_toml_end_to_end() {
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = CvarEnv::hold();
         let tmp = std::env::temp_dir().join(format!("benilla-cvar-e2e-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _u = EnvGuard::unset("WOW_UI_SCALE");
-        let _f = EnvGuard::unset("WOW_FARCLIP");
-        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
         crate::local_state::write_atomic(
             &tmp.join("config.toml"),
@@ -2574,7 +2682,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = cvar_app();
+        let mut app = cvar_app_in(&env);
 
         // Startup: the file's MusicVolume reaches the knob; Update: the VM table seeds from it.
         app.update();
@@ -2606,9 +2714,91 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// A client with a real CVar host: every knob resource an observer writes, every observer,
+    /// What a CVar host reads from the environment when it is built and when it loads
+    /// ([`session_values`], [`crate::video::windowed_env`], [`crate::local_state::home`]); the
+    /// persistence variables are `ENV_LOCK`'s own, the window ones are the capture tests'.
+    const HOST_ENV: [&str; 13] = [
+        "WOW_WIN",
+        "WOW_CAPTURE",
+        "WOW_CAPTURE_UI",
+        "WOW_UI_SCALE",
+        "WOW_FARCLIP",
+        "WOW_CLUTTER_DENSITY",
+        "WOW_NOVSYNC",
+        "WOW_TRILINEAR",
+        "WOW_ANISO",
+        "WOW_MSAA",
+        "WOW_RENDER_SCALE",
+        "WOW_HOST",
+        "BENILLA_HOME",
+    ];
+
+    /// [`HOST_ENV`] cleared for an attended run with no state folder, until dropped. The caller
+    /// holds `ENV_LOCK`. `background_run` counts any env under a run-driving prefix
+    /// (`WOW_UNATTENDED`, `WOW_RIG…`), so it is answered with `WOW_BG=0`, which forces no.
+    fn scrub_host_env() -> Vec<EnvGuard> {
+        let mut guards: Vec<_> = HOST_ENV.into_iter().map(EnvGuard::unset).collect();
+        guards.push(EnvGuard::set("WOW_BG", "0"));
+        guards
+    }
+
+    /// `ENV_LOCK` held with [`HOST_ENV`] cleared, so a client built under it reads the same
+    /// environment whichever tests run beside it. A test that sets variables of its own (a state
+    /// folder) sets them after this. Not reentrant: the one thread holds one, builds its clients
+    /// with [`cvar_app_in`] and takes no `ENV_LOCK` of its own.
+    struct CvarEnv {
+        // Dropped first: the variables come back while the lock is still held.
+        _scrubbed: Vec<EnvGuard>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CvarEnv {
+        fn hold() -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Self {
+                _scrubbed: scrub_host_env(),
+                _lock: lock,
+            }
+        }
+    }
+
+    /// A [`cvar_app`] and the environment it was built under, which it keeps for as long as the
+    /// test has it: its load reads the environment again.
+    struct CvarApp {
+        app: App,
+        // After `app`, so the client is gone before the variables come back.
+        _env: CvarEnv,
+    }
+
+    impl std::ops::Deref for CvarApp {
+        type Target = App;
+        fn deref(&self) -> &App {
+            &self.app
+        }
+    }
+
+    impl std::ops::DerefMut for CvarApp {
+        fn deref_mut(&mut self) -> &mut App {
+            &mut self.app
+        }
+    }
+
+    /// A client with a real CVar host, hermetic: it holds [`CvarEnv`] for its life. A test that
+    /// builds a second client, or sets variables of its own, holds one itself and builds with
+    /// [`cvar_app_in`].
+    fn cvar_app() -> CvarApp {
+        let env = CvarEnv::hold();
+        CvarApp {
+            app: cvar_app_in(&env),
+            _env: env,
+        }
+    }
+
+    /// A client with a real CVar host: every knob resource a callback writes, the callbacks,
     /// [`CvarPlugin`] and a VM for the mirror.
-    fn cvar_app() -> App {
+    fn cvar_app_in(_env: &CvarEnv) -> App {
         let mut app = App::new();
         app.add_plugins(bevy::MinimalPlugins)
             .insert_resource(SoundConfig::default())
@@ -2635,6 +2825,7 @@ mod tests {
             .init_resource::<benilla_world::weather::WeatherState>()
             .init_resource::<benilla_world::particles::ParticleTuning>()
             .init_resource::<crate::video::SpellEffectLevel>()
+            .init_resource::<crate::video::Widescreen>()
             .init_resource::<crate::ui_gamma::DisplayGamma>()
             .init_resource::<ClickConfig>()
             .init_resource::<crate::target::AssistAttack>()
@@ -2662,88 +2853,69 @@ mod tests {
             .init_resource::<crate::game_tip::GameTipSetting>()
             .init_resource::<crate::player::Approach>()
             .add_plugins(CvarPlugin);
-        for observer in ALL_OBSERVERS {
-            observer(&mut app);
-        }
         app.insert_non_send_resource(UiScript::new().unwrap());
         app
     }
 
-    /// Every CVar observer in the crate; a new one is a line here and an `add_observer` in its
-    /// plugin.
-    const ALL_OBSERVERS: &[fn(&mut App)] = &[
-        |app| {
-            app.add_observer(crate::player::approach_on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::sound::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_script::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::video::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::player::camera::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::player::camera_dynamics::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::target::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::spell::cast_target::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::combat_text::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_chat::combat::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_loot::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::nameplates::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::game_tip::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::text_filter::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::chat_bubble::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_guild::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_trade::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::minimap::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::portrait::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::perf::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::realmlist::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::ui_gamma::on_cvar);
-        },
-        |app| {
-            app.add_observer(crate::world_backdrop::on_cvar);
-        },
-    ];
+    /// A test built on [`cvar_app`] reads the same environment whichever tests run beside it: a
+    /// capture that sets the window variables under `ENV_LOCK` on another thread leaves the build
+    /// waiting for the lock, and it then sees the attended default, not that run's windowed one.
+    #[test]
+    fn a_cvar_app_is_built_outside_another_tests_window_variables() {
+        use std::sync::mpsc;
+        let (set_tx, set_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let capture = std::thread::spawn(move || {
+            let _l = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _w = EnvGuard::set("WOW_WIN", "800x600");
+            let _c = EnvGuard::set("WOW_CAPTURE", "ui-trainer");
+            set_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            // Held for as long as a capture test builds its client: far past the build below.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+        set_rx.recv().unwrap();
+        go_tx.send(()).unwrap();
+        let app = cvar_app();
+        assert_eq!(
+            res::<VideoConfig>(&app).display,
+            crate::video::DisplayMode::Fullscreen
+        );
+        drop(app);
+        capture.join().unwrap();
+    }
 
-    /// A host write, its latch committed at once, and its observers run before this returns.
+    /// The scrub leaves nothing a CVar host reads: no window variable, no state folder, and no
+    /// run-driving variable the list does not name; it gives them back.
+    #[test]
+    fn the_host_environment_is_scrubbed_and_comes_back() {
+        use crate::video::windowed_env;
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _set: Vec<_> = HOST_ENV
+            .into_iter()
+            .map(|k| EnvGuard::set(k, "1"))
+            .collect();
+        let _run = EnvGuard::set("WOW_UNATTENDED", "1");
+        assert!(windowed_env(), "the premise: a run that owns its window");
+
+        let scrub = scrub_host_env();
+        assert!(!windowed_env(), "the prefix scan too, whatever is set");
+        for key in HOST_ENV {
+            assert!(std::env::var_os(key).is_none(), "{key}");
+        }
+        drop(scrub);
+        assert!(windowed_env());
+        for key in HOST_ENV {
+            assert_eq!(std::env::var(key).as_deref(), Ok("1"), "{key}");
+        }
+        assert!(std::env::var_os("WOW_BG").is_none());
+    }
+
+    /// A host write, its latch committed at once, and its callbacks run before this returns.
     fn apply(app: &mut App, name: &str, value: &str) -> SetOutcome {
         let world = app.world_mut();
         let (outcome, events) = {
@@ -2758,9 +2930,68 @@ mod tests {
         outcome
     }
 
+    /// An engine value shown over a row (`gxResolution` in fullscreen, the screen's own size) is
+    /// what `GetCVar`, the console and a new VM read, fires nothing, and leaves the player's value
+    /// for the save; a player write replaces the held value, and ending the overlay brings the
+    /// held value back.
+    #[test]
+    fn a_shown_value_answers_and_the_held_one_saves() {
+        let mut cvars = registry(&[("gxResolution", "1280x720")]);
+        cvars.take_events();
+        cvars.show("gxResolution", Some("2880x1800"));
+        assert_eq!(cvars.get("gxResolution"), Some("2880x1800"));
+        assert!(!cvars.has_events(), "the engine's value fires no callback");
+        assert_eq!(
+            cvars.compose().get("gxResolution").map(String::as_str),
+            Some("1280x720")
+        );
+        let mut script = UiScript::new().unwrap();
+        cvars.seed_vm(&mut script);
+        assert_eq!(script.cvar("gxResolution").as_deref(), Some("2880x1800"));
+        assert_eq!(cvars.set("gxResolution", "1024x768"), SetOutcome::Staged);
+        assert_eq!(cvars.commit_latched(), 1);
+        assert_eq!(cvars.get("gxResolution"), Some("1024x768"));
+        cvars.show("gxResolution", Some("2880x1800"));
+        assert_eq!(
+            cvars.compose().get("gxResolution").map(String::as_str),
+            Some("1024x768"),
+            "the player's write is what saves"
+        );
+        cvars.show("gxResolution", None);
+        assert_eq!(cvars.get("gxResolution"), Some("1024x768"));
+        cvars.show("gxResolution", None);
+        assert_eq!(cvars.get("gxResolution"), Some("1024x768"));
+    }
+
+    /// `ffx`, `ffxGlow`, `ffxDeath` and `ffxRectangle` share the change callback `0x6cde30`: the
+    /// value's `atoi` (`0x41449c`), "enabled" (`0x853764`) when nonzero, else "disabled"
+    /// (`0x853758`), and the write taken (`mov al,1`), on the console write, `SetCVar` and the
+    /// host's own writes alike.
+    #[test]
+    fn the_ffx_rows_echo_their_state() {
+        let mut cvars = registry(&[]);
+        let mut script = UiScript::new().unwrap();
+        cvars.seed_vm(&mut script);
+        script
+            .run(
+                r#"ConsoleExec("ffxGlow 0") SetCVar("ffxDeath", " +2") ConsoleExec("ffx abc")
+                   SetCVar("ffxRectangle", "0")"#,
+            )
+            .unwrap();
+        assert_eq!(script.cvar("ffxGlow").as_deref(), Some("0"));
+        assert_eq!(script.cvar("ffx").as_deref(), Some("abc"));
+        cvars.drain_vm(&mut script);
+        assert_eq!(cvars.get("ffxDeath"), Some(" +2"));
+        cvars.set("ffxGlow", "1");
+        assert_eq!(
+            cvars.take_console_lines(),
+            ["disabled", "enabled", "disabled", "disabled", "enabled"]
+        );
+    }
+
     /// `ConsoleExec(line)` as the typed `/console` runs it: on a VM seeded from the app's registry,
-    /// its writes drained back and their observers run; the console lines the callbacks and the
-    /// observers printed.
+    /// its writes drained back and their callbacks run; the console lines the checks and the
+    /// callbacks printed.
     fn console_exec(app: &mut App, line: &str) -> Vec<String> {
         let world = app.world_mut();
         let mut script = UiScript::new().unwrap();
@@ -2821,7 +3052,7 @@ mod tests {
     }
 
     /// A reset of a latched row moves the record, not the device: `GetCVar` and the save take
-    /// it, no observer fires, and a stage it found stays staged and is what the file holds.
+    /// it, no callback runs, and a stage it found stays staged and is what the file holds.
     #[test]
     fn a_latched_reset_moves_the_value_and_not_the_window() {
         let mut app = cvar_app();
@@ -2882,16 +3113,9 @@ mod tests {
 
     #[test]
     fn a_minimap_setzoom_reaches_the_knob_and_the_file() {
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = CvarEnv::hold();
         let tmp = std::env::temp_dir().join(format!("benilla-mmzoom-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _u = EnvGuard::unset("WOW_UI_SCALE");
-        let _f = EnvGuard::unset("WOW_FARCLIP");
-        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
         // The previous session left the outdoor map zoomed right in.
         crate::local_state::write_atomic(
@@ -2900,7 +3124,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = cvar_app();
+        let mut app = cvar_app_in(&env);
         app.update();
 
         assert_eq!(app.world().resource::<MinimapZoom>().outdoor, 5);
@@ -2958,7 +3182,7 @@ mod tests {
 
     /// The string-valued rows, a closed list, each default checked on its own terms: `realmName`
     /// and `accountName` (the reference's registered `""`, `0x882748`) and `gxApi` are empty until
-    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their observers' parsers
+    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their callbacks' parsers
     /// ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]).
     #[test]
     fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
@@ -3319,17 +3543,9 @@ mod tests {
     /// [`CvarLoad`].
     #[test]
     fn the_loaded_file_reaches_a_knob_before_anything_ordered_after_cvar_load() {
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = CvarEnv::hold();
         let tmp = std::env::temp_dir().join(format!("benilla-cvar-load-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _u = EnvGuard::unset("WOW_UI_SCALE");
-        let _f = EnvGuard::unset("WOW_FARCLIP");
-        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
-        let _m = EnvGuard::unset("WOW_MSAA");
         let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
         crate::local_state::write_atomic(
             &tmp.join("config.toml"),
@@ -3345,7 +3561,7 @@ mod tests {
         ) {
             seen.0 = Some((sound.music, msaa.samples));
         }
-        let mut app = cvar_app();
+        let mut app = cvar_app_in(&env);
         app.init_resource::<SeenAtStartup>()
             .add_systems(Startup, after_load.after(CvarLoad));
         app.update();
@@ -3446,7 +3662,7 @@ mod tests {
         }
         assert!(
             orphans.is_empty(),
-            "registered rows nothing in the source reads (an observer arm, a `cvars.get`, or a \
+            "registered rows nothing in the source reads (a callback's arm, a `cvars.get`, or a \
              `LUA_ONLY` entry with its stock reader): {orphans:?}"
         );
         for (name, _) in LUA_ONLY {
@@ -3486,5 +3702,88 @@ mod tests {
                 "gxWindow",
             ]
         );
+    }
+
+    /// The engine verbs that write a CVar run its callback inside the call, as `SetCVar` does:
+    /// `SetGamma` (`0x489267`), `SetWorldDetail` (`0x488e51`), a video pair's setter (`0x488f30`)
+    /// and the minimap's `SetZoom` (`0x6da974`) each call `CVar::Set` (`0x63df50`), and
+    /// `RestartGx`'s handler commits the latched rows synchronously (`0x48dab0` → `0x639f60`).
+    /// So each knob has moved, and `GetCVar` reads the committed `gxWindow`, before the chunk's
+    /// next line, with no frame run.
+    #[test]
+    fn the_engine_cvar_verbs_run_their_callbacks_inside_the_call() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
+            bevy::ecs::error::ignore,
+        ));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        app.update();
+        app.insert_non_send_resource(UiScript::new().expect("a VM"));
+        // The registry seeds the new VM's mirror.
+        app.update();
+        let window: String = crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
+            s.expect("a VM").eval(
+                r#"
+                CreateFrame("Minimap", "ProbeMinimap", UIParent):SetZoom(2)
+                SetGamma(0.25)
+                SetWorldDetail(0)
+                SetFarclip(500)
+                SetCVar("gxWindow", "1")
+                RestartGx()
+                return GetCVar("gxWindow")
+                "#,
+            )
+        })
+        .expect("the chunk runs");
+        assert_eq!(
+            window, "1",
+            "the restart committed the stage inside its call"
+        );
+        let cvars = res::<Cvars>(&app);
+        assert_eq!(cvars.get("gamma"), Some("0.750000"));
+        assert_eq!(cvars.get("frillDensity"), Some("16"));
+        assert_eq!(cvars.get("farclip"), Some("500.000000"));
+        assert_eq!(cvars.get("minimapZoom"), Some("2"));
+        assert_eq!(cvars.get("gxWindow"), Some("1"));
+        assert_eq!(res::<crate::ui_gamma::DisplayGamma>(&app).0, 0.75);
+        assert_eq!(res::<crate::minimap::MinimapZoom>(&app).outdoor, 2);
+    }
+
+    /// The Video options' Okay sets the resolution, then the multisample format
+    /// (`OptionsFrame.lua:239-240`), with no `RestartGx` when no other row asked one. Each verb
+    /// runs `gxRestart` inside its call (`0x48c0bc`, `0x48c79b`), so both latched changes commit.
+    #[test]
+    fn an_okay_with_a_new_resolution_and_multisample_commits_both() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
+            bevy::ecs::error::ignore,
+        ));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        app.insert_resource(benilla_world::view::MsaaFormats {
+            formats: vec![(24, 24, 1), (24, 24, 4)],
+        });
+        app.update();
+        let mut script = UiScript::new().expect("a VM");
+        let size = |width, height| benilla_ui::script::ScreenResolution { width, height };
+        script.set_screen_resolutions(vec![size(800, 600), size(1024, 768)], Some(size(800, 600)));
+        app.insert_non_send_resource(script);
+        app.update();
+        let (resolution, samples): (String, String) =
+            crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
+                s.expect("a VM").eval(
+                    r#"
+                    SetScreenResolution(2)
+                    SetMultisampleFormat(2)
+                    return GetCVar("gxResolution"), GetCVar("gxMultisample")
+                    "#,
+                )
+            })
+            .expect("the chunk runs");
+        assert_eq!((resolution.as_str(), samples.as_str()), ("1024x768", "4"));
+        let cvars = res::<Cvars>(&app);
+        assert_eq!(cvars.get("gxResolution"), Some("1024x768"));
+        assert_eq!(cvars.get("gxMultisample"), Some("4"));
     }
 }

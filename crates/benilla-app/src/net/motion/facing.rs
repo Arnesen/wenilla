@@ -48,6 +48,36 @@ pub(crate) struct DisplayFacing {
     hist: [f32; 4],
 }
 
+impl DisplayFacing {
+    /// A unit's state with the raw facing `wire` and an empty ring, which the next pump turns the
+    /// display toward from wherever it stands.
+    pub(in crate::net) fn seeded(wire: f32) -> Self {
+        Self {
+            wire,
+            hist: [0.0; 4],
+        }
+    }
+}
+
+/// Sets the raw facing a unit's display turns to (`0x6198e0` into `CMovement+0x1c`), keeping the
+/// display and its ring: nothing on a move resets them (`0x601020` runs only at create and
+/// reactivate). A unit not yet governed starts with an empty ring.
+pub(in crate::net) fn set_raw_facing(commands: &mut Commands, e: Entity, wire: f32) {
+    commands
+        .entity(e)
+        .entry::<DisplayFacing>()
+        .and_modify(move |mut d| d.wire = wire)
+        .or_insert(DisplayFacing::seeded(wire));
+}
+
+/// Whether [`drive_display_facing`] turns this body's display facing: a unit, not the body we
+/// steer, which shows its raw facing at once (`0x600d03`). The reference smooths players too
+/// (`0x608070`, skipped only for the unit the camera follows at `0x60805b`); benilla's smoother
+/// does not yet, so a player here shows its raw facing at once.
+pub(in crate::net) fn smoothed(kind: Option<EntityKind>, active_mover: bool) -> bool {
+    kind == Some(EntityKind::Unit) && !active_mover
+}
+
 /// The signed yaw the facing pump applied this frame (positive turns left), the client's
 /// `0x607ed0` shuffle latch input; removed the frame the body stops moving.
 #[derive(Component)]
@@ -74,22 +104,36 @@ impl GoalSource {
 }
 
 /// A [`MonsterMoveFacing`] as a WoW orientation for a unit at `unit_pos`: `Spot` and `Target`
-/// are the horizontal `atan2(dy, dx)` bearing; `None` also for an unstreamed or coincident target.
+/// are [`heading_between`] the two; `None` for no facing and for an unstreamed target.
 pub(in crate::net) fn resolve_facing(
     facing: MonsterMoveFacing,
     unit_pos: [f32; 3],
     target_pos: impl FnOnce(u64) -> Option<[f32; 3]>,
 ) -> Option<f32> {
-    let bear = |to: [f32; 3]| {
-        let (dx, dy) = (to[0] - unit_pos[0], to[1] - unit_pos[1]);
-        (dx * dx + dy * dy > 1e-6).then(|| dy.atan2(dx))
-    };
     match facing {
         MonsterMoveFacing::None => None,
         MonsterMoveFacing::Angle(a) => Some(a),
-        MonsterMoveFacing::Spot(spot) => bear(spot),
-        MonsterMoveFacing::Target(guid) => target_pos(guid).and_then(bear),
+        MonsterMoveFacing::Spot(spot) => Some(heading_between(unit_pos, spot)),
+        MonsterMoveFacing::Target(guid) => target_pos(guid).map(|to| heading_between(unit_pos, to)),
     }
+}
+
+/// `HeadingBetweenPoints` (`0x47f220`): the x-y heading from `from` to `to`. Under 2^-22
+/// (`[0x8029d4]`) a difference takes a fixed heading: `|dx|` gives 1.5π for `dy < 0`, else 0.5π
+/// (so a point under the unit is 0.5π); then `|dy|` gives π when `to` lies behind in x, else 0;
+/// otherwise `atan2(dy, dx)`. `dx` is rounded to a float and `dy` is not (`0x47f22a`).
+pub(super) fn heading_between(from: [f32; 3], to: [f32; 3]) -> f32 {
+    use std::f32::consts::PI;
+    const TINY: f32 = 1.0 / 4_194_304.0;
+    let dx = to[0] - from[0];
+    let dy = f64::from(to[1]) - f64::from(from[1]);
+    if dx.abs() < TINY {
+        return if dy < 0.0 { 1.5 * PI } else { 0.5 * PI };
+    }
+    if dy.abs() < f64::from(TINY) {
+        return if to[0] < from[0] { PI } else { 0.0 };
+    }
+    dy.atan2(f64::from(dx)) as f32
 }
 
 /// The horizontal bearing from `from` to `to`, `None` when they coincide.
@@ -622,6 +666,26 @@ mod tests {
             app.world().resource::<Dirty>().0,
             0,
             "a settled unit must stop dirtying its transform"
+        );
+    }
+
+    /// `0x47f220`'s fixed headings: a point under the unit faces 0.5π, never "no direction".
+    #[test]
+    fn heading_between_takes_the_references_fixed_headings() {
+        let o = [10.0, 20.0, 0.0];
+        assert_eq!(
+            heading_between(o, [10.0, 20.0, 5.0]),
+            0.5 * PI,
+            "under the unit"
+        );
+        assert_eq!(heading_between(o, [10.0, 25.0, 0.0]), 0.5 * PI);
+        assert_eq!(heading_between(o, [10.0, 15.0, 0.0]), 1.5 * PI, "dy < 0");
+        assert_eq!(heading_between(o, [5.0, 20.0, 0.0]), PI, "behind in x");
+        assert_eq!(heading_between(o, [15.0, 20.0, 0.0]), 0.0);
+        let diag = heading_between(o, [9.0, 19.0, 0.0]);
+        assert!(
+            (diag + 3.0 * std::f32::consts::FRAC_PI_4).abs() < 1.0e-6,
+            "atan2: {diag}"
         );
     }
 

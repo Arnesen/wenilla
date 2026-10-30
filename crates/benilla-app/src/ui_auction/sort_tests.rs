@@ -1,5 +1,5 @@
 //! The three lists end to end, their sort, their time left and their life across the window: the
-//! wire's results through the handlers, the feed and the drain to the VM's getters, as the window
+//! wire's results through the handlers and the drain to the VM's getters, as the window
 //! reads them.
 
 use benilla_protocol::messages::{
@@ -94,21 +94,33 @@ impl House {
         self.app.insert_non_send_resource(script);
     }
 
+    /// The item's record answered, with what its answer's handler runs for the house: each page
+    /// that waited on it and now waits on nothing runs its tail (`0x4cca10`), then the drain.
     fn item(&mut self, entry: u32, name: &str, level: u32, quality: u32) {
         let mut t = crate::items::test_template(name);
         t.required_level = level;
         t.quality = quality;
-        self.app
-            .world_mut()
+        let world = self.app.world_mut();
+        world
             .resource_mut::<Items>()
             .insert_template(entry, Some(t));
+        world.resource_scope(|world, mut auction: Mut<super::AuctionOpen>| {
+            world.resource_scope(|world, mut lane: Mut<super::HouseLane>| {
+                super::record_answered(&mut auction, &mut lane, world.resource::<Items>(), entry);
+            });
+        });
+        super::net::fire_house_lane(world);
     }
 
+    /// The player's name answered, with what its answer's handler runs for the house: each list
+    /// whose read waited on it hears its update (`0x4cf290`), then the drain.
     fn name(&mut self, guid: u64, name: &str) {
-        self.app
-            .world_mut()
+        let world = self.app.world_mut();
+        world
             .resource_mut::<NameCache>()
             .insert_player(guid, name.into(), None);
+        world.resource_mut::<super::HouseLane>().name_landed(guid);
+        super::net::fire_house_lane(world);
     }
 
     /// The packet, the frame's feeds, then the house lane's steps, as the lanes' drain follows the
@@ -154,7 +166,8 @@ impl House {
     fn cascade(&mut self) {
         self.app
             .world_mut()
-            .write_message(crate::net::WorldEnterCascadeMessage);
+            .run_system_cached(super::reset_auction_on_world_enter)
+            .expect("the auction init runs");
         self.app.update();
     }
 
@@ -164,7 +177,7 @@ impl House {
     }
 
     fn eval<T: benilla_ui::mlua::FromLuaMulti>(&mut self, chunk: &str) -> T {
-        self.script().eval(chunk).unwrap()
+        hosted_eval(self.app.world_mut(), chunk)
     }
 
     fn script(&mut self) -> Mut<'_, UiScript> {
@@ -174,32 +187,17 @@ impl House {
     /// A chunk of Lua with the auction verbs' host lent, then two frames: whatever the chunk
     /// leaves for the drain has reached the getters by the second.
     fn lua(&mut self, chunk: &str) {
-        let world = self.app.world_mut();
-        let mut state =
-            bevy::ecs::system::SystemState::<(NonSendMut<UiScript>, super::AuctionVerbs)>::new(
-                world,
-            );
-        {
-            let (mut script, mut verbs) = state.get_mut(world);
-            script
-                .hosted(&mut AuctionHost(&mut verbs), |s| s.run(chunk))
-                .unwrap();
-        }
-        state.apply(world);
+        hosted_eval::<()>(self.app.world_mut(), chunk);
         self.app.update();
         self.app.update();
     }
 
     fn order(&mut self, list: &str) -> String {
-        self.script()
-            .eval(&format!("return ORDER({list:?})"))
-            .unwrap()
+        self.eval(&format!("return ORDER({list:?})"))
     }
 
     fn sellers(&mut self, list: &str) -> String {
-        self.script()
-            .eval(&format!("return SELLERS({list:?})"))
-            .unwrap()
+        self.eval(&format!("return SELLERS({list:?})"))
     }
 
     /// The packet through its handlers and the house lane alone, with no frame after: what the
@@ -280,9 +278,15 @@ impl House {
     }
 }
 
-/// The call host's auction applier alone, lent by [`House::lua`]: this world has no other
-/// engine half.
-struct AuctionHost<'a, 'w, 's>(&'a mut super::AuctionVerbs<'w, 's>);
+/// The auction verbs and the auction getters' live reads, the call host's two auction halves.
+type AuctionHalves = (
+    super::AuctionVerbs<'static, 'static>,
+    super::AuctionLive<'static, 'static>,
+);
+
+/// The call host's auction halves alone, lent by [`House::lua`]: this world has no other engine
+/// half.
+struct AuctionHost<'a, 'w, 's>(&'a mut ParamSet<'w, 's, AuctionHalves>);
 
 impl benilla_ui::script::CallHost for AuctionHost<'_, '_, '_> {
     fn apply(
@@ -290,11 +294,40 @@ impl benilla_ui::script::CallHost for AuctionHost<'_, '_, '_> {
         script: &mut UiScript,
         call: benilla_ui::script::ScriptCall,
     ) -> Option<benilla_ui::script::CallTail> {
-        if let benilla_ui::script::ScriptCall::Auction(call) = call {
-            self.0.apply(script, call);
+        use benilla_ui::script::{RecordAsk, ScriptCall};
+        match call {
+            ScriptCall::Auction(call) => self.0.p0().apply(script, call),
+            ScriptCall::RecordAsk(RecordAsk::AuctionName { guid, list }) => {
+                self.0.p0().wait_for_name(guid, list);
+            }
+            _ => {}
         }
         None
     }
+
+    fn read_live(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+        use crate::script_calls::live::LiveFamily;
+        ask.answer(|q: &benilla_ui::script::PlayerNameQuery| Some(self.0.p0().player_name(q.0)))
+            || self.0.p1().answer(ask)
+    }
+}
+
+/// `chunk` on the world's VM with the auction halves of the host lent ([`AuctionHost`]), as a call
+/// inside a frame runs: its getters read the house and the caches, and their name lookups ask and
+/// wait inside their calls.
+pub(super) fn hosted_eval<T: benilla_ui::mlua::FromLuaMulti>(world: &mut World, chunk: &str) -> T {
+    let mut state = bevy::ecs::system::SystemState::<(
+        NonSendMut<UiScript>,
+        ParamSet<'static, 'static, AuctionHalves>,
+    )>::new(world);
+    let out = {
+        let (mut script, mut halves) = state.get_mut(world);
+        script
+            .hosted(&mut AuctionHost(&mut halves), |s| s.eval::<T>(chunk))
+            .unwrap_or_else(|e| panic!("{chunk}: {e}"))
+    };
+    state.apply(world);
+    out
 }
 
 /// A row of item `item`, sold by [`SELLER`] for 100c with no bid, an hour left.
@@ -453,6 +486,32 @@ fn a_sellers_name_signals_the_list_without_sorting_it() {
         "the name signals the list that asked, once"
     );
     assert_eq!(h.sellers("list"), "Bob,Al", "and does not sort it");
+}
+
+/// A name wait outlives the VM that made it: the list callbacks are engine code (`0x4cf290`,
+/// `0x4cf2b0`, `0x4cf2d0`) that only `0x55f870` cancels, and no auction caller does, so a `/reload`
+/// keeps them and the name's landing signals the list in the new VM.
+#[test]
+fn a_name_wait_outlives_a_reload_and_signals_the_new_vm() {
+    const AL: u64 = 0x61;
+    let mut h = House::new();
+    h.item(1, "Cloth", 10, 1);
+    h.open(AUCTIONEER);
+    let mut al = entry(1, 1);
+    al.owner_guid = AL;
+    h.land(LIST, vec![al]);
+    assert_eq!(h.sellers("list"), "?");
+    h.new_vm();
+    h.app.update();
+    h.script().run("SEEN = {}").unwrap();
+    h.name(AL, "Al");
+    h.app.update();
+    super::net::fire_house_lane(h.app.world_mut());
+    assert_eq!(
+        h.seen(),
+        ["AUCTION_ITEM_LIST_UPDATE=Cloth"],
+        "the new VM hears the list the old one read"
+    );
 }
 
 /// The duration sort compares each row's deadline, the result's tick plus the wire's

@@ -1,12 +1,13 @@
 //! The app side of the container seam around `benilla_ui::script`'s `container` module.
 //!
-//! [`feed`] builds each bag from the player's descriptor (the backpack's `PACK_SLOT` array, the
-//! equipped bags at `INV_SLOT` 19-22 with their own `CONTAINER_FIELD_SLOT` arrays, the keyring at
-//! 81.. with no container object, like the bank), the object index and the template cache, and
-//! fires `BAG_UPDATE(bagID)` per changed bag. [`drain`] sends the Lua intents over [`wire_pos`]:
-//! an equippable item that starts no quest goes out as `CMSG_AUTOEQUIP_ITEM`, anything else
-//! through [`send_item_use`]. The cursor verbs lock what they pick up and place onto, and the
-//! server's answer lifts it ([`crate::ui_items::locks`]).
+//! [`bags`] answers the container getters at the call off the player's descriptor (the backpack's
+//! `PACK_SLOT` array, the equipped bags at `INV_SLOT` 19-22 with their own `CONTAINER_FIELD_SLOT`
+//! arrays, the keyring at 81.. with no container object, like the bank), the object index and the
+//! template cache; the bag events are the item watchers' ([`crate::item_watch`]). The verbs' calls send inside their verbs over
+//! [`wire_pos`]: [`drain`]'s item use takes an equippable item that starts no quest out as
+//! `CMSG_AUTOEQUIP_ITEM` and anything else through [`send_item_use`], and [`calls`] the cursor's
+//! moves, stores, repairs, destroys and bind answers. The cursor verbs lock what they pick up and
+//! place onto, and the server's answer lifts it ([`crate::ui_items::locks`]).
 
 use benilla_protocol::messages::{BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST, SLOT_PACK_FIRST};
 use benilla_protocol::ObjectFields;
@@ -18,25 +19,33 @@ use crate::net::Objects;
 use crate::query_cache::Ask;
 use crate::ui_unit::UnitFeed;
 
+mod bags;
+mod calls;
 mod drain;
 mod equip_error;
 pub(crate) mod feed;
+pub(crate) mod live;
 mod lock_openers;
 pub(crate) mod locks;
 mod net;
+mod requirements;
+mod sets;
+#[cfg(test)]
+mod verb_tests;
 
-pub(crate) use drain::{dispatch_fork, send_auto_equip};
-use drain::{
-    drain_bag_autostores, drain_container_autoequips, drain_container_destroys,
-    drain_container_moves, drain_container_repairs,
-};
-pub(crate) use equip_error::equip_error_key;
-// `UseContainerItem` and `UseInventoryItem`, applied in call order by `crate::script_calls`.
+pub(crate) use drain::{clear_wrap_on_right_press, dispatch_fork};
+pub(crate) use equip_error::{equip_error_key, inventory_result_key, EquipError, EquipErrors};
+// `UseContainerItem`, `UseInventoryItem` and the item verbs' calls, applied in call order by
+// `crate::script_calls`.
+#[cfg(test)]
+pub(crate) use bags::eval_with_bags;
+pub(crate) use bags::{BagLive, BagReads};
+pub(crate) use calls::{EquipEnd, ItemSteps};
 pub(crate) use drain::ScriptItemUse;
-use feed::{
-    ask_item_build_lookups, feed_containers, feed_item_sets, feed_item_stats, feed_player_req,
-    feed_random_properties,
-};
+pub(crate) use feed::ItemViewLive;
+use feed::{feed_item_stats, feed_random_properties};
+pub(crate) use requirements::RequirementsLive;
+pub(crate) use sets::ItemSetLive;
 
 /// The backpack's capacity (`PLAYER_FIELD_PACK_SLOT_1..`).
 pub(super) const PACK_SLOTS: u8 = 16;
@@ -53,7 +62,7 @@ pub(super) const BANK_SLOTS: u8 = 24;
 pub(super) const BANK_SLOT_FIRST: u8 = 39;
 /// The first bank-bag slot (vmangos `BANK_SLOT_BAG_START`); as with an equipped bag, a bank bag's
 /// slot number is its wire bag byte.
-pub(super) const BANK_BAG_SLOT_FIRST: u8 = 63;
+pub(crate) const BANK_BAG_SLOT_FIRST: u8 = 63;
 /// Bank bag count (live-API bag ids [`BANK_BAG_ID_FIRST`]..=10).
 pub(super) const BANK_BAGS: u8 = 6;
 /// `BANK_CONTAINER` (`BankFrame.lua:1`).
@@ -110,35 +119,13 @@ pub(crate) fn wire_pos(bag: i64, slot1: u32) -> Option<(u8, u8)> {
     }
 }
 
-/// One inventory refusal off the wire, with the fills of the only two reasons that format one.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EquipError {
-    /// The wire `InventoryResult`.
-    pub reason: u8,
-    /// Reason 1's `%d`, the packet's `requiredLevel`.
-    pub required_level: Option<u32>,
-    /// Reason 16's `%s` source: the destination bag's player slot (255 names no bag), which the
-    /// drain resolves to the bag's `BagFamily` name.
-    pub bag_slot: u8,
-    /// The item guids a refused inventory operation unlocks after its line (`0x5e3ac0`,
-    /// `0x5e3ad3`); none for a mail refusal.
-    pub unlocks: [u64; 2],
-    /// The change tick of the handler call that queued it, its place on the wire: each call is
-    /// its own system run, so a later packet's writes carry newer ticks.
-    pub at: bevy::ecs::change_detection::Tick,
-}
-
-/// Inventory refusals (`SMSG_INVENTORY_CHANGE_FAILURE`) queued for the UI error line.
-#[derive(Resource, Default)]
-pub(crate) struct EquipErrors(pub Vec<EquipError>);
-
 /// The item guid in a Lua-space bag slot; for [`EQUIPMENT_BAG`], `slot0` is the wire slot, as in
 /// [`wire_pos`].
 pub(crate) fn slot_guid(
     store: &ObjectFields,
     bag: i64,
     slot0: u8,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
 ) -> Option<u64> {
     match bag {
         0 => store.player_pack_slot(slot0).filter(|g| *g != 0),
@@ -247,6 +234,27 @@ fn item_is_whole(fields: &ObjectFields) -> bool {
     !broken && flags & 0x10 == 0
 }
 
+/// The item objects an inventory walk finds by guid, as `0x468460` does: the live ones
+/// ([`Objects`]), or each as of the drain's place
+/// ([`crate::ui_unit::views::ViewStores::item_objects`]).
+pub(crate) trait ItemObjects {
+    /// The object held under `guid`, `None` for none.
+    fn object(&self, guid: u64) -> Option<&ObjectFields>;
+
+    /// The item's countdown cells under `guid` (`+0x320`, `+0x324`), `None` for no item.
+    fn countdowns(&self, guid: u64) -> Option<&crate::items::Countdowns>;
+}
+
+impl ItemObjects for Objects<'_, '_> {
+    fn object(&self, guid: u64) -> Option<&ObjectFields> {
+        Objects::object(self, guid)
+    }
+
+    fn countdowns(&self, guid: u64) -> Option<&crate::items::Countdowns> {
+        Objects::countdowns(self, guid)
+    }
+}
+
 /// The reference's inventory walk (`0x622420`): one ascending pass over the player's slot array,
 /// recursing into each container as it is passed, `scope` gating the sections. `visit` gets the
 /// wire `(bag_index, slot)` and the guid, and returns `Some` to stop. The order is the reference's
@@ -254,7 +262,7 @@ fn item_is_whole(fields: &ObjectFields) -> bool {
 /// 39-62, each bank bag 63-68 then its contents, keyring.
 fn walk_inventory<T>(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
     scope: InventoryScope,
     mut raw: impl FnMut(u8, u8, u64) -> Option<T>,
 ) -> Option<T> {
@@ -367,7 +375,7 @@ fn walk_inventory<T>(
 /// `0x4f76b2`, `0x4ff7a2`).
 pub(crate) fn count_of(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
     entry: u32,
     scope: InventoryScope,
 ) -> u32 {
@@ -379,7 +387,7 @@ pub(crate) fn count_of(
 /// The sum of `weight` over every copy of `entry` within `scope`; a dword add, so it wraps.
 fn sum_of(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
     entry: u32,
     scope: InventoryScope,
     weight: impl Fn(&ObjectFields) -> u32,
@@ -404,7 +412,7 @@ fn sum_of(
 /// (`0x55ba30` returns null, `0x4e6d7f`).
 pub(crate) fn action_count(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
     entry: u32,
     template: Option<&benilla_protocol::ItemInfo>,
 ) -> u32 {
@@ -421,7 +429,7 @@ pub(crate) fn action_count(
 /// a caller asking about many entries in a frame.
 pub(crate) fn stack_counts(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
 ) -> std::collections::HashMap<u32, u32> {
     let mut counts = std::collections::HashMap::new();
     walk_inventory::<()>(store, objects, InventoryScope::DEFAULT, |_, _, guid| {
@@ -452,7 +460,7 @@ pub(crate) struct ItemSearch {
 /// of [`walk_inventory`] (predicate `OBJECT_FIELD_ENTRY` equality). The bank is not in scope.
 pub(crate) fn find_item(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
     entry: u32,
     search: ItemSearch,
 ) -> Option<(u8, u8, u64)> {
@@ -481,7 +489,7 @@ pub(crate) fn find_item(
 /// against the template cache.
 pub(crate) fn collect_inventory(
     store: &ObjectFields,
-    objects: &Objects,
+    objects: &(impl ItemObjects + ?Sized),
     scope: InventoryScope,
 ) -> Vec<(u8, u8, u64)> {
     let mut out = Vec::new();
@@ -496,9 +504,13 @@ pub(crate) fn collect_inventory(
 /// walker (`0x6223a0` → `0x622420`) with predicate `0x6223d0`, `BagFamily == 9` (`template+0x1d0`),
 /// at mode `0x4f`, so a key in the bank counts. A slot whose template is still in flight reads as
 /// no key until the answer lands.
-pub(crate) fn has_key(store: &ObjectFields, objects: &Objects, items: &Items) -> bool {
+pub(crate) fn has_key(
+    store: &ObjectFields,
+    objects: &(impl ItemObjects + ?Sized),
+    items: &Items,
+) -> bool {
     // Every guid mode `0x4f` reaches, in the walker's order: each bag's contents follow its slot.
-    fn contents(bag_guid: u64, objects: &Objects, out: &mut Vec<u64>) {
+    fn contents(bag_guid: u64, objects: &(impl ItemObjects + ?Sized), out: &mut Vec<u64>) {
         let Some(f) = objects.object(bag_guid) else {
             return;
         };
@@ -701,7 +713,17 @@ pub(crate) fn send_item_use(
     // `0x5d8d00`'s requirement check (`0x5d8e0e`) and control gate (`0x5d8eaa`), past the
     // quest-starter arm (`0x5d8dcc`), which runs before them.
     if it.start_quest == 0 {
-        if let Some(key) = script.item_use_refusal(it.entry, it.use_spell.unwrap_or(0)) {
+        // The control gate's exemption off the caster now (`0x5d8ef9`-`0x5d8f66`).
+        let use_spell = it.use_spell.unwrap_or(0);
+        let exempt = ladder.spells.as_ref().is_some_and(|s| {
+            s.catalog
+                .get(use_spell)
+                .zip(ctx.rel.self_store)
+                .is_some_and(|(cast, store)| {
+                    crate::ui_unit::control_gate::exempts_lost_control(&s.catalog, cast, &store.0)
+                })
+        });
+        if let Some(key) = script.item_use_refusal(it.entry, use_spell, exempt) {
             debug!("ui_items: item use refused — {key}");
             ui_errors.push(crate::ui_action::UiError::key(key));
             return false;
@@ -824,30 +846,22 @@ pub(super) fn item_link_full(
     )
 }
 
-/// `CGItem_C::GetFullName` (`0x5d8bc0`): the item's name with its random property's suffix
-/// (`0x5d8b00`), or with none when `ITEM_FIELD_FLAGS` has the wrapped bit `0x8`.
-pub(crate) fn object_name(
-    fields: &ObjectFields,
-    template: &benilla_protocol::messages::ItemInfo,
-    rolls: crate::items::RollCatalogs,
-) -> String {
-    rolls.name(&template.name, object_link_numbers(fields, template).1)
-}
-
 /// The three numbers `0x52ae00` passes `0x52adb0` for an item object: the permanent enchant
 /// (`[block+0x40]`, `0x52aeb2`), 0 for a charter, whose template flag `0x2000` marks slot 0 as its
 /// petition id (`0x52aeaa`); the random property id (`+0x98`); and the property seed (`+0x94`). A
 /// wrapped item (`ITEM_FIELD_FLAGS & 0x8`) passes 0 for all three (`0x52ae66`-`0x52ae80`).
 pub(crate) fn object_link_numbers(
     fields: &ObjectFields,
-    template: &benilla_protocol::messages::ItemInfo,
+    template: Option<&benilla_protocol::messages::ItemInfo>,
 ) -> (u32, u32, u32) {
+    // No record reads flags 0 (`0x5da2a0`): no charter.
+    let charter =
+        template.is_some_and(|t| t.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0);
     let wrapped =
         fields.item_flags().unwrap_or(0) & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED != 0;
     if wrapped {
         return (0, 0, 0);
     }
-    let charter = template.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0;
     let enchant = if charter {
         0
     } else {
@@ -860,34 +874,15 @@ pub(crate) fn object_link_numbers(
     )
 }
 
-/// `0x52ae00`, the link of an item object: its template's quality and [`object_name`], with
-/// [`object_link_numbers`]. Every link the client makes of an item it holds comes from here: the
-/// bag slot's (`GetContainerItemLink`, `0x4f997f`), the player's own equipped slot's
-/// (`GetInventoryItemLink`, `0x4c8ce2`) and our own trade slot's (`GetTradePlayerItemLink`,
-/// `0x4c06bc`).
-pub(crate) fn object_link(
-    fields: &ObjectFields,
-    template: &benilla_protocol::messages::ItemInfo,
-    rolls: crate::items::RollCatalogs,
-) -> String {
-    let (enchant, roll, seed) = object_link_numbers(fields, template);
-    item_link_full(
-        fields.object_entry().unwrap_or(0),
-        enchant,
-        roll,
-        seed,
-        &object_name(fields, template, rolls),
-        template.quality,
-    )
-}
-
 /// [`item_link_full`] with zero enchant, random-property and suffix ids, for a caller with no roll
 /// in hand; a rolled item's link carries the roll and its suffixed name (`0x5d8b00`).
 pub(super) fn item_link(item_id: u32, name: &str, quality: u32) -> String {
     item_link_full(item_id, 0, 0, 0, name, quality)
 }
 
-/// `ITEM_CLASS_PROJECTILE`, the template class `UseContainerItem` leaves unlocked (`0x4fa40b`).
+/// `ITEM_CLASS_PROJECTILE`, the template class a test's arrows carry; the VM decides by it
+/// (`0x5e1704`, `0x4fa40b`).
+#[cfg(test)]
 pub(super) const ITEM_CLASS_PROJECTILE: u32 = 6;
 
 /// The `InventoryType` → live-API equip slots map (wire `EQUIPMENT_SLOT_*` + 1, bag icons
@@ -1030,17 +1025,14 @@ pub(crate) struct UiItemsPlugin;
 impl Plugin for UiItemsPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
+        crate::item_lane::add_item_lane(app);
+        equip_error::add_equip_error_lane(app);
         // The icons come from the equipment renderer's `ItemDisplays`.
-        app.init_resource::<EquipErrors>()
-            .init_resource::<feed::BagUpdates>()
-            .init_resource::<crate::ui_items::locks::ItemReleases>()
-            .init_resource::<crate::ui_items::locks::HeldItemLocks>()
-            .init_resource::<crate::ui_items::locks::LockWatch>()
+        app.init_resource::<crate::ui_items::locks::HeldItemLocks>()
             // The soulbind confirmations' pending records: the client's pending-equip array and
             // its one bind-on-use cell.
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
-            .init_resource::<net::BagOpens>()
             // After the chain opens: unordered, it can run first and skip every item DBC.
             .add_systems(
                 Startup,
@@ -1049,52 +1041,16 @@ impl Plugin for UiItemsPlugin {
             .add_systems(
                 Update,
                 (
-                    // The server's unlocks, ahead of both inventory feeds: the reference's
-                    // watchers run before the descriptor takes the new guid.
-                    crate::ui_items::locks::apply_item_releases
-                        .in_set(crate::ui_script::UiFeed)
-                        .before(feed_containers)
-                        .before(crate::ui_char::feed_char),
-                    // The slot cooldowns must be in the VM before the action feed's
-                    // `BAG_UPDATE_COOLDOWN` makes the bag handlers re-read them, and the action
-                    // feed counts this feed's `BAG_UPDATE`s (`crate::ui_action`'s schedule).
-                    feed_containers
-                        .in_set(UnitFeed)
-                        .before(crate::ui_action::CooldownEvents),
-                    // The item-tooltip store answers before the input pass, so a re-hover the
-                    // next frame sees the answer, and seats a new VM before its world entry; a
-                    // refused cast's item name reads the store it leaves.
-                    feed_item_stats
-                        .in_set(UnitFeed)
-                        .in_set(crate::ui_unit::WorldEnterSeats)
-                        .before(crate::ui_cast::feed_cast_reports),
-                    feed_item_sets.in_set(UnitFeed),
-                    ask_item_build_lookups.in_set(UnitFeed),
+                    // The item-tooltip store answers in the feed, so the next frame's input
+                    // records, a re-hover among them, see the answer, and seats a new VM before its world entry.
+                    feed_item_stats.in_set(UnitFeed),
                     // The roll table, pushed whole once per VM, before the first hover.
                     feed_random_properties.in_set(UnitFeed),
-                    // After the latches, so a skinning spell learnt this frame colours the line now.
-                    feed_player_req
-                        .in_set(UnitFeed)
-                        .after(crate::ui_action::track_learned_abilities),
-                    // The item tooltip's lock check: `Lock.dbc` once, the player's openers on change.
+                    // The suffix template, copied once the frame's Lua has run.
+                    feed::copy_suffix_template.in_set(crate::ui_script::UiDrain),
+                    // The item tooltip's lock check: `Lock.dbc` once; the getters read the player's
+                    // openers through the host ([`RequirementsLive`]).
                     lock_openers::feed_lock_rows.in_set(UnitFeed),
-                    lock_openers::feed_lock_openers.in_set(UnitFeed),
-                    // After the input pass, so a repair-mode click goes out the same frame; a
-                    // plain `UseContainerItem` is a script call.
-                    drain_container_repairs.in_set(crate::ui_script::UiDrain),
-                    // Pick, place and split: `CMSG_SWAP_INV_ITEM`, `CMSG_SWAP_ITEM` or
-                    // `CMSG_SPLIT_ITEM`.
-                    drain_container_moves.in_set(crate::ui_script::UiDrain),
-                    // The delete-confirm popup's accept: `CMSG_DESTROYITEM`.
-                    drain_container_destroys.in_set(crate::ui_script::UiDrain),
-                    // `AutoEquipCursorItem`: `CMSG_AUTOEQUIP_ITEM`.
-                    drain_container_autoequips.in_set(crate::ui_script::UiDrain),
-                    drain_bag_autostores.in_set(crate::ui_script::UiDrain),
-                    // The soulbind confirmations' answers (`EquipPendingItem`,
-                    // `CancelPendingEquip`, `ConfirmBindOnUse`). A dialog is answered in a later
-                    // frame than it was raised, so no order against the other drains is needed.
-                    drain::drain_bind_confirm_answers.in_set(crate::ui_script::UiDrain),
-                    drain::drain_bind_on_use_confirms.in_set(crate::ui_script::UiDrain),
                 ),
             );
     }
@@ -1377,14 +1333,14 @@ mod tests {
         }
     }
 
-    /// Doll live id `n` (1..=23) is player-array slot `n - 1`; ammo (0) is refused, as
-    /// `pickup_inventory_item`'s range guard does.
+    /// Doll live id `n` (1..=23) is player-array slot `n - 1`; ammo (0) has none, as its leg
+    /// names the ammo by entry with `CMSG_SET_AMMO`.
     #[test]
     fn wire_pos_maps_equipment_bag_to_the_player_grid() {
         assert_eq!(wire_pos(EQUIPMENT_BAG, 1), Some((255, 0)), "HeadSlot");
         assert_eq!(wire_pos(EQUIPMENT_BAG, 19), Some((255, 18)), "TabardSlot");
         assert_eq!(wire_pos(EQUIPMENT_BAG, 16), Some((255, 15)), "MainHandSlot");
-        assert_eq!(wire_pos(EQUIPMENT_BAG, 0), None, "ammo — out of scope");
+        assert_eq!(wire_pos(EQUIPMENT_BAG, 0), None, "ammo has no wire slot");
         // The four equipped-bag icons map onto the wire's bag inventory slots (19..22).
         assert_eq!(wire_pos(EQUIPMENT_BAG, 20), Some((255, 19)), "Bag0Slot");
         assert_eq!(wire_pos(EQUIPMENT_BAG, 23), Some((255, 22)), "Bag3Slot");

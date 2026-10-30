@@ -28,7 +28,7 @@ use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalInfo, WmoPortalRef};
 pub use benilla_formats::triangle_z_at as floor_z_at;
 
 use super::{
-    point_in_poly_2d, portal_poly, EXTERIOR, MAX_FLOOR_DROP, NEAREST_TIE_EPS, PORTAL_NEAR_PARALLEL,
+    point_in_poly_2d, portal_poly, EXTERIOR, MAX_FLOOR_DROP, NEAREST_TIE_YD, PORTAL_NEAR_PARALLEL,
     PORTAL_PLANE_SNAP,
 };
 
@@ -41,9 +41,24 @@ pub struct DownRaySeeds {
     pub(crate) across: Option<usize>,
 }
 
-/// [`down_ray_pick`] over the asset's stored pieces; `terrain_z` is in this model's local space.
+/// The eye's current group, by the module doc's mechanism, over the asset's stored pieces;
+/// `terrain_z` is in this model's local space.
 pub fn down_ray_seeds(model: &WmoModel, eye: [f32; 3], terrain_z: Option<f32>) -> DownRaySeeds {
-    down_ray_pick(
+    down_ray_seeds_scored(model, eye, terrain_z, None).0
+}
+
+/// [`down_ray_seeds`] with the winning hit's depth below the eye, which the placements race on:
+/// `0x6be250` shares one fraction across every instance, and an exterior best clears the claim.
+/// `shared` is the best depth the earlier placements set: a face must beat it strictly and a
+/// portal comes within the tie of it. An exterior winner is outside but keeps its depth; a miss, a
+/// hit past the floor drop, a hit the terrain beats and nothing past `shared` have none.
+pub(crate) fn down_ray_seeds_scored(
+    model: &WmoModel,
+    eye: [f32; 3],
+    terrain_z: Option<f32>,
+    shared: Option<f32>,
+) -> (DownRaySeeds, Option<f32>) {
+    down_ray_pick_scored(
         &model.group_collision_tris,
         &model.group_collision_grids,
         &model.group_camera_only_tris,
@@ -53,12 +68,12 @@ pub fn down_ray_seeds(model: &WmoModel, eye: [f32; 3], terrain_z: Option<f32>) -
         &model.portal_refs,
         eye,
         terrain_z,
+        shared,
     )
 }
 
-/// The eye's current group, by the module doc's mechanism. `terrain_z` is the terrain height under
-/// the eye in WMO model space, or `None` where there is none to hit: off the streamed tiles, or a
-/// hole cut through the ground into this interior.
+/// [`down_ray_pick_scored`]'s verdict over the pieces a test builds.
+#[cfg(test)]
 pub(crate) fn down_ray_pick(
     tris: &[Vec<[[f32; 3]; 3]>],
     grids: &[Option<ColumnGrid>],
@@ -70,6 +85,37 @@ pub(crate) fn down_ray_pick(
     eye: [f32; 3],
     terrain_z: Option<f32>,
 ) -> DownRaySeeds {
+    down_ray_pick_scored(
+        tris,
+        grids,
+        camera_only_tris,
+        nav,
+        portal_vertices,
+        portal_infos,
+        portal_refs,
+        eye,
+        terrain_z,
+        None,
+    )
+    .0
+}
+
+/// The eye's current group, by the module doc's mechanism, and the winning hit's depth, as
+/// [`down_ray_seeds_scored`] gives it. `terrain_z` is the terrain height under the eye in WMO model
+/// space, or `None` where there is none to hit: off the streamed tiles, or a hole cut through the
+/// ground into this interior.
+fn down_ray_pick_scored(
+    tris: &[Vec<[[f32; 3]; 3]>],
+    grids: &[Option<ColumnGrid>],
+    camera_only_tris: &[Vec<[[f32; 3]; 3]>],
+    nav: &[WmoGroupNav],
+    portal_vertices: &[[f32; 3]],
+    portal_infos: &[WmoPortalInfo],
+    portal_refs: &[WmoPortalRef],
+    eye: [f32; 3],
+    terrain_z: Option<f32>,
+    shared: Option<f32>,
+) -> (DownRaySeeds, Option<f32>) {
     // Broad phase: the column inside the group's XY bounds, its bottom at or below the eye.
     let in_column = |g: &WmoGroupNav| {
         eye[0] >= g.bbox_min[0]
@@ -79,8 +125,9 @@ pub(crate) fn down_ray_pick(
             && g.bbox_min[2] <= eye[2]
     };
 
-    // Leg A, walking-collision faces: the highest crossing at or below the eye.
-    let mut best_z = f32::NEG_INFINITY;
+    // Leg A, walking-collision faces: the highest crossing at or below the eye, strictly nearer
+    // than the fraction the earlier placements set.
+    let mut best_z = shared.map_or(f32::NEG_INFINITY, |d| eye[2] - d);
     let mut best: Option<usize> = None;
     for (gi, g) in nav.iter().enumerate() {
         if !in_column(g) {
@@ -108,8 +155,9 @@ pub(crate) fn down_ray_pick(
         }
     }
 
-    // Leg B, portal crossings, racing the face hit; a coincident portal wins the tie.
-    let mut across: Option<usize> = None;
+    // Leg B, portal crossings (`0x6a3f80`): the nearest crossing alone, a hit at most the shortest
+    // so far kept (`0x6a4111`, so the later of equals), as (z, chosen group, across).
+    let mut nearest: Option<(f32, usize, Option<usize>)> = None;
     for (gi, g) in nav.iter().enumerate() {
         if !in_column(g) {
             continue;
@@ -134,8 +182,8 @@ pub(crate) fn down_ray_pick(
                 }
                 z
             };
-            if z < best_z - NEAREST_TIE_EPS {
-                continue; // a face hit is strictly nearer
+            if nearest.is_some_and(|(pz, ..)| z < pz) {
+                continue; // farther than the shortest so far
             }
             let Some(verts) = portal_poly(portal_vertices, info) else {
                 continue;
@@ -156,18 +204,28 @@ pub(crate) fn down_ray_pick(
                 continue;
             }
             let other = if chosen == gi { r.group as usize } else { gi };
+            let across = (nav.get(other).is_some() && other != chosen).then_some(other);
+            nearest = Some((z, chosen, across));
+        }
+    }
+    // Then raced once against the face best (`0x6be421`-`0x6be434`): taken while `best − z < tie`,
+    // strictly, a NaN refused, so a coincident portal wins.
+    let mut across: Option<usize> = None;
+    if let Some((z, chosen, other)) = nearest {
+        if (best_z - z).partial_cmp(&NEAREST_TIE_YD) == Some(std::cmp::Ordering::Less) {
             best_z = z;
             best = Some(chosen);
-            across = (nav.get(other).is_some() && other != chosen).then_some(other);
+            across = other;
         }
     }
 
     // Outside: nothing within the ray, or an exterior winner; the client appends no seeds.
     let Some(in_group) = best else {
         // Leg C, the camera-void fallback (the module doc's deviation): only when both legs missed
-        // and no terrain lies at or below the eye. Leg A's rules; one root, no `across`.
-        if terrain_z.is_some_and(|tz| tz <= eye[2]) {
-            return DownRaySeeds::default();
+        // in every placement and no terrain lies at or below the eye. Leg A's rules; one root, no
+        // `across`.
+        if shared.is_some() || terrain_z.is_some_and(|tz| tz <= eye[2]) {
+            return (DownRaySeeds::default(), None);
         }
         let mut fb_z = f32::NEG_INFINITY;
         let mut fb: Option<usize> = None;
@@ -184,27 +242,37 @@ pub(crate) fn down_ray_pick(
                 }
             }
         }
-        let named = fb.filter(|&g| {
-            eye[2] - fb_z <= MAX_FLOOR_DROP && nav.get(g).is_some_and(|n| n.flags & EXTERIOR == 0)
-        });
-        return DownRaySeeds {
+        let Some(fb) = fb.filter(|_| eye[2] - fb_z <= MAX_FLOOR_DROP) else {
+            return (DownRaySeeds::default(), None);
+        };
+        let named = nav
+            .get(fb)
+            .is_some_and(|n| n.flags & EXTERIOR == 0)
+            .then_some(fb);
+        let seeds = DownRaySeeds {
             in_group: named,
             across: None,
         };
+        return (seeds, Some(eye[2] - fb_z));
     };
-    if eye[2] - best_z > MAX_FLOOR_DROP || nav.get(in_group).is_none_or(|g| g.flags & EXTERIOR != 0)
-    {
-        return DownRaySeeds::default();
+    if eye[2] - best_z > MAX_FLOOR_DROP {
+        return (DownRaySeeds::default(), None);
     }
     // The terrain race: terrain above the eye is off the segment; terrain strictly nearer than the
     // WMO hit is open ground, outside; a tie keeps the WMO (the client's strict `<`).
     if terrain_z.is_some_and(|tz| tz <= eye[2] && tz > best_z) {
-        return DownRaySeeds::default();
+        return (DownRaySeeds::default(), None);
     }
-    DownRaySeeds {
+    let depth = Some(eye[2] - best_z);
+    // An exterior winner is outside, its depth kept for the race across placements.
+    if nav.get(in_group).is_none_or(|g| g.flags & EXTERIOR != 0) {
+        return (DownRaySeeds::default(), depth);
+    }
+    let seeds = DownRaySeeds {
         in_group: Some(in_group),
         across,
-    }
+    };
+    (seeds, depth)
 }
 
 /// The zone-text ray length, the client's `[0x8022cc]` = 1000.0; the render probe's is 1760.
@@ -221,6 +289,7 @@ const ZONE_RAY_LEN: f32 = 1000.0;
 ///
 /// The portal leg belongs to the camera's render seed alone: a doorway plane under the eye must
 /// not claim the interior. `None` is outdoors; [`down_ray_claim`] keeps an outdoor-class winner.
+#[cfg(test)]
 pub(crate) fn area_down_ray(
     tris: &[Vec<[[f32; 3]; 3]>],
     bounds: &[Option<([f32; 3], [f32; 3])>],
@@ -246,7 +315,7 @@ pub(crate) struct DownRayClaim {
     pub(crate) outdoor: bool,
 }
 
-/// [`area_down_ray`] without the outdoor collapse: the light chain tells an outdoor-class face (a
+/// `area_down_ray` without the outdoor collapse: the light chain tells an outdoor-class face (a
 /// deck) from open terrain.
 pub(crate) fn down_ray_claim(
     tris: &[Vec<[[f32; 3]; 3]>],
@@ -614,6 +683,80 @@ mod tests {
             no_terrain(&tris, &groups, &pverts, &[pinfo], &refs, [0.0, 0.0, 12.0]).in_group,
             Some(1)
         );
+    }
+
+    /// The portal leg's accept (`0x6be421`-`0x6be434`) is `portal − best < 1e-4` (`0x80c4f4`) in
+    /// fractions of the 1760 yd ray (`0x80fec8`): a floor-hole portal up to 0.176 yd below the
+    /// nearest face still wins, strictly, and one further below does not.
+    #[test]
+    fn the_portal_tie_is_a_fraction_of_the_ray() {
+        let refs = [
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: 1,
+            },
+        ];
+        let (pverts, pinfo) = horizontal_portal(10.0, 5.0);
+        let with_slab_at = |z: f32| {
+            let (groups, mut tris) = stairwell();
+            tris[0].extend(quad(z, 5.0));
+            no_terrain(&tris, &groups, &pverts, &[pinfo], &refs, [0.0, 0.0, 12.0]).in_group
+        };
+        assert_eq!(with_slab_at(10.15), Some(1), "0.15 yd is inside the tie");
+        assert_eq!(with_slab_at(10.2), Some(0), "0.2 yd is past it");
+    }
+
+    /// `0x6a3f80` finds the nearest portal alone, keeping a hit at most the shortest so far (the
+    /// later of equals, `0x6a4111`), and `0x6be250` races that one portal against the face best
+    /// once: a second portal farther down, though within the tie, never replaces the nearest.
+    #[test]
+    fn the_nearest_portal_is_found_alone_then_raced() {
+        let with_second_at = |z1: f32| {
+            let (mut groups, mut tris) = stairwell();
+            groups[0].ref_count = 2;
+            tris[0].extend(quad(10.15, 5.0));
+            let side_room = nav(0, [-20.0, -20.0, 0.0], [20.0, 20.0, 9.0], 2, 0);
+            let groups = [groups[0], groups[1], side_room];
+            let tris = [tris[0].clone(), Vec::new(), Vec::new()];
+            let (mut verts, near) = horizontal_portal(10.0, 5.0);
+            let (far_verts, mut far) = horizontal_portal(z1, 5.0);
+            far.start_vertex = 4;
+            verts.extend(far_verts);
+            // Both the stairwell's: the eye above each plane picks the ref's other group.
+            let refs = [
+                WmoPortalRef {
+                    portal: 0,
+                    group: 1,
+                    side: -1,
+                },
+                WmoPortalRef {
+                    portal: 1,
+                    group: 2,
+                    side: -1,
+                },
+            ];
+            no_terrain(
+                &tris,
+                &groups,
+                &verts,
+                &[near, far],
+                &refs,
+                [0.0, 0.0, 12.0],
+            )
+            .in_group
+        };
+        assert_eq!(
+            with_second_at(9.9),
+            Some(1),
+            "the nearer portal is the one raced"
+        );
+        assert_eq!(with_second_at(10.0), Some(2), "the later of equals is kept");
     }
 
     #[test]

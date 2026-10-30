@@ -183,7 +183,8 @@ fn raise_panic(vm: &mut Vm, payload: Box<dyn Any + Send>) -> LuaError {
         p.retain(|&t, e| e.2 != id || vm.heap.user_tag(e.3) == Some(t));
         p.insert(tag, (Some(payload), text, id, r));
     });
-    vm.throw(u)
+    // A panic is no Lua error: it runs no error function, which could swallow it, on its way out.
+    LuaError { value: u }
 }
 
 /// The metatable of panic values, made once per VM and kept in its registry.
@@ -736,6 +737,56 @@ impl Lua {
         })
     }
 
+    /// `f` behind a check of its receiver, as each method of a 1.12 widget class opens: argument 1
+    /// read as a [`Receiver`] (`lua_type`, then `lua_rawgeti(1, 0)` and `lua_touserdata`, as
+    /// `Frame:Show` reads it at `0x775777`-`0x7757a6`), an `Err` from `check` raised as the
+    /// callback's own error is, and otherwise `f`'s own host closure run in the same call, with no
+    /// second call into the VM. `None` for a function that is no host closure.
+    pub fn guard_receiver<C>(&self, f: &Function, check: C) -> Result<Option<Function>>
+    where
+        C: Fn(&Lua, Receiver) -> Result<()> + 'static,
+    {
+        let (inner, name) = {
+            let vm = self.vm();
+            let V::Func(r) = f.0.get().unpack() else {
+                return Ok(None);
+            };
+            match vm.heap.func(r) {
+                benilla_lua::heap::FuncObj::Native {
+                    host: Some(host),
+                    name,
+                    ..
+                } => (host.clone(), *name),
+                _ => return Ok(None),
+            }
+        };
+        let host: HostFn = Rc::new(move |vm: &mut Vm, nargs: usize| {
+            let receiver = match vm.args(nargs).first().map(|v| v.unpack()) {
+                Some(V::Table(t)) => {
+                    match vm.heap.table(t).get(benilla_lua::Value::Num(0.0)).unpack() {
+                        V::Light(p) => Receiver::Object(p),
+                        _ => Receiver::NoObject,
+                    }
+                }
+                _ => Receiver::NotTable,
+            };
+            let lua = Lua::of_vm(vm);
+            in_callback(&lua, vm, || {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    check(&lua, receiver)
+                }));
+                match res {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(raise(&lua, nargs, e)),
+                    Err(payload) => Err(raise_panic(lua.vm(), payload)),
+                }
+            })?;
+            inner(vm, nargs)
+        });
+        let g = self.vm().new_host(name, host);
+        Ok(Some(Function(self.make_ref(g))))
+    }
+
     /// Load a chunk. Unnamed, it is named after the Rust call site, as mlua names it.
     #[track_caller]
     pub fn load(&self, chunk: impl AsChunk) -> Chunk<'_> {
@@ -946,9 +997,20 @@ impl Lua {
 
     /// Call `f` protected, from the host: its results, or its error.
     pub(crate) fn call_raw(&self, f: benilla_lua::Value, args: MultiValue) -> Result<MultiValue> {
+        self.call_raw_with(f, args, None)
+    }
+
+    /// [`Lua::call_raw`] with `handler` as the call's error function (`Vm::pcall_value_with`).
+    fn call_raw_with(
+        &self,
+        f: benilla_lua::Value,
+        args: MultiValue,
+        handler: Option<&Function>,
+    ) -> Result<MultiValue> {
         let argv: Vec<benilla_lua::Value> = args.iter().map(|v| self.unwrap(v)).collect();
+        let h = handler.map(|h| self.unref(&h.0));
         // The arguments' handles stay alive until the values are on the VM's stack.
-        let r = self.vm().pcall_value(f, &argv, -1);
+        let r = self.vm().pcall_value_with(f, &argv, -1, h);
         drop(args);
         match r {
             Ok(vals) => Ok(vals.into_iter().map(|v| self.wrap(v)).collect()),
@@ -956,17 +1018,34 @@ impl Lua {
         }
     }
 
+    /// Call any value protected, from the host, as `lua_call` on the stack does: a function runs,
+    /// a value with `__call` is called through it, and anything else raises `attempt to call a
+    /// <type> value` (`Vm::pcall_value`). Not mlua's API: benilla's own, for a callee that is
+    /// held as a value and may be none.
+    pub fn call_value<R: FromLuaMulti>(&self, f: &Value, args: impl IntoLuaMulti) -> Result<R> {
+        let a = args.into_lua_multi(self)?;
+        let r = self.call_raw(self.unwrap(f), a)?;
+        R::from_lua_multi(r, self)
+    }
+
     /// Call `func`, protected and with no arguments, while each named global holds the value
     /// paired with it, each earlier value put back after: the 1.12 script handler's convention
     /// (`Vm::call_with_globals`) in one VM call, without a handle per global read or written.
-    pub fn call_with_globals(&self, func: &Function, globals: &[(&str, Value)]) -> Result<()> {
+    /// `handler` is the call's error function, run at the raise as `lua_pcall`'s `errfunc` is.
+    pub fn call_with_globals(
+        &self,
+        func: &Function,
+        globals: &[(&str, Value)],
+        handler: Option<&Function>,
+    ) -> Result<()> {
         let f = self.unref(&func.0);
+        let h = handler.map(|h| self.unref(&h.0));
         let sets: Vec<(benilla_lua::value::StrRef, benilla_lua::Value)> = globals
             .iter()
             .map(|(name, v)| (self.vm().heap.intern(name.as_bytes()), self.unwrap(v)))
             .collect();
         self.vm()
-            .call_with_globals(f, &sets)
+            .call_with_globals(f, &sets, h)
             .map_err(|e| self.error_from(e))
     }
 
@@ -1080,6 +1159,17 @@ pub struct Thread(());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LightUserData(pub *mut c_void);
+
+/// A method's argument 1 as the 1.12 member prologue reads it ([`Lua::guard_receiver`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Receiver {
+    /// No table, or no argument.
+    NotTable,
+    /// A table whose `[0]` holds no light userdata.
+    NoObject,
+    /// The light userdata at `[0]`, as its address.
+    Object(usize),
+}
 
 #[derive(Clone, Debug, Default)]
 pub enum Value {
@@ -1648,6 +1738,20 @@ impl Function {
         let lua = &self.0.lua();
         let a = args.into_lua_multi(lua)?;
         let r = lua.call_raw(self.0.get(), a)?;
+        R::from_lua_multi(r, lua)
+    }
+
+    /// [`Function::call`] with `handler` as its error function, as `lua_pcall` takes an
+    /// `errfunc`: it runs at the raise, before the stack unwinds, and its answer is the error.
+    /// Not mlua's API: benilla's own, for the 1.12 script runners.
+    pub fn call_under<R: FromLuaMulti>(
+        &self,
+        handler: &Function,
+        args: impl IntoLuaMulti,
+    ) -> Result<R> {
+        let lua = &self.0.lua();
+        let a = args.into_lua_multi(lua)?;
+        let r = lua.call_raw_with(self.0.get(), a, Some(handler))?;
         R::from_lua_multi(r, lua)
     }
 

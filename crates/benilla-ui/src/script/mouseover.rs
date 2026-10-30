@@ -13,7 +13,17 @@ use mlua::Lua;
 
 use crate::widget::{FrameHandle, FrameKind};
 
+use super::live::LiveQuery;
 use super::{event, Model, UiScript};
+
+/// The question the world's pick asks before it publishes: whether the camera is in freelook,
+/// which blanks the WorldFrame's pick from the call that entered it (`0x483e80` sets
+/// `[wf+0x38c]&2`).
+pub struct FreelookQuery;
+
+impl LiveQuery for FreelookQuery {
+    type Answer = bool;
+}
 
 /// What a frame's leave notify (`vtbl+0x50`) does beyond its `OnLeave`.
 enum LeaveClass {
@@ -77,6 +87,20 @@ pub(super) fn leave(lua: &Lua, h: FrameHandle, script: Option<u32>) {
     }
 }
 
+/// A frame's enter notify (`vtbl+0x4c`) with `script` the id whose `OnEnter` fires: the walk's
+/// motion enter and an enabled Button's `Enable()` while hovered (`0x77918e`) both come here. A
+/// hyperlink button's enter is its text frame's `OnHyperlinkEnter` (`0x7a34b0`); the base
+/// enter's plain runner (`0x76b6e5` → `0x702690`) sets no arg global. An enabled Button
+/// refreshes its label after the base enter and its `OnEnter` (`0x76b6a0`, then `0x7794ab`).
+pub(super) fn enter(lua: &Lua, h: FrameHandle, script: u32) {
+    if !super::hyperlink::hover(lua, h, true) {
+        if let Err(e) = event::fire_widget_handler(lua, script, "OnEnter", Vec::new()) {
+            model(lua).record_lua_error(&e);
+        }
+    }
+    super::button::refresh_label(&mut model(lua), h);
+}
+
 /// The publisher behind the change check: an unchanged mouseover does nothing (`0x4820b5`). A
 /// change away from a published one requests the fade on `GameTooltip` (`0x4928d5`, `0x492909` →
 /// `0x530ae0`), whoever holds it, after `"mouseover"` stops naming the old unit (the pair is zeroed
@@ -89,15 +113,20 @@ pub(super) fn publish(lua: &Lua, guid: Option<u64>) -> bool {
         }
         let prev = std::mem::replace(&mut model.world_mouseover, guid);
         // The token resolver reads the pair (`0x515970`), so `"mouseover"` names a unit only while
-        // it is the published guid; the app pushes the new unit after the publish.
+        // it is the published guid; the app pushes the new unit after the publish. The old unit's
+        // stand-in entry goes with it, unless the target still names it.
         if model
             .pushed_unit("mouseover")
             .is_some_and(|u| Some(u.guid) != guid)
         {
             model.units_by_lower.remove("mouseover");
         }
-        if model.unit_guids.mouseover != 0 && Some(model.unit_guids.mouseover) != guid {
+        let old = model.unit_guids.mouseover;
+        if old != 0 && Some(old) != guid {
             model.unit_guids.mouseover = 0;
+            if old != model.unit_guids.target {
+                model.unit_guids.held.remove(&old);
+            }
         }
         (prev, model.arena.lookup("GameTooltip"))
     };
@@ -137,6 +166,12 @@ impl UiScript {
         self.model_ref().world_mouseover
     }
 
+    /// Whether the camera is in freelook as of here ([`FreelookQuery`]), through the lent host;
+    /// `None` with no host to ask.
+    pub fn freelook_now(&self) -> Option<bool> {
+        super::live::ask(&self.lua, &FreelookQuery)
+    }
+
     /// Publish the world pick's mouseover ([`publish`]): the caller then pushes a unit's
     /// `"mouseover"` and builds its plate. Returns whether it changed.
     pub fn publish_world_mouseover(&mut self, guid: Option<u64>) -> bool {
@@ -145,7 +180,8 @@ impl UiScript {
 
     /// Seat a published unit in the token resolver, held with its `UNIT_FIELD_TARGET`: the
     /// publisher writes the pair (`0x492890`) before it signals (`0x4929b3`), so `"mouseover"`
-    /// names the unit inside its `UPDATE_MOUSEOVER_UNIT`. The app's next token push carries it on.
+    /// names the unit inside its `UPDATE_MOUSEOVER_UNIT`, and it stays the global until the next
+    /// publish.
     pub fn seat_world_mouseover_unit(&mut self, guid: u64, target: u64) {
         let mut model = self.model_mut();
         if model.world_mouseover == Some(guid) {

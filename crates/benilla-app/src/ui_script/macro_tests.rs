@@ -20,6 +20,7 @@ fn harness() -> UiScript {
 
 fn harness_with(player: &str) -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The global strings this window formats.
     s.run(
@@ -545,6 +546,10 @@ fn the_tab_highlight_is_exactly_its_tab() {
 fn the_icon_picker_opens_without_raising() {
     let _data = benilla_formats::wow_data_or_skip!();
     let s = harness();
+    // Edit mode puts the selected macro's name in the box (`Blizzard_MacroUI.lua:226`), and
+    // `EditBox:SetText` raises for the nil of an empty slot (`0x79854c`), so a macro is selected.
+    s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
+    s.run("ShowMacroFrame()").unwrap();
     select_first(&s);
     let _ = s.errors();
     s.run("MacroEditButton:Click()").unwrap();

@@ -33,6 +33,11 @@ const TREE: &str = r#"
 
 /// Both halves of the UI pass over [`TREE`] on a `w`×`h` window, the dial at `ui_scale`.
 fn app(w: u32, h: u32, ui_scale: f32) -> App {
+    app_with(w, h, ui_scale, true)
+}
+
+/// [`app`] with `widescreen` as given.
+fn app_with(w: u32, h: u32, ui_scale: f32, widescreen: bool) -> App {
     let script = UiScript::new().unwrap();
     script.run(TREE).unwrap();
     let mut app = App::new();
@@ -52,6 +57,7 @@ fn app(w: u32, h: u32, ui_scale: f32) -> App {
     app.init_resource::<super::UiClock>();
     app.init_resource::<benilla_world::frame_pace::FrameStep>();
     app.insert_resource(super::UiScaleCvar(ui_scale));
+    app.insert_resource(crate::video::Widescreen(widescreen));
     app.world_mut().spawn((
         Window {
             resolution: UVec2::new(w, h).into(),
@@ -280,4 +286,70 @@ fn the_stock_interface_inside_uiparent_is_unmoved_by_where_the_scale_lives() {
         rehit.len(),
         &rehit[..rehit.len().min(20)]
     );
+}
+
+/// With `widescreen` 0 the interface's cells are built for 4/3 whatever the window
+/// (`0x4901e0` → `0x48fe1e` → `0x41ad10`): the root is 1024 by 768 on a 16:9 window, which the
+/// frame then stretches across it.
+#[test]
+fn widescreen_off_lays_the_interface_out_four_by_three() {
+    let wide = app_with(1920, 1080, 1.0, false);
+    assert!(close(eval(&wide, "return GetScreenWidth()") as f32, 1024.0));
+    assert!(close(eval(&wide, "return GetScreenHeight()") as f32, 768.0));
+    let on = app_with(1920, 1080, 1.0, true);
+    assert!(close(
+        eval(&on, "return GetScreenWidth()") as f32,
+        768.0 * 16.0 / 9.0
+    ));
+}
+
+/// The dial's cap reads the cells' aspect (`0x490770`, the callbacks' `0.75·a`): a tall window
+/// with `widescreen` 0 is 4/3 to it, so the dial stands. With it on, the callback's cap takes the
+/// dial to 0.5625, which the sink floors at 0.64 (`0x490770` → `0x494550`).
+#[test]
+fn widescreen_off_never_caps_the_ui_scale() {
+    let tall = app_with(768, 1024, 1.0, false);
+    assert!(close(eval(&tall, "return UIParent:GetScale()") as f32, 1.0));
+    let on = app_with(768, 1024, 1.0, true);
+    let got = eval(&on, "return UIParent:GetScale()") as f32;
+    assert!(close(got, 0.64), "{got}");
+}
+
+/// `w`×`h`, the primary window resized.
+fn resize(app: &mut App, w: u32, h: u32) {
+    app.world_mut()
+        .query_filtered::<&mut Window, With<PrimaryWindow>>()
+        .single_mut(app.world_mut())
+        .expect("the window")
+        .resolution = UVec2::new(w, h).into();
+    app.update();
+}
+
+/// The automatic scale reads the display aspect `0x4901e0` answers (`0x492fb4`), exactly 4/3 with
+/// `widescreen` 0, so a display up to 768 tall keeps 1.0 whatever its shape; and a resize runs it
+/// (`0x492e90`) though the 4:3 cells stay. A dial under the floor reaches it.
+#[test]
+fn widescreen_off_runs_the_automatic_scale_at_four_thirds() {
+    // The 4:3 widths that round down, a wide window and a narrow one.
+    for (w, h) in [(933, 700), (1021, 766), (1280, 700), (600, 766)] {
+        let mut app = app_with(1024, 768, 0.5, false);
+        resize(&mut app, w, h);
+        let got = eval(&app, "return UIParent:GetScale()") as f32;
+        assert_eq!(got, 1.0, "{w}x{h}");
+    }
+    // Above 768 it is `768/h`, floored at 0.9.
+    let mut app = app_with(1024, 768, 0.5, false);
+    resize(&mut app, 1920, 800);
+    assert_eq!(eval(&app, "return UIParent:GetScale()") as f32, 0.96);
+}
+
+/// With `widescreen` 0 the cells take exactly `RN24(4/3)` (stored at `0x48fe1e`), whatever the
+/// window's height: the root is exactly 1024 wide.
+#[test]
+fn widescreen_off_keeps_the_cells_at_exactly_four_thirds() {
+    for (w, h) in [(1920, 770), (1280, 800), (1920, 1537)] {
+        let app = app_with(w, h, 1.0, false);
+        let width = eval(&app, "return GetScreenWidth() * UIParent:GetScale()") as f32;
+        assert_eq!(width, 1024.0, "{w}x{h}");
+    }
 }

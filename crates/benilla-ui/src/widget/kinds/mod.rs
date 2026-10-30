@@ -213,6 +213,15 @@ impl KindState {
         }
     }
 
+    /// The message kinds' XML `<FontString bytes>` line length, mutably.
+    pub fn message_line_bytes_mut(&mut self) -> Option<&mut LineBytes> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(&mut smf.line_bytes),
+            KindState::Message(mf) => Some(&mut mf.line_bytes),
+            _ => None,
+        }
+    }
+
     /// The message kinds' sweep-skip generation ([`ScrollingMessageState::lines_gen`]).
     pub fn lines_gen(&self) -> Option<u64> {
         match self {
@@ -295,8 +304,9 @@ pub struct TooltipState {
     pub left_lines: Vec<RegionHandle>,
     /// The right-column pool (the `AddDoubleLine`/`TextRightN` half), parallel to `left_lines`.
     pub right_lines: Vec<RegionHandle>,
-    /// `SetOwner`'s frame, dropped on hide.
-    pub owner: Option<FrameHandle>,
+    /// `SetOwner`'s object by its id, a frame or a region: the reference keeps its layout
+    /// (`+0x314`, the object's `+0x24`, `0x5313c9`) with no type test. Dropped on hide.
+    pub owner: Option<crate::layout::Handle>,
     /// `SetOwner`'s x and y offsets (`+0x3c4`, `+0x3c8`, stored by the core at `0x53001c`), which
     /// every anchor apply reads.
     pub owner_offset: (f32, f32),
@@ -318,6 +328,12 @@ pub struct TooltipState {
     /// health watcher (`0x467e70`, registered at `0x52a0a8`) drives the bar; a `set_unit` push of
     /// that unit, under any token, re-drives it.
     pub unit_guid: Option<u64>,
+    /// The game object this tooltip shows (`+0x370`/`+0x374`, stored at `0x52aa8c`), which the lock
+    /// key's record callback builds again (`0x52ad34`); every clear zeroes it (`0x5300b9`).
+    pub object_guid: Option<u64>,
+    /// The corpse this tooltip shows (`+0x388`/`+0x38c`, stored at `0x52af3e`), which the owner's
+    /// name callback builds again (`0x52b004`); every clear zeroes it (`0x5300d1`).
+    pub corpse_guid: Option<u64>,
     /// The unit's health as the bar was last driven with it: the watcher's copy of the field
     /// (`0x4667a0`), which a values update compares before calling it (`0x4655bb`).
     pub unit_health: u32,
@@ -1573,6 +1589,18 @@ pub fn slider_set_value(v: f32, min: f32, span: f32, step: f32) -> f32 {
 }
 
 impl SliderState {
+    /// The span `SetMinMaxValues` stores beside the min, `f32(max - min)` (`0x7898ff`-`0x78990d`).
+    pub fn span(&self) -> f32 {
+        (f64::from(self.max) - f64::from(self.min)) as f32
+    }
+
+    /// `GetMinMaxValues` (`0x7906e0`): the min, then the double `span + min`, never the max as
+    /// given (`0x790778`-`0x79078c`), so `(0.1, 1)` reads back 0.9999999776482582.
+    pub fn min_max_values(&self) -> (f64, f64) {
+        let min = f64::from(self.min);
+        (min, f64::from(self.span()) + min)
+    }
+
     /// The value fraction in `[0, 1]`; `0.0` when `max <= min`, the thumb at the track's start.
     pub fn fraction(&self) -> f32 {
         if self.max > self.min {
@@ -1589,8 +1617,7 @@ impl SliderState {
         if !self.range_valid {
             return None;
         }
-        let span = (f64::from(self.max) - f64::from(self.min)) as f32;
-        let settled = slider_set_value(v, self.min, span, self.step);
+        let settled = slider_set_value(v, self.min, self.span(), self.step);
         let first = !self.has_value;
         self.has_value = true;
         (first || settled != self.value).then(|| {
@@ -1607,8 +1634,7 @@ impl SliderState {
         if !self.range_valid {
             return None;
         }
-        let span = (f64::from(self.max) - f64::from(self.min)) as f32;
-        let max = (f64::from(span) + f64::from(self.min)) as f32;
+        let max = (f64::from(self.span()) + f64::from(self.min)) as f32;
         self.set_min_max(self.min, max)
     }
 

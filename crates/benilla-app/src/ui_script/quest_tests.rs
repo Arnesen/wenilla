@@ -10,6 +10,7 @@ use super::test_ui::load_ui as load_xml;
 fn questgiver_show_hide_plays_open_and_close_kits() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -34,7 +35,7 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
-        body: "Speak with the captain.".into(),
+        quest_text: "Speak with the captain.".into(),
         objectives: "Report to the captain.".into(),
         ..QuestState::default()
     }));
@@ -69,6 +70,7 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
 fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -159,6 +161,7 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
 fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -175,19 +178,18 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     load_xml(&s, "Interface\\FrameXML\\QuestFrame.xml");
     load_xml(&s, "Interface\\FrameXML\\QuestLogFrame.xml");
 
-    let choice = |name: &str, quality: u32| benilla_ui::script::QuestItemView {
+    let choice = |name: &str, quality: i32| benilla_ui::script::QuestItemView {
         item_id: 0,
         name: Some(name.into()),
         texture: None,
         count: 1,
         quality,
-        usable: true,
         ..Default::default()
     };
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
-        body: "Kill the kobolds infesting the mine.".into(),
+        quest_text: "Kill the kobolds infesting the mine.".into(),
         objectives: "Slay 10 Kobold Vermin.".into(),
         choices: vec![choice("Worn Sword", 1), choice("Worn Mace", 1)],
         rewards: vec![choice("Militia Hammer", 1)],
@@ -254,6 +256,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
 fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -276,13 +279,12 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
         texture: None,
         count: 1,
         quality: 1,
-        usable: true,
         ..Default::default()
     };
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Reward,
         title: "A Threat Within".into(),
-        body: "Well done.".into(),
+        reward_text: "Well done.".into(),
         choices: vec![choice("Worn Sword"), choice("Worn Mace")],
         ..QuestState::default()
     }));
@@ -304,10 +306,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     );
     // No choice picked: `QuestChooseRewardError()` instead (`QuestFrame.lua:97-98`).
     s.run("QuestFrameCompleteQuestButton:Click()").unwrap();
-    assert!(
-        s.take_quest_actions().is_empty(),
-        "must pick a choice first"
-    );
+    assert!(s.take_quest_calls().is_empty(), "must pick a choice first");
 
     s.run("QuestRewardItem2:Click()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -319,8 +318,8 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
 
     s.run("QuestFrameCompleteQuestButton:Click()").unwrap();
     assert_eq!(
-        s.take_quest_actions(),
-        vec![benilla_ui::script::QuestAction::Reward(1)],
+        s.take_quest_calls(),
+        vec![benilla_ui::script::QuestCall::Reward(1)],
         "row 2 (1-based) -> wire index 1 (0-based)"
     );
 }
@@ -330,6 +329,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
 fn greeting_goodbye_button_closes_the_window() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -377,6 +377,7 @@ fn greeting_goodbye_button_closes_the_window() {
 fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -396,7 +397,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
-        body: "Kill kobolds.".into(),
+        quest_text: "Kill kobolds.".into(),
         ..QuestState::default()
     }));
     s.set_unit(
@@ -499,6 +500,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
 fn write_on_still_fades_when_instant_text_is_off() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -518,7 +520,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
-        body: "Kill kobolds.".into(),
+        quest_text: "Kill kobolds.".into(),
         ..QuestState::default()
     }));
     s.set_unit(
@@ -572,6 +574,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
 fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -591,7 +594,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
         title: "A Threat Within".into(),
-        body: "Kill things.".into(),
+        quest_text: "Kill things.".into(),
         ..QuestState::default()
     }));
     s.set_unit(
@@ -645,6 +648,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
 fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // Stock sizes each row right after `SetText`, `GetTextHeight() + 2` (`QuestFrame.lua:245`), so
     // the measure must be synchronous, as the app's is.
@@ -739,6 +743,7 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
 fn reward_rows_preview_and_post_without_selecting_the_choice() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -768,13 +773,12 @@ fn reward_rows_preview_and_post_without_selecting_the_choice() {
         texture: None,
         count: 1,
         quality: 1,
-        usable: true,
         link: Some(link.into()),
     };
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Reward,
         title: "A Threat Within".into(),
-        body: "Well done.".into(),
+        reward_text: "Well done.".into(),
         choices: vec![
             item(2299, "Worn Sword", SWORD),
             item(2300, "Worn Mace", MACE),

@@ -8,17 +8,15 @@ use benilla_protocol::field::{
     FIELD_UNIT_NPC_FLAGS,
 };
 use benilla_protocol::ObjectFields;
-use benilla_ui::script::{ContainerSlot, ContainerState, MerchantItem, MerchantState, UiScript};
-use benilla_world::interact::WorldRightClick;
-use bevy::ecs::system::RunSystemOnce;
+use benilla_ui::script::{
+    ClickMode, ContainerSlot, ContainerState, MerchantItem, MerchantState, UiScript,
+};
 use bevy::prelude::*;
 
 use super::front_tests::{fix, Fix, ME, MOB, OLD};
-use super::{by_name, click, cursor_mode, Hovered, PickOcclusion, PressPick};
+use super::{cursor_mode, Hovered, PickOcclusion, PressPick};
 use crate::net::{ClientCommand, GuidIndex, ObjectStore};
-use crate::target::TargetByNameRequest;
 use crate::ui_action::UiErrorKeys;
-use crate::vplates::PlateClicks;
 
 /// A gossip NPC, and a hostile unit.
 const NPC: u64 = 0x51;
@@ -115,35 +113,20 @@ impl Fix {
 
     /// The world's right-click on what `press_on` latched.
     fn right_click(&mut self) {
-        self.app
-            .world_mut()
-            .resource_mut::<Messages<WorldRightClick>>()
-            .write(WorldRightClick);
-        self.app
-            .world_mut()
-            .run_system_once(click::act_on_right_click)
-            .expect("the right-click runs");
+        let world = self.app.world_mut();
+        super::record_error_lines(world);
+        super::release_click(world, ClickMode::Action);
     }
 
-    /// A right-click on `unit`'s nameplate, begun on what the press latched, through the systems
-    /// in the schedule's order (`plate_right_click_runs_after_the_script_calls_head` pins it):
-    /// the click's `SelectTarget`, the head of the script calls' pass that binds what it parked,
-    /// then the unit's interact.
-    fn plate_right_click(&mut self, unit: Entity) {
-        self.app
-            .world_mut()
-            .resource_mut::<PlateClicks>()
-            .right
-            .push(unit);
-        self.app
-            .world_mut()
-            .run_system_once(click::select_on_plate_click)
-            .expect("the plate click runs");
-        self.bind();
-        self.app
-            .world_mut()
-            .run_system_once(click::act_on_interact)
-            .expect("the unit's interact runs");
+    /// A mouse right-click on `guid`'s nameplate, begun on what the press latched, through the
+    /// click's call (`0x7cb910` → `0x4949f0` → `0x492820`).
+    fn plate_right_click(&mut self, guid: u64) {
+        super::click_plate(
+            self.app.world_mut(),
+            guid,
+            benilla_ui::script::PlateAction::Interact,
+            false,
+        );
     }
 
     /// Everything sent since the last look.
@@ -151,14 +134,18 @@ impl Fix {
         self.rx.try_iter().collect()
     }
 
+    /// The refusals shown inside a call ([`super::error_lines`]), then those queued outside one.
     fn errors(&self) -> Vec<&'static str> {
-        self.app
-            .world()
-            .resource::<UiErrorKeys>()
-            .snapshot()
-            .iter()
-            .map(|e| e.key)
-            .collect()
+        let world = self.app.world();
+        let mut keys = super::error_lines(world);
+        keys.extend(
+            world
+                .resource::<UiErrorKeys>()
+                .snapshot()
+                .iter()
+                .map(|e| e.key),
+        );
+        keys
     }
 
     /// The player's control, `[0xb4b3e4]`.
@@ -346,7 +333,7 @@ fn a_charmed_players_world_right_click_does_nothing_and_a_plates_still_interacts
         let npc = f.unit_with(NPC, 3.0, &[(FIELD_UNIT_NPC_FLAGS, GOSSIP)]);
         f.press_on(npc, NPC, false);
         if plate {
-            f.plate_right_click(npc);
+            f.plate_right_click(NPC);
         } else {
             f.right_click();
         }
@@ -358,6 +345,40 @@ fn a_charmed_players_world_right_click_does_nothing_and_a_plates_still_interacts
             "{what}"
         );
     }
+}
+
+/// Mid-combat, the world right-click's select (`0x492870` → `0x493540`) stops and re-swings at the
+/// new unit by Attack's own legs on it (`0x4938c8` → `0x5ecb70`: alive, `CanAttack` at
+/// `0x5ecc2e`), whatever cursor the press showed: a gossip NPC we can attack, pressed under the
+/// Speak cursor, is swung at, then talked to.
+#[test]
+fn a_right_click_mid_combat_reswings_at_an_attackable_unit_under_any_cursor() {
+    let mut f = fix(false);
+    f.app.world_mut().init_resource::<crate::player::Player>();
+    let old = f.app.world().resource::<GuidIndex>().0[&OLD];
+    // A creature (`OBJECT_FIELD_TYPE` 0x9), which the latch (`0x60ecb0`) looks up as a unit.
+    f.make_unit(old);
+    let npc = f.unit_with(NPC, 3.0, &[(2, 0x9), (FIELD_UNIT_NPC_FLAGS, GOSSIP)]);
+    f.app
+        .world_mut()
+        .insert_non_send_resource(UiScript::new().expect("a VM"));
+    crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
+        s.expect("a VM").run("AttackTarget()")
+    })
+    .expect("the attack runs");
+    f.press_on(npc, NPC, false);
+    f.right_click();
+    let sent = f.sent();
+    assert!(
+        swung_at(&sent, OLD),
+        "the attack began on the old target: {sent:?}"
+    );
+    assert!(
+        swung_at(&sent, NPC),
+        "the select re-swings at the NPC: {sent:?}"
+    );
+    assert!(greeted(&sent, NPC), "and the interact talks: {sent:?}");
+    assert_eq!(f.selected(), Some(NPC));
 }
 
 /// The router's nothing leg for a charmed player has no points to walk along (`0x492d3f` on a
@@ -431,7 +452,7 @@ fn a_plate_right_click_binds_then_selects_then_acts_in_the_references_order() {
         };
         let unit = f.unit_with(guid, 3.0, fields);
         f.press_on(unit, guid, attack);
-        f.plate_right_click(unit);
+        f.plate_right_click(guid);
         let sent = f.sent();
         let what = format!("attack leg {attack}, cursor up {cursor}: {sent:?}");
         assert_eq!(steps(&sent), want, "{what}");
@@ -530,12 +551,16 @@ fn the_skin_leg_measures_its_own_reach_not_the_spell_cursors() {
         );
         f.press_under_spell(body, CORPSE, false, spell_unable);
         f.right_click();
-        let cast = !f
-            .app
-            .world()
-            .resource::<crate::ui_action::ClickCasts>()
-            .0
-            .is_empty();
+        // The click's cast goes through the ladder inside the click's call.
+        let cast = f.sent().iter().any(|c| {
+            matches!(
+                c,
+                ClientCommand::CastSpell {
+                    spell_id: SKINNING,
+                    ..
+                }
+            )
+        });
         let walking = f.app.world().resource::<crate::player::Approach>().active();
         assert_eq!(
             (cast, walking),
@@ -578,14 +603,7 @@ fn the_router_legs_clear_the_payload_as_the_reference_does() {
             },
         };
         f.app.world_mut().resource_mut::<PressPick>().hovered = hovered;
-        f.app
-            .world_mut()
-            .resource_mut::<Messages<WorldRightClick>>()
-            .write(WorldRightClick);
-        f.app
-            .world_mut()
-            .run_system_once(click::world_right_click_payload)
-            .expect("the payload leg runs");
+        super::release_click(f.app.world_mut(), ClickMode::Action);
         assert_eq!(
             !f.held(),
             cleared,
@@ -642,41 +660,30 @@ fn a_right_press_with_a_payload_is_consumed_before_the_world_sees_it() {
     }
 }
 
-/// `TargetByName` (`0x489d60`) leaves the target alone on a miss and shows message `0x127`
-/// (`ERR_UNIT_NOT_FOUND`) for a name given (`0x489dbd`, tested on the raw string's first byte, so
-/// blanks count) or `0xb8` (`ERR_GENERIC_NO_TARGET`) for an empty one (`0x489dcf`); the chat
-/// layer's `/target` request is the binding's body. A hit shows nothing. The Lua binding's miss is
-/// pinned in `script_calls`, whose call host fires the lines inside the call.
+/// Talking to an NPC in reach whose dialog status is 1, unavailable, triggers Unavailable Quest
+/// Givers (`0x5f0268`-`0x5f0278`) ahead of its service ladder; another status triggers nothing.
+/// The click's select lit the NPC, which the selection's tutorial ladder then judges
+/// (`0x493789`).
 #[test]
-fn a_target_name_that_finds_nobody_shows_the_references_line() {
-    let request = |f: &mut Fix, name: &str| {
-        f.app
-            .world_mut()
-            .resource_mut::<Messages<TargetByNameRequest>>()
-            .write(TargetByNameRequest { name: name.into() });
-        f.app
-            .world_mut()
-            .run_system_once(by_name::target_by_name_requests)
-            .expect("the drain runs");
-    };
-    for (name, line) in [
-        ("Nobody", "ERR_UNIT_NOT_FOUND"),
-        ("   ", "ERR_UNIT_NOT_FOUND"),
-        ("", "ERR_GENERIC_NO_TARGET"),
-    ] {
+fn talking_to_an_npc_with_status_one_triggers_unavailable_quest_givers() {
+    for (status, fired) in [(1, vec![0x2b]), (5, vec![])] {
         let mut f = fix(false);
-        request(&mut f, name);
-        assert_eq!(f.errors(), [line], "{name:?}");
-        assert_eq!(f.selected(), Some(OLD), "{name:?}: the target stays");
-        assert!(f.sent().is_empty(), "{name:?}");
+        f.app.world_mut().init_resource::<crate::player::Player>();
+        f.app
+            .world()
+            .resource::<crate::tutorial::Tutorials>()
+            .lock()
+            .apply_flags(&[0u8; 32]);
+        let npc = f.unit_with(NPC, 3.0, &[(FIELD_UNIT_NPC_FLAGS, GOSSIP)]);
+        f.app
+            .world_mut()
+            .resource_mut::<crate::ui_quest::QuestGiver>()
+            .set_status(NPC, status);
+        f.press_on(npc, NPC, false);
+        f.right_click();
+        assert!(greeted(&f.sent(), NPC), "status {status}: in reach");
+        let tutorials = f.app.world().resource::<crate::tutorial::Tutorials>();
+        assert_eq!(tutorials.take_fired(), fired, "status {status}");
+        assert_eq!(tutorials.take_selects(), [(npc, NPC)], "the select it made");
     }
-
-    let mut f = fix(false);
-    f.app
-        .world_mut()
-        .resource_mut::<crate::names::NameCache>()
-        .insert_player(MOB, "Mob".into(), None);
-    request(&mut f, "Mob");
-    assert!(f.errors().is_empty(), "{:?}", f.errors());
-    assert_eq!(f.selected(), Some(MOB));
 }

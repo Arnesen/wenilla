@@ -11,7 +11,7 @@ const ME: u64 = 10;
 
 /// The whole client, headless, with us streamed in.
 fn client() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     let world = app.world_mut();
@@ -330,6 +330,8 @@ fn a_game_objects_go_plays_its_instant_impacts_and_nothing_of_a_caster() {
         misses: vec![],
         target: None,
         go_target: None,
+        target_mask: 0x40,
+        source: None,
         dest: Some([1.0, 2.0, 3.0]),
         ammo_display_id: None,
         item_caster: None,

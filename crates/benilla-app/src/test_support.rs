@@ -99,12 +99,46 @@ fn matching(text: &str, open: usize, lhs: u8, rhs: u8) -> Option<usize> {
     None
 }
 
+/// Our player held by the object manager under `guid`, its descriptor `fields`, as its create
+/// leaves it: for a test whose getters read the active player through the lent host.
+pub(crate) fn hold_self_player(
+    world: &mut bevy::prelude::World,
+    guid: u64,
+    fields: &[(u16, u32)],
+) -> bevy::prelude::Entity {
+    let fields = benilla_protocol::ObjectFields::from_pairs(fields)
+        .into_created(benilla_protocol::messages::ObjectType::Player);
+    let me = world
+        .spawn((
+            crate::net::SelfPlayer,
+            crate::net::Guid(guid),
+            crate::net::ObjectStore(fields),
+        ))
+        .id();
+    world
+        .get_resource_or_init::<crate::net::GuidIndex>()
+        .0
+        .insert(guid, me);
+    world.get_resource_or_init::<crate::net::SelfGuid>().0 = Some(guid);
+    me
+}
+
 /// `a` runs before `b` in `app`'s built `Update`, by system identity: a `.after()` on a system
 /// missing from the schedule is silently nothing, and debug names may be off. The dependency graph
 /// is walked with the set hierarchy unfolded, so a set `a` sits in precedes what that set
 /// precedes, and a successor set brings its members.
 pub(crate) fn runs_before<MA, MB>(
     app: &mut bevy::app::App,
+    a: impl bevy::ecs::system::IntoSystem<(), (), MA>,
+    b: impl bevy::ecs::system::IntoSystem<(), (), MB>,
+) -> bool {
+    runs_before_in(app, bevy::app::Update, a, b)
+}
+
+/// [`runs_before`] in the built `label` schedule.
+pub(crate) fn runs_before_in<MA, MB>(
+    app: &mut bevy::app::App,
+    label: impl bevy::ecs::schedule::ScheduleLabel,
     a: impl bevy::ecs::system::IntoSystem<(), (), MA>,
     b: impl bevy::ecs::system::IntoSystem<(), (), MB>,
 ) -> bool {
@@ -118,41 +152,38 @@ pub(crate) fn runs_before<MA, MB>(
     let b = System::type_id(&IntoSystem::into_system(b));
     // `schedule_scope`, not `resource_scope::<Schedules>`: initializing the schedule inserts
     // `Schedules`, which a resource scope refuses.
-    app.world_mut()
-        .schedule_scope(bevy::app::Update, |world, schedule| {
+    app.world_mut().schedule_scope(label, |world, schedule| {
+        schedule.initialize(world).expect("the schedule builds");
+        let key = |id: TypeId| -> NodeId {
             schedule
-                .initialize(world)
-                .expect("the Update schedule builds");
-            let key = |id: TypeId| -> NodeId {
-                schedule
-                    .systems()
-                    .expect("initialized")
-                    .find(|&(_, s)| System::type_id(&**s) == id)
-                    .map(|(k, _)| NodeId::System(k))
-                    .expect("the system is in Update")
+                .systems()
+                .expect("initialized")
+                .find(|&(_, s)| System::type_id(&**s) == id)
+                .map(|(k, _)| NodeId::System(k))
+                .expect("the system is in the schedule")
+        };
+        let (a, b) = (key(a), key(b));
+        let dep = schedule.graph().dependency().graph();
+        let hier = schedule.graph().hierarchy().graph();
+        let (mut after, mut containers) = (HashSet::new(), HashSet::new());
+        let mut work = vec![(a, false)];
+        while let Some((n, is_after)) = work.pop() {
+            let fresh = if is_after {
+                after.insert(n)
+            } else {
+                containers.insert(n)
             };
-            let (a, b) = (key(a), key(b));
-            let dep = schedule.graph().dependency().graph();
-            let hier = schedule.graph().hierarchy().graph();
-            let (mut after, mut containers) = (HashSet::new(), HashSet::new());
-            let mut work = vec![(a, false)];
-            while let Some((n, is_after)) = work.pop() {
-                let fresh = if is_after {
-                    after.insert(n)
-                } else {
-                    containers.insert(n)
-                };
-                if !fresh {
-                    continue;
-                }
-                work.extend(dep.neighbors_directed(n, Outgoing).map(|m| (m, true)));
-                work.extend(hier.neighbors_directed(n, Incoming).map(|p| (p, false)));
-                if is_after {
-                    work.extend(hier.neighbors_directed(n, Outgoing).map(|c| (c, true)));
-                }
+            if !fresh {
+                continue;
             }
-            after.contains(&b)
-        })
+            work.extend(dep.neighbors_directed(n, Outgoing).map(|m| (m, true)));
+            work.extend(hier.neighbors_directed(n, Incoming).map(|p| (p, false)));
+            if is_after {
+                work.extend(hier.neighbors_directed(n, Outgoing).map(|c| (c, true)));
+            }
+        }
+        after.contains(&b)
+    })
 }
 
 #[cfg(test)]

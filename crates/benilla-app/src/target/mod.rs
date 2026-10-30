@@ -5,16 +5,27 @@
 
 use bevy::prelude::*;
 
-use crate::creature_anim::Engaged;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_script::InspectMode;
 use benilla_assets::AssetSet;
-use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;
 
+mod arm;
+#[cfg(test)]
+pub(crate) use crate::script_calls::{
+    click_plate, error_lines, record_error_lines, release_click, take_error_lines,
+};
+pub(crate) use arm::{
+    begin_records, right_press_hook, run_world_clicks, world_steps, ArmTracer, ClickArm, ClickLegs,
+    WorldClickLegs,
+};
 mod by_name;
 // `pub(crate)` for the chest live probe, which drives the mouse's own `click::resolve_go_action`.
 pub(crate) mod click;
+#[cfg(test)]
+mod click_order_tests;
+#[cfg(test)]
+mod record_click_tests;
 // `pub(crate)` for the hover inspector, which runs the cursor's `cursor_mode::go_highlightable`.
 pub(crate) mod cursor_mode;
 mod died;
@@ -26,6 +37,8 @@ mod front_tests;
 mod gate_tests;
 mod highlight;
 pub(crate) mod hover;
+mod live;
+pub(crate) use live::SelectionLive;
 mod hover_probe;
 
 /// The hover probe's aim for a cursorless window, as this frame's pick published it.
@@ -46,7 +59,12 @@ pub(crate) mod ring;
 mod scan;
 mod script;
 pub(crate) use script::ScriptSelect;
-mod track;
+mod release;
+#[cfg(test)]
+pub(crate) use release::Releases;
+pub(crate) use release::{
+    drop_parked_releases, member as raid_member_or_pet, object_held, unit_released, OwedReleases,
+};
 #[cfg(test)]
 mod unheld_tests;
 
@@ -55,6 +73,8 @@ pub(crate) use cursor_mode::{
 };
 /// `GO_FLAG_LOCKED`, the bit the lock chain and the GameObject tooltip's "Locked" line read.
 pub(crate) use lock::GO_FLAG_LOCKED;
+// `OnDied`, which the update packet's field callbacks run on a unit's death edge.
+pub(crate) use died::died;
 // This frame's combat-flash verdict, for the ring's material and the nameplate colour gate.
 pub(crate) use flash::CombatFlash;
 // The discount `0x612b80` the repair cost and the taxi fare take off their DBC prices.
@@ -69,29 +89,34 @@ pub(crate) use relations::{
 // The attack validator's target half, run in the call that asks, for the player's Attack and the
 // pet bar's; the melee probe's press with nothing selected.
 #[cfg(test)]
-pub(crate) use scan::LastEnemy;
-pub(crate) use scan::{AttackNearestRequest, AttackPick, CreatureTypes};
-// The chat layer's by-name asks (`/target`, `/assist`), and the typemask `TargetByName`'s
-// candidate feed shares.
-pub(crate) use by_name::{
-    assistable_alive, AssistRequest, Candidacy, NameSearch, PlayerLookup, TargetByNameRequest,
+pub(crate) use scan::{fire_owed_selects_lane, take_owed_deselects, LastEnemy};
+pub(crate) use scan::{
+    Acquire, AttackNearestRequest, AttackPick, CreatureTypes, Owed, OwedSelect, OwedSelects,
 };
-// The one SetSelection path, for the loot response's select (`0x48f3a0`).
-pub(crate) use by_name::SelectCommit;
+// The typemask `TargetByName`'s candidate feed shares.
+pub(crate) use by_name::{assistable_alive, Candidacy, NameSearch, PlayerLookup};
+// The one SetSelection path, for the loot response's select (`0x48f3a0`), and what a selecting
+// call owes after its signals.
+pub(crate) use by_name::{SelectCommit, SelectDebt};
+// The follow's start gate, for `/follow` and for `FollowUnit` and `FollowByName` in their calls.
+pub(crate) use by_name::{FollowStart, FollowSteps};
 // The selector's colour and the faction catalog it and the model read.
 #[cfg(test)]
 pub(crate) use ring::{ring_variant, PlayerPath, SelectorInput};
 pub(crate) use ring::{selection_variant, Factions, RingVariant};
 
 pub use click::Interact;
-pub(crate) use click::{clear_selection_on_world_teardown, deselect_on_ui_shutdown, DeselectGuid};
+pub(crate) use click::{
+    clear_selection_on_world_teardown, clear_with_no_world, deselect_on_ui_shutdown,
+    signal_ui_shutdown_deselect, CursorLeg,
+};
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server.
 /// The selection is the guid `[0xb4e2d8]`: `SetSelection 0x493540` stores it whether or not the
 /// object manager holds its object (`0x4935bf` → `0x493605`), and the client reads the object by
 /// that guid where it needs one. `CMSG_SET_SELECTION` carries the guid, which the server records in
-/// our `UNIT_FIELD_TARGET`. [`track::follow_selection_object`] keeps [`Self::target`] on the guid's
-/// object and ends the selection where the client's teardowns do.
+/// our `UNIT_FIELD_TARGET`. The handlers that hold and release objects keep [`Self::target`] on the
+/// guid's object and end the selection where the client's teardowns do ([`release`]).
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Selection {
     /// The object [`Self::guid`] names while the object manager holds it.
@@ -123,7 +148,7 @@ pub(crate) struct Hovered {
     pub(crate) corpse_guid: Option<u64>,
     /// The `IsSelectable` grader refused the winning pick (`0x482982`): both slots are empty but
     /// [`Self::distance`] holds the hit, so a chest behind the unit does not inherit the mouseover.
-    /// To [`click::select_on_click`] it is an object hit, which clears no selection.
+    /// To [`click::ClickSelect::select`] it is an object hit, which clears no selection.
     pub(crate) refused: bool,
     /// The pick is the hovered plate's unit, the plate's enter publishing it (`0x7cb850`), not the
     /// world's own pick: it stands only while that plate still holds the hover.
@@ -178,8 +203,9 @@ impl Default for PickOcclusion {
     }
 }
 
-/// The pick latched on the button's down edge, which a world click of either button acts on: the
-/// reference picks once per press (`0x481f00`) into the WorldFrame (state `+0x350`, guid `+0x358`,
+/// The pick latched at the press, which a world click of either button acts on: the reference
+/// picks once per press, as the mouse command arms the click (`0x514810` → `0x481f00`), into the
+/// WorldFrame (state `+0x350`, guid `+0x358`,
 /// point `+0x360`, distance `+0x36c`), so a drag can orbit the camera and still select. The hover
 /// is another matter: the reference blanks it during freelook (`0x483e80` sets `[wf+0x38c]&2`).
 #[derive(Resource, Default, Clone, Copy)]
@@ -187,8 +213,8 @@ pub(crate) struct PressPick {
     pub(crate) hovered: Hovered,
     pub(crate) object: HoveredObject,
     pub(crate) occlusion: PickOcclusion,
-    /// The context cursor as of the press, which the right-click ladder forks on; the reference's
-    /// new-target validation (`0x5ecb70`) also reads the press's pick, not a live one.
+    /// The context cursor as of the press, which the right-click ladder forks on. No select's
+    /// re-swing reads it: `Attack 0x5ecb70` judges the new unit itself (`scan::reswing_allowed`).
     pub(crate) cursor: cursor_mode::WorldCursor,
     /// The unit dispatcher's attack fork as of the press, which the sword alone cannot carry: the
     /// sword also needs the player's own legs, and a refused player still takes the attack arm.
@@ -202,39 +228,6 @@ impl PressPick {
     pub(crate) fn over_object(&self) -> bool {
         self.hovered.any().is_some() || self.hovered.refused || self.object.target.is_some()
     }
-
-    /// Whether the press was an Attack-cursor press, for `0x5ecb70`'s new-target validation.
-    pub(crate) fn attack(&self) -> bool {
-        self.cursor.kind == cursor_mode::CursorKind::Attack
-    }
-}
-
-/// Latch the frame's pick as a press begins. It must run at the head of the target chain: input has
-/// already engaged the look session on the press frame, and [`hover::update_hover`] is about to
-/// clear the hover, so what stands here is last frame's pick at the same cursor, the press's.
-pub(crate) fn latch_press_pick(
-    buttons: Res<ButtonInput<MouseButton>>,
-    hovered: Res<Hovered>,
-    object: Res<HoveredObject>,
-    occlusion: Res<PickOcclusion>,
-    cursor: Res<cursor_mode::WorldCursor>,
-    attack_fork: Res<cursor_mode::AttackFork>,
-    mut press: ResMut<PressPick>,
-) {
-    // Either button's down edge arms a pick (`0x514810`, clickModes 1 and 2); a chord does not
-    // re-latch, as `0x51481a` refuses to arm while the other button is held.
-    let left = buttons.just_pressed(MouseButton::Left) && !buttons.pressed(MouseButton::Right);
-    let right = buttons.just_pressed(MouseButton::Right) && !buttons.pressed(MouseButton::Left);
-    if !(left || right) {
-        return;
-    }
-    *press = PressPick {
-        hovered: *hovered,
-        object: *object,
-        occlusion: *occlusion,
-        cursor: *cursor,
-        attack_fork: *attack_fork,
-    };
 }
 
 /// Whether the hovered GameObject, not the character pick, is what a click acts on. The reference
@@ -254,8 +247,8 @@ pub(crate) fn go_is_nearest(character: &Hovered, go: &HoveredObject) -> bool {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct SelectionRadius(pub(crate) f32);
 
-/// The set the targeting chain runs in: readers of [`Selection`], [`Hovered`] or [`CombatFlash`]
-/// order after it, or they can read last frame's verdict.
+/// The set the targeting chain's frame-time half runs in: readers of [`Selection`], [`Hovered`]
+/// or [`CombatFlash`] order after it, or they can read last frame's verdict.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TargetUpdate;
 
@@ -283,9 +276,9 @@ pub(crate) struct AssistAttack(pub(crate) bool);
 
 /// The targeting rows' change callback: two flags.
 pub(crate) fn on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut click: ResMut<ClickConfig>,
-    mut assist: ResMut<AssistAttack>,
+    ev: &crate::cvars::CvarChanged,
+    mut click: bevy::prelude::Mut<'_, ClickConfig>,
+    mut assist: bevy::prelude::Mut<'_, AssistAttack>,
 ) {
     match ev.key().as_str() {
         "deselectonclick" => click.deselect_on_click = ev.flag(),
@@ -299,24 +292,34 @@ pub(crate) struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
+        // The update packet's field callbacks, a death's among them, after the net plugin's
+        // update end, which writes their edges.
+        crate::field_callbacks::register(app);
+        release::register(app);
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
             .init_resource::<AssistAttack>()
             .init_resource::<Hovered>()
             .init_resource::<HoveredObject>()
             .init_resource::<PickOcclusion>()
+            .init_resource::<hover_probe::ProbeAim>()
             .init_resource::<PressPick>()
+            .init_resource::<ClickArm>()
+            .init_resource::<hover::StickyPicks>()
+            .init_resource::<hover::GoPickable>()
+            // The GameObject pick set, kept ahead of the frame's input records and the hover.
+            .add_systems(
+                Update,
+                hover::track_go_pick_parts
+                    .before(crate::ui_script::UiInput)
+                    .before(hover::update_hovered_object),
+            )
             .init_resource::<WorldCursor>()
             .init_resource::<cursor_mode::AttackFork>()
             .init_resource::<CombatFlash>()
             .init_resource::<scan::TabHistory>()
             .init_resource::<scan::LastEnemy>()
             .add_message::<AttackNearestRequest>()
-            .add_message::<TargetByNameRequest>()
-            .add_message::<AssistRequest>()
-            .add_message::<click::DeselectGuid>()
-            .add_message::<click::PlateRightClick>()
             .add_message::<Interact>()
             .add_systems(
                 Startup,
@@ -326,107 +329,59 @@ impl Plugin for TargetPlugin {
                     (ring::load_factions, scan::load_creature_types).after(AssetSet::Open),
                 ),
             )
-            // After input, so this frame's `WorldClick` is here, in order: the picks, the cursor,
-            // the clicks, the non-mouse selection writers, then the flash and the ring off the
-            // frame's final selection. Nested tuples keep the chain within Bevy's 20-tuple limit.
+            // What no call dispatches, where the frame's records end, ahead of the packets, as
+            // the reference's world-frame handlers run in the window input (`0x423920` at
+            // `0x420d23`), in the dispatcher's order: a crate's interacts and the casts their
+            // dispatchers queued.
+            .edit_schedule(WorldClickLegs, |legs| {
+                legs.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+            })
+            .add_systems(
+                WorldClickLegs,
+                (
+                    click::act_on_interact,
+                    // The casts the dispatchers queued (`0x5f35c0`, `0x5f06dc` → `0x6e5a90`).
+                    crate::ui_action::drain_click_casts,
+                )
+                    .chain(),
+            )
+            // The frame time's half, after the controller's step and the stream: the picks, the
+            // cursor, a walk's arrival, the non-mouse selection writers, then the flash and the
+            // ring off the frame's final selection. Nested tuples keep the chain within Bevy's
+            // 20-tuple limit.
             .add_systems(
                 Update,
                 (
-                    // The latch first, before any pick refresh clears what the press was over.
-                    (latch_press_pick, hover::update_pick_occlusion).chain(),
+                    // The trace reads the static world after this frame's stream reshapes it.
+                    hover::aim_and_trace().after(WorldStage::Stream),
                     hover::update_hover,
                     hover::update_hovered_object,
                     cursor_mode::classify_cursor,
-                    // The right press's two legs of the reference's OnMouseDown hook (`0x492c20`),
-                    // the targeting cancel and the repair-mode reset, before the cursor drive, so
-                    // the press frame already reads both modes cleared.
-                    (
-                        crate::spell::targeting::cancel_targeting_on_right_press,
-                        // It lends the call host, whose casts read the player's outdoors answer:
-                        // here this frame's re-place's. A key or action-button cast runs in
-                        // `UiInput`, before `WorldStage::Input`, and reads the last re-place's, as
-                        // the client's bit does.
-                        crate::ui_merchant::end_repair_mode_on_right_press
-                            .after(crate::player::publish_caster_outdoors),
-                    ),
                     // Overwrites the classifier's verdict while the targeting cursor is up, as the
                     // reference's dispatcher runs this branch before the object classifier.
                     crate::spell::targeting::drive_targeting_cursor,
                     // Reads that verdict: `WorldCursor.unable` is the frame's range state, as the
                     // reference's one `CheckGroundPointInRange` caller feeds both.
                     reticle::update_reticle,
-                    // It lends the call host too, after the repair-mode reset, so its casts read
-                    // this frame's outdoors answer as well.
-                    click::world_right_click_payload,
-                    // The world click's trade leg, ahead of the select in the same click
-                    // (`0x4925d0`); then a plate click replayed as a click, then the select that
-                    // reads it.
+                    // The verb a walk owes runs at its stop, in the frame time's movement, after
+                    // the frame's clicks; a unit it parked with the targeting cursor up is bound,
+                    // and a cast it queued sent, as a click's are.
                     (
-                        crate::ui_action::drop_item::trade_on_world_click,
-                        click::select_on_plate_click,
-                        click::select_on_click,
+                        click::act_on_arrival,
+                        crate::script_calls::bind_arrival_picks,
+                        crate::ui_action::drain_arrival_casts,
                     )
                         .chain(),
-                    // After the gated select, which must read the targeting mode before a commit
-                    // clears it. The pending spell feeds only one of the two legs, so their mutual
-                    // order is free.
-                    crate::spell::targeting::commit_ground_cast_on_click,
-                    crate::spell::targeting::commit_object_cast_on_click,
-                    // The verb a walk owes runs at its stop, ahead of this frame's click.
-                    (click::act_on_arrival, click::act_on_right_click).chain(),
-                    // The loot close's guid-scoped deselect.
-                    click::clear_target_requests,
-                    // The units the writers above parked with the targeting cursor up, bound to its
-                    // cast; then the unit interact of a nameplate's right-click and a crate's
-                    // `Interact`, so the cast goes out ahead of the interact it came with; then
-                    // `DropItemOnUnit`'s pet leg.
-                    (
-                        crate::script_calls::bind_parked_picks,
-                        click::act_on_interact,
-                        crate::ui_action::drop_item::drop_item_on_unit,
-                    )
-                        .chain(),
-                    // The chat layer's by-name asks: `/target` and `/assist` commit through
-                    // `scan::commit`; `/follow` hands its subject to `crate::player`.
-                    (
-                        by_name::target_by_name_requests,
-                        by_name::assist_requests,
-                        // After the pet bar's and pet book's drains, which write `PetBar`. The
-                        // two commute: the `FollowUnit` resolver reads only the pet's guid
-                        // (`spells.pet_guid`), which neither writes; the order keeps them declared.
-                        // After the follow drain, so a `FollowUnit` starts the frame it is made.
-                        by_name::follow_requests
-                            .after(crate::ui_pet::drain_pet_actions)
-                            .after(crate::ui_pet_book::drain_pet_book)
-                            .after(crate::ui_follow::drain_follow),
-                    )
-                        .chain(),
-                    scan::auto_acquire,
                     // The melee probe's press, the player's Attack; the TAB keys and ATTACKTARGET
                     // run their bodies' `TargetNearestEnemy` and `AttackTarget` as script calls.
                     crate::ui_action::attack_nearest_probe,
                     flash::drive_flash,
-                    // The last-enemy stamp before the death handler's deselect, so a hostile that
-                    // dies selected is still remembered (the reference's `TargetLastEnemy` has no
-                    // liveness gate); the ring after both, off the frame's final selection.
-                    (
-                        scan::remember_last_enemy,
-                        died::on_unit_died,
-                        ring::update_ring,
-                    )
-                        .chain(),
+                    // The last-enemy stamp, then the ring off the frame's final selection.
+                    (scan::remember_last_enemy, ring::update_ring).chain(),
                 )
                     .chain()
                     .in_set(TargetUpdate)
                     .after(WorldStage::Input),
-            )
-            // The selection's object, as the objects that streamed in and out applied and the
-            // active player is tagged, before any reader of the frame.
-            .add_systems(
-                Update,
-                track::follow_selection_object
-                    .after(WorldStage::Net)
-                    .before(WorldStage::Input),
             )
             // PostUpdate: the brighten sets MeshTag bit 31 after every Update writer that
             // overwrites the whole tag.
@@ -484,79 +439,5 @@ mod tests {
         assert!(!go_is_nearest(&refused(4.0), &obj(true, 10.0)));
         assert!(!go_is_nearest(&refused(5.0), &obj(true, 5.0)));
         assert!(go_is_nearest(&refused(10.0), &obj(true, 4.0)));
-    }
-
-    /// A drag blanks the live hover for its whole length, and a click at its end must still act on
-    /// what the press was over.
-    #[test]
-    fn the_press_latch_outlives_the_hover_a_drag_clears() {
-        let mut world = World::new();
-        world.init_resource::<Hovered>();
-        world.init_resource::<HoveredObject>();
-        world.init_resource::<PickOcclusion>();
-        world.init_resource::<cursor_mode::WorldCursor>();
-        world.init_resource::<cursor_mode::AttackFork>();
-        world.init_resource::<PressPick>();
-        world.init_resource::<ButtonInput<MouseButton>>();
-        let id = world.register_system(latch_press_pick);
-
-        // A boar under the cursor, and the cursor classified as Attack over it.
-        const BOAR: u64 = 0xB0A2;
-        world.resource_mut::<Hovered>().guid = Some(BOAR);
-        world.resource_mut::<cursor_mode::WorldCursor>().kind = cursor_mode::CursorKind::Attack;
-
-        // Press left: the latch takes the pick.
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        world.run_system(id).unwrap();
-        assert_eq!(world.resource::<PressPick>().hovered.guid, Some(BOAR));
-        assert!(world.resource::<PressPick>().attack(), "Attack rode along");
-
-        // The drag begins: the look session blanks the live hover.
-        *world.resource_mut::<Hovered>() = Hovered::default();
-        world.resource_mut::<ButtonInput<MouseButton>>().clear();
-        world.run_system(id).unwrap();
-        assert_eq!(
-            world.resource::<PressPick>().hovered.guid,
-            Some(BOAR),
-            "the release must still know what the press was over"
-        );
-    }
-
-    /// The reference refuses to arm while another button is down (`0x51481a`) and kills the
-    /// pending click (`0x514ac1`), so neither release of a both-button run selects.
-    #[test]
-    fn a_chord_does_not_relatch_the_pick() {
-        let mut world = World::new();
-        world.init_resource::<Hovered>();
-        world.init_resource::<HoveredObject>();
-        world.init_resource::<PickOcclusion>();
-        world.init_resource::<cursor_mode::WorldCursor>();
-        world.init_resource::<cursor_mode::AttackFork>();
-        world.init_resource::<PressPick>();
-        world.init_resource::<ButtonInput<MouseButton>>();
-        let id = world.register_system(latch_press_pick);
-
-        const FIRST: u64 = 0x1111;
-        const SECOND: u64 = 0x2222;
-        world.resource_mut::<Hovered>().guid = Some(FIRST);
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        world.run_system(id).unwrap();
-        assert_eq!(world.resource::<PressPick>().hovered.guid, Some(FIRST));
-
-        // Right joins while left is still held, over something else entirely.
-        world.resource_mut::<Hovered>().guid = Some(SECOND);
-        let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
-        buttons.clear(); // drop last frame's just_pressed, keep `pressed`
-        buttons.press(MouseButton::Right);
-        world.run_system(id).unwrap();
-        assert_eq!(
-            world.resource::<PressPick>().hovered.guid,
-            Some(FIRST),
-            "the chord's second press must not steal the latch"
-        );
     }
 }

@@ -141,6 +141,58 @@ fn edit_box_max_setters_name_the_box() {
     }
 }
 
+/// EditBox `SetText` and `SetNumber` gate with `lua_isstring` (`0x79854c`, `0x79871c`) and raise
+/// `Usage: %s:SetText("text")` (`0x87a198`) or `Usage: %s:SetNumber(number)` (`0x87beb0`) naming
+/// the box; `Insert` skips a non-string (`0x798494`); `AddHistoryLine` takes exactly one argument
+/// (`0x7989ec`) and raises `Usage: %s:AddHistoryLine("text")` (`0x87becc`).
+#[test]
+fn edit_box_text_setters_gate_their_argument() {
+    let s = script();
+    s.run(
+        r#"
+        TextBox = CreateFrame("EditBox", "TextBox")
+        TextAnon = CreateFrame("EditBox")
+    "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        ("TextBox:SetText(nil)", r#"Usage: TextBox:SetText("text")"#),
+        ("TextBox:SetText()", r#"Usage: TextBox:SetText("text")"#),
+        ("TextBox:SetText(true)", r#"Usage: TextBox:SetText("text")"#),
+        (
+            "TextAnon:SetText({})",
+            r#"Usage: <unnamed>:SetText("text")"#,
+        ),
+        ("TextBox:SetNumber(nil)", "Usage: TextBox:SetNumber(number)"),
+        (
+            "TextAnon:SetNumber(false)",
+            "Usage: <unnamed>:SetNumber(number)",
+        ),
+        (
+            "TextBox:AddHistoryLine()",
+            r#"Usage: TextBox:AddHistoryLine("text")"#,
+        ),
+        (
+            "TextAnon:AddHistoryLine('a', 'b')",
+            r#"Usage: <unnamed>:AddHistoryLine("text")"#,
+        ),
+    ] {
+        let e = err(&s, call);
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    s.run(
+        r#"
+        TextBox:SetText(12) assert(TextBox:GetText() == "12")
+        TextBox:SetNumber(1e20) assert(TextBox:GetText() == "1e+020")
+        TextBox:SetText("ab") TextBox:Insert(true) TextBox:Insert({}) TextBox:Insert(nil)
+        assert(TextBox:GetText() == "ab")
+        TextBox:Insert(5) assert(TextBox:GetText() == "ab5")
+        TextBox:AddHistoryLine("one")
+    "#,
+    )
+    .unwrap();
+}
+
 /// `SetVerticalScroll` (`0x791400`) and `SetHorizontalScroll` (`0x7912f0`) gate on `lua_isnumber`
 /// (`0x791490`, `0x791380`), so a numeric string scrolls, and anything else raises
 /// `Usage: %s:SetVerticalScroll(offset)` (`0x87b59c`) or the horizontal line (`0x87b574`).
@@ -477,6 +529,23 @@ fn create_font_raises_its_usage_line() {
     .unwrap();
 }
 
+/// The Font's `IsObjectType` (`0x79fe60`) tests `lua_isstring` (`0x79feec`) and raises
+/// `Usage: %s:IsObjectType("TYPE")` (`0x8794e4`) naming the font.
+#[test]
+fn font_is_object_type_raises_its_usage_line() {
+    let s = script();
+    s.run(r#"TypeFont = CreateFont("TypeFont")"#).unwrap();
+    for call in ["TypeFont:IsObjectType()", "TypeFont:IsObjectType(true)"] {
+        let e = err(&s, call);
+        assert!(
+            e.contains(r#"Usage: TypeFont:IsObjectType("TYPE")"#),
+            "`{call}` -> {e}"
+        );
+    }
+    s.run(r#"assert(TypeFont:IsObjectType("font") == 1 and TypeFont:IsObjectType(5) == nil)"#)
+        .unwrap();
+}
+
 /// `IsFrameType` (`0x773700`) raises IsObjectType's line for a value `lua_isstring` refuses
 /// (`0x77378c`, `Usage: %s:IsObjectType("TYPE")` `0x8794e4` pushed at `0x7737af`).
 #[test]
@@ -533,4 +602,452 @@ fn set_shadow_offset_raises_its_usage_line_on_a_font_and_a_simplehtml() {
     "#,
     )
     .unwrap();
+}
+
+/// FontString's own `SetShadowOffset` (`0x79e070`, gates `0x79e102`, `0x79e117`) and the EditBox
+/// and message-frame shims into `0x79f9c0` raise `Usage: %s:SetShadowOffset(x, y)` (`0x87c6e8`)
+/// for a coordinate `lua_isnumber` refuses, naming the receiver.
+#[test]
+fn set_shadow_offset_raises_its_usage_line_on_font_blocks() {
+    let s = script();
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "ShadowOwner")
+        ShadowFS = f:CreateFontString("ShadowFS")
+        ShadowAnonFS = f:CreateFontString()
+        ShadowBox = CreateFrame("EditBox", "ShadowBox")
+        ShadowMF = CreateFrame("MessageFrame", "ShadowMF")
+        ShadowSMF = CreateFrame("ScrollingMessageFrame", "ShadowSMF")
+    "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        (
+            "ShadowFS:SetShadowOffset(nil, 1)",
+            "Usage: ShadowFS:SetShadowOffset(x, y)",
+        ),
+        (
+            "ShadowAnonFS:SetShadowOffset(1)",
+            "Usage: <unnamed>:SetShadowOffset(x, y)",
+        ),
+        (
+            "ShadowBox:SetShadowOffset(1, true)",
+            "Usage: ShadowBox:SetShadowOffset(x, y)",
+        ),
+        (
+            "ShadowMF:SetShadowOffset({}, 1)",
+            "Usage: ShadowMF:SetShadowOffset(x, y)",
+        ),
+        (
+            "ShadowSMF:SetShadowOffset('x', 1)",
+            "Usage: ShadowSMF:SetShadowOffset(x, y)",
+        ),
+    ] {
+        let e = err(&s, call);
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    s.run(r#"ShadowFS:SetShadowOffset("2", -1)"#).unwrap();
+}
+
+/// `SetButtonState` raises `Usage: %s:SetButtonState("state", lock)` (`0x87a0d8`) for a non-string
+/// or an unknown token; `SetWidth`/`SetHeight` (`0x7a1fb0`, `0x7a21e0`) raise their lines
+/// (`0x87cbec`, `0x87cc08`) on frames and regions; `SetLight` names the pane and closes its
+/// brackets (`0x878c00`).
+#[test]
+fn button_size_and_light_setters_raise_the_reference_lines() {
+    let s = script();
+    s.run(
+        r#"
+        StateBtn = CreateFrame("Button", "StateBtn")
+        SizeFrame = CreateFrame("Frame", "SizeFrame")
+        SizeTex = SizeFrame:CreateTexture("SizeTex")
+        SizeFS = SizeFrame:CreateFontString()
+        LightM = CreateFrame("Model", "LightM")
+    "#,
+    )
+    .unwrap();
+    let light = "Usage: LightM:SetLight(enabled[, omni, dirX, dirY, dirZ, ambIntensity[, \
+                 ambR, ambG, ambB], dirIntensity[, dirR, dirG, dirB]])";
+    for (call, line) in [
+        (
+            "StateBtn:SetButtonState(nil)",
+            r#"Usage: StateBtn:SetButtonState("state", lock)"#,
+        ),
+        (
+            "StateBtn:SetButtonState('HELD')",
+            r#"Usage: StateBtn:SetButtonState("state", lock)"#,
+        ),
+        (
+            "SizeFrame:SetWidth(nil)",
+            "Usage: SizeFrame:SetWidth(width)",
+        ),
+        (
+            "SizeFrame:SetHeight({})",
+            "Usage: SizeFrame:SetHeight(height)",
+        ),
+        ("SizeTex:SetWidth('x')", "Usage: SizeTex:SetWidth(width)"),
+        ("SizeFS:SetHeight()", "Usage: <unnamed>:SetHeight(height)"),
+        ("LightM:SetLight(1, 'x')", light),
+    ] {
+        let e = err(&s, call);
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    s.run(
+        r#"
+        StateBtn:SetButtonState("pushed") assert(StateBtn:GetButtonState() == "PUSHED")
+        SizeFrame:SetWidth("12") SizeTex:SetHeight("3")
+    "#,
+    )
+    .unwrap();
+}
+
+/// `SetParent` (`0x7a1550`) on a frame or a region: a table with no object raises
+/// `%s:SetParent(): Couldn't find 'this' in parent object` (`0x87cbb4`), a non-frame object
+/// `…Wrong parent object type, expected frame` (`0x87cb78`), and a number is a name (`0x7a1601`).
+#[test]
+fn set_parent_raises_the_reference_lines_for_a_bad_table() {
+    let s = script();
+    s.run(
+        r#"
+        PFrame = CreateFrame("Frame", "PFrame")
+        PTex = PFrame:CreateTexture("PTex")
+        CreateFrame("Frame", "5")
+    "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        (
+            "PFrame:SetParent({})",
+            "PFrame:SetParent(): Couldn't find 'this' in parent object",
+        ),
+        (
+            "PFrame:SetParent(PTex)",
+            "PFrame:SetParent(): Wrong parent object type, expected frame",
+        ),
+        (
+            "PTex:SetParent({})",
+            "PTex:SetParent(): Couldn't find 'this' in parent object",
+        ),
+        (
+            "PTex:SetParent(PTex)",
+            "PTex:SetParent(): Wrong parent object type, expected frame",
+        ),
+        (
+            "PTex:SetParent('NoSuchFrame')",
+            "PTex:SetParent(): Couldn't find region named 'NoSuchFrame'",
+        ),
+        (
+            "PTex:SetParent()",
+            "PTex:SetParent(): Couldn't find region named '(null)'",
+        ),
+    ] {
+        let e = err(&s, call);
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    s.run(
+        r#"
+        PFrame:SetParent(5) assert(PFrame:GetParent() == getglobal("5"))
+        PTex:SetParent(5) assert(PTex:GetParent() == getglobal("5"))
+    "#,
+    )
+    .unwrap();
+}
+
+/// `SetScrollFromBottom` (`0x793070`) runs the member prologue after its number gate: another
+/// frame type fails the type test (`0x7930f0`) with "Wrong object type for member function"
+/// (`0x847e98`), and a non-number returns before any receiver check (`0x79307f`).
+#[test]
+fn set_scroll_from_bottom_checks_its_receiver_late() {
+    let s = script();
+    s.run(
+        r#"
+        FromBottom = CreateFrame("ScrollingMessageFrame").SetScrollFromBottom
+        FromBottom(CreateFrame("Frame"), nil)
+    "#,
+    )
+    .unwrap();
+    for (call, line) in [
+        (
+            "FromBottom(CreateFrame('Frame'), 1)",
+            "Wrong object type for member function",
+        ),
+        (
+            "FromBottom({}, 1)",
+            "Attempt to find 'this' in non-framescript object",
+        ),
+        (
+            "FromBottom(5, 1)",
+            "Attempt to find 'this' in non-table object",
+        ),
+    ] {
+        let e = err(&s, call);
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    s.run("CreateFrame('ScrollingMessageFrame'):SetScrollFromBottom(1)")
+        .unwrap();
+}
+
+/// The Frame verbs that take a string test it with `lua_isstring` after the receiver check and
+/// raise their usage line naming the frame (RegisterEvent `0x8796dc`, UnregisterEvent `0x879700`,
+/// GetScript `0x879698`, HasScript `0x87965c`, SetFrameStrata `0x8795b8`). SetScript also needs a
+/// function or nil by `lua_type`, so a missing one raises (`0x774986`, `0x8796b4`); SetBackdrop
+/// takes nil or a table, a bare call included in the raise (`0x777794`, `0x8798a8`); an inherits
+/// miss names its method and frame (`0x879544`, `0x87957c`).
+#[test]
+fn frame_string_verbs_raise_their_usage_lines() {
+    let s = script();
+    s.run(
+        r#"
+        VerbFrame = CreateFrame("Frame", "VerbFrame")
+        VerbAnon = CreateFrame("Frame")
+        VerbFrame:SetBackdrop({ bgFile = "Interface\Tooltips\UI-Tooltip-Background" })
+        VerbFrame:SetScript("OnShow", function() end)
+    "#,
+    )
+    .unwrap();
+    let backdrop = r#"Usage: VerbFrame:SetBackdrop(nil or {bgFile = "bgFile", edgeFile = "edgeFile", tile = false, tileSize = 0, edgeSize = 32, insets = { left = 0, right = 0, top = 0, bottom = 0 }})"#;
+    for (call, line) in [
+        (
+            "VerbFrame:RegisterEvent(nil)",
+            r#"Usage: VerbFrame:RegisterEvent("event")"#,
+        ),
+        (
+            "VerbAnon:UnregisterEvent({})",
+            r#"Usage: <unnamed>:UnregisterEvent("event")"#,
+        ),
+        (
+            "VerbFrame:GetScript()",
+            r#"Usage: VerbFrame:GetScript("type")"#,
+        ),
+        (
+            "VerbFrame:HasScript(true)",
+            r#"Usage: VerbFrame:HasScript("type")"#,
+        ),
+        (
+            "VerbFrame:SetFrameStrata(nil)",
+            "Usage: VerbFrame:SetFrameStrata(level)",
+        ),
+        (
+            "VerbFrame:SetScript(nil, nil)",
+            r#"Usage: VerbFrame:SetScript("type", function)"#,
+        ),
+        (
+            "VerbFrame:SetScript('OnShow')",
+            r#"Usage: VerbFrame:SetScript("type", function)"#,
+        ),
+        (
+            "VerbFrame:SetScript('OnShow', 'f')",
+            r#"Usage: VerbFrame:SetScript("type", function)"#,
+        ),
+        ("VerbFrame:SetBackdrop()", backdrop),
+        ("VerbFrame:SetBackdrop('x')", backdrop),
+        (
+            "VerbFrame:CreateTexture(nil, nil, 'NoSuchNode')",
+            r#"VerbFrame:CreateTexture(): Couldn't find inherited node "NoSuchNode""#,
+        ),
+        (
+            "VerbAnon:CreateFontString(nil, nil, 'NoSuchNode')",
+            r#"<unnamed>:CreateFontString(): Couldn't find inherited node "NoSuchNode""#,
+        ),
+    ] {
+        let e = err(&s, call);
+        assert!(e.contains(line), "`{call}` -> {e}");
+    }
+    // The raises left the script and the backdrop in place; an explicit nil clears each.
+    s.run(
+        r#"
+        assert(VerbFrame:GetScript("OnShow") ~= nil and VerbFrame:GetBackdrop() ~= nil)
+        VerbFrame:SetScript("OnShow", nil) VerbFrame:SetBackdrop(nil)
+        assert(VerbFrame:GetScript("OnShow") == nil and VerbFrame:GetBackdrop() == nil)
+        VerbFrame:SetFrameStrata("HIGH") VerbFrame:RegisterEvent("PLAYER_LOGIN")
+    "#,
+    )
+    .unwrap();
+}
+
+/// `SortGuildRoster` tests argument 1 with `lua_isstring` (`0x4d1cb8`), so a number is its
+/// string, and anything else raises `Usgae: SortGuildRoster("type")` (`0x849bf0`, `0x4d1cc7`),
+/// the binary's spelling, with no call made.
+#[test]
+fn sort_guild_roster_raises_its_own_usage_line() {
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    for call in ["SortGuildRoster()", "SortGuildRoster({})"] {
+        let e = err(&s, call);
+        assert!(
+            e.contains(r#"Usgae: SortGuildRoster("type")"#),
+            "{call}: {e}"
+        );
+    }
+    assert!(s.take_guild_calls().is_empty());
+    s.run("SortGuildRoster(5)").unwrap();
+    assert_eq!(s.take_guild_calls(), [GuildCall::Sort("5".into())]);
+}
+
+/// `is-number` (`0x6f34d0`) reads a string through `luaO_str2d` (`0x6f5900`), whose `strtod` takes
+/// `d` as an exponent marker (`0x4112d1`) and no `inf` or `nan`: so `"1d0"` passes every gate
+/// below and `"nan"`, `"inf"` and `"infinity"` raise each binding's own line.
+#[test]
+fn a_numeric_string_is_read_as_the_clients_strtod_reads_it() {
+    let s = script();
+    s.run(
+        r#"
+        StrtodFrame = CreateFrame("Frame", "StrtodFrame")
+        StrtodModel = CreateFrame("Model", "StrtodModel")
+        StrtodTT = CreateFrame("GameTooltip", "StrtodTT", nil, "TestTooltipTemplate")
+    "#,
+    )
+    .unwrap();
+    for ok in [
+        r#"GetSpellName("1d0", "spell")"#,
+        r#"PickupSpell("2D0", "spell")"#,
+        r#"AcceptBattlefieldPort("5d0", 1)"#,
+        r#"SetGuildRecruitmentMode("0d0")"#,
+        "SetGuildRecruitmentMode(0/0)", // `_ftol` makes NaN mode 0 (`0x4a008f`)
+        r#"SetGamma("1d0")"#,
+        r#"SetWorldDetail("1d0")"#,
+        r#"GetWorldStateUIInfo("1d0")"#,
+        r#"StrtodFrame:SetMinResize("1d1", "2d1")"#,
+    ] {
+        s.run(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for bad in ["nan", "inf", "infinity"] {
+        for (call, line) in [
+            (
+                format!(r#"GetSpellName("{bad}", "spell")"#),
+                "Invalid spell slot in GetSpellName",
+            ),
+            (
+                format!(r#"CastSpell("{bad}", "spell")"#),
+                "Invalid spell slot in CastSpell",
+            ),
+            (
+                format!(r#"AcceptBattlefieldPort("{bad}", 1)"#),
+                "Usage: AcceptBattlefieldPort(index, accept)",
+            ),
+            (
+                format!(r#"SetGuildRecruitmentMode("{bad}")"#),
+                "Usage: SetGuildRecruitmentMode(mode)",
+            ),
+            (format!(r#"SetGamma("{bad}")"#), "Usage: SetGamma(value)"),
+            (
+                format!(r#"SetWorldDetail("{bad}")"#),
+                "Usage: SetWorldDetail",
+            ),
+            (
+                format!(r#"GetWorldStateUIInfo("{bad}")"#),
+                "Usage: GetWorldStateUIInfo(index)",
+            ),
+            (
+                format!(r#"StrtodFrame:SetMinResize("{bad}", 1)"#),
+                "Usage: StrtodFrame:SetMinResize(minWidth, minHeight)",
+            ),
+            (
+                format!(r#"StrtodModel:SetLight("{bad}")"#),
+                "Usage: StrtodModel:SetLight(enabled", // the name fills `%s` (`0x76e79f`)
+            ),
+            (
+                format!(r#"StrtodTT:SetMerchantCompareItem("{bad}")"#),
+                "Usage: SetMerchantCompareItem(",
+            ),
+        ] {
+            let e = err(&s, &call);
+            assert!(e.contains(line), "{call}: {e}");
+        }
+    }
+}
+
+/// The number is truncated by `_ftol` (`0x40a2b0`), whose QWORD `fistp` keeps the low dword: NaN
+/// and an infinity are 0, and 2^32 + n is n (`SetWorldDetail` `0x488e0a`, `GetWorldStateUIInfo`
+/// `0x4c5aad` then `dec` and an unsigned compare).
+#[test]
+fn number_arguments_truncate_through_ftol() {
+    let mut s = script();
+    s.register_cvars([
+        (crate::script::CVAR_WORLD_DETAIL, "1"),
+        (crate::script::CVAR_FRILL_DENSITY, "32"),
+        (crate::script::CVAR_SMALL_CULL, "0.04"),
+    ]);
+    for (call, stop) in [
+        ("SetWorldDetail(0/0)", 0),
+        ("SetWorldDetail(4294967298)", 2),
+        ("SetWorldDetail(1/0)", 0),
+    ] {
+        s.run(call).unwrap_or_else(|e| panic!("{call}: {e}"));
+        assert_eq!(
+            s.eval::<i64>("return GetWorldDetail()").unwrap(),
+            stop,
+            "{call}"
+        );
+    }
+    s.set_world_state_ui(vec![WorldStateUiView {
+        text: "Row".into(),
+        ..Default::default()
+    }]);
+    let text = |s: &UiScript, i: &str| {
+        s.eval::<mlua::Value>(&format!("local _, t = GetWorldStateUIInfo({i}) return t"))
+            .unwrap()
+    };
+    assert!(matches!(text(&s, "4294967297"), mlua::Value::String(t) if t == "Row"));
+    for i in ["0/0", "0", "4294967296"] {
+        assert!(text(&s, i).is_nil(), "{i} is row 0, below the first");
+    }
+}
+
+/// Every widget-specific method checks its receiver's type first and raises "Wrong object type for
+/// member function" (`0x847e98`) for a widget of another type, as an addon that copies methods
+/// between frames meets it; the same text the frame, region and font methods raise.
+#[test]
+fn a_widget_method_on_another_widget_raises_the_one_wrong_type_line() {
+    let s = script();
+    for (kind, method, args) in [
+        ("Button", "SetText", "'x'"),
+        ("Button", "GetText", ""),
+        ("Button", "Enable", ""),
+        ("Button", "SetNormalTexture", "'x'"),
+        ("Button", "GetFontString", ""),
+        ("Button", "SetTextFontObject", "nil"),
+        ("CheckButton", "GetChecked", ""),
+        ("ColorSelect", "SetColorRGB", "1, 1, 1"),
+        ("ColorSelect", "GetColorRGB", ""),
+        ("ColorSelect", "SetColorWheelTexture", "nil"),
+        ("MessageFrame", "AddMessage", "'x'"),
+        ("MessageFrame", "SetFadeDuration", "1"),
+        ("ScrollingMessageFrame", "ScrollUp", ""),
+        ("ScrollingMessageFrame", "AddMessage", "'x'"),
+        ("Model", "SetModel", "'x'"),
+        ("ScrollFrame", "SetVerticalScroll", "1"),
+        ("ScrollFrame", "GetVerticalScroll", ""),
+        ("SimpleHTML", "SetText", "'x'"),
+        ("Slider", "SetValue", "1"),
+        ("Slider", "GetValue", ""),
+        ("Slider", "SetThumbTexture", "nil"),
+        ("StatusBar", "SetValue", "1"),
+        ("StatusBar", "GetValue", ""),
+        ("StatusBar", "SetStatusBarTexture", "nil"),
+        ("GameTooltip", "AddLine", "'x'"),
+        ("GameTooltip", "ClearLines", ""),
+        ("GameTooltip", "SetOwner", "UIParent"),
+    ] {
+        let sep = if args.is_empty() { "" } else { ", " };
+        let call = format!("CreateFrame('{kind}').{method}(CreateFrame('Frame'){sep}{args})");
+        let e = err(&s, &call);
+        assert!(
+            e.contains("Wrong object type for member function"),
+            "{kind}.{method} on a Frame -> {e}"
+        );
+    }
+}
+
+/// The widget helpers a method reaches past the prologue raise the same line for a frame of
+/// another kind (`0x847e98`), not a wording of their own.
+#[test]
+fn a_widget_helper_on_another_kind_raises_the_one_wrong_type_line() {
+    use crate::script::object::ERR_WRONG_TYPE;
+    let s = script();
+    let frame: mlua::Table = s.eval("return CreateFrame('Frame')").unwrap();
+    let e = crate::script::button::with_button(s.lua(), &frame, |_| ()).unwrap_err();
+    assert!(e.to_string().contains(ERR_WRONG_TYPE), "{e}");
+    let e = crate::script::slider::with_slider(s.lua(), &frame, |_| ()).unwrap_err();
+    assert!(e.to_string().contains(ERR_WRONG_TYPE), "{e}");
 }

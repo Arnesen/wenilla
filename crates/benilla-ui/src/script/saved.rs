@@ -24,8 +24,9 @@ const MAX_DEPTH: usize = 32;
 
 impl super::UiScript {
     /// Hold a saved-variables file that failed to load, so the shutdown write leaves it alone.
-    /// Deviation: the reference rewrites it from the live defaults (`0x51f865`–`0x51f970`), which
-    /// would cost the player the whole file for one typo in a hand edit.
+    /// Deviation: the reference rewrites it from the live defaults (`0x51f865`–`0x51f970`) after
+    /// renaming the old file to `.bak` (`0x51f794`, `0x51f8eb`, `.bak` at `0x8431e4`), so a hand
+    /// edit with one typo survives only until the next logout.
     pub fn hold_saved_file(&self, path: &std::path::Path) {
         let mut model = self.model_mut();
         if !model.held_saved_files.iter().any(|p| p == path) {
@@ -52,9 +53,9 @@ impl super::UiScript {
     }
 
     /// Serialize every registered global as `NAME = value` lines, in bytes, since a Lua string is
-    /// bytes and the reference writes them raw. A value with no literal (a function, userdata,
-    /// `inf`, `NaN`) is skipped with a warning where the reference drops it silently; `nil` is
-    /// written, as the reference records an untouched toggle.
+    /// bytes and the reference writes them raw. Every name gets its line (`0x704422`-`0x704455`):
+    /// `nil` is written, as the reference records an untouched toggle, and a value with no literal
+    /// writes the reference's `nil` comment ([`no_literal`]), so a reload sets it to nil.
     pub fn saved_variables_bytes(&self) -> Vec<u8> {
         self.saved_variables_bytes_for(&self.saved_variable_names())
     }
@@ -74,20 +75,17 @@ impl super::UiScript {
                 }
             };
             let mut seen = HashSet::new();
-            match serialize(&value, 1, &mut seen, &model) {
-                Some(text) => {
-                    out.extend_from_slice(name.as_bytes());
-                    out.extend_from_slice(b" = ");
-                    out.extend_from_slice(&text);
-                    out.push(b'\n');
-                }
-                None => unwritable.push(name.clone()),
-            }
+            let text =
+                serialize(&value, 1, &mut seen, &model).unwrap_or_else(|| no_literal(&value));
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b" = ");
+            out.extend_from_slice(&text);
+            out.push(b'\n');
         }
         drop(model);
         if !unwritable.is_empty() {
             self.model_mut().record_warning(format!(
-                "saved variables: not serializable, skipped: {}",
+                "saved variables: unreadable, skipped: {}",
                 unwritable.join(", ")
             ));
         }
@@ -226,44 +224,10 @@ fn unescape(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `SStrToFloat` (`0x64aaa0`) rounded to `f32` (`fstp dword` at `0x491534`): an optional `-`,
-/// digits, an optional `.` and digits, then `e` or `E`, an optional `+` (`0x64ac0a`-`0x64ac1d`) and
-/// `SStrToInt`'s optional `-` and digits (`0x64ac60`); whatever follows is ignored, so `5abc` is 5
-/// and `0x10` is 0.
+/// `SStrToFloat` (`0x64aaa0`) rounded to `f32` (`fstp dword` at `0x491534`), so `5abc` is 5,
+/// `0x10` is 0 and the wrapped exponent of `1e4294967297` is 10.
 fn flat_number(value: &[u8]) -> f32 {
-    fn digits(s: &[u8]) -> (&[u8], &[u8]) {
-        s.split_at(s.iter().take_while(|b| b.is_ascii_digit()).count())
-    }
-    fn sign(s: &[u8]) -> (bool, &[u8]) {
-        s.strip_prefix(b"-").map_or((false, s), |rest| (true, rest))
-    }
-    let (neg, rest) = sign(value);
-    let (int, rest) = digits(rest);
-    let (frac, rest) = rest.strip_prefix(b".").map_or((&b""[..], rest), digits);
-    let mut exp: i64 = 0;
-    if let Some(rest) = rest.strip_prefix(b"e").or_else(|| rest.strip_prefix(b"E")) {
-        let (eneg, rest) = sign(rest.strip_prefix(b"+").unwrap_or(rest));
-        for &d in digits(rest).0 {
-            exp = (exp * 10 + i64::from(d - b'0')).min(100_000);
-        }
-        if eneg {
-            exp = -exp;
-        }
-    }
-    let text = |d: &[u8]| {
-        if d.is_empty() {
-            "0".to_owned()
-        } else {
-            String::from_utf8_lossy(d).into_owned()
-        }
-    };
-    let text = format!(
-        "{}{}.{}e{exp}",
-        if neg { "-" } else { "" },
-        text(int),
-        text(frac)
-    );
-    text.parse::<f64>().unwrap_or(0.0) as f32
+    binding_abi::s_str_to_float(&String::from_utf8_lossy(value)) as f32
 }
 
 /// One Lua value as Lua expression text, or `None` when it has none. `depth` is the indent of a
@@ -299,6 +263,21 @@ fn serialize(
     }
 }
 
+/// What the value writer `0x704480` writes for a value [`serialize`] has none for: a function
+/// (`0x704989`; its `>n` lookup names no function off the stack, `0x872cfc`), NaN (`0x7044f5`,
+/// `0x872e40`), an infinity (`0x704513`, `0x872e30`), and any other type by its name (`0x7049f0`,
+/// `0x872ce4`), a light userdata as `userdata`.
+fn no_literal(v: &Value) -> Vec<u8> {
+    let text = match v {
+        Value::Function(_) => "nil --[[ skipped inline function ]]".to_owned(),
+        Value::Number(n) if n.is_nan() => "nil --[[ nan ]]".to_owned(),
+        Value::Number(_) => "nil --[[ inf ]]".to_owned(),
+        Value::LightUserData(_) => "nil --[[ skipped userdata ]]".to_owned(),
+        other => format!("nil --[[ skipped {} ]]", other.type_name()),
+    };
+    text.into_bytes()
+}
+
 /// A Lua number literal: integral values bare, as the reference's `%.16g` prints them, others in
 /// the shortest form that round-trips; `inf` and `NaN` have none.
 fn number(n: f64) -> Option<String> {
@@ -332,8 +311,9 @@ fn quote(s: &[u8]) -> Vec<u8> {
 
 /// A table constructor, `{\n<tabs>[key] = value,\n<tabs-1>}`: every key bracketed, as the
 /// reference writes for every table shape (`[0x704607, 0x704989)`), integer keys ascending, then
-/// strings. It reloads a list as a list through the 1.12 parser: `recfield` gives a `[k] = v` field
-/// no size hint, so dense integer keys land in the array part, which `next` walks in order.
+/// other numbers ascending, `false`, `true`, then strings. It reloads a list as a list through the
+/// 1.12 parser: `recfield` gives a `[k] = v` field no size hint, so dense integer keys land in the
+/// array part, which `next` walks in order.
 fn table(
     t: &Table,
     depth: usize,
@@ -344,29 +324,66 @@ fn table(
         return None;
     }
     let mut ints: Vec<(i64, Vec<u8>)> = Vec::new();
+    // A non-integral number key; `None` for an infinite one, which writes a comment.
+    let mut floats: Vec<(f64, Option<Vec<u8>>)> = Vec::new();
+    let mut bools: Vec<(bool, Vec<u8>)> = Vec::new();
     let mut strs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    // The type names of keys with no literal.
+    let mut skipped: Vec<&'static str> = Vec::new();
     for pair in t.pairs::<Value, Value>() {
         let Ok((k, v)) = pair else { continue };
-        let Some(value) = serialize(&v, depth + 1, seen, model) else {
-            continue; // an unserializable entry drops, like the reference's
+        // The key's type picks the arm (`0x704766`): a boolean or string key writes as a value
+        // (`0x7047eb`), a number as one unless it is infinite (`0x7047c4`, a NaN key cannot
+        // occur), and any other type has no literal (`0x7048a3`). A skipped key writes a comment
+        // line and never reads its value (`0x7047c6`-`0x7047e6`, `0x7048b3`-`0x7048d9`).
+        let skip = match &k {
+            Value::Number(n) if n.is_infinite() => {
+                floats.push((*n, None));
+                continue;
+            }
+            Value::Table(_) => Some("table"),
+            Value::Function(_) => Some("function"),
+            Value::Thread(_) => Some("thread"),
+            // A light userdata is `userdata` to `lua_typename` (`0x6f3480`).
+            Value::LightUserData(_) => Some("userdata"),
+            _ => None,
+        };
+        if let Some(name) = skip {
+            skipped.push(name);
+            continue;
+        }
+        // A value with no literal writes the value writer's `nil` comment (`0x70482f` →
+        // `0x704480`), which sets nothing on reload. A table answers none only for a cycle or
+        // past [`MAX_DEPTH`], and drops (the module's deviations).
+        let value = match serialize(&v, depth + 1, seen, model) {
+            Some(value) => value,
+            None if matches!(v, Value::Table(_)) => continue,
+            None => no_literal(&v),
         };
         match k {
             Value::Integer(i) => ints.push((i, value)),
             // A float key that is integral is the same slot as the integer in Lua 5.1.
-            Value::Number(n) if n.fract() == 0.0 => ints.push((n as i64, value)),
+            Value::Number(n) if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 => {
+                ints.push((n as i64, value))
+            }
+            Value::Number(n) if n.is_finite() => floats.push((n, Some(value))),
+            Value::Boolean(b) => bools.push((b, value)),
             Value::String(s) => strs.push((s.as_bytes().to_vec(), value)),
-            _ => continue, // a table/bool/function key cannot be written as a literal
+            _ => continue,
         }
     }
     seen.remove(&t.to_pointer());
     ints.sort_by_key(|(k, _)| *k);
+    floats.sort_by(|a, b| a.0.total_cmp(&b.0));
+    bools.sort_by_key(|(k, _)| *k);
     // Byte order, the same as `str` order for UTF-8 keys.
     strs.sort_by(|a, b| a.0.cmp(&b.0));
+    skipped.sort_unstable();
 
     let indent = "\t".repeat(depth);
     let close = "\t".repeat(depth.saturating_sub(1));
     let mut out = b"{\n".to_vec();
-    let mut entry = |key: &[u8], value: &[u8]| {
+    let entry = |out: &mut Vec<u8>, key: &[u8], value: &[u8]| {
         out.extend_from_slice(indent.as_bytes());
         out.push(b'[');
         out.extend_from_slice(key);
@@ -374,11 +391,30 @@ fn table(
         out.extend_from_slice(value);
         out.extend_from_slice(b",\n");
     };
+    let comment = |out: &mut Vec<u8>, what: &str| {
+        out.extend_from_slice(
+            format!("{indent}--[[ skipped entry with {what} key ]]\n").as_bytes(),
+        );
+    };
     for (k, v) in ints {
-        entry(k.to_string().as_bytes(), &v);
+        entry(&mut out, k.to_string().as_bytes(), &v);
+    }
+    for (k, v) in floats {
+        match v {
+            Some(v) => entry(&mut out, number(k).expect("finite").as_bytes(), &v),
+            // `%s--[[ skipped entry with inf key ]]` (`0x872d94`), the indent first.
+            None => comment(&mut out, "inf"),
+        }
+    }
+    for (k, v) in bools {
+        entry(&mut out, k.to_string().as_bytes(), &v);
     }
     for (k, v) in strs {
-        entry(&quote(&k), &v);
+        entry(&mut out, &quote(&k), &v);
+    }
+    // `%s--[[ skipped entry with %s key ]]` (`0x872d5c`), the indent and the key's type name.
+    for name in skipped {
+        comment(&mut out, name);
     }
     out.extend_from_slice(close.as_bytes());
     out.push(b'}');
@@ -524,30 +560,97 @@ mod tests {
             .unwrap());
     }
 
+    /// A top-level value with no literal still gets its line (`0x704422`-`0x704455`), the value
+    /// writer's `nil` comment (`0x872cfc`, `0x872e40`, `0x872e30`), so a reload sets it to nil; a
+    /// boolean key and a fractional one write as `[key] = value,` (`0x7047eb`, `0x70476d`). Inside
+    /// a table a value with no literal writes the same comment as `[key] = nil --[[ … ]],`
+    /// (`0x70482f`), and an infinite key or one of another type a comment line (`0x872d94`,
+    /// `0x872d5c`).
     #[test]
-    fn unserializable_values_are_skipped_with_one_warning() {
+    fn values_and_keys_with_no_literal_write_the_references_comments() {
         let mut s = UiScript::new().unwrap();
         s.run(
             r#"
             A_FUNCTION = function() end
-            NOT_A_NUMBER = 1/0
+            NOT_A_NUMBER = 0/0
+            INFINITE = -1/0
             KEPT = 7
             CYCLE = {}
             CYCLE.self = CYCLE
-            RegisterForSave("A_FUNCTION")
-            RegisterForSave("NOT_A_NUMBER")
-            RegisterForSave("KEPT")
-            RegisterForSave("CYCLE")
+            KEYS = { [true] = "yes", [false] = 0, [0.5] = "half", [-2.25] = 1, [2] = 2, x = 1 }
+            SKIPS = { f = function() end, n = 0/0, [1/0] = 1, [-1/0] = 2, [{}] = 3,
+                      [function() end] = 4 }
+            for _, n in ipairs({ "A_FUNCTION", "NOT_A_NUMBER", "INFINITE", "KEPT", "CYCLE",
+                                 "KEYS", "SKIPS" }) do
+              RegisterForSave(n)
+            end
         "#,
         )
         .unwrap();
         let text = s.saved_variables_bytes();
-        // The cycle's own entry drops; the table itself still writes (empty here).
-        assert_eq!(text, b"KEPT = 7\nCYCLE = {\n}\n");
-        let warns = s.take_warnings();
-        assert_eq!(warns.len(), 1, "one line, not one per name: {warns:?}");
-        assert!(warns[0].contains("A_FUNCTION") && warns[0].contains("NOT_A_NUMBER"));
-        UiScript::new().unwrap().run_chunk(&text).unwrap();
+        let expected = "A_FUNCTION = nil --[[ skipped inline function ]]\n\
+                        NOT_A_NUMBER = nil --[[ nan ]]\n\
+                        INFINITE = nil --[[ inf ]]\n\
+                        KEPT = 7\n\
+                        CYCLE = {\n}\n\
+                        KEYS = {\n\
+                        \t[2] = 2,\n\
+                        \t[-2.25] = 1,\n\
+                        \t[0.5] = \"half\",\n\
+                        \t[false] = 0,\n\
+                        \t[true] = \"yes\",\n\
+                        \t[\"x\"] = 1,\n\
+                        }\n\
+                        SKIPS = {\n\
+                        \t--[[ skipped entry with inf key ]]\n\
+                        \t--[[ skipped entry with inf key ]]\n\
+                        \t[\"f\"] = nil --[[ skipped inline function ]],\n\
+                        \t[\"n\"] = nil --[[ nan ]],\n\
+                        \t--[[ skipped entry with function key ]]\n\
+                        \t--[[ skipped entry with table key ]]\n\
+                        }\n";
+        assert_eq!(String::from_utf8_lossy(&text), expected);
+        assert!(s.take_warnings().is_empty());
+
+        let fresh = UiScript::new().unwrap();
+        fresh
+            .run("A_FUNCTION, NOT_A_NUMBER, INFINITE = 1, 2, 3")
+            .unwrap();
+        fresh.run_chunk(&text).unwrap();
+        assert!(fresh
+            .eval::<bool>("return A_FUNCTION == nil and NOT_A_NUMBER == nil and INFINITE == nil")
+            .unwrap());
+        assert!(fresh
+            .eval::<bool>(
+                r#"return KEYS[true] == "yes" and KEYS[false] == 0 and KEYS[0.5] == "half"
+                   and KEYS[-2.25] == 1 and KEYS[2] == 2 and KEYS.x == 1 and next(SKIPS) == nil"#
+            )
+            .unwrap());
+        assert_eq!(fresh.saved_variables_bytes(), b"");
+        for n in [
+            "A_FUNCTION",
+            "NOT_A_NUMBER",
+            "INFINITE",
+            "KEPT",
+            "CYCLE",
+            "KEYS",
+            "SKIPS",
+        ] {
+            fresh.run(&format!("RegisterForSave({n:?})")).unwrap();
+        }
+        let again = fresh.saved_variables_bytes();
+        let nils = "A_FUNCTION = nil\nNOT_A_NUMBER = nil\nINFINITE = nil\n";
+        let skips = expected.find("SKIPS = {").expect("written");
+        assert_eq!(
+            String::from_utf8_lossy(&again),
+            format!("{}SKIPS = {{\n}}\n", &expected[..skips]).replacen(
+                "A_FUNCTION = nil --[[ skipped inline function ]]\n\
+                 NOT_A_NUMBER = nil --[[ nan ]]\nINFINITE = nil --[[ inf ]]\n",
+                nils,
+                1
+            ),
+            "the reload writes the same file, the nils bare and the skipped entries gone"
+        );
     }
 
     /// A frame kept in a saved variable (Decursive keeps `DEFAULT_CHAT_FRAME` as its output
@@ -664,6 +767,20 @@ mod tests {
             s.eval::<f64>("return PARTYBACKGROUND_OPACITY").unwrap(),
             f64::from(0.1f32)
         );
+    }
+
+    /// The number is `SStrToFloat`'s (`0x64aaa0`): its exponent wraps at 32 bits and its digits
+    /// fold in its own steps, so these read as 1.12.1 reads them, not as a correct parse would.
+    #[test]
+    fn a_flat_number_is_converted_by_s_str_to_float() {
+        for (text, want) in [
+            ("1e4294967297", 10.0),
+            ("1e-4294967295", 10.0),
+            ("16777217.0000000019", 16_777_216.0),
+        ] {
+            let s = read_flat(format!("N = {text}\n").as_bytes());
+            assert_eq!(s.eval::<f64>("return N").unwrap(), want, "{text}");
+        }
     }
 
     /// The flat file is never run (`0x4913b0` has no call into the compiler): a call is not made,

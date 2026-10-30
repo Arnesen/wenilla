@@ -17,9 +17,8 @@
 //! in the reference's call order. The calls benilla has nothing for: the field-watch
 //! unregistrations (`0x490aad`, `0x490ab7`, `0x490acb`, `0x490ae4`, `0x490af3`, and the tail of
 //! `0x490ada`'s leg), frees of caches it does not hold (the minimap's points of interest
-//! `0x490a99`, the durability alert `0x490aa8`, the trade skill's item callbacks `0x490ae9`, the
-//! battlefield list `0x490b20`, the minigame `0x490b34`), the sound band's reset (`0x490b3e` →
-//! `0x72a450`, `[0xcf06e4]`), the pending-chat latch (`0x490a9e`), an empty stub (`0x490b43`), six
+//! `0x490a99`, the durability alert `0x490aa8`, the battlefield list `0x490b20`, the minigame `0x490b34`), the sound band's reset (`0x490b3e` →
+//! `0x72a450`, `[0xcf06e4]`), an empty stub (`0x490b43`), six
 //! bare `ret`s, and past the event the camera's detach (`0x490b52`-`0x490b5a`, `0x4841a0` →
 //! `0x50d0f0(0)`).
 
@@ -69,11 +68,14 @@ pub(crate) struct WorldLeaveSweep;
 pub(crate) enum SweepLeg {
     /// `0x490a94` → `0x458f50`: the `PlaySound` suppression scope opens.
     Silence,
+    /// `0x490a9e` → `0x498a10`: the chat display latch set, so the wire's lines wait for the next
+    /// world-enter cascade.
+    ChatLatch,
     /// `0x490ab2` → `0x4c1ca0` → `CloseInteraction 0x48f200(cl=1, dl=0)`.
     Loot,
     /// `0x490abc` → `0x4e3240` → `0x4e32e0(0, 0)`.
     ItemText,
-    /// `0x490ac1` → `0x4e1f60` → `0x4e1fa0(0)`.
+    /// `0x490ac1` → `0x4e1f60`: `0x4e1fa0(0)`, then the slots' reset `0x4e26a0`.
     Gossip,
     /// `0x490ac6` → `0x500bc0` → `0x501130(0, 1)`.
     Quest,
@@ -85,6 +87,8 @@ pub(crate) enum SweepLeg {
     Merchant,
     /// `0x490adf` → `0x4bf220` → `0x5d4310`.
     Trade,
+    /// `0x490ae9` → `0x4fc780` → `0x4fc890`: the profession list's item waits cancelled.
+    TradeSkill,
     /// `0x490afd` → `0x4d47d0`.
     Duel,
     /// `0x490b02` → `0x4f5830` → `0x4f58a0`.
@@ -200,6 +204,7 @@ fn sweep_schedule() -> Schedule {
         .configure_sets(
             (
                 SweepLeg::Silence,
+                SweepLeg::ChatLatch,
                 SweepLeg::Loot,
                 SweepLeg::ItemText,
                 SweepLeg::Gossip,
@@ -208,6 +213,7 @@ fn sweep_schedule() -> Schedule {
                 SweepLeg::Trainer,
                 SweepLeg::Merchant,
                 SweepLeg::Trade,
+                SweepLeg::TradeSkill,
                 SweepLeg::Duel,
                 SweepLeg::Tabard,
                 SweepLeg::Registrar,
@@ -261,20 +267,33 @@ pub(crate) fn arm_leaving_world_on_self_create(
 }
 
 /// The sweep from the local player's destructor (`0x5dd543`) on a cross-map worldport; a
-/// same-map teleport destroys nothing and never sweeps. The sweep runs at this system's sync
-/// point, so its legs and their events land before the entering edge `feed_units`, ordered after
-/// it, raises for the same port.
-pub(crate) fn sweep_on_worldport(
-    mut ports: MessageReader<crate::net::WorldportMessage>,
-    mut commands: Commands,
-) {
-    // `needs_ack` false is the initial-login map, an arrival; the whole iterator is read so no
-    // message carries over.
-    if ports.read().filter(|w| w.needs_ack).count() > 0 {
-        commands.queue(|world: &mut World| {
-            run_leave_world_sweep(world);
-        });
+/// same-map teleport destroys nothing and never sweeps.
+///
+/// `SMSG_NEW_WORLD` (`0x401b00`) posts the teardown `0x401bc0` as a timer at no delay
+/// (`0x401ba5`-`0x401bae`), and a tick runs its timers before the window input and the packets
+/// (`0x420d0c`, `0x420d23`, `0x420d55`). So the sweep runs at the start of the frame after the
+/// port's, in `PreUpdate` ahead of the input pass and the net drain, and `PLAYER_LEAVING_WORLD`
+/// follows every event the port's own frame raised, the lanes' drain among them. It runs for a
+/// load posted ([`crate::net::PendingWorldports`]; the initial-login map posts none), inside the
+/// teardown, ahead of the objects' leg ([`crate::net::WorldportTimer`]). It precedes the new
+/// world's create, which the server sends after the teardown's acknowledgement.
+pub(crate) fn sweep_on_worldport(world: &mut World) {
+    if world
+        .get_resource::<crate::net::PendingWorldports>()
+        .is_some_and(|p| p.is_posted())
+    {
+        run_leave_world_sweep(world);
     }
+}
+
+/// Register [`sweep_on_worldport`] at the frame's start, outside any interface gate: the
+/// destructor sweeps (`0x5dd543`) whether or not an interface is up, the host legs with it.
+pub(crate) fn add_worldport_sweep(app: &mut App) -> &mut App {
+    app.init_resource::<crate::net::PendingWorldports>()
+        .add_systems(
+            PreUpdate,
+            sweep_on_worldport.in_set(crate::net::WorldportTimer::Sweep),
+        )
 }
 
 /// What a test of a leg needs: a spied VM, and the reload's and the worldport's sweeps.

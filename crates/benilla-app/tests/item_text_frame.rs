@@ -164,6 +164,7 @@ fn the_scrollbar_track_sits_right_of_the_page() {
 fn a_book_page_shows_the_paging_chrome() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     load_ui(&s);
     s.set_item_text(Some(ItemTextState {
         item: "Lament of the Highborne".into(),
@@ -196,12 +197,13 @@ fn a_book_page_shows_the_paging_chrome() {
     assert!(s.take_errors().is_empty());
 }
 
-/// The X hides the panel and its OnHide queues `CloseItemText`; the app then clears the session
-/// and fires `ITEM_TEXT_CLOSED`, which hides again harmlessly.
+/// The X hides the panel and its OnHide calls `CloseItemText`, whose core clears the session and
+/// fires `ITEM_TEXT_CLOSED`, which hides again harmlessly.
 #[test]
 fn closing_queues_the_close_intent() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     load_ui(&s);
     s.set_item_text(Some(letter()));
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
@@ -210,7 +212,7 @@ fn closing_queues_the_close_intent() {
 
     s.run("ItemTextCloseButton:Click()").unwrap();
     assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
-    assert!(s.take_item_text_close(), "OnHide queued the close intent");
+    assert!(s.take_item_text_close(), "OnHide called the close");
 
     s.set_item_text(None);
     s.fire_event("ITEM_TEXT_CLOSED", vec![]);
@@ -390,6 +392,8 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
     use benilla_ui::script::GossipMenu;
 
     let mut s = UiScript::new().unwrap();
+    // `CloseGossip` is a call, which this VM keeps with no host.
+    s.keep_calls();
     load_ui(&s);
     // The stock gossip window, off the chain.
     common::load_ui(&s, "Interface\\FrameXML\\GossipFrame.xml");
@@ -429,7 +433,9 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
     assert!(s.eval::<bool>("return GossipFrame:IsShown()").unwrap());
 
     // The reverse order: reading the note over an open gossip ends the gossip session.
-    let _ = s.take_gossip_close();
+    let _ = s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+        benilla_ui::script::GossipCall::Close,
+    ));
     s.set_item_text(Some(letter()));
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
     s.fire_event("ITEM_TEXT_READY", vec![]);
@@ -440,7 +446,9 @@ fn a_quest_givers_gossip_displaces_the_open_reader() {
         "the reader replaces gossip the same way"
     );
     assert!(
-        s.take_gossip_close(),
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+            benilla_ui::script::GossipCall::Close
+        )) > 0,
         "the displaced gossip's OnHide ended the gossip session (CloseGossip)"
     );
 }

@@ -23,6 +23,11 @@ pub(crate) struct TradeSteps<'w, 's> {
     errors: Res<'w, UiErrorKeys>,
     objects: Objects<'w, 's>,
     items: Res<'w, Items>,
+    /// The initiate's name lookup (`0x5d4031`).
+    names: Res<'w, crate::names::NameCache>,
+    /// The item watchers' trade halves still on the lane, which a close runs first.
+    lane: Option<ResMut<'w, crate::item_lane::ItemLane>>,
+    touch_reads: super::TouchReads<'w, 's>,
 }
 
 impl TradeSteps<'_, '_> {
@@ -35,6 +40,8 @@ impl TradeSteps<'_, '_> {
             errors,
             objects,
             items,
+            names,
+            ..
         } = self;
         let Some(trade) = trade.as_deref_mut() else {
             debug!("ui_trade: no trade window in this world; {call:?} dropped");
@@ -56,8 +63,7 @@ impl TradeSteps<'_, '_> {
                     return None;
                 }
                 info!(target: "trade", "initiate {guid:#x}; sending CMSG_INITIATE_TRADE");
-                trade.initiate(guid, false);
-                let _ = net.0.send(ClientCommand::InitiateTrade { target: guid });
+                trade.initiate_send(guid, false, net, names, errors);
             }
             // `0x4bf230`: its gate's tag 5 always passes (`0x4bf233`), an unchanged flag does
             // nothing (`0x4bf247`), and a change signals both flags (`0x4bf260`) and then sends,
@@ -114,8 +120,47 @@ impl TradeSteps<'_, '_> {
             TradeCall::TargetEnchant | TradeCall::ReplaceEnchant => {
                 debug!("ui_trade: {call:?} is the targeting cursor's, not the trade's");
             }
+            // The close core needs the latch, which the host lends beside this.
+            TradeCall::Close => {}
         }
         None
+    }
+
+    /// The close core's first step here, the trade halves of the item watcher runs still on the
+    /// lane, as the world close core drains them, for the caller to run one at a time
+    /// ([`Self::touch`]).
+    pub(crate) fn take_trade_touches(&mut self) -> Vec<crate::item_watch::TradeTouch> {
+        self.lane
+            .as_deref_mut()
+            .map(crate::item_lane::ItemLane::take_trade_touches)
+            .unwrap_or_default()
+    }
+
+    /// One watcher run's trade half ([`super::touch_trade`]).
+    pub(crate) fn touch(&mut self, script: &mut UiScript, touch: crate::item_watch::TradeTouch) {
+        if let Some(trade) = self.trade.as_deref_mut() {
+            super::touch_trade(script, trade, touch, &self.touch_reads);
+        }
+    }
+
+    /// The partner's cell `[0xb71728]`, set only while the window is open.
+    pub(crate) fn partner_cell(&self) -> Option<u64> {
+        use crate::ui_session::LatchedWindow;
+        self.trade.as_deref().and_then(TradeSession::cell)
+    }
+
+    /// The close core's clear of the cell (`0x4bf516`), and the VM's window with it; both offers
+    /// stay for the handlers' getters, and for the next open to clear.
+    pub(crate) fn close_window(&mut self, script: &mut UiScript) {
+        if let Some(trade) = self.trade.as_deref_mut() {
+            trade.close_window();
+        }
+        script.close_trade_window();
+    }
+
+    /// The close core's last step, `CMSG_CANCEL_TRADE` open or not (`0x4bf527` → `0x5d4310`).
+    pub(crate) fn send_cancel(&mut self) {
+        let _ = self.net.0.send(ClientCommand::CancelTrade);
     }
 
     /// The partner's slot 7 as the trade bind and its clash check read it: `Some` with the record's

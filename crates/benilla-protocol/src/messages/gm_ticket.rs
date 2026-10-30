@@ -63,12 +63,18 @@ pub fn gm_ticket_create(category: u8, map: u32, pos: [f32; 3], text: &str) -> Ve
     out
 }
 
-/// `CMSG_GMTICKET_UPDATETEXT` body: the category byte (`0x5efb2d`), then the text. vmangos stores
-/// the byte, so an edit re-files the ticket under it (`GMTicketHandler.cpp:59-61`).
+/// The most text bytes either client sender keeps: `SStrCopy` into a 0x7d0-byte buffer
+/// (`0x5ef7f0`, `0x5efacd`) leaves 1999 and the terminator.
+const TICKET_TEXT_MAX: usize = 0x7d0 - 1;
+
+/// `CMSG_GMTICKET_UPDATETEXT` body: the category byte (`0x5efb2d`), then the text cut at
+/// [`TICKET_TEXT_MAX`] bytes (`0x5efacd`). vmangos stores the byte, so an edit re-files the ticket
+/// under it (`GMTicketHandler.cpp:59-61`).
 pub fn gm_ticket_updatetext(category: u8, text: &str) -> Vec<u8> {
+    let text = &text.as_bytes()[..text.len().min(TICKET_TEXT_MAX)];
     let mut out = Vec::with_capacity(1 + text.len() + 1);
     out.push(category);
-    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(text);
     out.push(0);
     out
 }
@@ -85,21 +91,26 @@ pub(super) fn read_gm_ticket_system_status(r: &mut &[u8]) -> io::Result<i32> {
     Ok(read_u32_le(r)? as i32)
 }
 
-/// Read `SMSG_GMTICKET_GETTICKET`: a status, then the ticket only for
-/// [`GMTICKET_STATUS_HASTEXT`]; any other status is no ticket, not an error.
-pub(super) fn read_gm_ticket(r: &mut &[u8]) -> io::Result<Option<GmTicket>> {
-    if read_u32_le(r)? != GMTICKET_STATUS_HASTEXT {
-        return Ok(None);
+/// Read `SMSG_GMTICKET_GETTICKET`: the status, then the ticket only for
+/// [`GMTICKET_STATUS_HASTEXT`]; any other status is no ticket, and the status stays because 0
+/// shows `ERR_TICKET_DB_ERROR` (`0x5e44fb`) where the rest do not.
+pub(super) fn read_gm_ticket(r: &mut &[u8]) -> io::Result<(u32, Option<GmTicket>)> {
+    let status = read_u32_le(r)?;
+    if status != GMTICKET_STATUS_HASTEXT {
+        return Ok((status, None));
     }
-    Ok(Some(GmTicket {
-        text: read_cstring(r)?,
-        category: read_u8(r)?,
-        ticket_age: read_f32_le(r)?,
-        oldest_ticket_age: read_f32_le(r)?,
-        update_time: read_f32_le(r)?,
-        assigned_to_gm: read_u8(r)?,
-        opened_by_gm: read_u8(r)?,
-    }))
+    Ok((
+        status,
+        Some(GmTicket {
+            text: read_cstring(r)?,
+            category: read_u8(r)?,
+            ticket_age: read_f32_le(r)?,
+            oldest_ticket_age: read_f32_le(r)?,
+            update_time: read_f32_le(r)?,
+            assigned_to_gm: read_u8(r)?,
+            opened_by_gm: read_u8(r)?,
+        }),
+    ))
 }
 
 #[cfg(test)]
@@ -134,6 +145,17 @@ mod tests {
         );
     }
 
+    /// `0x5efacd` copies at most 0x7d0 bytes, terminator included.
+    #[test]
+    fn the_updatetext_is_cut_at_1999_bytes() {
+        let body = gm_ticket_updatetext(1, &"a".repeat(3000));
+        assert_eq!(body.len(), 1 + 1999 + 1);
+        assert_eq!(body[1..2000], *"a".repeat(1999).as_bytes());
+        assert_eq!(body.last(), Some(&0));
+        let exact = gm_ticket_updatetext(1, &"b".repeat(1999));
+        assert_eq!(exact.len(), 2001, "1999 bytes fit whole");
+    }
+
     /// The Lua `UPDATE_TICKET` event reverses this order; the wire does not.
     #[test]
     fn a_held_ticket_decodes_in_wire_order_text_before_category() {
@@ -148,15 +170,18 @@ mod tests {
 
         assert_eq!(
             read_gm_ticket(&mut &bytes[..]).unwrap(),
-            Some(GmTicket {
-                text: "Stuck in a rock.".to_string(),
-                category: 1,
-                ticket_age: 0.25,
-                oldest_ticket_age: 2.5,
-                update_time: 0.01,
-                assigned_to_gm: 2,
-                opened_by_gm: 1,
-            })
+            (
+                GMTICKET_STATUS_HASTEXT,
+                Some(GmTicket {
+                    text: "Stuck in a rock.".to_string(),
+                    category: 1,
+                    ticket_age: 0.25,
+                    oldest_ticket_age: 2.5,
+                    update_time: 0.01,
+                    assigned_to_gm: 2,
+                    opened_by_gm: 1,
+                })
+            )
         );
     }
 
@@ -177,9 +202,12 @@ mod tests {
     #[test]
     fn the_no_ticket_answer_is_four_bytes_and_is_not_an_error() {
         let bytes = GMTICKET_STATUS_DEFAULT.to_le_bytes();
-        assert_eq!(read_gm_ticket(&mut &bytes[..]).unwrap(), None);
-        // Any other status is also no ticket.
+        assert_eq!(
+            read_gm_ticket(&mut &bytes[..]).unwrap(),
+            (GMTICKET_STATUS_DEFAULT, None)
+        );
+        // Any other status is also no ticket, and keeps its number: 0 is the DB error.
         let bytes = 0u32.to_le_bytes();
-        assert_eq!(read_gm_ticket(&mut &bytes[..]).unwrap(), None);
+        assert_eq!(read_gm_ticket(&mut &bytes[..]).unwrap(), (0, None));
     }
 }

@@ -17,9 +17,8 @@
 //! file is loaded rather than refused.
 //!
 //! The screen comes after the build: at startup the reference fires `SET_GLUE_SCREEN` with
-//! `"movie"` while the `movie` CVar is 1 (clearing it), else `"login"` (`0x402b3b`–`0x402b65`);
-//! back from the world `0x402090` fires it with `"charselect"` or `"login"`. benilla plays no movie
-//! yet (#968), so its boot screen is `"login"`.
+//! `"movie"` while the `movie` CVar is 1 (clearing it), else `"login"` (`0x402b3b`–`0x402b65`,
+//! [`startup_screen`]); back from the world `0x402090` fires it with `"charselect"` or `"login"`.
 //!
 //! The screens' `ModelFFX` panes drive the glue booth ([`super::glue_scene`]): its scene rig, the
 //! scene M2's own point lights and the `FfxGlow::GLUE_SCENE` pass, never the `ui_models` tile
@@ -192,6 +191,57 @@ pub(super) fn finish_glue_load_log(script: &mut UiScript) {
     super::load_log::write_glue(script.take_load_log_writes());
 }
 
+/// The screen the startup puts up (`0x402b3b`-`0x402b65`): `"movie"` while the `movie` CVar's
+/// integer (`rec+0x28`, `0x402b41`) is 1, which first sets it to `"0"` (`0x402b54`, `0x82e570`), so
+/// the intro plays once; else `"login"` (`0x82e3e0`). With no CVar table, `"login"`.
+pub(super) fn startup_screen(cvars: Option<Mut<'_, crate::cvars::Cvars>>) -> &'static str {
+    let Some(mut cvars) = cvars else {
+        return GlueScreen::Login.key();
+    };
+    if cvars
+        .get("movie")
+        .is_some_and(|v| benilla_ui::script::s_str_to_int(v) == 1)
+    {
+        cvars.set("movie", "0");
+        "movie"
+    } else {
+        GlueScreen::Login.key()
+    }
+}
+
+/// Whether a run skips the startup's movie: one nobody watches ([`crate::run_mode::unattended`])
+/// does, unless it asks to play it (`WOW_PLAY_MOVIE=1`). Tooling: the client plays it as the
+/// reference does, and a probe, a capture or a smoke run skips it as a player can.
+fn skips_startup_movie(unattended: bool, play_movie: bool) -> bool {
+    unattended && !play_movie
+}
+
+/// Skip a playing movie as Escape does: `MovieFrame_OnKeyUp` hides the frame, whose `OnHide`
+/// stops the movie and puts the login screen up (`MovieFrame.lua:40-44`, `:59-61`).
+fn skip_startup_movie(vm: StockVm) {
+    if vm.frame_visible("MovieFrame") {
+        info!("glue: an unattended run skips the startup movie (WOW_PLAY_MOVIE=1 plays it)");
+        vm.press("MovieFrame:Hide()");
+    }
+}
+
+/// The first frame the glue stands, an unattended run's startup movie is skipped
+/// ([`skips_startup_movie`]); a movie asked for later plays.
+pub(crate) fn skip_unattended_startup_movie(stock: StockGlueProbe, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let vm = stock.vm();
+    if !vm.is_up() {
+        return;
+    }
+    *done = true;
+    let play = std::env::var("WOW_PLAY_MOVIE").as_deref() == Ok("1");
+    if skips_startup_movie(crate::run_mode::unattended(), play) {
+        skip_startup_movie(vm);
+    }
+}
+
 /// Put `screen` up: `SET_GLUE_SCREEN` with its key as `arg1` (`0x46b840`, event 0).
 #[cfg(test)]
 pub(super) fn set_glue_screen(script: &mut UiScript, screen: GlueScreen) {
@@ -222,10 +272,10 @@ impl GlueRebuild {
 }
 
 /// The glue's aspect (`0x46ab40`): 4/3 with `widescreen` off, else the applied `gxResolution`
-/// scanned as width, separator, height (`0x46ab8f`). Not the window's: benilla writes
-/// `gxResolution` only through the CVar set path (the config load, `SetCVar`, `/console set`,
-/// `SetScreenResolution`, each committed at `RestartGx` as the row is latched), never from a
-/// window drag. A size `video::parse_resolution` refuses, a zero or unparsable extent, is no value.
+/// scanned as width, separator, height (`0x46ab8f`). Not the window's: `gxResolution` moves only
+/// through the CVar set path (the config load, `SetCVar`, `/console set`, `SetScreenResolution`,
+/// each committed at `RestartGx` as the row is latched) and, in fullscreen, to the screen's own
+/// size (`video::show_screen_size`), never with a window drag. A size `video::parse_resolution` refuses, a zero or unparsable extent, is no value.
 fn gx_aspect(cvars: Option<&crate::cvars::Cvars>) -> Option<f32> {
     let cvars = cvars?;
     if cvars.flag("widescreen") == Some(false) {
@@ -352,19 +402,6 @@ pub(crate) fn run_pending_glue_rebuild(world: &mut World) {
     super::lifecycle::install_glue_side_vm(world, &screen);
 }
 
-/// `ConsoleExec` lines the glue VM left for the console (`0x515f10` → `ConsoleCommandExecute`),
-/// run as the in-game drain runs its own, their output to the log: the glue has no chat to print
-/// to.
-pub(crate) fn drain_glue_console(world: &mut World) {
-    let lines = match world.get_non_send_resource_mut::<UiScript>() {
-        Some(mut s) if s.vm_kind() == benilla_ui::script::VmKind::Glue => s.take_console_lines(),
-        _ => return,
-    };
-    for line in lines {
-        crate::console::run(world, &line);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -392,6 +429,69 @@ mod tests {
         "RealmWizard",
         "AddonList",
     ];
+
+    /// The startup's screen: the movie while the `movie` CVar's integer is 1, which the pick sets
+    /// to "0" so the next start is the login screen; any other integer, "2" or "0", leaves the CVar
+    /// and puts the login screen up (`0x402b41`-`0x402b60`).
+    #[test]
+    fn the_first_start_plays_the_movie_once_and_clears_its_cvar() {
+        let mut world = World::new();
+        world.insert_resource(crate::cvars::Cvars::default());
+        assert_eq!(
+            world.resource::<crate::cvars::Cvars>().get("movie"),
+            Some("1"),
+            "the registered default"
+        );
+        let pick = |world: &mut World| startup_screen(world.get_resource_mut());
+        assert_eq!(pick(&mut world), "movie");
+        assert_eq!(
+            world.resource::<crate::cvars::Cvars>().get("movie"),
+            Some("0")
+        );
+        assert_eq!(pick(&mut world), "login");
+        for (value, screen, after) in [
+            ("2", "login", "2"),
+            ("1x", "movie", "0"),
+            ("-1", "login", "-1"),
+        ] {
+            world.insert_resource(crate::cvars::Cvars::with_value("movie", value));
+            assert_eq!(pick(&mut world), screen, "{value}");
+            assert_eq!(
+                world.resource::<crate::cvars::Cvars>().get("movie"),
+                Some(after),
+                "{value}"
+            );
+        }
+        assert_eq!(startup_screen(None), "login");
+    }
+
+    /// An unattended run lets nobody watch the startup's movie: it is skipped at once, by the
+    /// stock Escape path's `Hide()`, unless the run asks to play it (`WOW_PLAY_MOVIE=1`); an
+    /// attended run plays it. The skip puts the login screen up and leaves no movie playing.
+    #[test]
+    fn an_unattended_run_skips_the_startup_movie_as_escape_does() {
+        assert!(skips_startup_movie(true, false));
+        assert!(!skips_startup_movie(true, true));
+        assert!(!skips_startup_movie(false, false));
+        let _ = benilla_formats::wow_data_or_skip!();
+        let mut s = UiScript::new_glue().unwrap();
+        s.set_screen_size(1024.0, 768.0);
+        s.register_cvars([("movieSubtitle", "0"), ("gxResolution", "1024x768")]);
+        s.set_movie_reader(Box::new(|path, _| {
+            path.ends_with(".avi").then(|| {
+                benilla_movie::testing::synthetic_avi(1024, 464, (1, 25), 9, &[&[][..]; 9], &[])
+            })
+        }));
+        let _ = load_glue(&mut s);
+        signal_glue_screen(&mut s, "movie");
+        s.resolve();
+        assert!(s.movie_playing());
+        skip_startup_movie(StockVm(Some(&s)));
+        s.resolve();
+        assert!(!s.movie_playing());
+        assert!(!s.frame_visible("MovieFrame"));
+        assert_eq!(s.glue_screen(), "login");
+    }
 
     /// The name a "nil value" call error names, in either of Lua's two spellings of it.
     fn nil_call(error: &str) -> Option<&str> {
@@ -643,7 +743,7 @@ mod tests {
     fn glue_world() -> World {
         use crate::console::ConsoleCommandApp;
         let mut app = App::new();
-        app.console_command(
+        app.console_command_in_call(
             "reloadUI",
             crate::console::GRAPHICS,
             None,
@@ -680,11 +780,18 @@ mod tests {
         let set_state = |world: &World, state: ScreenState| {
             world.non_send_resource::<SharedGlueMgr>().get_mut().state = state;
         };
-        world
-            .non_send_resource::<UiScript>()
-            .run("SetGlueScreen('credits') ConsoleExec('reloadUI')")
-            .unwrap();
-        drain_glue_console(&mut world);
+        // The console line as the host runs it inside the call.
+        let lines = {
+            let mut s = world.non_send_resource_mut::<UiScript>();
+            s.keep_calls();
+            s.run("SetGlueScreen('credits') ConsoleExec('reloadUI')")
+                .unwrap();
+            s.take_console_lines()
+        };
+        assert_eq!(lines, ["reloadUI"]);
+        for line in lines {
+            crate::console::execute(&mut world, &line);
+        }
         let old = session(&world);
 
         set_state(&world, ScreenState::Logon);
@@ -733,7 +840,10 @@ mod tests {
             let mut app = App::new();
             app.init_resource::<GlueRebuild>()
                 .insert_resource(crate::cvars::Cvars::with_value("gxResolution", "1024x768"))
-                .add_systems(Update, watch_glue_aspect);
+                .add_systems(
+                    PreUpdate,
+                    watch_glue_aspect.after(crate::video::show_screen_size),
+                );
             let mut window = Window::default();
             window.resolution.set(1024.0, 768.0);
             let win = app
@@ -780,6 +890,39 @@ mod tests {
             !c.frame(1360.0, 768.0),
             "16:9 to 1.7708 moves the stored aspect by under a hundredth"
         );
+    }
+
+    /// A switch to fullscreen at the glue rebuilds it in the frame the window takes the screen:
+    /// the screen's size is shown first, so the callback compares the screen's aspect, and the
+    /// row answers the screen's size that frame. Wired as `UiScriptPlugin` and `VideoPlugin` wire
+    /// the two.
+    #[test]
+    fn a_switch_to_fullscreen_at_the_glue_rebuilds_it() {
+        use crate::video::{show_screen_size, DisplayMode, VideoConfig};
+        use bevy::window::{MonitorSelection, WindowMode};
+        let mut c = SizeCallback::new();
+        c.app
+            .insert_resource(VideoConfig {
+                vsync: true,
+                display: DisplayMode::Windowed,
+                maximize: false,
+                windowed: UVec2::new(1024, 768),
+            })
+            .add_systems(PreUpdate, show_screen_size);
+        assert!(!c.frame(1024.0, 768.0), "the size it was built at");
+        c.app.world_mut().resource_mut::<VideoConfig>().display = DisplayMode::Fullscreen;
+        c.app.world_mut().get_mut::<Window>(c.win).unwrap().mode =
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current);
+        assert!(c.frame(1440.0, 900.0), "4:3 to 16:10 rebuilds");
+        assert_eq!(
+            c.app
+                .world()
+                .resource::<crate::cvars::Cvars>()
+                .get("gxResolution"),
+            Some("1440x900"),
+            "the row answers the screen that frame"
+        );
+        assert!(!c.frame(1440.0, 900.0), "once");
     }
 
     /// The window is not the aspect: a drag to any size with `gxResolution` unchanged stores the

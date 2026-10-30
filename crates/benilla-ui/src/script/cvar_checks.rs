@@ -109,6 +109,103 @@ pub fn check_base_mip(value: &str, applied: &str, _rows: CvarRows<'_>) -> CvarVe
     }
 }
 
+/// `weatherDensity`'s callback (`0x67b870`): `SStrToInt` (`0x64ac60`), refused outside 0..=3 as a
+/// signed int with "Value out of range (0 - 3)" (`0x8685bc` through `0x63cd00`, the bounds
+/// pushed at `0x67b8cd`-`0x67b8d3`).
+pub fn check_weather_density(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
+    if (0..=3).contains(&s_str_to_int(value)) {
+        CvarVerdict::accept()
+    } else {
+        CvarVerdict::refuse("Value out of range (0 - 3)")
+    }
+}
+
+/// `anisotropic`'s callback (`0x689110`): `SStrToInt` (`0x64ac60`), refused outside 1..=16 with
+/// "Anisotropy must be between 1 and 16 inclusive" (`0x869cd0`). The first compare is unsigned
+/// (`0x689128 jb`, `0x689131 ja`), so 0 and every negative are outside. A value above the device's
+/// own cap (`[caps+0xac]`) refuses with "max anisotropy is %d, not set" (`0x869d58`); benilla's
+/// samplers take the full 16, so that leg cannot be reached. A value it takes prints "anisotropic
+/// enabled, set upon game restart" above 1 (`0x68918b`-`0x68919a`, `0x869d2c`) and "anisotropic
+/// disabled, set upon game restart" at 1 (`0x6891ab`-`0x6891ba`, `0x869d00`).
+pub fn check_anisotropic(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
+    match s_str_to_int(value) {
+        1 => CvarVerdict::accept_saying("anisotropic disabled, set upon game restart"),
+        2..=16 => CvarVerdict::accept_saying("anisotropic enabled, set upon game restart"),
+        _ => CvarVerdict::refuse("Anisotropy must be between 1 and 16 inclusive"),
+    }
+}
+
+/// The two ends of the error filter the engine holds (`[0xb05d30]` the lowest level shown,
+/// `[0x83592c]` the highest), set by the callbacks [`check_error_level_min`] and
+/// [`check_error_level_max`] and read by `0x402fa0`.
+const ERROR_LEVEL_NAMES: [&str; 4] = [
+    "informational messages", // 0x82eb2c
+    "warnings",               // 0x82eb20
+    "errors",                 // 0x82eb18
+    "fatal errors",           // 0x82eb08
+];
+
+/// `0x402fa0`, what a taken `ErrorLevelMin` or `ErrorLevelMax` prints: "Displaying all system
+/// messages" (`0x82eb58`) for 0 through 3 (`0x402fba`); else "Displaying " (`0x82eb4c`), "only "
+/// (`0x82eb44`) when the two are one level, the lowest's name (`0x403094`) and, when they differ,
+/// " through " the highest's name for 1 to 3 (`0x82eacc`, `0x82eae0`, `0x82eaf0`).
+fn error_level_line(min: i32, max: i32) -> String {
+    if min == 0 && max == 3 {
+        return "Displaying all system messages".to_string();
+    }
+    let mut line = String::from("Displaying ");
+    if min == max {
+        line.push_str("only ");
+    }
+    if let Some(name) = usize::try_from(min)
+        .ok()
+        .and_then(|i| ERROR_LEVEL_NAMES.get(i))
+    {
+        line.push_str(name);
+    }
+    if min != max {
+        line.push_str(match max {
+            1 => " through warnings",
+            2 => " through errors",
+            3 => " through fatal errors",
+            _ => "",
+        });
+    }
+    line
+}
+
+/// An error-level row's level other than the one being written, as the rows hold it.
+fn error_level_of(rows: CvarRows<'_>, name: &str, default: i32) -> i32 {
+    rows(name).map_or(default, |v| s_str_to_int(&v))
+}
+
+/// `ErrorLevelMin`'s callback (`0x402f60`): `SStrToInt` (`0x64ac60`), refused outside 0..=3 as a
+/// signed int (`0x402f6e jl`, `0x402f73 jge 4`) with "%i is not valid, valid values are 0 - %i"
+/// (`0x82eaa0`) of the value and 3. A taken value is the lowest level (`0x44cc20`), which raises
+/// the highest to match when it is below, and prints [`error_level_line`] (`0x402f7c`).
+/// The highest is read off the `ErrorLevelMax` row, which the engine's own copy can run ahead of
+/// after an earlier raise (the row keeps the string written).
+pub fn check_error_level_min(value: &str, _applied: &str, rows: CvarRows<'_>) -> CvarVerdict {
+    let min = s_str_to_int(value);
+    if !(0..=3).contains(&min) {
+        return CvarVerdict::refuse(format!("{min} is not valid, valid values are 0 - 3"));
+    }
+    let max = error_level_of(rows, "ErrorLevelMax", 3).max(min);
+    CvarVerdict::accept_saying(error_level_line(min, max))
+}
+
+/// `ErrorLevelMax`'s callback (`0x4030b0`): the same range and refusal, a taken value being the
+/// highest level (`0x44cc40`), which lowers the lowest to match when it is above, then
+/// [`error_level_line`] (`0x4030cc`).
+pub fn check_error_level_max(value: &str, _applied: &str, rows: CvarRows<'_>) -> CvarVerdict {
+    let max = s_str_to_int(value);
+    if !(0..=3).contains(&max) {
+        return CvarVerdict::refuse(format!("{max} is not valid, valid values are 0 - 3"));
+    }
+    let min = error_level_of(rows, "ErrorLevelMin", 1).min(max);
+    CvarVerdict::accept_saying(error_level_line(min, max))
+}
+
 /// What the `gx*` callbacks print when they take a value (`0x865008`): the device record changed
 /// and waits for the next `gxRestart`.
 const GX_PENDING: &str = "set pending gxRestart";
@@ -500,44 +597,75 @@ pub fn check_camera_view(value: &str, _applied: &str, _rows: CvarRows<'_>) -> Cv
     camera_range(value, 0.0, 4.0)
 }
 
-/// `sscanf(s, "%f")` as the reference's CRT reads it: leading white space, an optional sign, digits
-/// with at most one `.` (at least one digit), then `e`/`E` with an optional sign and digits,
-/// converted as a double and stored as a float. `None` when no number starts the string.
+/// The full-screen effect switches' shared callback (`0x6cde30`), on `ffx`, `ffxGlow`, `ffxDeath`
+/// and `ffxRectangle`: the value's `atoi` (`0x41449c`), "enabled" (`0x853764`) when nonzero, else
+/// "disabled" (`0x853758`), through `ConsoleWrite` (`0x63cb50`); it takes every value (`mov al,1`).
+pub fn check_ffx_echo(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
+    CvarVerdict::accept_saying(if crate::crt::atoi(value) != 0 {
+        "enabled"
+    } else {
+        "disabled"
+    })
+}
+
+/// `sscanf(s, "%f")` as the reference's CRT reads it ([`scanf_f_prefix`]). `None` when no number
+/// starts the string.
 fn scanf_f(s: &str) -> Option<f32> {
+    scanf_f_prefix(s).map(|(v, _)| v)
+}
+
+/// `sscanf`'s `%f` (`__input`, `0x744e21`) over `s` as a C string: the float and the bytes it
+/// consumed, so a format of several `%f` goes on after it. Blanks skipped (`__whiteout`,
+/// `0x7458ae`), then a sign, digits, a `.` and digits, and only after a digit an `e` or `E`
+/// (`0x74518d`), a sign and digits, every byte after the sign counted against a width of 349
+/// (`0x7450c9`). The marker is consumed, and its sign, whether or not a digit follows: only the
+/// byte after them is pushed back (`0x745220`). The text goes to `_fassign` (`0x745251`), which
+/// rounds it once to the float (`_atoflt`, `0x40b53b`). `None` when the mantissa has no digit.
+pub fn scanf_f_prefix(s: &str) -> Option<(f32, usize)> {
     let b = s.as_bytes();
+    let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
     let mut i = b
         .iter()
-        .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .take_while(|&&c| c == b' ' || (0x09..=0x0d).contains(&c))
         .count();
     let start = i;
     if matches!(b.get(i), Some(b'+' | b'-')) {
         i += 1;
     }
-    let digits = |i: &mut usize| {
-        let from = *i;
-        while b.get(*i).is_some_and(u8::is_ascii_digit) {
-            *i += 1;
-        }
-        *i - from
+    // A byte is taken while the width lasts.
+    let mut width = 0x15d;
+    let mut take = |ok: bool| {
+        let took = ok && width > 0;
+        width -= usize::from(took);
+        took
     };
-    let mut n = digits(&mut i);
-    if b.get(i) == Some(&b'.') {
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let mut digits = 0;
+    while take(digit(i)) {
         i += 1;
-        n += digits(&mut i);
+        digits += 1;
     }
-    if n == 0 {
+    if take(b.get(i) == Some(&b'.')) {
+        i += 1;
+        while take(digit(i)) {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
         return None;
     }
-    if matches!(b.get(i), Some(b'e' | b'E')) {
-        let mut e = i + 1;
-        if matches!(b.get(e), Some(b'+' | b'-')) {
-            e += 1;
+    if take(matches!(b.get(i), Some(b'e' | b'E'))) {
+        i += 1;
+        if take(matches!(b.get(i), Some(b'+' | b'-'))) {
+            i += 1;
         }
-        if digits(&mut e) > 0 {
-            i = e;
+        while take(digit(i)) {
+            i += 1;
         }
     }
-    s[start..i].parse::<f64>().ok().map(|v| v as f32)
+    // The bytes stored are these but a `+`, which `___strgtold12` reads the same either way.
+    Some((mlua::benilla_lua::strtod::atoflt(&b[start..i]), i))
 }
 
 #[cfg(test)]
@@ -547,6 +675,33 @@ mod tests {
     }
 
     use super::*;
+
+    /// `sscanf`'s `%f`: one rounding to the float, the exponent marker and its sign consumed with
+    /// no digit after them, and a width of 349 bytes after the sign.
+    #[test]
+    fn scanf_f_is_the_clients() {
+        assert_eq!(scanf_f("460e8"), Some(45_999_996_928.0));
+        assert_eq!(scanf_f_prefix("1e 2"), Some((1.0, 2)));
+        assert_eq!(scanf_f_prefix("1e+"), Some((1.0, 3)));
+        assert_eq!(scanf_f_prefix("-2.5E-1x"), Some((-0.25, 7)));
+        assert_eq!(scanf_f_prefix(" \x0b+.5"), Some((0.5, 5)));
+        assert_eq!(
+            scanf_f_prefix("1d5"),
+            Some((1.0, 1)),
+            "only `e` and `E` mark"
+        );
+        assert_eq!(scanf_f_prefix("5."), Some((5.0, 2)));
+        for text in ["", " ", "-", ".", "e5", ".e5", "x1"] {
+            assert_eq!(scanf_f_prefix(text), None, "{text:?}");
+        }
+        let long = format!("-{}", "1".repeat(400));
+        assert_eq!(scanf_f_prefix(&long), Some((f32::NEG_INFINITY, 350)));
+        let long = format!("-0.{}", "1".repeat(400));
+        let (v, used) = scanf_f_prefix(&long).unwrap();
+        assert_eq!((v.to_bits(), used), (0xbde3_8e39, 350));
+        assert_eq!(scanf_f("1e39"), Some(f32::INFINITY));
+        assert_eq!(scanf_f("1e-40").map(f32::to_bits), Some(0x0001_16c2));
+    }
 
     /// `0x50b330` through each wrapper: values at the float bounds pass, values past them do not,
     /// and the line prints the float bounds with `%f`.
@@ -921,5 +1076,103 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// `0x67b870`, `0x689110`, `0x402f60` and `0x4030b0` refuse an out-of-range write with their
+    /// lines; the parse is `SStrToInt`'s.
+    #[test]
+    fn the_weather_anisotropy_and_error_level_callbacks_refuse_out_of_range_values() {
+        let weather = |v: &str| check_weather_density(v, "2", &no_rows);
+        for ok in ["0", "3", " 2", "1.9"] {
+            assert_eq!(weather(ok), CvarVerdict::accept(), "{ok:?}");
+        }
+        for bad in ["4", "9", "-1"] {
+            assert_eq!(
+                weather(bad),
+                CvarVerdict::refuse("Value out of range (0 - 3)"),
+                "{bad:?}"
+            );
+        }
+        // No digits parses as 0, which is in range.
+        assert_eq!(weather("x"), CvarVerdict::accept());
+
+        let aniso = |v: &str| check_anisotropic(v, "1", &no_rows);
+        for bad in ["0", "17", "32", "-4", "junk"] {
+            assert_eq!(
+                aniso(bad),
+                CvarVerdict::refuse("Anisotropy must be between 1 and 16 inclusive"),
+                "{bad:?}"
+            );
+        }
+        // A taken value says what it did (`0x68918b`, `0x6891ab`).
+        assert_eq!(
+            aniso("1"),
+            CvarVerdict::accept_saying("anisotropic disabled, set upon game restart")
+        );
+        for on in ["2", "16", "8"] {
+            assert_eq!(
+                aniso(on),
+                CvarVerdict::accept_saying("anisotropic enabled, set upon game restart"),
+                "{on:?}"
+            );
+        }
+
+        let refused =
+            |v: i32| CvarVerdict::refuse(format!("{v} is not valid, valid values are 0 - 3"));
+        assert_eq!(check_error_level_min("7", "1", &no_rows), refused(7));
+        assert_eq!(check_error_level_min("-2", "1", &no_rows), refused(-2));
+        assert_eq!(check_error_level_max("4", "3", &no_rows), refused(4));
+    }
+
+    /// `0x402fa0` and the two callbacks' pair rule: the minimum raises the maximum to match
+    /// (`0x44cc20`), the maximum lowers the minimum (`0x44cc40`).
+    #[test]
+    fn the_error_level_callbacks_say_which_levels_show() {
+        let rows = |min: &'static str, max: &'static str| {
+            move |name: &str| match name {
+                "ErrorLevelMin" => Some(min.to_string()),
+                "ErrorLevelMax" => Some(max.to_string()),
+                _ => None,
+            }
+        };
+        let say = |v: CvarVerdict| v.lines.join("|");
+        // Min 0 with max 3: everything.
+        assert_eq!(
+            say(check_error_level_min("0", "1", &rows("1", "3"))),
+            "Displaying all system messages"
+        );
+        // A range reads "lowest through highest".
+        assert_eq!(
+            say(check_error_level_min("1", "0", &rows("0", "3"))),
+            "Displaying warnings through fatal errors"
+        );
+        assert_eq!(
+            say(check_error_level_max("2", "3", &rows("1", "3"))),
+            "Displaying warnings through errors"
+        );
+        assert_eq!(
+            say(check_error_level_max("1", "3", &rows("0", "3"))),
+            "Displaying informational messages through warnings"
+        );
+        // One level says "only".
+        assert_eq!(
+            say(check_error_level_max("1", "3", &rows("1", "3"))),
+            "Displaying only warnings"
+        );
+        assert_eq!(
+            say(check_error_level_max("0", "3", &rows("1", "3"))),
+            "Displaying only informational messages"
+        );
+        // The minimum past the maximum raises it; the maximum below the minimum lowers it.
+        assert_eq!(
+            say(check_error_level_min("3", "1", &rows("1", "1"))),
+            "Displaying only fatal errors"
+        );
+        assert_eq!(
+            say(check_error_level_max("0", "3", &rows("2", "3"))),
+            "Displaying only informational messages"
+        );
+        // A refusal says the value and nothing else.
+        assert!(!check_error_level_min("5", "1", &rows("1", "3")).accept);
     }
 }

@@ -13,19 +13,35 @@
 //!
 //! `source` is always nil, and only the player's auras carry a duration: the 1.12 wire has no aura
 //! caster and sends durations for the player alone, so the stock target frame shows no timers.
+//!
+//! The unit walks read the unit's slots as the call runs, through the lent host ([`read`]); the
+//! app pushes no unit's list, and a harness's lists answer only with no host to ask. The
+//! `GetPlayerBuff` family reads no object: the cache it reads is the client's own, rebuilt at each
+//! packet that moves the aura fields (`0x4e4140` → `0x4e4170`), and its timers the expiry array
+//! the duration packet writes (`0x4e4390` into `0xbc5f68`).
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
 
 mod player_buff;
+mod read;
 
-/// One aura on one unit, as the app's feed pushes it ([`crate::script::UiScript::set_unit_auras`],
-/// [`crate::script::UiScript::set_player_auras`]).
+pub use player_buff::PlayerBuffExpiry;
+pub(crate) use player_buff::{expiry_of, until_cancelled_of};
+pub(crate) use read::{aura_unit, nth_kept, read_auras_of};
+pub use read::{AuraListRead, AuraRead};
+
+/// One aura on one unit: a record of the player's buff cache as the app pushes it
+/// ([`crate::script::UiScript::set_player_auras`]), or of a harness's unit list
+/// ([`crate::script::UiScript::set_unit_auras`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AuraState {
     /// `Spell.dbc` id, what `CMSG_CANCEL_AURA` names and the app's icon lookup keys on.
     pub spell_id: u32,
+    /// The descriptor slot the aura sits in, the cache record's `+0x0`: what the expiry array
+    /// (`0xbc5f68`) is indexed by (`0x4e4450`).
+    pub slot: u8,
     /// The spell's name; `None` when the catalog lacks the id.
     pub name: Option<String>,
     /// The icon's extensionless MPQ path (`Interface\Icons\…`).
@@ -39,8 +55,11 @@ pub struct AuraState {
     /// `"Magic"`, `"Curse"`, `"Disease"`, `"Poison"` or `None`; the debuff border tints by it.
     pub debuff_type: Option<String>,
     /// Seconds, from the last apply or refresh; 0 when permanent or on a unit not the player.
+    /// The player's list carries none: the getters read it through the lent host
+    /// ([`PlayerBuffExpiry`]).
     pub duration: f64,
-    /// The `GetTime()` instant it runs out; 0 when [`Self::duration`] is 0.
+    /// The `GetTime()` instant it runs out; 0 when [`Self::duration`] is 0. The snapshot's, which
+    /// the getters read only with no host to ask ([`PlayerBuffExpiry`]).
     pub expiration_time: f64,
     /// A buff rather than a debuff: the `HELPFUL`/`HARMFUL` filter's test.
     pub helpful: bool,
@@ -50,15 +69,24 @@ pub struct AuraState {
     /// from the spell (`0x4e452e`-`0x4e45c5`), not from `expiration_time`, so it holds before any
     /// `SMSG_UPDATE_AURA_DURATION` and a permanent aura never shows a `0 s` timer.
     pub until_cancelled: bool,
+    /// The spell is not in the catalog, so the record's flag is not known: the call reads it as
+    /// `expiry == 0` ([`until_cancelled_of`]).
+    pub until_cancelled_unknown: bool,
     /// `AttributesEx & 0x4` (`SPELL_ATTR_EX_IS_CHANNELED`), [`cancel_authorized`]'s second arm.
     pub channeled: bool,
     /// Kept by a set `raidFilter`: a buff the player could cast (`0x4b3870`), a debuff whose
     /// dispel type a spell the player knows removes (`0x4b3920`). Read on a unit's list alone.
     pub raid_listed: bool,
+    /// Hidden by `IsAuraDisplayable`'s vision test (`0x51989c`-`0x5198b8`): the spell's
+    /// `RequiredAuraVision` names a bit the active player's `PLAYER_FIELD_BYTES2` byte 1 lacks.
+    /// `UnitBuff` and `UnitDebuff` skip it (`0x51966d`, `0x519a0c`); `GameTooltip:SetUnitBuff`
+    /// counts it, its own test reading no vision (`0x534df0`). Read on a unit's list alone.
+    pub vision_hidden: bool,
 }
 
-/// One unit's auras as the app pushes them ([`crate::script::UiScript::set_unit_auras`]): every
-/// live aura in ascending slot, and `UnitBuff`'s unit gate over the helpful half.
+/// One unit's auras as a harness sets them with no host to ask
+/// ([`crate::script::UiScript::set_unit_auras`]): every live aura in ascending slot, and
+/// `UnitBuff`'s unit gate over the helpful half.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnitAuraList {
     pub auras: Vec<AuraState>,
@@ -118,26 +146,26 @@ fn returns(lua: &Lua, a: &AuraState, with_dispel_type: bool) -> mlua::Result<Mul
     Ok(MultiValue::from_vec(out))
 }
 
-/// The list of the unit `token` names, through the resolver (`0x515970`, which `UnitBuff` calls at
-/// `0x519542`), the player's by slot as any unit's; `None` for nobody or a unit with no list. A
-/// token the resolver does not recognise raises `Unknown unit name`.
-pub(crate) fn auras_of<'m>(
-    model: &'m Model,
-    token: &str,
-) -> mlua::Result<Option<&'m UnitAuraList>> {
-    Ok(model
+/// The list of the unit `token` names off the snapshots, for a reader outside any call: the
+/// resolver's stand-in (`0x515970`, which `UnitBuff` calls at `0x519542`), the player's by slot as
+/// any unit's; `None` for nobody, a unit with no list, and a token the resolver does not recognise.
+pub(crate) fn auras_of<'m>(model: &'m Model, token: &str) -> Option<&'m UnitAuraList> {
+    model
         .unit_guids
-        .guid_of(token)?
-        .and_then(|g| model.unit_auras.get(&g)))
+        .resolve(token)
+        .ok()
+        .flatten()
+        .and_then(|g| model.unit_auras.get(&g))
 }
 
 /// `UnitBuff`'s and `UnitDebuff`'s walk over `list`: the half the verb names, the buffs only
-/// through the unit gate ([`UnitAuraList::buffs_visible`]).
+/// through the unit gate ([`UnitAuraList::buffs_visible`]), past the vision test
+/// ([`AuraState::vision_hidden`]).
 fn listed(list: &UnitAuraList, helpful: bool) -> impl Iterator<Item = &AuraState> {
     let gate_open = !helpful || list.buffs_visible;
     list.auras
         .iter()
-        .filter(move |a| gate_open && a.helpful == helpful)
+        .filter(move |a| gate_open && a.helpful == helpful && !a.vision_hidden)
 }
 
 /// The `raidFilter` argument, read as a script flag with default 0 (`0x6f1c10` at `0x51958b`,
@@ -146,9 +174,11 @@ pub(crate) fn raid_filter_arg(v: Option<&Value>) -> bool {
     crate::script::binding_abi::flag_or_default(v, 0) != 0
 }
 
-/// The `index`-th (1-based) buff (`helpful`) or debuff of `token`, in pushed order, counting only
-/// the `raid_listed` ones under `raid`; out of range answers one nil on every miss leg
-/// (`0x5195fe`, `0x5197d4`, `0x519a51`), the loop terminator.
+/// The `index`-th (1-based) buff (`helpful`) or debuff of `token`, in slot order, counting only
+/// the `raid_listed` ones under `raid`, read off the unit as the call runs ([`read_auras_of`]);
+/// out of range answers one nil on every miss leg (`0x5195fe`, `0x5197d4`, `0x519a51`), the loop
+/// terminator. The buffs only through the unit gate ([`UnitAuraList::buffs_visible`]), read before
+/// any slot (`0x5195aa`), and both halves past the vision test ([`AuraState::vision_hidden`]).
 fn nth_aura(
     lua: &Lua,
     token: &Option<String>,
@@ -158,20 +188,19 @@ fn nth_aura(
 ) -> mlua::Result<MultiValue> {
     // The token resolves before the index is read (`0x519542`, then `0x51957a`), so a bad token
     // raises at any index.
-    let hit = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        match token {
-            Some(t) => auras_of(&model, t)?
-                .filter(|_| index >= 1)
-                .and_then(|list| {
-                    listed(list, helpful)
-                        .filter(|a| !raid || a.raid_listed)
-                        .nth((index - 1) as usize)
-                        .cloned()
-                }),
-            None => None,
-        }
+    let guid = match token {
+        Some(t) => aura_unit(lua, t)?,
+        None => None,
     };
+    let hit = read_auras_of(lua, guid, |list| {
+        let list = list.filter(|_| index >= 1)?;
+        if helpful && !list.buffs_visible() {
+            return None;
+        }
+        nth_kept(list, (index - 1) as usize, |a| {
+            a.helpful() == helpful && !a.vision_hidden() && (!raid || a.raid_listed())
+        })
+    });
     match hit {
         Some(a) => returns(lua, &a, !helpful),
         None => Ok(MultiValue::from_vec(vec![Value::Nil])),
@@ -200,6 +229,11 @@ impl super::UiScript {
         }
     }
 
+    /// A unit's aura list by guid, as [`Self::set_unit_auras`] left it.
+    pub fn unit_auras_view(&self, guid: u64) -> Option<UnitAuraList> {
+        self.model_ref().unit_auras.get(&guid).cloned()
+    }
+
     /// Drop every aura list, the player's with the rest: the session's end.
     pub fn clear_auras(&mut self) {
         let mut model = self.model_mut();
@@ -207,7 +241,8 @@ impl super::UiScript {
         model.unit_auras.clear();
     }
 
-    /// Push the unit-token resolver's inputs, copied only when they moved.
+    /// Set the unit-token resolver's no-host stand-in ([`super::UnitGuids`]) whole, copied only
+    /// when it moved: a harness's units, or the session end's clear.
     pub fn set_unit_guids(&mut self, guids: &super::UnitGuids) {
         let mut model = self.model_mut();
         if model.unit_guids != *guids {
@@ -215,8 +250,8 @@ impl super::UiScript {
         }
     }
 
-    /// Seat the player's own guid in the unit-token resolver ahead of a full
-    /// [`Self::set_unit_guids`] push, so `"player"` names us from the world-enter cascade on.
+    /// Seat the player's own guid in the unit-token resolver's stand-in at the world entry, so
+    /// `"player"` names us from the world-enter cascade on with no host to ask too.
     pub fn seat_player_guid(&mut self, guid: u64) {
         let mut model = self.model_mut();
         if model.unit_guids.player != guid {
@@ -235,17 +270,33 @@ impl super::UiScript {
     pub fn aura_spell_ids(&self, token: &str, helpful: bool) -> Vec<u32> {
         let model = self.model_ref();
         auras_of(&model, token)
-            .ok()
-            .flatten()
             .map(|list| listed(list, helpful).map(|a| a.spell_id).collect())
             .unwrap_or_default()
     }
 
-    /// Drain the queued cancels, one `CMSG_CANCEL_AURA` per spell id: the server cancels by spell,
-    /// never by slot.
+    /// The cancels a harness's VM kept ([`Self::keep_calls`]), one `CMSG_CANCEL_AURA` per spell
+    /// id: the server cancels by spell, never by slot.
     pub fn take_cancel_aura_requests(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().cancel_aura_requests)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::Aura(AuraCall::Cancel(spell_id)) => Some(*spell_id),
+            _ => None,
+        })
     }
+}
+
+/// An aura verb the host applies inside its call ([`super::ScriptCall::Aura`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuraCall {
+    /// `0x6e7040(spell)`, the cancel `CancelPlayerBuff`, `CancelTrackingBuff` and
+    /// `CancelAreaSpiritHeal` run: for the active player its precast of the spell ended and the
+    /// spell's kits reaped (`0x6e7075`, `0x6e707e`), then `AREA_SPIRIT_HEALER_OUT_OF_RANGE` for
+    /// spell 2584 (`0x6e70c3`) and `CMSG_CANCEL_AURA` (`0x6e70eb`).
+    Cancel(u32),
+}
+
+/// Hand the cancel of `spell_id` to the host, which runs it before this returns.
+pub(crate) fn cancel_aura(lua: &Lua, spell_id: u32) -> mlua::Result<()> {
+    super::calls::submit(lua, super::ScriptCall::Aura(AuraCall::Cancel(spell_id)))
 }
 
 /// Register the aura and tracking globals, the `GetPlayerBuff` family from [`player_buff`].
@@ -297,17 +348,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CancelTrackingBuff() (`0x4e4a80`), the tracking frame's right-click: queues the tracking
-    // spell's id behind its `AFLAG_CANCELABLE`; with no tracking it is a no-op.
+    // CancelTrackingBuff() (`0x4e4a80`), the tracking frame's right-click: cancels the tracking
+    // spell behind its `AFLAG_CANCELABLE`, inside the call; with no tracking it is a no-op.
     g.set(
         "CancelTrackingBuff",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(t) = model.tracking.as_ref().filter(|t| t.cancelable) {
-                let id = t.spell_id;
-                model.cancel_aura_requests.push(id);
+            let tracked = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .tracking
+                    .as_ref()
+                    .filter(|t| t.cancelable)
+                    .map(|t| t.spell_id)
+            };
+            match tracked {
+                Some(id) => cancel_aura(lua, id),
+                None => Ok(()),
             }
-            Ok(())
         })?,
     )?;
 
@@ -324,6 +381,7 @@ mod tests {
     /// A VM whose resolver names us as `player` and `TARGET` as `target`.
     fn script() -> UiScript {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_unit_guids(&UnitGuids {
             player: ME,
             target: TARGET,
@@ -347,6 +405,9 @@ mod tests {
             until_cancelled: false,
             channeled: false,
             raid_listed: false,
+            slot: 0,
+            until_cancelled_unknown: false,
+            vision_hidden: false,
         }
     }
 
@@ -508,6 +569,7 @@ mod tests {
     /// its own: `base + 1` and `base + 2`.
     fn group_script() -> UiScript {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         crate::script::tests::common::load_tooltip_template(&s);
         s.set_unit_guids(&UnitGuids {
             player: ME,

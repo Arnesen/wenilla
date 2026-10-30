@@ -1,10 +1,12 @@
 //! The battleground list and queue verbs of `BattlefieldFrame.lua` and `Minimap.xml`. They read
 //! the reference's instance list (`0xb6e860`, filled by `0x4aa6c0`), its three queue slots
-//! (`0xb6e9d0`, written by `0x4aa850`) and the selected instance id (`[0xb6eba0]`); the app pushes
-//! the list and the slots, clock values in ms, and the VM owns the selection.
+//! (`0xb6e9d0`, written by `0x4aa850`) and the selected instance id (`[0xb6eba0]`): the list and
+//! the slots through the lent host at the call ([`super::battlefield_live`]), clock values in ms,
+//! and the VM owns the selection.
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::battlefield_live as live;
 use super::binding_abi::{bool_or_default, flag, number_arg};
 use super::Model;
 
@@ -70,10 +72,14 @@ fn slot_index(index: i32, n: usize) -> Option<usize> {
         .filter(|&i| i < n)
 }
 
-/// The local-player gate of `GetBattlefieldInfo` and `GetBattlefieldInstanceInfo`, read at call
-/// time (`0x468550`, `0x468460` with `ecx = 0x10`): the answer `UnitExists("player")` gives.
-pub(super) fn player_exists(model: &Model) -> bool {
-    model.unit("player").is_some_and(|u| u.exists)
+/// The local-player gate of `GetBattlefieldInfo`, `GetBattlefieldInstanceInfo` and the senders,
+/// read at call time (`0x468550`, `0x468460` with `ecx = 0x10`): whether the object manager holds
+/// the active player, through the lent host; with none to ask, the `"player"` snapshot's
+/// existence.
+pub(super) fn player_exists(lua: &Lua, model: &Model) -> bool {
+    let mut held = None;
+    super::host::read_host(lua, |h| h.read_self(&mut |own| held = Some(own.held())));
+    held.unwrap_or_else(|| model.snapshot_unit("player").is_some_and(|u| u.exists))
 }
 
 /// The reference's four-entry status jump table with its `"error"` default (`0x4ab604`).
@@ -88,8 +94,9 @@ fn status_text(status: u32) -> &'static str {
 }
 
 impl super::UiScript {
-    /// Push the instance list. A new list leaves the selection (`[0xb6eba0]`) alone; it only
-    /// decides whether `GetSelectedBattlefield` still finds it (`0x4ab360`).
+    /// Set the VM's copy of the instance list, which the getters read with no host to ask. A new
+    /// list leaves the selection (`[0xb6eba0]`) alone; it only decides whether
+    /// `GetSelectedBattlefield` still finds it (`0x4ab360`).
     pub fn set_battlefield_list(&mut self, list: BattlefieldListView) {
         self.model_mut().battlefield_list = list;
     }
@@ -99,8 +106,8 @@ impl super::UiScript {
         self.model_mut().battlefield_selected = 0;
     }
 
-    /// Push the queue slots and the instance expiration (`[0xb6ebb8]`) every frame, since the
-    /// clock getters move.
+    /// Set the VM's copy of the queue slots and the instance expiration (`[0xb6ebb8]`), which the
+    /// getters read with no host to ask.
     pub fn set_battlefield_queue(
         &mut self,
         slots: [BattlefieldQueueSlot; 3],
@@ -111,16 +118,56 @@ impl super::UiScript {
         model.battlefield_instance_expiration_ms = instance_expiration_ms;
     }
 
-    /// `JoinBattlefield` calls since the last drain, `(instance, as group)`; instance 0 is first
-    /// available. The app adds the map, the opcode and the group-size refusal (`0x4a9f60`).
-    pub fn take_battlefield_join_requests(&mut self) -> Vec<(u32, bool)> {
-        std::mem::take(&mut self.model_mut().battlefield_join_requests)
+    /// The battleground calls a harness's VM kept ([`Self::keep_calls`]), in call order.
+    pub fn take_battlefield_calls(&mut self) -> Vec<BattlefieldCall> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Battlefield(call) => Some(*call),
+            _ => None,
+        })
     }
 
-    /// `ShowBattlefieldList` calls since the last drain: the map ids for `CMSG_BATTLEFIELD_LIST`.
-    pub fn take_battlefield_list_requests(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().battlefield_list_requests)
+    /// The `JoinBattlefield` calls a harness's VM kept, `(instance, as group)`.
+    pub fn take_battlefield_join_requests(&mut self) -> Vec<(u32, bool)> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Battlefield(BattlefieldCall::Join {
+                instance_id,
+                as_group,
+            }) => Some((*instance_id, *as_group)),
+            _ => None,
+        })
     }
+}
+
+/// The battleground verbs the host applies inside their calls ([`super::ScriptCall::Battlefield`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BattlefieldCall {
+    /// `JoinBattlefield(index, asGroup)` (`0x4ab290` → `0x4a9f60`): the as-group refusal
+    /// (`0x4a9fa8`), then `CMSG_BATTLEMASTER_JOIN` with a stored battlemaster or
+    /// `CMSG_BATTLEFIELD_JOIN` without (`0x4a9fea`). Instance 0 is the first available.
+    Join { instance_id: u32, as_group: bool },
+    /// `ShowBattlefieldList(index)` on a queued slot (`0x4ab8c0`): `CMSG_BATTLEFIELD_LIST` with its
+    /// map (`0x4ab91f`).
+    List { map_id: u32 },
+    /// `AcceptBattlefieldPort(index, accept)` on slot 1..=3 (`0x4ab3b0`): `CMSG_BATTLEFIELD_PORT`
+    /// with the slot's map (`0x4ab429`).
+    Port { index: u8, accept: bool },
+    /// `RequestBattlefieldScoreData()` (`0x4ab990` → `0x4aa170`): `MSG_PVP_LOG_DATA`, at most once
+    /// per 5000 ms.
+    ScoreData,
+    /// `SetBattlefieldScoreFaction(f)` (`0x4abc90` → `0x4aa5a0`) with `f` in -1..=1: the filter
+    /// stored, then the rebuild and `UPDATE_BATTLEFIELD_SCORE` unless names are pending.
+    ScoreFaction(i8),
+    /// `LeaveBattlefield()` past the ended byte (`0x4abe66`): `CMSG_LEAVE_BATTLEFIELD` with the
+    /// active slot's map (`0x4abe99`).
+    Leave,
+    /// `RequestBattlefieldPositions()` (`0x4abef0` → `0x4aa5c0`): with no active slot the
+    /// teammate count zeroed, else `MSG_BATTLEGROUND_PLAYER_POSITIONS` at most once per 5000 ms.
+    Positions,
+}
+
+/// Hand `call` to the host, which applies it before this returns ([`super::calls::submit`]).
+pub(super) fn submit(lua: &Lua, call: BattlefieldCall) -> mlua::Result<()> {
+    super::calls::submit(lua, super::ScriptCall::Battlefield(call))
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -130,7 +177,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetNumBattlefields",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.battlefield_list.instances.len() as i64)
+            Ok(live::list(lua, &model).instances.len() as i64)
         })?,
     )?;
 
@@ -139,8 +186,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldInfo",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let list = &model.battlefield_list;
-            let (Some(info), true) = (list.info.as_ref(), player_exists(&model)) else {
+            let list = live::list(lua, &model);
+            let (Some(info), true) = (list.info.as_ref(), player_exists(lua, &model)) else {
                 return Ok(MultiValue::new());
             };
             let description = match &info.description {
@@ -168,10 +215,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let list = &model.battlefield_list;
-            if !player_exists(&model) {
+            if !player_exists(lua, &model) {
                 return Ok(MultiValue::new());
             }
+            let list = live::list(lua, &model);
             Ok(match slot_index(index, list.instances.len()) {
                 Some(i) => {
                     MultiValue::from_vec(vec![Value::Number(f64::from(list.instances[i] as i32))])
@@ -187,11 +234,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (index, as_group): (Value, Value)| {
             let index = number_arg(lua, index, "Usage: JoinBattlefield(index)")?;
             let as_group = bool_or_default(Some(&as_group), false);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let instance = slot_index(index, model.battlefield_list.instances.len())
-                .map_or(0, |i| model.battlefield_list.instances[i]);
-            model.battlefield_join_requests.push((instance, as_group));
-            Ok(())
+            let instance_id = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let list = live::list(lua, &model);
+                slot_index(index, list.instances.len()).map_or(0, |i| list.instances[i])
+            };
+            submit(
+                lua,
+                BattlefieldCall::Join {
+                    instance_id,
+                    as_group,
+                },
+            )
         })?,
     )?;
 
@@ -203,9 +257,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetSelectedBattlefield",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: SetSelectedBattlefield(index)")?;
+            let list = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                live::list(lua, &model)
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.battlefield_selected = slot_index(index, model.battlefield_list.instances.len())
-                .map_or(0, |i| model.battlefield_list.instances[i]);
+            model.battlefield_selected =
+                slot_index(index, list.instances.len()).map_or(0, |i| list.instances[i]);
             Ok(())
         })?,
     )?;
@@ -216,8 +274,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let selected = model.battlefield_selected;
-            Ok(model
-                .battlefield_list
+            Ok(live::list(lua, &model)
                 .instances
                 .iter()
                 .position(|&id| id == selected)
@@ -231,8 +288,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldStatus(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(slot) = slot_index(index, 3).and_then(|i| model.battlefield_slots.get(i))
-            else {
+            let Some(slot) = slot_index(index, 3).and_then(|i| live::slot(lua, &model, i)) else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
@@ -280,8 +336,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 Ok(i64::from(
                     slot_index(index, 3)
-                        .and_then(|i| model.battlefield_slots.get(i))
-                        .map_or(0, read),
+                        .and_then(|i| live::slot(lua, &model, i))
+                        .map_or(0, |s| read(&s)),
                 ))
             })?,
         )?;
@@ -292,7 +348,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldInstanceExpiration",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(i64::from(model.battlefield_instance_expiration_ms))
+            Ok(i64::from(live::times(lua, &model).instance_expiration_ms))
         })?,
     )?;
 
@@ -301,15 +357,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "ShowBattlefieldList",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: ShowBattlefieldList(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let map_id = slot_index(index, 3)
-                .and_then(|i| model.battlefield_slots.get(i))
-                .filter(|s| s.map_id != 0 && s.status == 1)
-                .map(|s| s.map_id);
-            if let Some(map_id) = map_id {
-                model.battlefield_list_requests.push(map_id);
+            let map_id = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                slot_index(index, 3)
+                    .and_then(|i| live::slot(lua, &model, i))
+                    .filter(|s| s.map_id != 0 && s.status == 1)
+                    .map(|s| s.map_id)
+            };
+            match map_id {
+                Some(map_id) => submit(lua, BattlefieldCall::List { map_id }),
+                None => Ok(()),
             }
-            Ok(())
         })?,
     )?;
 
@@ -318,7 +376,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CanJoinBattlefieldAsGroup",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(flag(model.battlefield_list.group_queue))
+            Ok(flag(live::list(lua, &model).group_queue))
         })?,
     )?;
 
@@ -333,6 +391,7 @@ mod tests {
     /// A VM with a local player, as every in-world call has.
     fn vm() -> UiScript {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_unit(
             "player",
             Some(crate::script::UnitState {
@@ -611,10 +670,14 @@ mod tests {
     #[test]
     fn show_battlefield_list_gates_on_a_queued_slot() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_battlefield_queue([slot(489, 1, 5), slot(529, 2, 1), slot(0, 1, 0)], 0);
         s.run("ShowBattlefieldList(1) ShowBattlefieldList(2) ShowBattlefieldList(3) ShowBattlefieldList(4)")
             .unwrap();
-        assert_eq!(s.take_battlefield_list_requests(), vec![489]);
+        assert_eq!(
+            s.take_battlefield_calls(),
+            vec![super::BattlefieldCall::List { map_id: 489 }]
+        );
         let err = s.run("ShowBattlefieldList('q')").unwrap_err().to_string();
         assert!(err.contains("Usage: ShowBattlefieldList(index)"), "{err}");
 

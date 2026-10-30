@@ -39,8 +39,13 @@ fn family(rel: &str) -> Family {
     }
 }
 
-/// The standing count of `Game` files; raise it only with the reason written down.
-const CEILING: usize = 40;
+/// The standing count of `Game` files; raise it only with the reason written down. 41: the call
+/// host's window close cores (`script_calls/windows.rs`), the host's own code, which drives the VM
+/// at each core's signal point. 42: the host's engine appliers (`script_calls/engine.rs`), which
+/// show a refused follow's line in the calling VM and post its events at their signal points.
+/// 43: the host's world click (`script_calls/world_click.rs`), which applies the mouse commands'
+/// click inside their calls and keeps the steps that wait for an arm's pick in the calling VM.
+const CEILING: usize = 43;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 4;

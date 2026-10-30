@@ -716,6 +716,7 @@ fn viewable_action_bar_pages_follow_the_bar_toggles() {
 fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s, &[]);
     show_bars(&s, &[1]);
@@ -783,6 +784,7 @@ fn the_grid_option_holds_the_extra_bars_empty_wells_open() {
 fn a_held_payload_ghosts_the_empty_wells_it_opens() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s, &[]);
     s.set_action(
@@ -911,6 +913,7 @@ fn a_held_payload_ghosts_the_empty_wells_it_opens() {
 fn a_bar_toggle_sends_the_byte_its_globals_pack_to() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s, &[]);
     let _ = s.take_action_bar_toggle_sends();
@@ -1229,6 +1232,7 @@ fn the_stance_shelf_is_as_long_as_the_form_count() {
 fn an_extra_bars_empty_well_keeps_its_bound_hotkey_label() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The real command set, so `MULTIACTIONBAR1BUTTONn` is bindable; it ships unbound.
     crate::ui_script::load_stock_bindings(&mut s);
@@ -1420,11 +1424,10 @@ fn the_middle_strip_clamps_as_its_xml_loaded_it() {
 /// The reference fires `UPDATE_SHAPESHIFT_FORMS` only when the form list changes (`0x4b28ff`,
 /// `0x4b2e43`): its `ShapeshiftBar_Update` re-shows the middle strip with no manage pass
 /// (BonusActionBarFrame.lua:170, 177), so a state change sent as one would draw the strip over the
-/// raised bar. Driven through [`crate::ui_shapeshift::push_forms`].
+/// raised bar. The list's state moves push silently; its event is the book's handlers'.
 #[test]
 fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
     benilla_formats::wow_data_or_skip!();
-    use crate::ui_shapeshift::{push_forms, FormsEdge, StanceMemory};
     use benilla_ui::script::ShapeshiftFormView;
 
     let mut s = UiScript::new().unwrap();
@@ -1466,21 +1469,16 @@ fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
         castable,
         cooldown,
     };
-    let mut memory = StanceMemory::default();
 
     // Login: the list arrives, a list edge, with Battle Stance active.
-    assert_eq!(
-        push_forms(
-            &mut s,
-            &mut memory,
-            vec![
-                stance(2457, true, true, None),
-                stance(71, false, true, None),
-                stance(2458, false, true, None),
-            ],
-        ),
-        FormsEdge::List
-    );
+    s.set_shapeshift_forms(vec![
+        stance(2457, true, true, None),
+        stance(71, false, true, None),
+        stance(2458, false, true, None),
+    ]);
+    // The push is silent: the edge is the book handler's (`0x4b2904`).
+    assert_eq!(log(&s), "");
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     assert_eq!(log(&s), "UPDATE_SHAPESHIFT_FORMS");
     assert!(checked(&s, 1) && !checked(&s, 2));
     // The bottom-left bar up: the pass seats the stance bar a row higher and takes the shelf down
@@ -1494,15 +1492,11 @@ fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
     // A stance switch: the form byte flips to Defensive and category 47 arms for a second on all
     // three, a state move the reference announces through the aura and cooldown events.
     let cd = Some((0, 1000, true));
-    let edge = push_forms(
-        &mut s,
-        &mut memory,
-        vec![
-            stance(2457, false, true, cd),
-            stance(71, true, true, cd),
-            stance(2458, false, true, cd),
-        ],
-    );
+    s.set_shapeshift_forms(vec![
+        stance(2457, false, true, cd),
+        stance(71, true, true, cd),
+        stance(2458, false, true, cd),
+    ]);
     for region in shelf {
         assert!(
             !shown(&s, region),
@@ -1510,7 +1504,6 @@ fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
         );
     }
     benilla_ui::assert_near!(ring(&s), 50.0);
-    assert_eq!(edge, FormsEdge::Silent);
     assert_eq!(log(&s), "", "a state move fires no list edge");
     // …and the checked ring follows the aura event the switch carries.
     assert!(
@@ -1530,36 +1523,22 @@ fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
     }
 
     // The cooldown running out is silent too: the reference's store fires nothing at expiry.
-    assert_eq!(
-        push_forms(
-            &mut s,
-            &mut memory,
-            vec![
-                stance(2457, false, true, None),
-                stance(71, true, true, None),
-                stance(2458, false, true, None),
-            ],
-        ),
-        FormsEdge::Silent
-    );
+    s.set_shapeshift_forms(vec![
+        stance(2457, false, true, None),
+        stance(71, true, true, None),
+        stance(2458, false, true, None),
+    ]);
     assert_eq!(log(&s), "");
     assert!(!shown(&s, "ShapeshiftBarMiddle"));
 
     // A castable flip pushes silently: the form bar's refresh is the usable refresh's (`0x4b31c0`),
     // whose own callers signal `SPELL_UPDATE_USABLE`. On it the bar greys the icon and leaves the
     // shelf.
-    assert_eq!(
-        push_forms(
-            &mut s,
-            &mut memory,
-            vec![
-                stance(2457, false, false, None),
-                stance(71, true, true, None),
-                stance(2458, false, true, None),
-            ],
-        ),
-        FormsEdge::Silent
-    );
+    s.set_shapeshift_forms(vec![
+        stance(2457, false, false, None),
+        stance(71, true, true, None),
+        stance(2458, false, true, None),
+    ]);
     assert_eq!(log(&s), "");
     s.fire_event("SPELL_UPDATE_USABLE", vec![]);
     assert_eq!(log(&s), "SPELL_UPDATE_USABLE");
@@ -1572,36 +1551,17 @@ fn a_forms_state_change_leaves_the_shelf_down_over_the_raised_bar() {
     );
     assert!(!shown(&s, "ShapeshiftBarMiddle"));
 
-    // Nothing moved: nothing pushed, nothing fired.
-    assert_eq!(
-        push_forms(
-            &mut s,
-            &mut memory,
-            vec![
-                stance(2457, false, false, None),
-                stance(71, true, true, None),
-                stance(2458, false, true, None),
-            ],
-        ),
-        FormsEdge::Unchanged
-    );
-    assert_eq!(log(&s), "");
-
     // A fourth stance learned is a list edge: `ShapeshiftBar_Update` shows the strip over the
     // raised bar until the next pass.
-    assert_eq!(
-        push_forms(
-            &mut s,
-            &mut memory,
-            vec![
-                stance(2457, false, false, None),
-                stance(71, true, true, None),
-                stance(2458, false, true, None),
-                stance(768, false, true, None),
-            ],
-        ),
-        FormsEdge::List
-    );
+    s.set_shapeshift_forms(vec![
+        stance(2457, false, false, None),
+        stance(71, true, true, None),
+        stance(2458, false, true, None),
+        stance(768, false, true, None),
+    ]);
+    // The push is silent: the edge is the book handler's (`0x4b2904`).
+    assert_eq!(log(&s), "");
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     assert_eq!(log(&s), "UPDATE_SHAPESHIFT_FORMS");
     assert!(
         shown(&s, "ShapeshiftBarMiddle"),

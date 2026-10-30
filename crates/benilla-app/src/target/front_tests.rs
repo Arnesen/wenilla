@@ -6,10 +6,7 @@ use bevy::prelude::*;
 use crossbeam_channel::Receiver;
 
 use super::{click, scan, Hovered, PressPick, Selection};
-use crate::creature_anim::SwingMessage;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer};
-use crate::vplates::PlateClicks;
-use benilla_world::interact::WorldClick;
 
 pub(super) const ME: u64 = 0x10;
 /// Selected before each writer runs.
@@ -28,13 +25,14 @@ pub(super) struct Fix {
 /// The whole client, headless, with us, `OLD` selected and `MOB` beside; `charmed` has someone
 /// charm us (`UNIT_FIELD_CHARMEDBY`, a guid of two fields).
 pub(super) fn fix(charmed: bool) -> Fix {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     let world = app.world_mut();
     let unit = |guid: u64| {
         (
             Guid(guid),
+            Transform::default(),
             GlobalTransform::default(),
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
                 (22, 100),
@@ -88,12 +86,21 @@ impl Fix {
         self.app.world().resource::<Selection>().guid
     }
 
+    /// A clean left click released over `pick`, through the mouse command's call.
     pub(super) fn click(&mut self, pick: Hovered) {
         let world = self.app.world_mut();
         world.resource_mut::<PressPick>().hovered = pick;
-        world
-            .resource_mut::<Messages<WorldClick>>()
-            .write(WorldClick);
+        super::release_click(world, benilla_ui::script::ClickMode::Select);
+    }
+
+    /// A left click on `MOB`'s nameplate, through the click's call (`0x7cb910` → `0x4949f0`).
+    pub(super) fn plate_click(&mut self) {
+        super::click_plate(
+            self.app.world_mut(),
+            MOB,
+            benilla_ui::script::PlateAction::Select,
+            false,
+        );
     }
 
     /// A unit the TAB scan can pick, `x` yards along.
@@ -160,25 +167,19 @@ impl Fix {
         self.make_unit_with(entity, &[]);
     }
 
-    /// `SMSG_SPELL_START` by `caster` aimed at us, as the spell handler hands it on.
+    /// `SMSG_SPELL_START` by `caster` aimed at us, as the spell handler owes its select.
     pub(super) fn cast_at_us(&mut self, caster: Entity) {
-        self.app
-            .world_mut()
-            .resource_mut::<Messages<crate::spell::net::CastAtPlayer>>()
-            .write(crate::spell::net::CastAtPlayer { caster, seq: 0 });
+        scan::owe_acquire(self.app.world_mut(), caster, scan::Acquire::Caster);
     }
 
-    /// The frame's acquire over the swings and casts written since the last, which it consumes as
-    /// the frame's reader does.
+    /// A swing at us by `attacker`, as the swing's handler owes its select.
+    pub(super) fn swung_at_us(&mut self, attacker: Entity) {
+        scan::owe_acquire(self.app.world_mut(), attacker, scan::Acquire::Attacker);
+    }
+
+    /// The packet's end over the selects owed since the last.
     pub(super) fn acquire(&mut self) {
-        let world = self.app.world_mut();
-        world
-            .run_system_once(scan::auto_acquire)
-            .expect("the acquire runs");
-        world
-            .resource_mut::<Messages<crate::spell::net::CastAtPlayer>>()
-            .clear();
-        world.resource_mut::<Messages<SwingMessage>>().clear();
+        scan::run_owed_selects_now(self.app.world_mut());
     }
 
     /// The target chain's bind of what the writers parked.
@@ -217,32 +218,13 @@ impl Fix {
 fn a_plate_click_with_the_cursor_up_binds_its_unit() {
     let mut up = fix(false);
     up.cursor_up();
-    let mob = up.mob;
-    up.app
-        .world_mut()
-        .resource_mut::<PlateClicks>()
-        .left
-        .push(mob);
-    up.app
-        .world_mut()
-        .run_system_once(click::select_on_plate_click)
-        .expect("the plate click runs");
-    up.bind();
+    up.plate_click();
     assert_eq!(up.wire(), (vec![Some(MOB)], vec![]), "bound, not selected");
     assert_eq!(up.selected(), Some(OLD));
     assert!(!up.cursor_is_up());
 
     let mut down = fix(false);
-    let mob = down.mob;
-    down.app
-        .world_mut()
-        .resource_mut::<PlateClicks>()
-        .left
-        .push(mob);
-    down.app
-        .world_mut()
-        .run_system_once(click::select_on_plate_click)
-        .expect("the plate click runs");
+    down.plate_click();
     assert_eq!(down.wire(), (vec![], vec![MOB]));
     assert_eq!(down.selected(), Some(MOB));
 }
@@ -257,18 +239,7 @@ fn a_charmed_player_is_refused_by_every_selector() {
         (
             "a plate click",
             false,
-            |f| {
-                let mob = f.mob;
-                f.app
-                    .world_mut()
-                    .resource_mut::<PlateClicks>()
-                    .left
-                    .push(mob);
-                f.app
-                    .world_mut()
-                    .run_system_once(click::select_on_plate_click)
-                    .unwrap();
-            },
+            |f| f.plate_click(),
             Some(MOB),
             false,
         ),
@@ -278,10 +249,6 @@ fn a_charmed_player_is_refused_by_every_selector() {
             |f| {
                 let pick = f.over_the_mob();
                 f.click(pick);
-                f.app
-                    .world_mut()
-                    .run_system_once(click::select_on_click)
-                    .unwrap();
             },
             Some(MOB),
             false,
@@ -291,10 +258,6 @@ fn a_charmed_player_is_refused_by_every_selector() {
             false,
             |f| {
                 f.click(Hovered::default());
-                f.app
-                    .world_mut()
-                    .run_system_once(click::select_on_click)
-                    .unwrap();
             },
             None,
             false,
@@ -305,10 +268,6 @@ fn a_charmed_player_is_refused_by_every_selector() {
             |f| {
                 let pick = f.over_the_mob();
                 f.click(pick);
-                f.app
-                    .world_mut()
-                    .run_system_once(crate::spell::targeting::commit_object_cast_on_click)
-                    .unwrap();
             },
             Some(OLD),
             true,
@@ -317,24 +276,10 @@ fn a_charmed_player_is_refused_by_every_selector() {
             "an attacker acquired",
             false,
             |f| {
-                let (me, mob) = (f.app.world().resource::<GuidIndex>().0[&ME], f.mob);
+                let mob = f.mob;
                 *f.app.world_mut().resource_mut::<Selection>() = Selection::default();
-                f.app
-                    .world_mut()
-                    .resource_mut::<Messages<SwingMessage>>()
-                    .write(SwingMessage {
-                        attacker: mob,
-                        victim: Some(me),
-                        hit_info: 0,
-                        victim_state: 1,
-                        damage: 1,
-                        displayed: true,
-                        seq: 0,
-                    });
-                f.app
-                    .world_mut()
-                    .run_system_once(scan::auto_acquire)
-                    .unwrap();
+                f.swung_at_us(mob);
+                f.acquire();
             },
             Some(MOB),
             false,
@@ -347,10 +292,7 @@ fn a_charmed_player_is_refused_by_every_selector() {
                 let mob = f.mob;
                 f.make_unit(mob);
                 f.cast_at_us(mob);
-                f.app
-                    .world_mut()
-                    .run_system_once(scan::auto_acquire)
-                    .unwrap();
+                f.acquire();
             },
             Some(MOB),
             false,
@@ -397,31 +339,17 @@ fn a_charmed_player_is_refused_by_every_selector() {
 }
 
 /// `HandleUnitCombatMessage`'s select of the attacker (`0x6259fe`) is `SelectTarget` too, so
-/// with a cursor standing it binds the attacker to the cast and the selection stays empty. The
-/// packet handler runs in no script, whose context passes the bind's tag 2 (`0x494a5a`).
+/// with a cursor standing it binds the attacker to the cast at the packet and the selection stays
+/// empty. The packet handler runs in no script, whose context passes the bind's tag 2
+/// (`0x494a5a`).
 #[test]
 fn an_attacker_acquired_with_the_cursor_up_is_bound() {
     let mut f = fix(false);
     f.cursor_up();
-    let (me, mob) = (f.app.world().resource::<GuidIndex>().0[&ME], f.mob);
+    let mob = f.mob;
     *f.app.world_mut().resource_mut::<Selection>() = Selection::default();
-    f.app
-        .world_mut()
-        .resource_mut::<Messages<SwingMessage>>()
-        .write(SwingMessage {
-            attacker: mob,
-            victim: Some(me),
-            hit_info: 0,
-            victim_state: 1,
-            damage: 1,
-            displayed: true,
-            seq: 0,
-        });
-    f.app
-        .world_mut()
-        .run_system_once(scan::auto_acquire)
-        .expect("the acquire runs");
-    f.bind();
+    f.swung_at_us(mob);
+    f.acquire();
     assert_eq!(f.wire(), (vec![Some(MOB)], vec![]));
     assert_eq!(f.selected(), None);
     assert!(!f.cursor_is_up());
@@ -465,7 +393,8 @@ fn a_caster_at_us_is_selected_when_it_cannot_assist_and_nothing_is() {
     assert_eq!(f.wire(), (vec![], vec![MOB]), "CMSG_SET_SELECTION");
 }
 
-/// The caster's select is `SelectTarget` too, so a standing cursor binds it to the cast instead.
+/// The caster's select is `SelectTarget` too, so a standing cursor binds it to the cast instead,
+/// at the packet.
 #[test]
 fn a_caster_acquired_with_the_cursor_up_is_bound() {
     let mut f = fix(false);
@@ -474,11 +403,7 @@ fn a_caster_acquired_with_the_cursor_up_is_bound() {
     let mob = f.mob;
     f.make_unit(mob);
     f.cast_at_us(mob);
-    f.app
-        .world_mut()
-        .run_system_once(scan::auto_acquire)
-        .expect("the acquire runs");
-    f.bind();
+    f.acquire();
     assert_eq!(f.wire(), (vec![Some(MOB)], vec![]));
     assert_eq!(f.selected(), None);
 }
@@ -538,6 +463,35 @@ fn a_tab_goes_on_past_a_unit_the_cursor_refused() {
     assert_eq!(f.selected(), Some(OLD), "the target never moved");
 }
 
+/// The melee probe's press is the player's Attack, whose nearest-enemy pick (`0x6130bc` →
+/// `0x4941e6`) is `SelectTarget` too: with the cursor up it binds the unit inside the press, so
+/// the cast goes out in the same pass, with nothing selected and no swing.
+#[test]
+fn the_melee_probes_pick_with_the_cursor_up_binds_in_its_press() {
+    let mut f = fix(false);
+    *f.app.world_mut().resource_mut::<Selection>() = Selection::default();
+    let mob = f.mob;
+    f.app
+        .world_mut()
+        .entity_mut(mob)
+        .insert(crate::net::NetEntity {
+            kind: benilla_protocol::EntityKind::Unit,
+            display_id: None,
+            scale: 1.0,
+        });
+    f.make_unit(mob);
+    vm_in_the_world(&mut f);
+    f.cursor_up();
+    f.app.world_mut().write_message(scan::AttackNearestRequest);
+    f.app
+        .world_mut()
+        .run_system_once(crate::ui_action::attack_nearest_probe)
+        .expect("the probe runs");
+    assert_eq!(f.wire(), (vec![Some(MOB)], vec![]));
+    assert_eq!(f.selected(), None);
+    assert!(!f.cursor_is_up());
+}
+
 /// A left click with the cursor up and no object under the press: the terrain leg
 /// (`HandleGroundClick 0x492580`) tries `BindLocation 0x6e60f0`, which for a word with no location
 /// bit signals (`0x6e615d`) and returns 0, so the click falls to `OnWorldClick 0x5e0320` and
@@ -576,15 +530,18 @@ fn a_click_the_cursor_cannot_bind_deselects() {
             ray: None,
         };
         world.resource_mut::<crate::ui_cast::CastReports>().clear();
+        // The word's changes, signalled inside the click's call.
+        crate::script_calls::insert_test_vm(world);
+        world
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .run(
+                r#"CHANGES = 0
+                local r = CreateFrame("Frame")
+                r:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+                r:SetScript("OnEvent", function() CHANGES = CHANGES + 1 end)"#,
+            )
+            .expect("the recorder installs");
         f.click(Hovered::default());
-        f.app
-            .world_mut()
-            .run_system_once(click::select_on_click)
-            .expect("the click runs");
-        f.app
-            .world_mut()
-            .run_system_once(crate::spell::targeting::commit_ground_cast_on_click)
-            .expect("the terrain commit runs");
         let sent: Vec<_> = f.rx.try_iter().collect();
         let selections: Vec<_> = sent
             .iter()
@@ -593,15 +550,12 @@ fn a_click_the_cursor_cannot_bind_deselects() {
                 _ => None,
             })
             .collect();
-        let reports = &f
+        let signalled: usize = f
             .app
             .world()
-            .resource::<crate::ui_cast::CastReports>()
-            .reports();
-        let signalled = reports
-            .iter()
-            .filter(|r| matches!(r, crate::ui_cast::CastReport::Changed))
-            .count();
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval("return CHANGES")
+            .unwrap();
         if deselects {
             assert_eq!(f.selected(), None, "{label}");
             assert_eq!(selections, [0], "{label}");
@@ -619,6 +573,45 @@ fn a_click_the_cursor_cannot_bind_deselects() {
     }
 }
 
+/// `BindLocation`'s signal for a word with no location bit (`0x6e615d`) runs its listeners before
+/// the click falls to `OnWorldClick`'s deselect (`0x5e03cf`): a listener's packet goes out ahead
+/// of the deselect's `CMSG_SET_SELECTION`.
+#[test]
+fn a_refused_binds_listener_sends_ahead_of_the_clicks_deselect() {
+    let mut f = fix(false);
+    let world = f.app.world_mut();
+    world.resource_mut::<crate::spell::SpellTargeting>().enter(
+        HEAL,
+        crate::spell::CastCommit::Spell,
+        0x0002,
+    );
+    world.resource_mut::<PressPick>().occlusion = super::PickOcclusion {
+        distance: 5.0,
+        point: Some(Vec3::new(1.0, 2.0, 3.0)),
+        ray: None,
+    };
+    world.resource_mut::<crate::ui_cast::CastReports>().clear();
+    crate::script_calls::insert_test_vm(world);
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(
+            r#"local r = CreateFrame("Frame")
+            r:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+            r:SetScript("OnEvent", function() RandomRoll(1, 2) end)"#,
+        )
+        .expect("the listener installs");
+    f.click(Hovered::default());
+    let wire: Vec<String> =
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::SetSelection { guid } => Some(format!("select {guid:#x}")),
+                ClientCommand::RandomRoll { .. } => Some("roll".to_string()),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(wire, ["roll", "select 0x0"]);
+}
+
 /// The greeter (`PlayGreetingSound`, `0x60c270`) runs at `0x4927fd` for every unit a body click
 /// names, ahead of `SelectTarget`, with nothing in between that tests targeting: a click the
 /// cursor binds greets too. The click router returns for a charmed player first (`0x481f98`), so
@@ -628,10 +621,6 @@ fn a_body_click_greets_with_the_cursor_up_unless_charmed_or_on_an_object() {
     let click = |f: &mut Fix| {
         let pick = f.over_the_mob();
         f.click(pick);
-        f.app
-            .world_mut()
-            .run_system_once(click::select_on_click)
-            .expect("the click runs");
         f.greetings()
     };
     let mut up = fix(false);
@@ -679,15 +668,7 @@ fn a_plate_click_greets_with_the_cursor_up() {
             f.cursor_up();
         }
         let mob = f.mob;
-        f.app
-            .world_mut()
-            .resource_mut::<PlateClicks>()
-            .left
-            .push(mob);
-        f.app
-            .world_mut()
-            .run_system_once(click::select_on_plate_click)
-            .expect("the plate click runs");
+        f.plate_click();
         assert_eq!(
             f.greetings(),
             vec![mob],
@@ -747,4 +728,269 @@ fn an_interact_attack_with_the_cursor_up_binds_its_unit() {
         (Some(OLD), true, vec![Some(FOE)], vec![]),
         "cursor up: it binds, selects nothing, and swings on"
     );
+}
+
+/// `SetSelection`'s re-swing latch tests the outgoing selection for every writer (`0x49365f`-
+/// `0x4936a3`), the world click's included: switching off a dead selection while our attack is
+/// still engaged (the server's stop not yet in) latches no re-swing. The teardown's StopAttack
+/// (`0x493a08`) runs whatever the latch found, and sends while we attack (`0x5ecae4`).
+#[test]
+fn a_click_off_a_dead_selection_while_attacking_swings_at_nothing() {
+    let mut f = fix(false);
+    let world = f.app.world_mut();
+    let index = &world.resource::<GuidIndex>().0;
+    let (me, old) = (index[&ME], index[&OLD]);
+    world
+        .entity_mut(me)
+        .insert(crate::creature_anim::Engaged(OLD));
+    let mob = f.mob;
+    f.make_unit_with(old, &[(22, 0)]);
+    f.make_unit(mob);
+    f.app.world_mut().resource_mut::<PressPick>().cursor.kind =
+        super::cursor_mode::CursorKind::Attack;
+    let over = f.over_the_mob();
+    f.click(over);
+    let sent: Vec<_> =
+        f.rx.try_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    ClientCommand::AttackStop
+                        | ClientCommand::SetSelection { .. }
+                        | ClientCommand::AttackSwing { .. }
+                )
+            })
+            .collect();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [
+                ClientCommand::AttackStop,
+                ClientCommand::SetSelection { guid: MOB }
+            ]
+        ),
+        "{sent:?}"
+    );
+}
+
+/// The world click's `SetSelection` signals inside the click (`0x49389c`), so a
+/// `PLAYER_TARGET_CHANGED` listener's packet goes out between the selection and the re-swing
+/// (`0x4938c8`), and the unit feed hears the change no second time.
+#[test]
+fn a_world_click_signals_its_target_change_before_the_re_swing() {
+    let mut f = fix(false);
+    let world = f.app.world_mut();
+    let index = &world.resource::<GuidIndex>().0;
+    let (me, old) = (index[&ME], index[&OLD]);
+    world
+        .entity_mut(me)
+        .insert(crate::creature_anim::Engaged(OLD));
+    let mob = f.mob;
+    f.make_unit(old);
+    f.make_unit(mob);
+    vm_in_the_world(&mut f);
+    crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
+        s.expect("a VM").run(
+            r#"HEARD = 0
+            local r = CreateFrame("Frame")
+            r:RegisterEvent("PLAYER_TARGET_CHANGED")
+            r:SetScript("OnEvent", function() HEARD = HEARD + 1 RandomRoll(1, 100) end)"#,
+        )
+    })
+    .expect("the listener is in");
+    f.app.world_mut().resource_mut::<PressPick>().cursor.kind =
+        super::cursor_mode::CursorKind::Attack;
+    let over = f.over_the_mob();
+    f.click(over);
+    let wire: Vec<String> =
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::AttackStop => Some("AttackStop".to_string()),
+                ClientCommand::SetSelection { guid } => Some(format!("SetSelection {guid:#x}")),
+                ClientCommand::RandomRoll { .. } => Some("RandomRoll".to_string()),
+                ClientCommand::AttackSwing { guid } => Some(format!("AttackSwing {guid:#x}")),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(
+        wire,
+        [
+            "AttackStop",
+            "SetSelection 0x31",
+            "RandomRoll",
+            "AttackSwing 0x31"
+        ]
+    );
+    let heard: i64 = f
+        .app
+        .world()
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .eval("return HEARD")
+        .unwrap();
+    assert_eq!(heard, 1, "heard in the click alone");
+}
+
+/// A world click off every object deselects (`0x5e03cf`): its teardown's StopAttack
+/// (`0x493a08`) cancels a queued strike (`0x5ecb63` → `0x6e6f30`), whose stop the click reports
+/// in place, ahead of the release's `PLAYER_TARGET_CHANGED` (`0x493a73`).
+#[test]
+fn a_world_click_deselects_reporting_its_strike_cancel_first() {
+    let mut f = fix(false);
+    let world = f.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    world
+        .entity_mut(me)
+        .insert(crate::creature_anim::Engaged(OLD));
+    world
+        .resource_mut::<crate::spell::QueuedMeleeSpell>()
+        .arm(78);
+    world
+        .resource_mut::<crate::spell::PendingCast>()
+        .fill_record();
+    world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("a VM"));
+    crate::script_calls::with_hosted_vm(world, |s| {
+        s.expect("a VM").run(
+            r#"ORDER = {}
+            local r = CreateFrame("Frame")
+            r:RegisterEvent("SPELLCAST_STOP")
+            r:RegisterEvent("PLAYER_TARGET_CHANGED")
+            r:SetScript("OnEvent", function() table.insert(ORDER, event) end)"#,
+        )
+    })
+    .expect("the listener is in");
+    f.click(Hovered::default());
+    crate::ui_cast::signal_reports(f.app.world_mut());
+    assert_eq!(f.selected(), None);
+    let order: String = f
+        .app
+        .world()
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .eval(r#"return table.concat(ORDER, ",")"#)
+        .unwrap();
+    assert_eq!(order, "SPELLCAST_STOP,PLAYER_TARGET_CHANGED");
+}
+
+/// What the wire carried of the selections, the rolls a listener made and the swings.
+fn wire_order(rx: &Receiver<ClientCommand>) -> Vec<String> {
+    rx.try_iter()
+        .filter_map(|c| match c {
+            ClientCommand::AttackStop => Some("AttackStop".to_string()),
+            ClientCommand::SetSelection { guid } => Some(format!("SetSelection {guid:#x}")),
+            ClientCommand::RandomRoll { .. } => Some("RandomRoll".to_string()),
+            ClientCommand::AttackSwing { guid } => Some(format!("AttackSwing {guid:#x}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A VM in `f`, past its world entry as a session has it.
+fn vm_in_the_world(f: &mut Fix) {
+    f.app
+        .world_mut()
+        .insert_non_send_resource(benilla_ui::script::UiScript::new().expect("a VM"));
+}
+
+/// A VM in `f` whose `PLAYER_TARGET_CHANGED` listener rolls, so the wire shows where it ran.
+fn rolling_listener(f: &mut Fix) {
+    vm_in_the_world(f);
+    crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
+        s.expect("a VM").run(
+            r#"local r = CreateFrame("Frame")
+            r:RegisterEvent("PLAYER_TARGET_CHANGED")
+            r:SetScript("OnEvent", function() RandomRoll(1, 100) end)"#,
+        )
+    })
+    .expect("the listener is in");
+}
+
+/// The world right-click's INTERACT leg selects first (`0x492870` → `SetSelection 0x493540`),
+/// whose `PLAYER_TARGET_CHANGED` (`0x49389c`) runs its listeners there, before the unit's
+/// dispatcher (`0x492881`) swings (`0x5ecd3c`).
+#[test]
+fn a_right_click_attack_signals_its_select_before_the_swing() {
+    let mut f = fix(false);
+    let foe = f.scannable_at(0x43, 3.0);
+    f.app.world_mut().init_resource::<crate::player::Player>();
+    rolling_listener(&mut f);
+    let world = f.app.world_mut();
+    *world.resource_mut::<PressPick>() = PressPick {
+        hovered: Hovered {
+            target: Some(foe),
+            guid: Some(0x43),
+            distance: 3.0,
+            ..Hovered::default()
+        },
+        cursor: super::cursor_mode::WorldCursor {
+            kind: super::cursor_mode::CursorKind::Attack,
+            unable: false,
+        },
+        attack_fork: super::cursor_mode::AttackFork(true),
+        ..PressPick::default()
+    };
+    super::release_click(world, benilla_ui::script::ClickMode::Action);
+    assert_eq!(
+        wire_order(&f.rx),
+        ["SetSelection 0x43", "RandomRoll", "AttackSwing 0x43"]
+    );
+}
+
+/// The `Interact` API's attack leg selects through StartAttack (`SetSelection` at `0x5eccaa`),
+/// whose `PLAYER_TARGET_CHANGED` runs its listeners before the swing (`0x5ecd3c`).
+#[test]
+fn an_interact_attack_signals_its_select_before_the_swing() {
+    let mut f = fix(false);
+    let foe = f.scannable_at(0x43, 3.0);
+    f.app.world_mut().init_resource::<crate::player::Player>();
+    rolling_listener(&mut f);
+    let world = f.app.world_mut();
+    world
+        .resource_mut::<Messages<click::Interact>>()
+        .write(click::Interact(foe));
+    world
+        .run_system_once(click::act_on_interact)
+        .expect("the interact runs");
+    assert_eq!(
+        wire_order(&f.rx),
+        ["SetSelection 0x43", "RandomRoll", "AttackSwing 0x43"]
+    );
+}
+
+/// The attacker's select (`0x6259fe` → `SetSelection 0x493540`) signals inside the packet's
+/// handler (`0x49389c`): its `PLAYER_TARGET_CHANGED` listeners run behind the select's send, at
+/// the packet's place on the release lane.
+#[test]
+fn an_acquired_attacker_signals_its_select_in_place() {
+    let mut f = fix(false);
+    let mob = f.mob;
+    f.make_unit(mob);
+    *f.app.world_mut().resource_mut::<Selection>() = Selection::default();
+    rolling_listener(&mut f);
+    f.swung_at_us(mob);
+    f.acquire();
+    assert_eq!(
+        wire_order(&f.rx),
+        ["SetSelection 0x31"],
+        "the listener waits"
+    );
+    crate::lanes::fire_in_order(f.app.world_mut());
+    assert_eq!(f.selected(), Some(MOB));
+    assert_eq!(wire_order(&f.rx), ["RandomRoll"]);
+}
+
+/// A bare `/assist`'s `AssistByName("")` commits through `SetSelection` (`0x493540`), which
+/// signals inside it (`0x49389c`): the listener's roll goes out behind the select's send, inside
+/// the call, with no lane to wait for.
+#[test]
+fn a_chat_assist_signals_its_select_in_place() {
+    let mut f = fix(false);
+    let (mob, old) = (f.mob, f.app.world().resource::<GuidIndex>().0[&OLD]);
+    f.make_unit(mob);
+    f.make_unit_with(old, &[(16, MOB as u32), (17, 0)]);
+    rolling_listener(&mut f);
+    crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
+        s.expect("a VM").run(r#"AssistByName("")"#)
+    })
+    .expect("the assist runs");
+    assert_eq!(f.selected(), Some(MOB));
+    assert_eq!(wire_order(&f.rx), ["SetSelection 0x31", "RandomRoll"]);
 }

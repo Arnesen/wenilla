@@ -4,7 +4,8 @@
 //! Bindings window write. This module derives an exact-match dispatch map from the keys whenever
 //! the table's generation moves, and runs a pressed chord's command.
 //!
-//! Dispatch ([`latch_and_dispatch`], in [`crate::ui_script::UiInput`] after the UI key feed), as
+//! Dispatch ([`WorldFrameBindings`], the world frame's leg of each input record, in
+//! [`crate::ui_script::UiInput`] after the interface's walk of that record), as
 //! `CBindings::ExecuteBinding` (`0x4b7990`) and `RunCommand` (`0x4b7b50`) do:
 //! - a press probes its exact chord, then once more with its leftmost modifier dropped
 //!   ([`Chord::fallback`]);
@@ -29,15 +30,17 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use benilla_ui::script::keybind::KeybindRequest;
-use benilla_ui::script::{KeyUp, KeyWalk, UiScript};
+use benilla_ui::script::{KeyUp, KeyWalk, PointerTarget, UiScript};
 
 use crate::client_state::InWorldGated;
+use crate::textinput::keymap::Mods;
+#[cfg(test)]
 use crate::ui_script::{PlayerUiHover, UiKeyboardCapture};
 
 pub(crate) mod chord;
 mod layout;
 mod script_input;
-mod store;
+pub(crate) mod store;
 
 use chord::{BindKey, Chord};
 pub(crate) use layout::LayoutNames;
@@ -72,22 +75,44 @@ impl BindingDispatch {
     }
 }
 
-/// This frame's binding activity, which engine-side consumers read instead of raw keys: the
-/// [`Input`]s the running bodies' Lua calls set.
+/// The engine's input state the binding functions drive, the reference's `[InputControl+4]` and
+/// the camera's axes, which engine-side consumers read instead of raw keys: the [`Input`]s the
+/// bodies' Lua calls set, each inside its call ([`benilla_ui::script::ScriptCall::Input`]).
 #[derive(Resource, Default)]
 pub(crate) struct BindingsState {
-    /// Live latches, (base input, command): a press not yet released, whose release runs the
-    /// command's `runOnUp` half. The reference replays the press-time chord at key-up (`0x483bd0`);
-    /// latching the resolved command is equivalent.
-    latched: Vec<(Held, String)>,
     /// The held bits a Start set and no Stop has cleared.
     held: Vec<Input>,
+    /// This frame's edges, which the frame's readers take after the binding pass.
+    edges: Edges,
+    /// The edges of the calls made after this frame's readers ran, for the next frame's.
+    carry: Edges,
+    /// The binding pass runs ([`BindingHead`] to [`BindingTail`]), ahead of every reader.
+    open: bool,
+}
+
+/// One frame's binding edges.
+#[derive(Default)]
+struct Edges {
     /// Inputs whose Start, or whose one-shot, came this frame (the press edge).
     just: Vec<Input>,
     /// One-shots fired this frame.
     fired: Vec<Input>,
     /// Amount per one-shot this frame: a zoom's yards, else 1.0.
     amounts: Vec<(Input, f32)>,
+    /// This frame's `MoveView*` calls in call order, `(axis, start)`, for the camera's axes.
+    view_calls: Vec<(script_input::ViewAxis, bool)>,
+    /// The edges whose `SetCommands` work ran inside their call ([`BindingsState::call`]).
+    settled: Vec<Input>,
+}
+
+/// The world frame's binding latches and the keys it believes are down: `CBindings`' state, not
+/// the input control's.
+#[derive(Resource, Default)]
+pub(crate) struct BindingLatches {
+    /// Live latches, (base input, command): a press not yet released, whose release runs the
+    /// command's `runOnUp` half. The reference replays the press-time chord at key-up (`0x483bd0`);
+    /// latching the resolved command is equivalent.
+    latched: Vec<(Held, String)>,
     /// The keys we believe are down: a press of one is a repeat. The reference classifies
     /// auto-repeat off its own list (`0x4248b3`), never the Win32 `lParam` repeat bit.
     /// Normalized like [`latched`](Self::latched) and reconciled against `ButtonInput` every
@@ -128,6 +153,82 @@ impl KeyDownList {
     }
 }
 
+/// The VM, the host, and the input state the host's calls write, as the bindings pass holds them
+/// ([`begin_dispatch`]): what a synthetic press runs through.
+pub(crate) type SynthVm<'w, 's> =
+    crate::script_calls::VmWith<'w, 's, ResMut<'static, BindingsState>>;
+
+impl BindingLatches {
+    // ── The synthetic seam ── commands asserted by something that is not a key: the web bridge
+    // (`crate::webbridge`). A synthetic press runs the command's body exactly as a key's does
+    // ([`press`]), with the host lent, so every consumer reads it through `BindingsState` and
+    // cannot tell it from a key; its latch is a command name with no physical input, so the
+    // stuck-latch sweep never releases it. A VM swap drops it with the key latches, and the bridge
+    // re-asserts next frame.
+
+    /// Press `command` from the bridge, once: run its body with `keystate = "down"` and latch it
+    /// until [`Self::synth_release`]. An analog `amount` scales the one-shot amounts the body
+    /// fired (the page's wheel magnitude on a zoom; `1.0` is the reference's key step). Already
+    /// latched: nothing. `false` when there is no VM or no such command.
+    pub(crate) fn synth_press(&mut self, vm: &mut SynthVm, command: &str, amount: f32) -> bool {
+        if self.synth_latched(command) {
+            return true;
+        }
+        let mark = vm.own().amounts_mark();
+        let ran = vm.run(|script| {
+            script.map(|s| {
+                let ran = s.execute_binding(command, true);
+                // With no host lent the body's calls waited; they apply here, as a key's would at
+                // the pass's head, so the press is this frame's either way.
+                (ran, s.take_binding_input())
+            })
+        });
+        let Some((ran, unhosted)) = ran else {
+            return false;
+        };
+        match ran {
+            Ok(false) => return false,
+            Ok(true) => {}
+            Err(e) => warn!("bindings({command}): {e}"),
+        }
+        let mut state = vm.own();
+        state.apply_script_input(unhosted);
+        state.scale_amounts_since(mark, amount);
+        self.synth.push(command.to_owned());
+        true
+    }
+
+    /// Release the bridge's latch on `command`, if any, running its `runOnUp` up-half (with no
+    /// VM, only the latch goes). A key's latch on the same command is untouched.
+    pub(crate) fn synth_release(&mut self, vm: &mut SynthVm, command: &str) {
+        let Some(i) = self.synth.iter().position(|c| c == command) else {
+            return;
+        };
+        self.synth.remove(i);
+        let unhosted = vm.run(|script| {
+            script.map(|s| {
+                if let Err(e) = s.execute_binding(command, false) {
+                    warn!("bindings({command}): {e}");
+                }
+                s.take_binding_input()
+            })
+        });
+        vm.own().apply_script_input(unhosted.unwrap_or_default());
+    }
+
+    /// Release every synthetic latch: world exit, the typing edge, the bridge letting go.
+    pub(crate) fn synth_release_all(&mut self, vm: &mut SynthVm) {
+        while let Some(command) = self.synth.last().cloned() {
+            self.synth_release(vm, &command);
+        }
+    }
+
+    /// Is `command` latched by the bridge?
+    pub(crate) fn synth_latched(&self, command: &str) -> bool {
+        self.synth.iter().any(|c| c == command)
+    }
+}
+
 /// `ENTER` is down while either physical key is, since [`chord::normalize_key`] folds
 /// `NUMPADENTER` into it.
 fn key_physically_down(kc: KeyCode, keys: &ButtonInput<KeyCode>) -> bool {
@@ -153,19 +254,44 @@ impl BindingsState {
     }
     /// Did this bit's Start, or this one-shot, come this frame (the key-down edge)?
     pub(crate) fn just_pressed(&self, i: Input) -> bool {
-        self.just.contains(&i)
+        self.edges.just.contains(&i)
+    }
+    /// Did this frame's edge of `i` come from a call that ran its `SetCommands` work inside it
+    /// ([`Self::call`])?
+    pub(crate) fn settled(&self, i: Input) -> bool {
+        self.edges.settled.contains(&i)
     }
     /// Did this one-shot fire this frame?
     pub(crate) fn fired(&self, i: Input) -> bool {
-        self.fired.contains(&i)
+        self.edges.fired.contains(&i)
+    }
+    /// Fire the one-shot `i` this frame, as a body's Lua call would.
+    #[cfg(test)]
+    pub(crate) fn fire_for_test(&mut self, i: Input) {
+        self.edges.fired.push(i);
+    }
+    /// End the frame's one-shots.
+    #[cfg(test)]
+    pub(crate) fn clear_for_test(&mut self) {
+        self.edges.fired.clear();
+    }
+    /// The binding pass runs, so a call's edge is this frame's ([`Self::call`]).
+    #[cfg(test)]
+    pub(crate) fn open_for_test(&mut self) {
+        self.open = true;
     }
     /// Total amount for a one-shot this frame (0.0 when idle): the camera zoom's yards.
     pub(crate) fn amount(&self, i: Input) -> f32 {
-        self.amounts
+        self.edges
+            .amounts
             .iter()
             .filter(|&&(a, _)| a == i)
             .map(|&(_, v)| v)
             .sum()
+    }
+    /// This frame's `MoveView*` calls in call order, `(axis, start)`.
+    pub(crate) fn view_calls(&self) -> &[(script_input::ViewAxis, bool)] {
+        &self.edges.view_calls
     }
     /// Both mouse bits held by their Lua Starts, the both-button run: MOVEANDSTEER's body
     /// (`Bindings.xml:3-11`) runs `CameraOrSelectOrMoveStart` and `TurnOrActionStart`.
@@ -178,147 +304,245 @@ impl BindingsState {
             && (self.just_pressed(Input::TurnOrAction)
                 || self.just_pressed(Input::CameraOrSelectOrMove))
     }
-
-    // ── The synthetic seam ── commands asserted by something that is not a key: the web bridge
-    // (`crate::webbridge`). A synthetic press runs the command's body exactly as a key's does
-    // ([`press`]), so every consumer reads it through the accessors above and cannot tell it from
-    // a key; its latch is a command name with no physical input, so the stuck-latch sweep never
-    // releases it. A VM swap drops it with the key latches, and the bridge re-asserts next frame.
-
-    /// Press `command` from the bridge, once: run its body with `keystate = "down"`, apply the
-    /// calls it made this frame, and latch it until [`Self::synth_release`]. An analog `amount`
-    /// scales the one-shot amounts the body fired (the page's wheel magnitude on a zoom; `1.0` is
-    /// the reference's key step). Already latched: nothing. `false` when there is no such command.
-    pub(crate) fn synth_press(
-        &mut self,
-        script: &mut UiScript,
-        command: &str,
-        amount: f32,
-    ) -> bool {
-        if self.synth.iter().any(|c| c == command) {
-            return true;
-        }
-        let before = self.amounts.len();
-        match script.execute_binding(command, true) {
-            Ok(false) => return false,
-            Ok(true) => {}
-            Err(e) => warn!("bindings({command}): {e}"),
-        }
-        self.apply_script_input(script.take_binding_input());
-        for a in &mut self.amounts[before..] {
-            a.1 *= amount;
-        }
-        self.synth.push(command.to_owned());
-        true
+    /// A primary bit is held (`[InputControl+4] & 3`), whichever call set it: a mouse command's,
+    /// or `MouselookStart`'s TurnOrAction bit.
+    pub(crate) fn primary_held(&self) -> bool {
+        self.pressed(Input::TurnOrAction) || self.pressed(Input::CameraOrSelectOrMove)
     }
-
-    /// Release the bridge's latch on `command`, if any, running its `runOnUp` up-half (with no
-    /// VM, only the latch goes). A key's latch on the same command is untouched.
-    pub(crate) fn synth_release(&mut self, script: Option<&mut UiScript>, command: &str) {
-        let Some(i) = self.synth.iter().position(|c| c == command) else {
-            return;
-        };
-        self.synth.remove(i);
-        if let Some(s) = script {
-            if let Err(e) = s.execute_binding(command, false) {
-                warn!("bindings({command}): {e}");
-            }
-            self.apply_script_input(s.take_binding_input());
-        }
+    /// A call made with no host lent, applied where the engine takes it, its edge unsettled for
+    /// the frame's readers: `MouselookStart`'s bit, which the look session takes at its latch.
+    pub(crate) fn apply_unhosted(&mut self, input: benilla_ui::script::BindingInput) {
+        self.apply_script_input(vec![input]);
     }
-
-    /// Release every synthetic latch: world exit, the typing edge, the bridge letting go.
-    pub(crate) fn synth_release_all(&mut self, mut script: Option<&mut UiScript>) {
-        while let Some(command) = self.synth.last().cloned() {
-            self.synth_release(script.as_deref_mut(), &command);
-        }
+    /// The release of both primary bits (`0x5144c0` → `0x514b70(-1, …)`), the session's end.
+    pub(crate) fn release_primaries(&mut self) {
+        self.held
+            .retain(|&i| !matches!(i, Input::TurnOrAction | Input::CameraOrSelectOrMove));
     }
-
-    /// Is `command` latched by the bridge?
-    pub(crate) fn synth_latched(&self, command: &str) -> bool {
-        self.synth.iter().any(|c| c == command)
+    /// The next frame begins: this one's edges are spent, as the binding pass's head spends them.
+    #[cfg(test)]
+    pub(crate) fn next_frame_for_test(&mut self) {
+        self.begin_pass();
+        self.end_pass();
     }
 }
 
-/// Which files this session's bindings live in: written by [`seed_bindings_for_vm`], read by the
-/// save.
+/// Which files this session's bindings live in: written by [`register_binding_readers`], read by
+/// the save.
 #[derive(Resource, Default)]
 struct BindingFiles {
     account: Option<std::path::PathBuf>,
     character: Option<std::path::PathBuf>,
+    /// The account-data sections' files, the reference's `bindings-cache.wtf` pair.
+    account_cache: Option<std::path::PathBuf>,
+    character_cache: Option<std::path::PathBuf>,
+    /// Whether this VM's set 1 and set 2 wait for their sections (2 and 3): nothing read, so
+    /// nothing saved over them (`0x4b6600`, `0x4b6611` through `0x5afed0`).
+    held: crate::ui_script::VmMemo<[bool; 2]>,
 }
 
-/// This module's systems inside [`crate::ui_script::UiInput`]. The UI key feed runs before it, so
-/// a key a focused box consumed is already in the capture gate when dispatch runs.
+/// This module's systems inside [`crate::ui_script::UiInput`]: the pass's head ([`BindingHead`])
+/// and its tail ([`BindingTail`]). The interface's walk of the frame's records runs between them,
+/// each record's binding inside it, as the world frame is the walk's last frame.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BindingSet;
+
+/// The pass's head, ahead of the frame's records: the dispatch map and the frame's clears.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BindingHead;
+
+/// The pass's tail, after the frame's records: the stuck-latch sweep and the calls the bodies made.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BindingTail;
 
 pub(crate) struct BindingsPlugin;
 
 impl Plugin for BindingsPlugin {
     fn build(&self, app: &mut App) {
+        use crate::lanes::LaneApp;
         app.add_plugins(layout::plugin)
+            .configure_sets(
+                Update,
+                (BindingHead, BindingTail)
+                    .in_set(crate::ui_script::UiInput)
+                    .in_set(BindingSet)
+                    .in_set(InWorldGated),
+            )
+            .configure_sets(Update, BindingHead.before(BindingTail))
             .init_resource::<BindingDispatch>()
             .init_resource::<BindingsState>()
+            .init_resource::<BindingLatches>()
             .init_resource::<BindingFiles>()
             .add_systems(
                 Update,
                 (
-                    // The key sets are seeded at the VM's birth, not here: `seed_bindings_for_vm`
-                    // runs in `load_ingame_ui_on_world_entry`, before FrameXML and every addon;
+                    // The key sets are read by the interface load, not here: the defaults at the
+                    // VM's birth (`seed_bindings_for_vm`), before FrameXML and every addon, and
+                    // the stored sets at the readers' registration (`register_binding_readers`);
                     // the commands come with the load.
-                    (sync_dispatch, latch_and_dispatch)
-                        .chain()
-                        .in_set(crate::ui_script::UiInput)
-                        .in_set(BindingSet)
-                        .in_set(InWorldGated),
+                    (sync_dispatch, begin_dispatch).chain().in_set(BindingHead),
+                    end_dispatch.in_set(BindingTail),
                     // After the tick: the requests are Lua's own (`SaveBindings`), queued by
                     // handlers the tick dispatched, and a save must not wait a frame.
                     drain_binding_requests.in_set(crate::ui_script::UiDrain),
                 ),
+            )
+            // The readers of the binding sections, each at its section's settling.
+            .add_exclusive_lane(
+                "binding arrivals",
+                peek_arrived_bindings,
+                fire_arrived_bindings,
+                arrived_bindings_reads,
             );
     }
 }
 
-/// Seed the key sets at the VM's birth, before any interface file runs: the defaults off the
-/// player's chain (`WTF\DefaultBindings.wtf`), the account set, and the character's set if it has
-/// one. The keys are their own table, so a command a later file declares finds its keys there,
-/// and stock `ActionButton_OnLoad` paints its hotkey corner from `GetBindingKey` at load.
+/// Seed set 0, the defaults off the player's chain (`WTF\DefaultBindings.wtf`), at the VM's
+/// birth, before any interface file runs. The live table stays empty until the readers run
+/// ([`register_binding_readers`]).
 ///
 /// The reference reads the defaults later in `UI_Init` (`0x4b62b0` at `0x4900c7`); here they are
 /// read first because the stored sets are diffs against them ([`store`]'s deviation), and nothing
 /// reads set 0 before `LoadBindings(0)`.
-pub(crate) fn seed_bindings_for_vm(world: &mut World, script: &mut UiScript) {
-    let defaults = crate::ui_script::default_bindings();
-    script.set_default_bindings(defaults);
-    let defaults = script.default_bindings();
-    let account = crate::local_state::bindings_account_path();
-    let overrides = read_diff(&account).unwrap_or_default();
-    script.seed_binding_set(1, Some(store::resolve(&overrides, &defaults)));
-    script.load_binding_set(1);
+pub(crate) fn seed_bindings_for_vm(script: &mut UiScript) {
+    script.set_default_bindings(crate::ui_script::default_bindings());
+}
 
-    // The character's own set: its file existing makes it the active set, the reference's rule.
-    // No roster identity (a rigged or capture run) leaves set 2 unseeded.
+/// The reader's registration (`0x4b6240` through `0x5afe50` at `0x4b62ef` and `0x4b6300`), which
+/// the interface load makes after the layout's and ahead of the macros' (`0x4900c7` → `0x4b62b0`):
+/// a set is read now on a settled section (a `/reload`), else held until it settles
+/// ([`fire_arrived_bindings`]). Until set 2's read chooses, the live table is empty, as the load
+/// builds the binding object anew (`0x48feb0` → `0x4b6050`) after the last shutdown destroyed it
+/// (`0x490cb5` → `0x4b6100`). The reads run with the host lent, for the set choice's signal.
+pub(crate) fn register_binding_readers(world: &mut World, script: &mut UiScript) {
+    let account = crate::local_state::bindings_account_path();
+    // No roster identity (a rigged or capture run) leaves set 2 unread.
     let id = world
         .get_resource::<crate::glue_session::roster::Roster>()
         .and_then(crate::ui_macro::identity);
     let character = id
         .as_ref()
         .and_then(|(realm, name)| crate::local_state::bindings_character_path(realm, name));
-    match read_diff(&character) {
-        Some(overrides) => {
-            script.seed_binding_set(2, Some(store::resolve(&overrides, &defaults)));
-            script.load_binding_set(2);
-            info!("bindings: character-specific set loaded");
+    let held = world
+        .get_resource::<crate::account_data::AccountData>()
+        .map_or([false; 2], |data| {
+            crate::account_data::BINDINGS.map(|section| !data.register(section))
+        });
+    crate::script_calls::lent_by_world(world, script, |script| {
+        if !held[0] {
+            read_account_set(script, &account);
         }
-        None => {
-            script.seed_binding_set(2, None);
-            script.load_binding_set(1);
+        if !held[1] {
+            read_character_set(script, &character);
         }
-    }
+    });
     if let Some(mut files) = world.get_resource_mut::<BindingFiles>() {
+        *files.held.get(script) = held;
         files.account = account;
         files.character = character;
+        files.account_cache = crate::local_state::bindings_cache_account_path();
+        files.character_cache = id.as_ref().and_then(|(realm, name)| {
+            crate::local_state::bindings_cache_character_path(realm, name)
+        });
+    }
+}
+
+/// Section 2's read (`0x4b6240` with set 1): set 1 replaced by the account file, emptied first
+/// (`0x4b6161`); a file that does not read leaves it as it stands (`0x4b624c`, `0x4b6259`).
+fn read_account_set(script: &mut UiScript, account: &Option<std::path::PathBuf>) {
+    if let Some(overrides) = read_diff(account) {
+        let defaults = script.default_bindings();
+        script.seed_binding_set(1, Some(store::resolve(&overrides, &defaults)));
+    }
+}
+
+/// Section 3's read (`0x4b6240` with set 2): set 2 from the character file as
+/// [`read_account_set`] reads set 1, then the set choice (`0x4b629a` → `0x4b64b0`): the
+/// character's set in use when it has keys, else set 1 as it then stands, the defaults when it is
+/// still empty (`0x4b64e2`). Its copy into the live set signals `UPDATE_BINDINGS` in place
+/// (`0x4b6310(2, 3)`, `0x4b6498`).
+fn read_character_set(script: &mut UiScript, character: &Option<std::path::PathBuf>) {
+    if let Some(overrides) = read_diff(character) {
+        let defaults = script.default_bindings();
+        script.seed_binding_set(2, Some(store::resolve(&overrides, &defaults)));
+        info!("bindings: character-specific set read");
+    }
+    // The choice zeroes the dirty mask before its copy into the live set (`0x4b6506`), so no
+    // `SaveBindings` made ahead of it is written: its queued files are dropped.
+    script.take_keybind_requests();
+    script.load_binding_set(if script.character_bindings_exist() {
+        2
+    } else {
+        1
+    });
+    if script.take_keybinds_signal_owed() {
+        script.fire_event("UPDATE_BINDINGS", vec![]);
+    }
+}
+
+/// The binding section that settled first, its reader still owed, with its settling's stamp.
+fn arrived_binding(world: &World) -> Option<(usize, crate::lanes::Stamp)> {
+    let data = world.get_resource::<crate::account_data::AccountData>()?;
+    crate::account_data::BINDINGS
+        .into_iter()
+        .filter_map(|section| Some((section, data.owed_at(section)?)))
+        .min_by_key(|(_, at)| *at)
+}
+
+/// A binding section's settling, the head of its lane: the reader (`0x4b6240`) runs where the
+/// handler that settled it ran (`0x5afaca` in the digests' check, `0x5afd19` in a download), in
+/// the packets' order with the other lanes' events.
+fn peek_arrived_bindings(world: &World) -> Option<crate::lanes::Stamp> {
+    arrived_binding(world).map(|(_, at)| at)
+}
+
+/// The settled section's set read into the VM, as the firing of its settling's stamp: section 2
+/// reads set 1, section 3 reads set 2 and chooses the set in use, signalling `UPDATE_BINDINGS`
+/// ([`read_character_set`]).
+fn fire_arrived_bindings(In(until): In<crate::lanes::Until>, world: &mut World) {
+    let Some((section, at)) = arrived_binding(world).filter(|(_, at)| until.admits(*at)) else {
+        return;
+    };
+    // No VM: the settling waits for one.
+    if !world.contains_non_send::<UiScript>() {
+        return;
+    }
+    world
+        .resource::<crate::account_data::AccountData>()
+        .take_owed(section);
+    crate::lanes::firing(at, || {
+        world.try_resource_scope(|world, mut files: Mut<BindingFiles>| {
+            crate::script_calls::with_hosted_vm(world, |script| {
+                let Some(script) = script else { return };
+                if section == crate::account_data::BINDINGS[0] {
+                    read_account_set(script, &files.account);
+                    files.held.get(script)[0] = false;
+                    return;
+                }
+                read_character_set(script, &files.character);
+                files.held.get(script)[1] = false;
+            })
+        })
+    });
+}
+
+/// What the bindings lane's firing touches beside the call host and its own lane: the files.
+fn arrived_bindings_reads(world: &mut World) -> bevy::ecs::query::FilteredAccessSet {
+    fn read(_: Option<ResMut<BindingFiles>>) {}
+    crate::lanes::system_access(world, read)
+}
+
+/// Every binding settling fired alone, in order, for a test that drives the lane without the
+/// others.
+#[cfg(test)]
+fn reread_arrived_bindings(world: &mut World) {
+    while let Some(head) = peek_arrived_bindings(world) {
+        world
+            .run_system_cached_with(fire_arrived_bindings, crate::lanes::Until::all())
+            .expect("the bindings lane fires");
+        if peek_arrived_bindings(world) == Some(head) {
+            break;
+        }
     }
 }
 
@@ -346,24 +570,43 @@ fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<Strin
 }
 
 /// Drain the VM's binding requests: `SaveBindings` writes the set's diff; saving the account set
-/// deletes the character file.
-fn drain_binding_requests(mut hosted_vm: crate::script_calls::HostedVm, files: Res<BindingFiles>) {
+/// deletes the character file. A set choice drops those made before it ([`read_character_set`]).
+/// Left at the frame, not in the call: the call's own work, the copy
+/// and the dirty mark (`0x4b8260` → `0x4b6310`), is the VM's and signals nothing (only a copy into
+/// the live set does, `0x4b6498`), and the reference writes the files at the interface's shutdown
+/// (`0x490bd0` → `0x4b65e0`), which no script reads.
+fn drain_binding_requests(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut files: ResMut<BindingFiles>,
+    data: Option<Res<crate::account_data::AccountData>>,
+) {
     hosted_vm.run(|script| {
         let Some(script) = script else { return };
+        let [account_held, character_held] = *files.held.get(script);
         for req in script.take_keybind_requests() {
             let KeybindRequest::Save(which) = req;
-            let text = store::to_diff(&script.keybind_snapshot(), &script.default_bindings());
-            let path = match which {
-                1 => &files.account,
-                2 => &files.character,
+            // The set as the call stored it (`0x4b6310`), not the live table a later binding in
+            // the frame moved. None: a later `SaveBindings(1)` in the frame dropped set 2, and
+            // its own request writes the files that leaves.
+            let Some(saved) = script.stored_binding_snapshot(which) else {
+                continue;
+            };
+            let defaults = script.default_bindings();
+            let text = store::to_diff(&saved, &defaults);
+            // The section's file beside the diff, the whole table in the reference's form
+            // (`0x4b65b0`).
+            let table = store::to_cache(&store::from_diff(&text), &defaults);
+            let (path, cache, held) = match which {
+                1 => (&files.account, &files.account_cache, account_held),
+                2 => (&files.character, &files.character_cache, character_held),
                 _ => continue,
             };
-            if let Some(path) = path {
-                if let Err(e) = crate::local_state::write_atomic(path, &text) {
-                    warn!("bindings: saving {}: {e}", path.display());
-                }
+            // A held set's section is not written over (`0x4b6600`, `0x4b6611` → `0x5afee0`).
+            if !held {
+                write_file(path, &text);
+                write_file(cache, &table);
             }
-            if which == 1 {
+            if which == 1 && !character_held {
                 if let Some(chr) = &files.character {
                     match crate::local_state::remove_file(chr) {
                         Ok(()) => info!("bindings: character-specific set deleted"),
@@ -371,17 +614,33 @@ fn drain_binding_requests(mut hosted_vm: crate::script_calls::HostedVm, files: R
                         Err(e) => warn!("bindings: deleting {}: {e}", chr.display()),
                     }
                 }
+                // The character's section file emptied, as the account set is the one in use
+                // (`0x4b65c6` writes set 2 only when it is current).
+                write_file(&files.character_cache, "");
+            }
+            // Owed the shutdown's write: the account set's save both sections, the character's its
+            // own (`0x4b65ed`, `0x4b6617`).
+            if let Some(data) = &data {
+                data.saved(if which == 1 { &[2, 3] } else { &[3] });
             }
         }
     })
 }
 
+/// Write one bindings file, if this session has it.
+fn write_file(path: &Option<std::path::PathBuf>, text: &str) {
+    if let Some(path) = path {
+        if let Err(e) = crate::local_state::write_atomic(path, text) {
+            warn!("bindings: saving {}: {e}", path.display());
+        }
+    }
+}
+
 /// Rebuild the dispatch map when the engine table moved (a rebind, a set switch, the seed, a
-/// load, a registration), and fire the `UPDATE_BINDINGS` a host-side load owes so the Lua
-/// consumers (the action bar's hotkey corners) repaint. The reference signals it from `SetBinding`
-/// (`0x4b805b`), which signals in place, and from the copy of a set into the live table
-/// (`0x4b649d`); reading a `Bindings.xml` (`0x4b6f70`) signals nothing.
-fn sync_dispatch(
+/// load, a registration). It signals nothing: `SetBinding` (`0x4b805b`) and the copy of a set
+/// into the live table (`0x4b649d`, [`read_character_set`]) signal in place, and reading a
+/// `Bindings.xml` (`0x4b6f70`) signals nothing.
+pub(crate) fn sync_dispatch(
     mut hosted_vm: crate::script_calls::HostedVm,
     mut dispatch: ResMut<BindingDispatch>,
 ) {
@@ -399,9 +658,6 @@ fn sync_dispatch(
                     None => warn!("bindings: {command}: unpressable chord '{key}' (unknown token)"),
                 }
             }
-        }
-        if script.take_keybinds_signal_owed() {
-            script.fire_event("UPDATE_BINDINGS", vec![]);
         }
     })
 }
@@ -436,17 +692,16 @@ pub(crate) fn notch_travel(x: f32, y: f32, shift: bool) -> f32 {
     notch_travel_with(x, y, shift, OS_REMAPS_SHIFT_WHEEL)
 }
 
-/// The chord a wheel notch runs: the held modifiers and the direction. `None` while Super is held,
-/// where the notch runs no binding.
-fn wheel_chord(keys: &ButtonInput<KeyCode>, up: bool) -> Option<Chord> {
-    let held = |a, b| keys.pressed(a) || keys.pressed(b);
-    if held(KeyCode::SuperLeft, KeyCode::SuperRight) {
+/// The chord a wheel notch runs: the modifiers its record holds and the direction (`0x4b6aa0`
+/// names it from the event). `None` while Super is held, where the notch runs no binding.
+fn wheel_chord(mods: Mods, up: bool) -> Option<Chord> {
+    if mods.sup {
         return None;
     }
     Some(Chord {
-        alt: held(KeyCode::AltLeft, KeyCode::AltRight),
-        ctrl: held(KeyCode::ControlLeft, KeyCode::ControlRight),
-        shift: held(KeyCode::ShiftLeft, KeyCode::ShiftRight),
+        alt: mods.alt,
+        ctrl: mods.ctrl,
+        shift: mods.shift,
         key: if up {
             BindKey::WheelUp
         } else {
@@ -457,12 +712,8 @@ fn wheel_chord(keys: &ButtonInput<KeyCode>, up: bool) -> Option<Chord> {
 
 /// Whether the world frame's wheel slot takes a notch: it runs the notch's chord and answers the
 /// sum of the two `ExecuteBinding` results (`0x483d87`), which is 0 for a chord with no binding.
-pub(crate) fn world_takes_wheel(
-    dispatch: Option<&BindingDispatch>,
-    keys: &ButtonInput<KeyCode>,
-    up: bool,
-) -> bool {
-    match (dispatch, wheel_chord(keys, up)) {
+pub(crate) fn world_takes_wheel(dispatch: Option<&BindingDispatch>, mods: Mods, up: bool) -> bool {
+    match (dispatch, wheel_chord(mods, up)) {
         (Some(dispatch), Some(chord)) => dispatch.resolve(chord, false).is_some(),
         (None, _) => true,
         (Some(_), None) => false,
@@ -471,10 +722,16 @@ pub(crate) fn world_takes_wheel(
 
 /// Whole notches out of a stream of line deltas, carrying the fraction between frames.
 ///
+/// Deviation: a trackpad's `Pixel` deltas are carried until they make a line, and step at most
+/// once per event ([`crate::ui_script::Record::Wheel`]). The reference steps on every
+/// `WM_MOUSEWHEEL`, whatever its delta (`0x76c1a9`); carried, a trackpad does not zoom or scroll
+/// at its event rate.
+///
 /// For consumers that act per notch off the sign alone: the UI's `OnMouseWheel` (stock
 /// `ScrollFrameTemplate_OnMouseWheel` moves half a pane per call, `UIPanelTemplates.lua:150`) and
-/// the realm list's row step. A reversal drops the carried fraction: it is a new gesture.
-#[derive(Default, Resource)]
+/// the world frame's binding, each wheel record's ([`crate::ui_script::Record::Wheel`]). A
+/// reversal drops the carried fraction: it is a new gesture.
+#[derive(Default)]
 pub(crate) struct WheelNotches {
     carry: f32,
 }
@@ -495,46 +752,35 @@ impl WheelNotches {
     }
 }
 
-/// The wheel notches this frame's sweep left to the world frame, signed (`WheelWalk::World`):
-/// the UI feed writes them, the dispatch pass runs the `MOUSEWHEELUP`/`MOUSEWHEELDOWN` binding
-/// for each (`0x483d20`).
-#[derive(Default, Resource)]
-pub(crate) struct WorldWheel(pub(crate) i32);
-
-/// The dispatch pass (see the module doc). Runs after the UI key feed and before
-/// `WorldStage::Input`, so a bound key acts this frame, once.
-fn latch_and_dispatch(
-    mut script: Option<NonSendMut<UiScript>>,
-    mut keyboard: MessageReader<KeyboardInput>,
-    // What the active layout names a letter, digit or punctuation key.
-    layout: Res<LayoutNames>,
+/// The dispatch pass's head (see the module doc), ahead of the frame's records: the frame's
+/// activity cleared, the bulk clears, Lua's binding calls since the last pass, and the
+/// pressed-key reconcile.
+fn begin_dispatch(
+    // The input state with the host, whose calls write it ([`BindingsState::call`]).
+    mut vm: crate::script_calls::VmWith<ResMut<'static, BindingsState>>,
     keys: Res<ButtonInput<KeyCode>>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    world_wheel: Res<WorldWheel>,
-    capture: Res<UiKeyboardCapture>,
-    hover: Res<PlayerUiHover>,
-    dispatch: Res<BindingDispatch>,
-    mut state: ResMut<BindingsState>,
+    mut latches: ResMut<BindingLatches>,
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
     mut focus_lost: MessageReader<bevy::input::keyboard::KeyboardFocusLost>,
     cover: Option<Res<crate::loading_screen::LoadingScreen>>,
-    // Lent to the VM around each binding body, so the calls it makes apply in the call.
-    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
-    state.just.clear();
-    state.fired.clear();
-    state.amounts.clear();
-
+    let (script, set) = vm.parts();
+    let mut state = set.p0();
+    state.begin_pass();
     // Deviation: latches die with the VM that made them, because a latch names a command of that
     // VM's table and releasing it against a new one would run another load's up-half. The
     // reference keeps a held key running through `ReloadUI`; here it re-latches on its next press.
     // The held bits die with it, as the key's Stop would have cleared them.
-    if let Some(script) = script.as_ref() {
+    if let Some(script) = script {
         if same_vm.claim(script) {
-            state.latched.clear();
-            state.synth.clear();
+            latches.latched.clear();
+            latches.synth.clear();
             state.held.clear();
         }
+        // Lua's binding calls made with no host lent since the last pass, before this frame's
+        // keys.
+        let inputs = script.take_binding_input();
+        state.apply_script_input(inputs);
     }
     // The reference's two bulk clears: the window deactivate (`0x514490`'s `and eax,0xfffff00f`,
     // the direction bits only, so the mouse pair and autorun survive) and the world enter behind
@@ -547,200 +793,362 @@ fn latch_and_dispatch(
             .held
             .retain(|&i| matches!(i, Input::TurnOrAction | Input::CameraOrSelectOrMove));
     }
-    // Lua's binding calls made since the last pass, before this frame's keys.
-    if let Some(s) = script.as_mut() {
-        let inputs = s.take_binding_input();
-        state.apply_script_input(inputs);
-    }
-
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    let sup = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
-    // The dev overlays' plane, Ctrl+Shift without Alt (`modkeys::dev_chord`, which Super blocks
-    // too, as the `sup` gate below keeps any Super-held press from dispatching), which costs the
-    // keyboard its fallback probe (`BindingDispatch::resolve`). Only in a build with dev
-    // affordances: a player build keeps the reference's `CTRL-SHIFT-P` fallback to `SHIFT-P`.
-    let dev_plane = ctrl && shift && !alt && crate::run_mode::dev_affordances();
-
-    // ── Who owns this frame's keys ── a focused EditBox eats every key while it holds focus; a
-    // shown keyboard frame ate the keys in `capture.consumed`. Both suppress a press and nothing
-    // else: in the reference a focused box makes the movement handlers no-ops, so the direction
-    // bits are frozen, not cleared. `0x514490`, which does clear them, is the OS window-deactivate
-    // handler (sole caller `0x493058`, off the root's WM_ACTIVATE slot `[root+0x1134]`); here
-    // bevy's `KeyboardFocusLost` and `ButtonInput::release_all` reach the stuck-latch sweep below.
-    //
-    // ── The pressed-key reconcile ── against bevy's button planes, before this frame's messages:
-    // a release the window never saw drops off the list, and a window deactivate empties it, the
+    // ── The pressed-key reconcile ── against bevy's button planes, before this frame's records: a
+    // release the window never saw drops off the list, and a window deactivate empties it, the
     // reference's `0x424790` wipe, so a key held across an alt-tab re-latches on its next repeat.
-    state.down.reconcile(&keys);
+    latches.down.reconcile(&keys);
+}
 
-    // ── Keyboard ── press edges run their command, gated on ownership and the capture arm;
-    // release edges unlatch and run the `runOnUp` up-half.
-    let typing = capture.typing;
-    for ev in keyboard.read() {
-        let key = chord::normalize_key(ev.key_code);
-        match ev.state {
-            ButtonState::Pressed => {
-                // A focused box in alt-arrow mode declines the four arrows, so their bindings
-                // fire while typing (`UiKeyboardCapture::arrows_fall_through`).
-                let arrow_exempt = capture.arrows_fall_through
-                    && matches!(
-                        ev.key_code,
-                        KeyCode::ArrowLeft
-                            | KeyCode::ArrowRight
-                            | KeyCode::ArrowUp
-                            | KeyCode::ArrowDown
-                    );
-                // The box declines PRINTSCREEN before it looks at focus (`0x77b17f`), so the
-                // walk goes on and the world frame's binding runs while typing.
-                let arrow_exempt = arrow_exempt
-                    || chord::key_token(ev.key_code, &layout)
-                        == Some(chord::KeyName::Word("PRINTSCREEN"));
-                // A keyboard frame ate this one key (the world map's `OnKeyDown`, a cinematic);
-                // per key, so every other binding is untouched.
-                let eaten = capture.consumed.contains(&ev.key_code);
-                // A repeat is a key we already believe is down, the reference's test. Recorded
-                // before the gates below, so a key held through a focused box stays down.
-                let repeat = state.down.press(key);
-                // `sup`: the Super deviation (module doc).
-                if (typing && !arrow_exempt) || eaten || sup || repeat {
-                    continue;
-                }
-                if state.latched.iter().any(|(k, _)| *k == Held::Key(key)) {
-                    continue; // already latched (missed release would double-latch)
-                }
-                // Named under the layout this press was typed in; a key 1.12 cannot name binds
-                // nothing.
-                let Some(name) = chord::key_token(ev.key_code, &layout) else {
-                    continue;
-                };
-                let chord = Chord {
-                    alt,
-                    ctrl,
-                    shift,
-                    key: BindKey::Key(name),
-                };
-                if let Some(command) = dispatch.resolve(chord, dev_plane) {
-                    // The world frame's key-down ran it and returned that (`0x483b70`), so its
-                    // key-up and repeats are the world frame's, not a stale earlier consumer's.
-                    if let Some(s) = script.as_mut() {
-                        s.note_world_key(&name.to_string());
-                    }
-                    press(&mut state, &mut script, &mut host, command, Held::Key(key));
-                }
-            }
-            ButtonState::Released => {
-                state.down.release(key);
-                release(&mut state, &mut script, &mut host, Held::Key(key));
-                // The release, to the frame that took the press (`0x765fd0`), here and not in the
-                // key feed so it follows this key's press in event order: a binding's press has
-                // just made the world frame its consumer. PRINTSCREEN arrives as an up alone on
-                // Windows (`VK_SNAPSHOT` sends no `WM_KEYDOWN`), and with no consumer on record the
-                // client runs the key-down walk on it (`0x76603c`-`0x76604d`), the world frame's
-                // binding last: the up then runs the chord as a press, with no latch since no
-                // release follows.
-                let Some(name) = chord::walk_name(ev.key_code, &layout) else {
-                    continue;
-                };
-                let Some(s) = script.as_mut() else {
-                    continue;
-                };
-                let up = crate::script_calls::lent(s, host.as_mut(), |s| s.key_up(&name));
-                if up == KeyUp::Walked(KeyWalk::Declined) && !sup {
-                    if let Some(token) = chord::key_token(ev.key_code, &layout) {
-                        let chord = Chord {
-                            alt,
-                            ctrl,
-                            shift,
-                            key: BindKey::Key(token),
-                        };
-                        if let Some(command) = dispatch.resolve(chord, dev_plane) {
-                            press(&mut state, &mut script, &mut host, command, Held::Key(key));
-                            state.latched.retain(|(k, _)| *k != Held::Key(key));
-                        }
-                    }
-                }
-            }
+/// How the interface's walk left one key record, which gates the world frame's binding.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct KeyVerdict {
+    /// A focused EditBox holds the keyboard ([`crate::ui_script::UiKeyboardCapture::typing`]).
+    pub(crate) typing: bool,
+    /// The focused box passes the arrows on ([`crate::ui_script::UiKeyboardCapture::arrows_fall_through`]).
+    pub(crate) arrows_fall_through: bool,
+    /// A keyboard frame or a box took this record's key-down walk.
+    pub(crate) eaten: bool,
+}
+
+/// The world frame's leg of each input record, last in the interface's walk: its key and mouse
+/// slots run the binding (`0x483b70`, `0x483bd0`, `0x483c40`, `0x483cb0`). The caller lends the
+/// call host around the leg, so a body's calls apply inside it.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct WorldFrameBindings<'w> {
+    dispatch: Option<Res<'w, BindingDispatch>>,
+    state: Option<ResMut<'w, BindingLatches>>,
+}
+
+impl WorldFrameBindings<'_> {
+    /// One key record, after the interface's walk left `verdict`.
+    pub(crate) fn key(
+        &mut self,
+        script: Option<&mut UiScript>,
+        ev: &KeyboardInput,
+        mods: Mods,
+        verdict: KeyVerdict,
+        layout: &LayoutNames,
+    ) {
+        if let (Some(dispatch), Some(state)) = (self.dispatch.as_deref(), self.state.as_deref_mut())
+        {
+            key_leg(dispatch, state, script, ev, mods, verdict, layout);
         }
     }
 
-    // ── Mouse buttons ── presses only with the cursor over the world (a frame owns its clicks),
-    // releases always.
-    for b in [
-        MouseButton::Left,
-        MouseButton::Right,
-        MouseButton::Middle,
-        MouseButton::Forward,
-        MouseButton::Back,
-    ] {
-        if buttons.just_pressed(b)
-            && !sup
-            && hover.0.is_none()
-            && !state.latched.iter().any(|(k, _)| *k == Held::Mouse(b))
+    /// One button record, which the interface's walk sent to `reach`.
+    pub(crate) fn button(
+        &mut self,
+        script: Option<&mut UiScript>,
+        button: MouseButton,
+        pressed: ButtonState,
+        mods: Mods,
+        reach: PointerTarget,
+    ) {
+        if let (Some(dispatch), Some(state)) = (self.dispatch.as_deref(), self.state.as_deref_mut())
         {
+            button_leg(dispatch, state, script, button, pressed, mods, reach);
+        }
+    }
+
+    /// Whether the world frame's wheel slot takes a notch of a record holding `mods`
+    /// ([`world_takes_wheel`]).
+    pub(crate) fn takes_wheel(&self, mods: Mods, up: bool) -> bool {
+        world_takes_wheel(self.dispatch.as_deref(), mods, up)
+    }
+
+    /// One wheel notch the interface's walk left to the world frame (`0x483d20`): a press and its
+    /// release, back to back, as the reference hands the chord to `CBindings::ExecuteBinding` with
+    /// `isDown=1` (`0x483d6f`) then `isDown=0` (`0x483d82`). A `runOnUp` command runs both halves;
+    /// a plain one's up leg is the `RunCommand` (`0x4b7bf1`) no-op.
+    pub(crate) fn wheel(&mut self, mut script: Option<&mut UiScript>, mods: Mods, up: bool) {
+        let (Some(dispatch), Some(state)) = (self.dispatch.as_deref(), self.state.as_deref_mut())
+        else {
+            return;
+        };
+        if let Some(command) = wheel_chord(mods, up).and_then(|c| dispatch.resolve(c, false)) {
+            press(state, script.as_deref_mut(), command, Held::Wheel);
+            release(state, script, Held::Wheel);
+        }
+    }
+}
+
+/// The dev overlays' plane, Ctrl+Shift without Alt (`modkeys::dev_chord`, which Super blocks too,
+/// as the `sup` gate keeps any Super-held press from dispatching), which costs the keyboard its
+/// fallback probe (`BindingDispatch::resolve`). Only in a build with dev affordances: a player
+/// build keeps the reference's `CTRL-SHIFT-P` fallback to `SHIFT-P`.
+fn dev_plane(mods: Mods) -> bool {
+    mods.ctrl && mods.shift && !mods.alt && crate::run_mode::dev_affordances()
+}
+
+/// A key record's binding: a press runs its command, gated on ownership and the capture arm; a
+/// release unlatches, runs the `runOnUp` up-half and sends the key-up walk.
+///
+/// Who owns the key: a focused EditBox eats every key while it holds focus; a shown keyboard frame
+/// ate the key in `verdict.eaten`. Both suppress a press and nothing else: in the reference a
+/// focused box makes the movement handlers no-ops, so the direction bits are frozen, not cleared.
+/// `0x514490`, which does clear them, is the OS window-deactivate handler (sole caller
+/// `0x493058`, off the root's WM_ACTIVATE slot `[root+0x1134]`); here bevy's `KeyboardFocusLost`
+/// and `ButtonInput::release_all` reach the stuck-latch sweep.
+fn key_leg(
+    dispatch: &BindingDispatch,
+    state: &mut BindingLatches,
+    mut script: Option<&mut UiScript>,
+    ev: &KeyboardInput,
+    mods: Mods,
+    verdict: KeyVerdict,
+    layout: &LayoutNames,
+) {
+    let Mods {
+        shift,
+        ctrl,
+        alt,
+        sup,
+    } = mods;
+    let dev_plane = dev_plane(mods);
+    let key = chord::normalize_key(ev.key_code);
+    match ev.state {
+        ButtonState::Pressed => {
+            // A focused box in alt-arrow mode declines the four arrows, so their bindings fire
+            // while typing (`UiKeyboardCapture::arrows_fall_through`).
+            let arrow_exempt = verdict.arrows_fall_through
+                && matches!(
+                    ev.key_code,
+                    KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                );
+            // The box declines PRINTSCREEN before it looks at focus (`0x77b17f`), so the walk goes
+            // on and the world frame's binding runs while typing.
+            let arrow_exempt = arrow_exempt
+                || chord::key_token(ev.key_code, layout)
+                    == Some(chord::KeyName::Word("PRINTSCREEN"));
+            // A repeat is a key we already believe is down, the reference's test. Recorded before
+            // the gates below, so a key held through a focused box stays down.
+            let repeat = state.down.press(key);
+            // `sup`: the Super deviation (module doc).
+            if (verdict.typing && !arrow_exempt) || verdict.eaten || sup || repeat {
+                return;
+            }
+            if state.latched.iter().any(|(k, _)| *k == Held::Key(key)) {
+                return; // already latched (missed release would double-latch)
+            }
+            // Named under the layout this press was typed in; a key 1.12 cannot name binds
+            // nothing.
+            let Some(name) = chord::key_token(ev.key_code, layout) else {
+                return;
+            };
             let chord = Chord {
                 alt,
                 ctrl,
                 shift,
-                key: BindKey::Mouse(b),
+                key: BindKey::Key(name),
             };
-            if let Some(command) = dispatch.resolve(chord, false) {
-                press(&mut state, &mut script, &mut host, command, Held::Mouse(b));
+            if let Some(command) = dispatch.resolve(chord, dev_plane) {
+                // The world frame's key-down ran it and returned that (`0x483b70`), so its key-up
+                // and repeats are the world frame's, not a stale earlier consumer's.
+                if let Some(s) = script.as_deref_mut() {
+                    s.note_world_key(&name.to_string());
+                }
+                press(state, script, command, Held::Key(key));
             }
         }
-        if buttons.just_released(b) {
-            release(&mut state, &mut script, &mut host, Held::Mouse(b));
-        }
-    }
-
-    // ── Wheel ── each notch is a press and its release, back to back: the reference hands one
-    // chord to `CBindings::ExecuteBinding` with `isDown=1` (`0x483d6f`) then `isDown=0`
-    // (`0x483d82`) per wheel message. A `runOnUp` command runs both halves; a plain one's up leg is
-    // the `RunCommand` (`0x4b7bf1`) no-op. `WorldWheel` holds the notches no frame took.
-    let steps = world_wheel.0;
-    if steps != 0 {
-        if let Some(chord) = wheel_chord(&keys, steps > 0) {
-            if let Some(command) = dispatch.resolve(chord, false) {
-                for _ in 0..steps.unsigned_abs() {
-                    press(&mut state, &mut script, &mut host, command, Held::Wheel);
-                    release(&mut state, &mut script, &mut host, Held::Wheel);
+        ButtonState::Released => {
+            state.down.release(key);
+            release(state, script.as_deref_mut(), Held::Key(key));
+            // The release, to the frame that took the press (`0x765fd0`), here and not in the key
+            // feed so it follows this key's binding release: a binding's press has made the world
+            // frame its consumer. PRINTSCREEN arrives as an up alone on Windows (`VK_SNAPSHOT`
+            // sends no `WM_KEYDOWN`), and with no consumer on record the client runs the key-down
+            // walk on it (`0x76603c`-`0x76604d`), the world frame's binding last: the up then runs
+            // the chord as a press, with no latch since no release follows.
+            let Some(name) = chord::walk_name(ev.key_code, layout) else {
+                return;
+            };
+            let Some(s) = script else {
+                return;
+            };
+            let up = s.key_up(&name);
+            if up == KeyUp::Walked(KeyWalk::Declined) && !sup {
+                if let Some(token) = chord::key_token(ev.key_code, layout) {
+                    let chord = Chord {
+                        alt,
+                        ctrl,
+                        shift,
+                        key: BindKey::Key(token),
+                    };
+                    if let Some(command) = dispatch.resolve(chord, dev_plane) {
+                        press(state, Some(s), command, Held::Key(key));
+                        state.latched.retain(|(k, _)| *k != Held::Key(key));
+                    }
                 }
             }
         }
     }
+}
 
-    // ── The stuck-latch sweep ── a release the window never saw: a latch whose base key reads up
-    // unlatches now and runs its up-half. The reference's two bulk clears land here too, since
-    // bevy zeroes `ButtonInput` for both (see the clears above). UI keyboard focus never reaches
-    // here.
-    let mut stuck: Vec<Held> = Vec::new();
-    for (k, _) in &state.latched {
-        if !physically_down(*k, &keys, &buttons) && !stuck.contains(k) {
-            stuck.push(*k);
+/// The five buttons a chord can name (`BUTTON1` to `BUTTON5`).
+const BIND_BUTTONS: [MouseButton; 5] = [
+    MouseButton::Left,
+    MouseButton::Right,
+    MouseButton::Middle,
+    MouseButton::Forward,
+    MouseButton::Back,
+];
+
+/// A button record's binding, the world frame's slot's (`0x483c40`, `0x483cb0`): a press whose
+/// target was the world frame runs it; a release runs the up-half of what its press latched,
+/// unless a frame of the interface's took it, and with none latched, as for a press that went to
+/// a frame before freelook released through the hook (`0x492be5`), the chord the release makes
+/// (`0x4b6aa0` → `0x4b7990(…, 0)`) when it reached the world frame.
+fn button_leg(
+    dispatch: &BindingDispatch,
+    state: &mut BindingLatches,
+    script: Option<&mut UiScript>,
+    button: MouseButton,
+    pressed: ButtonState,
+    mods: Mods,
+    reach: PointerTarget,
+) {
+    if !BIND_BUTTONS.contains(&button) {
+        return;
+    }
+    match pressed {
+        ButtonState::Pressed => {
+            if mods.sup
+                || reach == PointerTarget::Ui
+                || state.latched.iter().any(|(k, _)| *k == Held::Mouse(button))
+            {
+                return;
+            }
+            let chord = Chord {
+                alt: mods.alt,
+                ctrl: mods.ctrl,
+                shift: mods.shift,
+                key: BindKey::Mouse(button),
+            };
+            if let Some(command) = dispatch.resolve(chord, false) {
+                press(state, script, command, Held::Mouse(button));
+            }
+        }
+        ButtonState::Released => {
+            let latched = state.latched.iter().any(|(k, _)| *k == Held::Mouse(button));
+            if reach == PointerTarget::Ui {
+                state.latched.retain(|(k, _)| *k != Held::Mouse(button));
+            } else if latched {
+                release(state, script, Held::Mouse(button));
+            } else if reach == PointerTarget::World && !mods.sup {
+                let chord = Chord {
+                    alt: mods.alt,
+                    ctrl: mods.ctrl,
+                    shift: mods.shift,
+                    key: BindKey::Mouse(button),
+                };
+                if let (Some(command), Some(s)) = (dispatch.resolve(chord, false), script) {
+                    if let Err(e) = s.execute_binding(command, false) {
+                        warn!("bindings({command}): {e}");
+                    }
+                }
+            }
         }
     }
-    for k in stuck {
-        release(&mut state, &mut script, &mut host, k);
-    }
+}
 
-    // The calls this pass's binding bodies made act this frame, as the reference's return from
-    // `0x515090` has already moved the bit.
-    if let Some(s) = script.as_mut() {
+/// The dispatch pass's tail, after the frame's records: the stuck-latch sweep, and the calls the
+/// pass's bodies made.
+fn end_dispatch(
+    // The input state with the host, whose calls write it ([`BindingsState::call`]).
+    mut vm: crate::script_calls::VmWith<ResMut<'static, BindingsState>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut latches: ResMut<BindingLatches>,
+) {
+    vm.run(|mut script| {
+        // ── The stuck-latch sweep ── a release the window never saw: a latch whose base key reads
+        // up unlatches now and runs its up-half. The reference's two bulk clears land here too,
+        // since bevy zeroes `ButtonInput` for both (see `begin_dispatch`). UI keyboard focus never
+        // reaches here.
+        let mut stuck: Vec<Held> = Vec::new();
+        for (k, _) in &latches.latched {
+            if !physically_down(*k, &keys, &buttons) && !stuck.contains(k) {
+                stuck.push(*k);
+            }
+        }
+        for k in stuck {
+            release(&mut latches, script.as_deref_mut(), k);
+        }
+    });
+    // The calls this pass's binding bodies made with no host lent act this frame, as the
+    // reference's return from `0x515090` has already moved the bit.
+    let (script, set) = vm.parts();
+    let mut state = set.p0();
+    if let Some(s) = script {
         let inputs = s.take_binding_input();
         state.apply_script_input(inputs);
+    }
+    state.end_pass();
+}
+
+/// The world frame's leg of each record alone, for a test of the bindings without the interface's
+/// walk: the verdicts are what the test left in [`UiKeyboardCapture`] and [`PlayerUiHover`], and
+/// every wheel notch is the world frame's.
+#[cfg(test)]
+fn dispatch_records(
+    mut script: Option<NonSendMut<UiScript>>,
+    mut host: Option<crate::script_calls::ScriptCallHost>,
+    records: Res<crate::ui_script::InputRecords>,
+    capture: Res<UiKeyboardCapture>,
+    hover: Res<PlayerUiHover>,
+    layout: Res<LayoutNames>,
+    mut legs: WorldFrameBindings,
+) {
+    use crate::ui_script::Record;
+    let mut run = |mut s: Option<&mut UiScript>| {
+        for r in records.iter() {
+            match &r.record {
+                Record::Key(ev) => {
+                    let verdict = KeyVerdict {
+                        typing: capture.typing,
+                        arrows_fall_through: capture.arrows_fall_through,
+                        eaten: capture.consumed.contains(&ev.key_code),
+                    };
+                    legs.key(s.as_deref_mut(), ev, r.mods, verdict, &layout);
+                }
+                // A release reached no frame: the test leaves no capture to route it.
+                Record::Button { button, state } => {
+                    let reach = match (*state, hover.0) {
+                        (ButtonState::Released, _) => PointerTarget::Nothing,
+                        (_, Some(_)) => PointerTarget::Ui,
+                        (_, None) => PointerTarget::World,
+                    };
+                    legs.button(s.as_deref_mut(), *button, *state, r.mods, reach);
+                }
+                Record::Move => {}
+                Record::Wheel { up } => legs.wheel(s.as_deref_mut(), r.mods, *up),
+            }
+        }
+    };
+    match script.as_mut() {
+        Some(s) => crate::script_calls::lent(s, host.as_mut(), |s| run(Some(s))),
+        None => run(None),
     }
 }
 
 /// The bindings pass once, as the frame runs it, for a test over the whole client: the dispatch
-/// map from the VM's keys, then this frame's key messages, with the call host the world lends.
+/// map from the VM's keys, then this frame's key messages and button edges as its records, with the
+/// call host the world lends.
 #[cfg(test)]
 pub(crate) fn dispatch_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
+    crate::ui_script::records_from_planes(world);
     world.run_system_once(sync_dispatch).expect("the map syncs");
     world
-        .run_system_once(latch_and_dispatch)
-        .expect("the keys dispatch");
+        .run_system_once(begin_dispatch)
+        .expect("the pass begins");
+    world
+        .run_system_once(dispatch_records)
+        .expect("the records dispatch");
+    world.run_system_once(end_dispatch).expect("the pass ends");
 }
 
 /// Is this input physically down, per bevy's button planes? The stuck-latch sweep and the
@@ -761,16 +1169,9 @@ fn physically_down(
 
 /// One matching press: the command's body with `keystate = "down"`, and a latch on its input so
 /// the release can run the up-half.
-fn press(
-    state: &mut BindingsState,
-    script: &mut Option<NonSendMut<UiScript>>,
-    host: &mut Option<crate::script_calls::ScriptCallHost>,
-    command: &str,
-    key: Held,
-) {
-    if let Some(s) = script.as_mut() {
-        let ran = crate::script_calls::lent(s, host.as_mut(), |s| s.execute_binding(command, true));
-        if let Err(e) = ran {
+fn press(state: &mut BindingLatches, script: Option<&mut UiScript>, command: &str, key: Held) {
+    if let Some(s) = script {
+        if let Err(e) = s.execute_binding(command, true) {
             warn!("bindings({command}): {e}");
         }
     }
@@ -779,21 +1180,13 @@ fn press(
 
 /// A base key's release: drop its latch and run the command's `runOnUp` up-half, even while
 /// typing (the reference completes a pressed binding's release regardless of focus).
-fn release(
-    state: &mut BindingsState,
-    script: &mut Option<NonSendMut<UiScript>>,
-    host: &mut Option<crate::script_calls::ScriptCallHost>,
-    key: Held,
-) {
+fn release(state: &mut BindingLatches, mut script: Option<&mut UiScript>, key: Held) {
     let mut i = 0;
     while i < state.latched.len() {
         if state.latched[i].0 == key {
             let (_, command) = state.latched.remove(i);
-            if let Some(s) = script.as_mut() {
-                let ran = crate::script_calls::lent(s, host.as_mut(), |s| {
-                    s.execute_binding(&command, false)
-                });
-                if let Err(e) = ran {
+            if let Some(s) = script.as_deref_mut() {
+                if let Err(e) = s.execute_binding(&command, false) {
                     warn!("bindings({command}): {e}");
                 }
             }
@@ -860,14 +1253,23 @@ mod tests {
     }
 
     fn key(app: &mut App, k: KeyCode, state: bevy::input::ButtonState, repeat: bool) {
-        app.world_mut().write_message(KeyboardInput {
-            key_code: k,
-            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
-            state,
-            text: None,
-            repeat,
-            window: Entity::PLACEHOLDER,
-        });
+        send_key(
+            app,
+            KeyboardInput {
+                key_code: k,
+                logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+                state,
+                text: None,
+                repeat,
+                window: Entity::PLACEHOLDER,
+            },
+        );
+    }
+    /// A key message as winit hands it over: typed, and on the window's stream the records read.
+    fn send_key(app: &mut App, ev: KeyboardInput) {
+        app.world_mut().write_message(ev.clone());
+        app.world_mut()
+            .write_message(bevy::window::WindowEvent::KeyboardInput(ev));
     }
     fn press_key(app: &mut App, k: KeyCode) {
         key(app, k, bevy::input::ButtonState::Pressed, false);
@@ -883,15 +1285,29 @@ mod tests {
         app.world().resource::<BindingsState>()
     }
     fn mouse(app: &mut App, button: MouseButton, state: bevy::input::ButtonState) {
-        app.world_mut().write_message(MouseButtonInput {
+        let ev = MouseButtonInput {
             button,
             state,
             window: Entity::PLACEHOLDER,
-        });
+        };
+        app.world_mut().write_message(ev);
+        app.world_mut()
+            .write_message(bevy::window::WindowEvent::MouseButtonInput(ev));
     }
-    /// `notches` whole notches (up positive) that the UI sweep left to the world frame.
+    /// `notches` wheel messages of one line each (up positive), on the window's stream as winit
+    /// hands them over; the harness gives every step to the world frame ([`dispatch_records`]).
     fn wheel(app: &mut App, notches: i32) {
-        app.world_mut().resource_mut::<WorldWheel>().0 = notches;
+        for _ in 0..notches.unsigned_abs() {
+            app.world_mut()
+                .write_message(bevy::window::WindowEvent::MouseWheel(
+                    bevy::input::mouse::MouseWheel {
+                        unit: MouseScrollUnit::Line,
+                        x: 0.0,
+                        y: notches.signum() as f32,
+                        window: Entity::PLACEHOLDER,
+                    },
+                ));
+        }
     }
 
     /// What a keyboard frame ate this frame. Set, not pushed: `feed_ui_input` rewrites the list
@@ -916,18 +1332,31 @@ mod tests {
         </Binding>
     </Bindings>"#;
 
-    /// The with-VM harness: a real engine table with the real [`sync_dispatch`] chained before
-    /// [`latch_and_dispatch`], so the map's derivation is under test too.
+    /// The with-VM harness: the frame's records read off the window's stream, then the real
+    /// [`sync_dispatch`] and the pass's head, the world frame's leg of each record
+    /// ([`dispatch_records`]) and the tail, so the map's derivation is under test too.
     fn vm_harness(script: UiScript) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
+            .add_message::<bevy::window::WindowEvent>()
+            .init_resource::<crate::ui_script::InputRecords>()
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiHover>()
-            .init_resource::<WorldWheel>()
             .init_resource::<BindingsState>()
+            .init_resource::<BindingLatches>()
             .init_resource::<BindingDispatch>()
             .init_resource::<LayoutNames>()
-            .add_systems(Update, (sync_dispatch, latch_and_dispatch).chain());
+            .add_systems(
+                Update,
+                (
+                    crate::ui_script::collect_input_records,
+                    sync_dispatch,
+                    begin_dispatch,
+                    dispatch_records,
+                    end_dispatch,
+                )
+                    .chain(),
+            );
         app.insert_non_send_resource(script);
         app
     }
@@ -988,8 +1417,9 @@ mod tests {
     }
 
     /// Only the two reference sites signal `UPDATE_BINDINGS`: a set's copy into the live table
-    /// (`0x4b649d`, here the host's load) and a stored `SetBinding`. Reading an addon's
-    /// `Bindings.xml` (`0x4b6f70`) moves the dispatch table and signals nothing.
+    /// (`0x4b649d`, here the reader's set choice, in place) and a stored `SetBinding`. Reading an
+    /// addon's `Bindings.xml` (`0x4b6f70`) moves the dispatch table and signals nothing, and the
+    /// frame's dispatch pass signals nothing of its own.
     #[test]
     fn registering_an_addons_bindings_signals_nothing_but_a_load_does() {
         let script = core_script();
@@ -1003,11 +1433,9 @@ mod tests {
         app.update();
         assert_eq!(
             lua_count(&app, "UPDATES"),
-            1,
-            "the seed's load owes its signal"
+            0,
+            "the fixture's load is no reader's: the frame pays it nothing"
         );
-        app.update();
-        assert_eq!(lua_count(&app, "UPDATES"), 1, "once");
 
         {
             let script = app.world().non_send_resource::<UiScript>();
@@ -1035,11 +1463,17 @@ mod tests {
             "but the dispatch map re-derives"
         );
 
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .load_binding_set(1);
+        read_character_set(
+            &mut app.world_mut().non_send_resource_mut::<UiScript>(),
+            &None,
+        );
+        assert_eq!(
+            lua_count(&app, "UPDATES"),
+            1,
+            "the set choice does, inside the read"
+        );
         app.update();
-        assert_eq!(lua_count(&app, "UPDATES"), 1, "a load does");
+        assert_eq!(lua_count(&app, "UPDATES"), 1, "once");
     }
 
     /// A `runOnUp` body is one chunk run twice, `keystate` "down" then "up"; a plain one runs on
@@ -1297,8 +1731,6 @@ mod tests {
     /// `0x483d20`); over a frame that has one, the frame scrolls and the camera does not.
     #[test]
     fn a_notch_zooms_the_camera_over_a_button_and_not_over_a_scroll_pane() {
-        use bevy::input::mouse::MouseScrollUnit;
-        let notch = (MouseScrollUnit::Line, 1.0);
         let mut s = core_script();
         s.set_screen_size(1024.0, 768.0);
         s.run(
@@ -1315,21 +1747,11 @@ mod tests {
         )
         .expect("frames");
         s.resolve();
-        let mut notches = WheelNotches::default();
-        let over_button = crate::ui_script::feed_wheel(
-            &mut s,
-            &mut notches,
-            Vec2::new(120.0, 120.0),
-            notch,
-            |_| true,
-        );
-        let over_pane = crate::ui_script::feed_wheel(
-            &mut s,
-            &mut notches,
-            Vec2::new(650.0, 150.0),
-            notch,
-            |_| true,
-        );
+        let mut to_world = |x, y| {
+            i32::from(s.mouse_wheel_bound(x, y, 1.0, true) == benilla_ui::script::WheelWalk::World)
+        };
+        let over_button = to_world(120.0, 120.0);
+        let over_pane = to_world(650.0, 150.0);
         let mut app = vm_harness(s);
 
         wheel(&mut app, over_pane);
@@ -1379,23 +1801,19 @@ mod tests {
     fn the_world_takes_a_notch_only_for_a_bound_chord() {
         let mut app = harness();
         app.update();
-        let mut keys = ButtonInput::<KeyCode>::default();
+        let mut mods = Mods::default();
         let dispatch = app.world().resource::<BindingDispatch>();
-        assert!(world_takes_wheel(Some(dispatch), &keys, true));
-        assert!(world_takes_wheel(Some(dispatch), &keys, false));
+        assert!(world_takes_wheel(Some(dispatch), mods, true));
+        assert!(world_takes_wheel(Some(dispatch), mods, false));
         // SHIFT-MOUSEWHEELUP has no binding; the unmodified chord's retry is the leftmost
         // modifier dropped, so it falls back to the bound plain chord.
-        keys.press(KeyCode::ShiftLeft);
-        assert!(world_takes_wheel(Some(dispatch), &keys, true));
-        keys.press(KeyCode::SuperLeft);
-        assert!(!world_takes_wheel(Some(dispatch), &keys, true));
-        assert!(world_takes_wheel(None, &keys, true), "no table, no say");
+        mods.shift = true;
+        assert!(world_takes_wheel(Some(dispatch), mods, true));
+        mods.sup = true;
+        assert!(!world_takes_wheel(Some(dispatch), mods, true));
+        assert!(world_takes_wheel(None, mods, true), "no table, no say");
         let empty = BindingDispatch::default();
-        assert!(!world_takes_wheel(
-            Some(&empty),
-            &ButtonInput::default(),
-            true
-        ));
+        assert!(!world_takes_wheel(Some(&empty), Mods::default(), true));
     }
 
     /// A notch is a press and its release (`0x483d6f`, `0x483d82`), so a `runOnUp` binding on the
@@ -1420,7 +1838,7 @@ mod tests {
         );
         assert_eq!(lua_str(&app, "PROBE_LAST"), "up");
         // Nothing is left latched: no key could end a wheel latch.
-        assert!(app.world().resource::<BindingsState>().latched.is_empty());
+        assert!(app.world().resource::<BindingLatches>().latched.is_empty());
     }
 
     /// Auto-repeat is classified off our pressed-key set, as the reference's (`0x4248b3`), not the
@@ -1507,7 +1925,7 @@ mod tests {
             .expect("world frame");
         let mut app = vm_harness(script);
         app.insert_non_send_resource(crate::textinput::HostClipboard::holding(""))
-            .add_systems(Update, feed.before(latch_and_dispatch));
+            .add_systems(Update, feed.before(dispatch_records));
         app
     }
 
@@ -1704,7 +2122,7 @@ mod tests {
     }
 
     /// The ungated one-shots fire as the keys do: `CameraZoomIn(yards)` carries its amount to the
-    /// zoom (1.0 when absent, `0x50b42d`), `SitOrStand` and `ToggleSheath` fire.
+    /// zoom (1.0 when absent, `0x50b42d`), and `ToggleSheath` fires, one frame only.
     #[test]
     fn the_one_shot_functions_fire_their_inputs() {
         let mut app = harness();
@@ -1725,11 +2143,10 @@ mod tests {
             0.0,
             "one frame only"
         );
-        run(&mut app, "SitOrStand()");
-        assert!(state(&app).fired(Input::SitOrStand));
         run(&mut app, "ToggleSheath()");
         assert!(state(&app).fired(Input::ToggleSheath));
-        assert!(!state(&app).fired(Input::SitOrStand));
+        run(&mut app, "CameraZoomOut()");
+        assert!(!state(&app).fired(Input::ToggleSheath));
     }
 
     /// Two keys on one command share its one bit: W and UP both run MOVEFORWARD's body, so the
@@ -1842,14 +2259,17 @@ mod tests {
 
     /// A press with the logical key the OS reports, modifiers applied.
     fn type_key(app: &mut App, k: KeyCode, logical: &str) {
-        app.world_mut().write_message(KeyboardInput {
-            key_code: k,
-            logical_key: Key::Character(logical.into()),
-            state: bevy::input::ButtonState::Pressed,
-            text: Some(logical.into()),
-            repeat: false,
-            window: Entity::PLACEHOLDER,
-        });
+        send_key(
+            app,
+            KeyboardInput {
+                key_code: k,
+                logical_key: Key::Character(logical.into()),
+                state: bevy::input::ButtonState::Pressed,
+                text: Some(logical.into()),
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            },
+        );
     }
 
     /// 1.12 binds a key by what its layout names it: on AZERTY the key where a US W sits is
@@ -1998,10 +2418,10 @@ mod tests {
             state(&app).pressed(Input::MoveForward),
             "the capture edge is not a release — holding W keeps you running while you type"
         );
-        press_key(&mut app, KeyCode::KeyX);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
-            !state(&app).fired(Input::SitOrStand),
+            !state(&app).fired(Input::ToggleSheath),
             "typed keys are not bindings"
         );
         // Letting go still stops you, box focused or not.
@@ -2012,12 +2432,12 @@ mod tests {
             "the release is delivered regardless of focus"
         );
         // Focus drops; keys work again.
-        release_key(&mut app, KeyCode::KeyX);
+        release_key(&mut app, KeyCode::KeyZ);
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = false;
         app.update();
-        press_key(&mut app, KeyCode::KeyX);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
-        assert!(state(&app).fired(Input::SitOrStand));
+        assert!(state(&app).fired(Input::ToggleSheath));
     }
 
     /// A shown keyboard frame eating the key that closes it costs that key its binding and
@@ -2041,22 +2461,22 @@ mod tests {
         // The eaten key loses its binding...
         release_key(&mut app, KeyCode::KeyM);
         app.update();
-        frame_ate(&mut app, &[KeyCode::KeyX]);
-        press_key(&mut app, KeyCode::KeyX);
+        frame_ate(&mut app, &[KeyCode::KeyZ]);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
-            !state(&app).fired(Input::SitOrStand),
+            !state(&app).fired(Input::ToggleSheath),
             "the frame ate this key: its binding must not also fire"
         );
 
         // ...and only that key.
-        release_key(&mut app, KeyCode::KeyX);
+        release_key(&mut app, KeyCode::KeyZ);
         app.update();
         frame_ate(&mut app, &[KeyCode::KeyM]);
-        press_key(&mut app, KeyCode::KeyX);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
-            state(&app).fired(Input::SitOrStand),
+            state(&app).fired(Input::ToggleSheath),
             "consumption is per key, not per frame"
         );
         assert!(
@@ -2090,6 +2510,60 @@ mod tests {
         mouse(&mut app, MouseButton::Middle, ButtonState::Released);
         app.update();
         assert!(!state(&app).steering());
+    }
+
+    /// Emptied button planes end a held drag, as a window's focus loss or the cover's reset leaves
+    /// them, with no release record: the stuck-latch sweep runs MOVEANDSTEER's up-half, whose
+    /// Stops lower both mouse bits.
+    #[test]
+    fn emptied_button_planes_end_a_held_drag() {
+        let mut app = harness();
+        mouse(&mut app, MouseButton::Middle, ButtonState::Pressed);
+        app.update();
+        assert!(state(&app).steering());
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .reset_all();
+        app.update();
+        assert!(!state(&app).steering(), "the sweep ran the up-half");
+    }
+
+    /// A rebound BUTTON2 runs only its own command: the release of a right press the world frame
+    /// took lowers no TurnOrAction bit a `MouselookStart` holds, as the world frame's release slot
+    /// runs the button's binding alone (`0x483cb0` → `0x4b7990`).
+    #[test]
+    fn a_rebound_right_buttons_release_ends_no_mouselook() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut script = UiScript::new().expect("VM");
+        script.set_default_bindings(benilla_ui::script::keybind::parse_bindings_wtf(&format!(
+            "{DEFAULTS}bind BUTTON2 TOGGLEUI\r\n"
+        )));
+        script.load_binding_set(1);
+        script.register_bindings(&benilla_ui::bindings_xml::parse(CORE).expect("well-formed"));
+        let mut app = vm_harness(script);
+        app.init_resource::<crate::player::CameraControl>();
+        app.update();
+        let latch = |app: &mut App| {
+            app.world_mut()
+                .run_system_once(crate::player::camera::latch_world_mouse)
+                .expect("the latch runs");
+        };
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("MouselookStart()")
+            .expect("runs");
+        latch(&mut app);
+        assert!(state(&app).pressed(Input::TurnOrAction));
+        for pressed in [ButtonState::Pressed, ButtonState::Released] {
+            mouse(&mut app, MouseButton::Right, pressed);
+            app.update();
+            latch(&mut app);
+        }
+        assert_eq!(lua_count(&app, "UITOGGLES"), 1, "BUTTON2's own command ran");
+        assert!(
+            state(&app).pressed(Input::TurnOrAction),
+            "the MouselookStart still holds the bit"
+        );
     }
 
     /// The notches the sweep left to the world each run CAMERAZOOMIN's `CameraZoomIn(1.0)`, and
@@ -2351,38 +2825,365 @@ mod tests {
         assert_eq!(found, ["x\\\"y", "ToggleBackpack();"]);
     }
 
-    // ── The synthetic seam (`BindingsState::synth_*`, the web bridge's door) ──
+    /// The binding harness over the files of a state folder of its own, with the account-data
+    /// state the save and the reread talk to, every section settled.
+    fn file_harness(home: &std::path::Path) -> (App, std::path::PathBuf, std::path::PathBuf) {
+        let account = home.join("bindings/account.txt");
+        let character = home.join("bindings/Realm-Probesix.txt");
+        let mut app = App::new();
+        app.insert_resource(BindingFiles {
+            account: Some(account.clone()),
+            character: Some(character.clone()),
+            account_cache: Some(home.join("bindings/account.wtf")),
+            character_cache: Some(home.join("bindings/Realm-Probesix.wtf")),
+            held: Default::default(),
+        })
+        .init_resource::<crate::account_data::AccountData>()
+        .insert_non_send_resource(core_script())
+        .add_systems(Update, (drain_binding_requests, reread_arrived_bindings));
+        app.world()
+            .resource::<crate::account_data::AccountData>()
+            .settle_for_test(Some(("Realm".into(), "Probesix".into())));
+        (app, account, character)
+    }
 
-    fn synth(app: &mut App, f: impl FnOnce(&mut BindingsState, &mut UiScript)) {
+    fn eval_str(app: &App, chunk: &str) -> String {
+        app.world()
+            .non_send_resource::<UiScript>()
+            .eval::<String>(chunk)
+            .expect("eval")
+    }
+
+    /// A binding section that settles again is read again, its own set alone: section 2 reads set
+    /// 1 and leaves the live table, section 3 reads set 2 and runs the set choice (`0x4b629a` →
+    /// `0x4b64b0`), the character's set in use when it has keys.
+    #[test]
+    fn a_binding_section_from_the_server_is_read_again() {
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-reread-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let (mut app, account, character) = file_harness(&tmp);
+        crate::local_state::write_atomic(&account, "bind JUMP G\n").unwrap();
+        app.update();
+        let jump = r#"return GetBindingKey("JUMP") or """#;
+        assert_ne!(eval_str(&app, jump), "G", "nothing came down: no read");
+
+        let data = || app.world().resource::<crate::account_data::AccountData>();
+        data().owe_reader_for_test(2);
+        app.update();
+        assert_ne!(
+            eval_str(&app, jump),
+            "G",
+            "set 1 read; the live table not chosen"
+        );
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("LoadBindings(1)")
+            .unwrap();
+        assert_eq!(eval_str(&app, jump), "G", "the account set read again");
+
+        crate::local_state::write_atomic(&character, "bind JUMP H\n").unwrap();
+        app.world()
+            .resource::<crate::account_data::AccountData>()
+            .owe_reader_for_test(3);
+        app.update();
+        assert_eq!(
+            eval_str(&app, jump),
+            "H",
+            "the character's set is the one in use"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The reader registers for each section through `0x5afe50` (`0x4b62ef`, `0x4b6300`): a
+    /// pending section's set is not read, nor saved over; section 2's settling reads set 1 alone,
+    /// and section 3's reads set 2 and chooses the set in use (`0x4b629a` → `0x4b64b0`).
+    #[test]
+    fn the_binding_reader_waits_for_its_sections() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-held-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _h = crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let account = crate::local_state::bindings_account_path().unwrap();
+        crate::local_state::write_atomic(&account, "bind JUMP G\n").unwrap();
+        let mut app = App::new();
+        app.init_resource::<BindingFiles>()
+            .init_resource::<crate::account_data::AccountData>()
+            .add_systems(Update, reread_arrived_bindings);
+        let mut script = core_script();
+        seed_bindings_for_vm(&mut script);
+        register_binding_readers(app.world_mut(), &mut script);
+        app.insert_non_send_resource(script);
+        let jump = r#"return GetBindingKey("JUMP") or """#;
+        assert_ne!(eval_str(&app, jump), "G", "pending: the sets are held");
+        app.add_systems(Update, drain_binding_requests);
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("SaveBindings(1)")
+            .unwrap();
+        app.update();
+        assert_eq!(
+            std::fs::read_to_string(&account).unwrap(),
+            "bind JUMP G\n",
+            "a held set is not saved over its file (`0x5afee0`)"
+        );
+        let settle = |app: &App, section| {
+            app.world()
+                .resource::<crate::account_data::AccountData>()
+                .settle_section_for_test(section)
+        };
+        settle(&app, 2);
+        app.update();
+        assert_ne!(
+            eval_str(&app, jump),
+            "G",
+            "set 1 read; no set chosen while section 3 is pending"
+        );
+        settle(&app, 3);
+        app.update();
+        assert_eq!(eval_str(&app, jump), "G", "set 2 read, set 1 chosen");
+        drop(app);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// One section settled and its pair held: a save writes the settled section's files and skips
+    /// the held one's (`0x4b6600`, `0x4b6611` → `0x5afee0`).
+    #[test]
+    fn a_save_skips_only_the_held_sections_write() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-mixed-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _h = crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let account = crate::local_state::bindings_account_path().unwrap();
+        crate::local_state::write_atomic(&account, "bind JUMP G\n").unwrap();
+        let theirs =
+            crate::local_state::bindings_cache_character_path("Realm", "Probeone").unwrap();
+        crate::local_state::write_atomic(&theirs, "bind H JUMP\r\n").unwrap();
+        let mut app = App::new();
+        app.insert_resource(crate::glue_session::roster::Roster::with_pending_pick(
+            vec![crate::glue_session::roster::test_character(7, "Probeone")],
+            7,
+        ))
+        .init_resource::<BindingFiles>()
+        .init_resource::<crate::account_data::AccountData>()
+        .add_systems(
+            Update,
+            (reread_arrived_bindings, drain_binding_requests).chain(),
+        );
+        app.world()
+            .resource::<crate::account_data::AccountData>()
+            .settle_section_for_test(2);
+        let mut script = core_script();
+        seed_bindings_for_vm(&mut script);
+        register_binding_readers(app.world_mut(), &mut script);
+        app.insert_non_send_resource(script);
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run(r#"SetBinding("K", "JUMP") SaveBindings(1)"#)
+            .unwrap();
+        app.update();
+        let diff = std::fs::read_to_string(&account).unwrap();
+        assert!(
+            diff.contains("bind JUMP SPACE K"),
+            "section 2 settled: written: {diff}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&theirs).unwrap(),
+            "bind H JUMP\r\n",
+            "section 3 held: its file is not emptied"
+        );
+        drop(app);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A `/reload` meets both binding sections settled, so the readers run at their registration,
+    /// after the addons' files (`0x4900c7` → `0x4b62b0`). A `SaveBindings(1)` at file scope is
+    /// never written: the set choice zeroes the dirty mask (`0x4b6506`), so the character's file
+    /// stays and its set is the one in use.
+    #[test]
+    fn a_save_before_the_set_choice_is_never_written() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-early-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _h = crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let account = crate::local_state::bindings_account_path().unwrap();
+        crate::local_state::write_atomic(&account, "bind JUMP G\n").unwrap();
+        let character = crate::local_state::bindings_character_path("Realm", "Probeone").unwrap();
+        crate::local_state::write_atomic(&character, "bind JUMP H\n").unwrap();
+        let mut app = App::new();
+        app.insert_resource(crate::glue_session::roster::Roster::with_pending_pick(
+            vec![crate::glue_session::roster::test_character(7, "Probeone")],
+            7,
+        ))
+        .init_resource::<BindingFiles>()
+        .init_resource::<crate::account_data::AccountData>()
+        .add_systems(
+            Update,
+            (reread_arrived_bindings, drain_binding_requests).chain(),
+        );
+        app.world()
+            .resource::<crate::account_data::AccountData>()
+            .settle_for_test(Some(("Realm".into(), "Probeone".into())));
+        let mut script = core_script();
+        seed_bindings_for_vm(&mut script);
+        // An addon's file scope, ahead of the readers.
+        script.run("SaveBindings(1)").unwrap();
+        register_binding_readers(app.world_mut(), &mut script);
+        app.insert_non_send_resource(script);
+        app.update();
+        assert_eq!(
+            std::fs::read_to_string(&character).ok().as_deref(),
+            Some("bind JUMP H\n"),
+            "the character's file stays"
+        );
+        assert_eq!(
+            eval_str(&app, "return tostring(GetCurrentBindingSet())"),
+            "2"
+        );
+        assert_eq!(eval_str(&app, r#"return GetBindingKey("JUMP") or """#), "H");
+        drop(app);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// `SaveBindings(1)` marks both sections and `SaveBindings(2)` the character's (`0x4b65ed`,
+    /// `0x4b6617`) for the interface's shutdown, the reference's one write of them (`0x490c64`);
+    /// the save itself arms no upload.
+    #[test]
+    fn saving_a_set_marks_its_sections_for_the_shutdown() {
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-save-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let (mut app, _, _) = file_harness(&tmp);
+        let armed = |app: &App, section: usize| {
+            let data = app.world().resource::<crate::account_data::AccountData>();
+            assert!(!data.armed_for_test(section), "a save arms nothing");
+            data.saved_for_test(section)
+        };
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("SaveBindings(2)")
+            .unwrap();
+        app.update();
+        assert!(
+            !armed(&app, 2) && armed(&app, 3),
+            "the character's set alone"
+        );
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("SaveBindings(1)")
+            .unwrap();
+        app.update();
+        assert!(
+            armed(&app, 2) && armed(&app, 3),
+            "the account set writes both"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A save writes the set's section file as the reference does (`0x4b65b0`): the account's
+    /// whole table, and the character's file emptied while the account set is in use
+    /// (`0x4b65c6`), or holding set 2 when it is.
+    #[test]
+    fn a_save_writes_the_sections_files_as_the_reference_does() {
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-wtf-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let (mut app, _, character) = file_harness(&tmp);
+        let run = |app: &mut App, chunk: &str| {
+            app.world()
+                .non_send_resource::<UiScript>()
+                .run(chunk)
+                .unwrap();
+            app.update();
+        };
+        let read = |name: &str| std::fs::read_to_string(tmp.join("bindings").join(name)).ok();
+        run(&mut app, r#"SetBinding("G", "JUMP") SaveBindings(2)"#);
+        let set2 = read("Realm-Probesix.wtf").expect("the character's file");
+        assert!(set2.contains("bind G JUMP\r\n"), "{set2}");
+        run(&mut app, "SaveBindings(1)");
+        let set1 = read("account.wtf").expect("the account's file");
+        assert!(set1.contains("bind G JUMP\r\n"), "{set1}");
+        assert_eq!(
+            read("Realm-Probesix.wtf").as_deref(),
+            Some(""),
+            "emptied, not removed: its digest is MD5 of nothing"
+        );
+        assert!(
+            !character.exists(),
+            "the character's diff goes: set 1 is in use"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A save writes the set `SaveBindings` stored, copied from the live table inside the call
+    /// (`0x4b8260` -> `0x4b6310`): a binding made after it in the same frame is in neither file.
+    #[test]
+    fn a_save_writes_the_set_as_it_was_saved() {
+        let tmp = std::env::temp_dir().join(format!("benilla-bind-saved-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let (mut app, account, _) = file_harness(&tmp);
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run(r#"SetBinding("F6", "JUMP") SaveBindings(1) SetBinding("F7", "SITORSTAND")"#)
+            .unwrap();
+        app.update();
+        let wtf = std::fs::read_to_string(tmp.join("bindings/account.wtf")).expect("the .wtf");
+        let diff = std::fs::read_to_string(&account).expect("the diff");
+        assert!(wtf.contains("bind F6 JUMP\r\n"), "the saved binding: {wtf}");
+        assert!(!wtf.contains("bind F7 "), "no later binding: {wtf}");
+        assert!(
+            diff.lines()
+                .any(|l| l.starts_with("bind JUMP ") && l.ends_with(" F6")),
+            "the saved binding: {diff}"
+        );
+        assert!(!diff.contains("SITORSTAND"), "no later binding: {diff}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ── The synthetic seam (`BindingLatches::synth_*`, the web bridge's door) ──
+
+    /// Run `f` over the latches and the bindings pass's VM pair, as the bridge's system holds them.
+    fn synth<R: 'static>(
+        app: &mut App,
+        f: impl FnOnce(&mut BindingLatches, &mut SynthVm) -> R + Send + Sync + 'static,
+    ) -> R {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut f = Some(f);
         app.world_mut()
-            .resource_scope(|world, mut state: Mut<BindingsState>| {
-                let mut script = world.non_send_resource_mut::<UiScript>();
-                f(&mut state, &mut script);
-            });
+            .run_system_once(move |mut latches: ResMut<BindingLatches>, mut vm: SynthVm| {
+                (f.take().expect("runs once"))(&mut latches, &mut vm)
+            })
+            .expect("the synthetic seam runs")
+    }
+
+    fn latches(app: &App) -> &BindingLatches {
+        app.world().resource::<BindingLatches>()
     }
 
     #[test]
     fn a_synthetic_hold_runs_the_body_once_and_survives_the_sweep() {
         let mut app = harness();
         app.update();
-        synth(&mut app, |s, vm| {
-            assert!(s.synth_press(vm, "MOVEFORWARD", 1.0))
-        });
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "MOVEFORWARD", 1.0)));
         assert!(state(&app).pressed(Input::MoveForward));
         assert!(
             state(&app).just_pressed(Input::MoveForward),
             "the press edge"
         );
         // Idempotent: a second assert neither re-runs the body nor re-latches.
-        synth(&mut app, |s, vm| {
-            assert!(s.synth_press(vm, "MOVEFORWARD", 1.0))
-        });
-        assert_eq!(state(&app).synth.len(), 1);
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "MOVEFORWARD", 1.0)));
+        assert_eq!(latches(&app).synth.len(), 1);
         // The stuck-latch sweep reads keys; a synthetic latch has none to read up.
         app.update();
         assert!(state(&app).pressed(Input::MoveForward));
         assert!(!state(&app).just_pressed(Input::MoveForward));
-        synth(&mut app, |s, vm| s.synth_release(Some(vm), "MOVEFORWARD"));
+        synth(&mut app, |l, vm| l.synth_release(vm, "MOVEFORWARD"));
         assert!(
             !state(&app).pressed(Input::MoveForward),
             "the up-half ran its Stop"
@@ -2393,9 +3194,7 @@ mod tests {
     fn a_synthetic_fire_scales_the_bodys_amount() {
         let mut app = harness();
         app.update();
-        synth(&mut app, |s, vm| {
-            assert!(s.synth_press(vm, "CAMERAZOOMIN", 2.5))
-        });
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "CAMERAZOOMIN", 2.5)));
         assert!(state(&app).fired(Input::CameraZoomIn));
         assert_eq!(state(&app).amount(Input::CameraZoomIn), 2.5);
         app.update();
@@ -2409,22 +3208,18 @@ mod tests {
     fn an_unknown_synthetic_command_runs_nothing_and_says_so() {
         let mut app = harness();
         app.update();
-        synth(&mut app, |s, vm| {
-            assert!(!s.synth_press(vm, "NOSUCHCOMMAND", 1.0))
-        });
-        assert!(state(&app).synth.is_empty());
+        assert!(!synth(&mut app, |l, vm| l.synth_press(vm, "NOSUCHCOMMAND", 1.0)));
+        assert!(latches(&app).synth.is_empty());
     }
 
     #[test]
     fn a_vm_swap_drops_the_synthetic_latches_without_their_up_halves() {
         let mut app = harness();
         app.update();
-        synth(&mut app, |s, vm| {
-            assert!(s.synth_press(vm, "ACTIONBUTTON1", 1.0))
-        });
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "ACTIONBUTTON1", 1.0)));
         assert_eq!(lua_str(&app, "AB1"), "down");
         app.insert_non_send_resource(core_script());
         app.update();
-        assert!(state(&app).synth.is_empty());
+        assert!(latches(&app).synth.is_empty());
     }
 }

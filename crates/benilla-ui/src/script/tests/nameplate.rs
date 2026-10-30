@@ -2,7 +2,7 @@
 //! `pfUI/modules/nameplates.lua`, `ShaguTweaks/libs/libnameplate.lua`,
 //! `CustomNameplates/CustomNameplates.lua` and `_Nameplates/_Nameplates.lua`.
 
-use crate::script::{PlateGeometry, PlateState, UiScript};
+use crate::script::{PlateAction, PlateClick, PlateGeometry, PlateState, ScriptCall, UiScript};
 
 /// A VM with a `WorldFrame` to hang plates off, all [`UiScript::sync_nameplates`] requires.
 fn vm() -> UiScript {
@@ -608,11 +608,24 @@ fn hovering_a_plate_names_its_unit() {
     assert_eq!(s.hovered_nameplate(), None);
 }
 
-/// The reference's click slot (`0x7cb910`) ends in the same `SetSelection` as a click on the body,
-/// and fires on the up edge only: `RegisterForClicks(0x500)` at `0x7cb637`.
+/// The calls the plates' clicks made, from a harness that keeps them ([`UiScript::keep_calls`]).
+fn plate_clicks(s: &mut UiScript) -> Vec<PlateClick> {
+    s.take_script_calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            ScriptCall::PlateClick(click) => Some(click),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The reference's click slot (`0x7cb910`) hands the plate's unit to `0x4949f0` as a call inside
+/// the click, the left button's select; the plate registers its Up clicks alone (`0x7cb637`
+/// stores `0x500`), so a press calls nothing.
 #[test]
-fn a_completed_click_on_a_plate_reaches_the_app() {
+fn a_completed_click_on_a_plate_calls_its_units_select() {
     let mut s = vm();
+    s.keep_calls();
     let wolf = plate("Wolf", 30.0, 40.0);
     let key = wolf.key;
     drive(&mut s, &[wolf]);
@@ -620,26 +633,28 @@ fn a_completed_click_on_a_plate_reaches_the_app() {
 
     s.mouse_button(500.0, 384.0, "LeftButton", true);
     assert!(
-        s.take_nameplate_clicks().is_empty(),
+        plate_clicks(&mut s).is_empty(),
         "a press is not a click: the plate fires on the UP edge only"
     );
     s.mouse_button(500.0, 384.0, "LeftButton", false);
-    let clicks = s.take_nameplate_clicks();
-    assert_eq!(clicks.len(), 1);
-    assert_eq!(clicks[0].key, key);
-    assert_eq!(clicks[0].button, "LeftButton");
-    assert!(
-        s.take_nameplate_clicks().is_empty(),
-        "drained, not repeated"
+    assert_eq!(
+        plate_clicks(&mut s),
+        [PlateClick {
+            guid: key,
+            action: PlateAction::Select,
+            scripted: false,
+            may_cast: true,
+        }]
     );
 }
 
 /// `0x500` includes RightButtonUp (`0x7cb637` writes `[this+0x330]`), where a plain `Button`
-/// registers LeftButtonUp alone; the slot forks on the mask: 1 selects (`0x4925d0`), 4 selects and
-/// interacts (`0x492820`).
+/// registers LeftButtonUp alone; `0x4949f0` forks on the bit: 1 selects (`0x4925d0`), 4 selects
+/// and interacts (`0x492820`).
 #[test]
-fn a_physical_right_click_on_a_plate_reaches_the_app() {
+fn a_physical_right_click_on_a_plate_calls_its_units_interact() {
     let mut s = vm();
+    s.keep_calls();
     let wolf = plate("Wolf", 30.0, 40.0);
     let key = wolf.key;
     drive(&mut s, &[wolf]);
@@ -647,43 +662,104 @@ fn a_physical_right_click_on_a_plate_reaches_the_app() {
 
     s.mouse_button(500.0, 384.0, "RightButton", true);
     assert!(
-        s.take_nameplate_clicks().is_empty(),
+        plate_clicks(&mut s).is_empty(),
         "the UP lane only: `0x500` has no ButtonDown bit"
     );
     s.mouse_button(500.0, 384.0, "RightButton", false);
-    let clicks = s.take_nameplate_clicks();
+    let clicks = plate_clicks(&mut s);
     assert_eq!(clicks.len(), 1);
-    assert_eq!(clicks[0].key, key);
-    assert_eq!(clicks[0].button, "RightButton");
+    assert_eq!(
+        (clicks[0].guid, clicks[0].action),
+        (key, PlateAction::Interact)
+    );
+    assert!(!clicks[0].scripted);
 }
 
 #[test]
 fn a_middle_click_on_a_plate_fires_nothing() {
     let mut s = vm();
+    s.keep_calls();
     drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
     s.mouse_move(500.0, 384.0);
     s.mouse_button(500.0, 384.0, "MiddleButton", true);
     s.mouse_button(500.0, 384.0, "MiddleButton", false);
     assert!(
-        s.take_nameplate_clicks().is_empty(),
+        plate_clicks(&mut s).is_empty(),
         "`0x500` is Left|Right on the up edge and nothing else"
     );
 }
 
-/// pfUI's click-through (`nameplates.lua:1228`) calls `plate:Click`; in the reference a scripted
-/// and a physical click go through the button's one click slot.
+/// pfUI's click-through (`nameplates.lua:1228`) calls `plate:Click`, which runs the one click slot
+/// a release runs (`0x7826c0` → slot `0x94`) with the scripted flag (`0x7827b2`); the call carries
+/// it, as no press of the mouse classed the unit.
 #[test]
 fn a_scripted_click_selects_too() {
     let mut s = vm();
+    s.keep_calls();
     let wolf = plate("Wolf", 30.0, 40.0);
     let key = wolf.key;
     drive(&mut s, &[wolf]);
     s.run(r#"WorldFrame:GetChildren():Click("RightButton")"#)
         .unwrap();
-    let clicks = s.take_nameplate_clicks();
+    let clicks = plate_clicks(&mut s);
     assert_eq!(clicks.len(), 1);
-    assert_eq!(clicks[0].key, key);
-    assert_eq!(clicks[0].button, "RightButton");
+    assert_eq!(
+        (clicks[0].guid, clicks[0].action),
+        (key, PlateAction::Interact)
+    );
+    assert!(clicks[0].scripted);
+}
+
+/// `Click`'s argument names the bit (`0x7827b6`, `0x7827e2`, `0x782811`): Middle is 2 and an
+/// unknown name 0, and `0x4949f0` acts on 1 and 4 alone (`0x494a15`, `0x494a2c`). The plate's
+/// slot calls `0x4949f0` ahead of the button's click (`0x7cb92a`, `0x7cb936`), so a disabled
+/// plate, whose `OnClick` `0x779540` never fires (`0x779552`), still selects. A plate an addon
+/// registers for a Down click selects on the press: the press calls the same slot (`0x779285`).
+#[test]
+fn the_plates_slot_selects_on_bits_one_and_four_ahead_of_the_buttons_click() {
+    let mut s = vm();
+    s.keep_calls();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    let key = wolf.key;
+    drive(&mut s, &[wolf]);
+    s.run(
+        r#"local p = WorldFrame:GetChildren()
+        p:Click("MiddleButton") p:Click("Button4")"#,
+    )
+    .unwrap();
+    assert!(plate_clicks(&mut s).is_empty(), "bits 2 and 0 call nothing");
+
+    s.run(
+        r#"local p = WorldFrame:GetChildren()
+        FIRED = 0
+        p:SetScript("OnClick", function() FIRED = FIRED + 1 end)
+        p:Disable() p:Click()"#,
+    )
+    .unwrap();
+    let clicks = plate_clicks(&mut s);
+    assert_eq!(clicks.len(), 1, "the disabled plate's slot selects");
+    assert_eq!(
+        (clicks[0].guid, clicks[0].action),
+        (key, PlateAction::Select)
+    );
+    assert_eq!(
+        s.eval::<i64>("return FIRED").unwrap(),
+        0,
+        "and fires no OnClick"
+    );
+
+    s.run(
+        r#"local p = WorldFrame:GetChildren()
+        p:Enable() p:RegisterForClicks("LeftButtonDown")"#,
+    )
+    .unwrap();
+    s.mouse_move(500.0, 384.0);
+    s.mouse_button(500.0, 384.0, "LeftButton", true);
+    let clicks = plate_clicks(&mut s);
+    assert_eq!(clicks.len(), 1, "the press of a Down registration selects");
+    assert!(!clicks[0].scripted);
+    s.mouse_button(500.0, 384.0, "LeftButton", false);
+    assert!(plate_clicks(&mut s).is_empty(), "and its release does not");
 }
 
 /// Entering mouselook turns the mouse off on every plate and leaving turns it back on (`0x60f830`,
@@ -718,6 +794,7 @@ fn freelook_hands_the_mouse_back() {
 #[test]
 fn a_ground_target_veto_refuses_the_hit_without_disabling_the_mouse() {
     let mut s = vm();
+    s.keep_calls();
     drive(&mut s, &[plate("Wolf", 30.0, 40.0)]);
     s.mouse_move(500.0, 384.0);
     assert!(s.hovered_nameplate().is_some(), "the plate takes the mouse");
@@ -733,7 +810,7 @@ fn a_ground_target_veto_refuses_the_hit_without_disabling_the_mouse() {
     s.mouse_button(500.0, 384.1, "LeftButton", true);
     s.mouse_button(500.0, 384.1, "LeftButton", false);
     assert!(
-        s.take_nameplate_clicks().is_empty(),
+        plate_clicks(&mut s).is_empty(),
         "a vetoed plate takes no click either"
     );
     assert_eq!(
@@ -1192,4 +1269,73 @@ fn the_plates_fill_shrinks_with_health() {
         s.tick(0.0);
         crate::assert_near!(fill_width(&mut s), whole * part);
     }
+}
+
+/// The name's `GetTextColor()` as a plate addon reads it: `r,g,b` rounded to bytes.
+fn name_colour(s: &mut UiScript) -> (u8, u8, u8) {
+    let [r, g, b] = ["r", "g", "b"].map(|c| {
+        s.eval::<f64>(&format!(
+            "local _, _, name = WorldFrame:GetChildren():GetRegions() \
+             local r, g, b = name:GetTextColor() return {c}"
+        ))
+        .unwrap()
+    });
+    let byte = |c: f64| (c * 255.0).round() as u8;
+    (byte(r), byte(g), byte(b))
+}
+
+/// `FlashNamePlate` (`0x6122e0` → `0x7cba70`) sets the timer `+0x514` to 5000 ms and the name to
+/// `0xffff0000`; the plate's update (`0x7cb950`) takes `ftol(elapsed * 1000)` off it and, at 0 or
+/// less, restores white, or yellow while the glow shows. Hover moves (`0x7cb850`, `0x7cb8b0`)
+/// change the colour only with the timer at 0 or less, and a bind starts it at 0 (`0x7cb80e`).
+#[test]
+fn a_flashed_plate_reads_red_for_five_seconds_then_its_resting_colour() {
+    const WHITE: (u8, u8, u8) = (255, 255, 255);
+    const RED: (u8, u8, u8) = (255, 0, 0);
+    const YELLOW: (u8, u8, u8) = (255, 255, 0);
+    let mut s = vm();
+    let wolf = plate("Wolf", 30.0, 40.0);
+    drive(&mut s, std::slice::from_ref(&wolf));
+    s.tick(0.0);
+    assert_eq!(name_colour(&mut s), WHITE);
+
+    // A unit with no plate flashes nothing.
+    s.flash_nameplate(wolf.key + 1);
+    assert_eq!(name_colour(&mut s), WHITE);
+
+    s.flash_nameplate(wolf.key);
+    assert_eq!(name_colour(&mut s), RED);
+    s.tick(2.0);
+    assert_eq!(name_colour(&mut s), RED, "3000 ms left");
+
+    // The hover does not touch the name while the timer is above 0.
+    let mut hovered = wolf.clone();
+    hovered.hovered = true;
+    drive(&mut s, &[hovered.clone()]);
+    assert_eq!(name_colour(&mut s), RED, "enter keeps the flash");
+    drive(&mut s, std::slice::from_ref(&wolf));
+    assert_eq!(name_colour(&mut s), RED, "leave keeps the flash");
+
+    // A second hit rearms the whole 5 s.
+    s.flash_nameplate(wolf.key);
+    s.tick(4.9);
+    assert_eq!(name_colour(&mut s), RED, "100 ms left");
+    s.tick(0.1);
+    assert_eq!(name_colour(&mut s), WHITE, "the timer ran out unhovered");
+
+    // Expiring under the pointer restores yellow, the glow being shown.
+    drive(&mut s, &[hovered.clone()]);
+    assert_eq!(name_colour(&mut s), YELLOW, "the hover works again at rest");
+    s.flash_nameplate(wolf.key);
+    s.tick(5.0);
+    assert_eq!(name_colour(&mut s), YELLOW);
+
+    // A bind clears a running flash: the plate returns for another unit.
+    s.flash_nameplate(wolf.key);
+    drive(&mut s, &[]);
+    drive(&mut s, &[plate("Bear", 10.0, 90.0)]);
+    s.tick(0.0);
+    assert_eq!(name_colour(&mut s), WHITE);
+    s.tick(1.0);
+    assert_eq!(name_colour(&mut s), WHITE);
 }

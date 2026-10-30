@@ -93,20 +93,29 @@ impl GlueNotices {
     }
 }
 
-/// The first `%d` of the CRT's `sscanf` (`0x73fb5d`): leading whitespace skipped, an optional sign
-/// and the leading digits; `None` when no digit follows, which leaves the out-slot untouched; 0
-/// for a number past `i64`.
-pub fn scanf_d(s: &str) -> Option<i64> {
-    let s = s.trim_start();
-    let (sign, digits) = match s.as_bytes().first() {
-        Some(b'-') => (-1, &s[1..]),
-        Some(b'+') => (1, &s[1..]),
-        _ => (1, s),
-    };
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    (end > 0).then(|| sign * digits[..end].parse::<i64>().unwrap_or(0))
+/// The first `%d` of the CRT's `sscanf` (`0x73fb5d`, `__input` `0x744e21`) over `s` as a C
+/// string: blanks skipped (`__whiteout`, `0x7458ae`), an optional sign and the leading digits,
+/// accumulated in 32 bits that wrap (`0x7456c9`, `0x74570f`), negated for `-` (`0x745744`) and
+/// stored as a dword (`0x745781`). `None` when no digit follows, which leaves the out-slot
+/// untouched.
+pub fn scanf_d(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
+    let mut i = b
+        .iter()
+        .take_while(|&&c| c == b' ' || (0x09..=0x0d).contains(&c))
+        .count();
+    let neg = b.get(i) == Some(&b'-');
+    if matches!(b.get(i), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let digits = b[i..].iter().take_while(|c| c.is_ascii_digit());
+    let (mut n, mut v) = (0, 0i32);
+    for &c in digits {
+        v = v.wrapping_mul(10).wrapping_add(i32::from(c - b'0'));
+        n += 1;
+    }
+    (n > 0).then(|| if neg { v.wrapping_neg() } else { v })
 }
 
 /// `DefaultServerLogin`'s two strings. Never logged: the `Debug` form names the account only.
@@ -122,6 +131,20 @@ impl std::fmt::Debug for GlueCredentials {
             .field("account", &self.account)
             .field("password", &"<redacted>")
             .finish()
+    }
+}
+
+/// `PINEntered`'s keys: the positions pressed on the keypad, 4 to 10 of them. Never logged: the
+/// `Debug` form gives the count only, since with the grid `PLAYER_ENTER_PIN` showed they spell the
+/// PIN.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GluePin {
+    pub positions: Vec<u8>,
+}
+
+impl std::fmt::Debug for GluePin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GluePin(<{} keys>)", self.positions.len())
     }
 }
 
@@ -158,6 +181,9 @@ pub enum GlueCall {
     /// `StatusDialogClick()` (`0x46d270` → `0x46b720`): the status dialog's button, per screen
     /// state.
     StatusDialogClick,
+    /// `PINEntered(...)` (`0x46d1c0`) past its checks: `0x46b0c0`, the `CANCEL` dialog and the keys
+    /// on to the logon (`0x5ab5a0` → `0x5b3120`).
+    PinEntered(GluePin),
     /// `DisconnectFromServer()` (`0x46d340`): the world link's flag down and the link dropped if
     /// up (`0x5ab1a0`), then the logon cancelled (`0x5b3320`).
     DisconnectFromServer,
@@ -244,6 +270,11 @@ pub enum GlueSignal {
     SelectLast,
     /// `FORCE_RENAME_CHARACTER(key)` (event 23): the key, unresolved.
     ForceRename(&'static str),
+    /// `PLAYER_ENTER_PIN` (event 25, `0x46bb15`): the keypad's grid, ten numbers.
+    EnterPin([u8; 10]),
+    /// The stock keypad pressed by its buttons: the keys at these positions (button `p + 1`
+    /// carries id `p`), then Okay, each by `Click` (`0x7826c0`), the physical click's path.
+    PressKeypad(Vec<u8>),
     /// A CVar the manager set (`CVar::Set`, `0x63df50`), written to the VM's table as the
     /// engine's write.
     Cvar { name: &'static str, value: String },
@@ -431,7 +462,8 @@ pub fn launch_url_allowed(url: &str) -> bool {
 /// What the browser is given for an add-on's URL, or `None` for one benilla will not open. The
 /// reference hands the server's string to `0x429ff0` with no whitelist (`0x46d5e0`): a C string of
 /// fewer than 0x400 bytes, each `%XY` replaced by the byte it spells (table `0x801490`: a
-/// non-hex digit reads 0; a `%` with fewer than two bytes after it ends the string), then
+/// non-hex ASCII digit reads 0, and one from 0x80 up, sign-extended at `0x42a059`, reads the 128
+/// bytes before the table; a `%` with fewer than two bytes after it ends the string), then
 /// `ShellExecute "open"`.
 ///
 /// Deviation: benilla keeps that decode and then encodes it again, every byte outside the URL
@@ -445,6 +477,7 @@ pub fn launch_addon_url(url: &str) -> Option<String> {
     if url.is_empty() || url.len() >= 0x400 {
         return None;
     }
+    // Any non-hex byte reads 0: the reference's read below its table from 0x80 up is not copied.
     let hex = |b: u8| -> u8 {
         match b {
             b'1'..=b'9' => b - b'0',
@@ -556,17 +589,6 @@ pub(crate) struct GlueCore {
     pub(super) create: super::glue_create::GlueCreate,
     /// The AddOns screen's enable nodes ([`super::glue_addons`]).
     pub(super) addons: super::glue_addons::GlueAddons,
-    /// The character name check's lists ([`super::char_name`]), as the host seated them.
-    name_lists: Option<std::rc::Rc<dyn super::NameLists>>,
-}
-
-impl GlueCore {
-    /// The name check's lists; with none seated, nothing is reserved.
-    pub(super) fn name_lists(&self) -> std::rc::Rc<dyn super::NameLists> {
-        self.name_lists
-            .clone()
-            .unwrap_or_else(|| std::rc::Rc::new(super::NoNameLists))
-    }
 }
 
 /// `SetCurrentScreen`'s buffer, 0x40 bytes with its terminator (`0x46b860`, `SStrCopy`).
@@ -591,11 +613,6 @@ impl super::UiScript {
     /// Fire one of the glue manager's signals into this VM, as the manager's frame raises it.
     pub fn fire_glue_signal(&mut self, signal: GlueSignal) {
         fire_signal(&self.lua, signal);
-    }
-
-    /// Seat the lists the character name check searches (`0x6c91a0` compiles them at startup).
-    pub fn set_glue_name_lists(&mut self, lists: std::rc::Rc<dyn super::NameLists>) {
-        self.model_mut().glue.name_lists = Some(lists);
     }
 
     /// Store one agreement's flags in the cells this VM is seated with.
@@ -726,6 +743,25 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
                 vec![ScriptValue::Str(key.to_string())],
             );
         }
+        GlueSignal::EnterPin(grid) => fire(
+            "PLAYER_ENTER_PIN",
+            grid.iter()
+                .map(|&d| ScriptValue::Int(i64::from(d)))
+                .collect(),
+        ),
+        GlueSignal::PressKeypad(positions) => {
+            let keys = positions
+                .iter()
+                .map(|p| format!("VirtualKeypadButton{}", p + 1));
+            for name in keys.chain(["VirtualKeypadOkayButton".to_string()]) {
+                if let Err(e) = click_global(lua, &name) {
+                    lua.app_data_mut::<Model>()
+                        .expect("model app_data")
+                        .record_lua_error(&e);
+                    return;
+                }
+            }
+        }
         GlueSignal::Cvar { name, value } => {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             super::cvars::set_from_engine(&mut model, name, value);
@@ -744,6 +780,14 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
             }
         }
     }
+}
+
+/// `Click` on the button the global `name` holds, the stock handlers running as for a press.
+fn click_global(lua: &Lua, name: &str) -> mlua::Result<()> {
+    use mlua::ObjectLike;
+    lua.globals()
+        .get::<mlua::Table>(name)?
+        .call_method::<()>("Click", ())
 }
 
 /// The text of a string global, as [`super::UiScript::global_text`] reads it.
@@ -798,6 +842,37 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // Arguments 1 to 10 up to the first nil or none (`lua_type` ≤ 0, `0x46d1eb`), each passing
+    // `lua_isnumber` (`0x46d1f1`, numeric strings too) or the usage error with its position
+    // (`0x837d34`); each key is the low byte of the number's `__ftol` (`0x46d203`, `0x46d20f`).
+    // Fewer than 4 or more than 10 raise `0x837cf4` with the count; the rest is `0x46b0c0`.
+    g.set(
+        "PINEntered",
+        lua.create_function(|lua, args: MultiValue| {
+            let mut positions = Vec::with_capacity(10);
+            for (i, v) in args.into_iter().take(10).enumerate() {
+                if matches!(v, Value::Nil) {
+                    break;
+                }
+                let Some(n) = lua.coerce_number(v)? else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Usage: PINEntered(4-10 key positions) - non-numeric arg #{}",
+                        i + 1
+                    )));
+                };
+                positions.push(super::binding_abi::ftol(n) as u8);
+            }
+            if !(4..=10).contains(&positions.len()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Usage: PINEntered(4-10 key positions) - bad number of args {}",
+                    positions.len()
+                )));
+            }
+            call(lua, GlueCall::PinEntered(GluePin { positions }));
+            Ok(())
+        })?,
+    )?;
+
     // The `accountName` CVar's string (`0x46cdd5`, `[[0x8826c8]+0x20]`), the saved, script-visible
     // record registered at `0x402bd2`: `GetCVar("accountName")` reads the same text.
     g.set(
@@ -818,9 +893,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetSavedAccountName",
         lua.create_function(|lua, name: Value| {
             let name = string_arg(lua, name, "Usage: SetSavedAccountName(\"accountName\")")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            super::cvars::write_cvar(&mut model, "accountName", name);
-            Ok(())
+            super::cvars::write_cvar(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                "accountName",
+                name,
+            );
+            super::cvars::written(lua)
         })?,
     )?;
 
@@ -876,7 +954,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     },
                 );
                 super::cvars::set_from_engine(&mut model, notice.cvar(), "1".to_string());
-                Ok(())
+                drop(model);
+                super::cvars::written(lua)
             })?,
         )?;
     }
@@ -1114,6 +1193,24 @@ mod tests {
         (s, host)
     }
 
+    /// `sscanf`'s `%d` accumulates in 32 bits that wrap, after C's blanks only.
+    #[test]
+    fn scanf_d_wraps_in_32_bits() {
+        assert_eq!(scanf_d(" 42x"), Some(42));
+        assert_eq!(scanf_d("-7"), Some(-7));
+        assert_eq!(scanf_d("+7"), Some(7));
+        assert_eq!(scanf_d("2147483647"), Some(i32::MAX));
+        assert_eq!(scanf_d("2147483648"), Some(i32::MIN));
+        assert_eq!(scanf_d("-2147483648"), Some(i32::MIN));
+        assert_eq!(scanf_d("4294967296"), Some(0));
+        assert_eq!(scanf_d("4294967301"), Some(5));
+        assert_eq!(scanf_d("99999999999999999999"), Some(1_661_992_959));
+        assert_eq!(scanf_d("\u{a0}1"), None, "no blank past C's");
+        for text in ["", " ", "-", "+x", "x1"] {
+            assert_eq!(scanf_d(text), None, "{text:?}");
+        }
+    }
+
     /// A seated host runs the call inside the verb, and what it raised has run its handlers by
     /// the verb's next Lua line, in order, with nothing left for a tick or a queue.
     #[test]
@@ -1266,6 +1363,82 @@ mod tests {
             "{err}"
         );
         assert!(s.take_glue_calls().is_empty());
+    }
+
+    /// `PLAYER_ENTER_PIN` (event 25) carries the grid's ten digits as numbers, the first key's
+    /// first (`0x46bac3`-`0x46bb15`, `%d` ten times at `0x8372a8`).
+    #[test]
+    fn enter_pin_fires_the_grid_as_ten_numbers() {
+        let grid = [6, 3, 2, 1, 9, 8, 7, 0, 4, 5];
+        let (s, _host) = seated(vec![(
+            "StatusDialogClick",
+            vec![GlueSignal::EnterPin(grid)],
+        )]);
+        s.run(
+            "GOT = {} F = CreateFrame('Frame') F:RegisterEvent('PLAYER_ENTER_PIN') \
+             F:SetScript('OnEvent', function() for i = 1, 10 do \
+               local v = getglobal('arg'..i) if type(v) == 'number' then GOT[i] = v end \
+             end end)",
+        )
+        .unwrap();
+        let got: Vec<i64> = s.eval("StatusDialogClick() return GOT").unwrap();
+        assert_eq!(got, grid.map(i64::from));
+    }
+
+    /// The keys `PINEntered` handed the host, or the error it raised.
+    fn pin_entered(args: &str) -> Result<Vec<u8>, String> {
+        let mut s = UiScript::new_glue().unwrap();
+        s.run(&format!("PINEntered({args})"))
+            .map_err(|e| e.to_string())?;
+        match s.take_glue_calls().as_slice() {
+            [GlueCall::PinEntered(pin)] => Ok(pin.positions.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `PINEntered` (`0x46d1c0`) reads arguments 1 to 10 up to the first nil (`lua_type` ≤ 0,
+    /// `0x46d1eb`), numbers or numeric strings, each the low byte of its `__ftol` (`0x46d20f`), and
+    /// hands 4 to 10 of them to `0x46b0c0`. The stock keypad passes its keys' ids as strings.
+    #[test]
+    fn pin_entered_hands_on_the_keys_pressed() {
+        assert_eq!(pin_entered("'2', '9', '4', '7'"), Ok(vec![2, 9, 4, 7]));
+        assert_eq!(pin_entered("1, 2, 3, 4, nil, 6"), Ok(vec![1, 2, 3, 4]));
+        assert_eq!(pin_entered("258, -1, 3.9, '7'"), Ok(vec![2, 255, 3, 7]));
+        assert_eq!(
+            pin_entered("0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
+            Ok((0..10).collect()),
+            "the eleventh is never read"
+        );
+        assert!(
+            format!(
+                "{:?}",
+                GlueCall::PinEntered(GluePin {
+                    positions: vec![1, 2, 3, 4]
+                })
+            )
+            .contains("4 keys"),
+            "the keys are never printed"
+        );
+    }
+
+    /// A count outside 4 to 10 raises `0x837cf4` with the count; an argument that is not a number
+    /// raises `0x837d34` with its position. Either hands nothing on.
+    #[test]
+    fn pin_entered_raises_its_usage() {
+        let err = pin_entered("1, 2, 3").unwrap_err();
+        assert!(
+            err.contains("Usage: PINEntered(4-10 key positions) - bad number of args 3"),
+            "{err}"
+        );
+        let err = pin_entered("").unwrap_err();
+        assert!(err.contains("bad number of args 0"), "{err}");
+        let err = pin_entered("1, 'x', 3, 4").unwrap_err();
+        assert!(
+            err.contains("Usage: PINEntered(4-10 key positions) - non-numeric arg #2"),
+            "{err}"
+        );
+        let err = pin_entered("1, 2, 3, false").unwrap_err();
+        assert!(err.contains("non-numeric arg #4"), "{err}");
     }
 
     /// An agreement's flags come off its record's integer (`0x46a41a` reads `+0x28`), Storm's
@@ -1543,9 +1716,9 @@ mod tests {
         assert!(s.take_errors().is_empty());
     }
 
-    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex digit reads 0, a `%` with fewer
-    /// than two bytes after it ends the string, a decoded NUL ends it too; then the web-address
-    /// rule on the result.
+    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex ASCII digit reads 0 (one from
+    /// 0x80 up reads before the table, `0x42a059`; benilla reads 0), a `%` with fewer than two
+    /// bytes after it ends the string, a decoded NUL ends it too; then the web-address rule.
     #[test]
     fn the_addon_url_is_decoded_as_the_launcher_decodes_it_and_must_be_a_web_address() {
         for (url, want) in [

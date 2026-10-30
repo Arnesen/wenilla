@@ -8,6 +8,7 @@ use super::test_ui::load_ui as load_xml;
 /// The chat stack, fonts first so `inherits="ChatFontNormal"` resolves.
 pub(crate) fn chat_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     // No engine behind it: the calls its verbs make are kept for the `take_*` readers.
     s.keep_calls();
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -46,6 +47,18 @@ pub(crate) fn chat_frame() -> UiScript {
     );
     s.resolve();
     s
+}
+
+/// Seat the active player, whose absence the language walk answers with no value (`0x49fb60`):
+/// the chat menu's language rows count from it (`ChatFrame.lua:2395-2397`).
+fn seat_player(s: &mut UiScript) {
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            ..Default::default()
+        }),
+    );
 }
 
 fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
@@ -210,6 +223,14 @@ fn the_edit_box_speaks_the_language_picked_in_the_chat_menu() {
     let mut s = chat_frame();
     s.set_language_table(vec![(2, "Darnassian".into()), (7, "Common".into())]);
     s.set_known_languages(vec!["Darnassian".into(), "Common".into()]);
+    // The walk answers only with an active player (`0x49fb50`).
+    s.set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            ..Default::default()
+        }),
+    );
     for line in ["/s before", "/s ishnu", "/y alah"] {
         if line == "/s ishnu" {
             s.run("ChatFrameEditBox.language = GetLanguageByIndex(1)")
@@ -329,6 +350,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
             "Interface\\FrameXML\\FloatingChatFrame.xml",
         ],
     );
+    seat_player(&mut s);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.set_spellbook(SpellBookState {
         tabs: vec![SpellTabView {
@@ -388,6 +410,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -973,6 +996,7 @@ fn the_combat_log_window_runs_its_own_bottom_button_blink() {
 fn the_chat_menu_builds_its_rows_on_the_references_kit() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -993,6 +1017,7 @@ fn the_chat_menu_builds_its_rows_on_the_references_kit() {
     ] {
         load_xml(&s, f);
     }
+    seat_player(&mut s);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     let _ = s.errors();
 
@@ -1082,6 +1107,7 @@ fn a_glass_windows_plate_fades_in_on_every_hover() {
 fn a_glass_windows_plate_fades_in_on_every_hover_under_the_full_manifest() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1600.0, 900.0);
     super::test_ui::load_ui(&s, "Interface\\FrameXML\\GlobalStrings.lua");
     let failures = super::load_default_ui(&s);
@@ -1237,6 +1263,7 @@ fn a_quick_exit_and_reentry_keeps_the_plates_hover_fade() {
 
     // The shipped interface, with the guard the layer installs.
     let mut shipped = UiScript::new().unwrap();
+    shipped.keep_calls();
     shipped.set_screen_size(1600.0, 900.0);
     super::test_ui::load_ui(&shipped, "Interface\\FrameXML\\GlobalStrings.lua");
     let failures = super::load_default_ui(&shipped);
@@ -1348,6 +1375,8 @@ fn the_stock_afk_and_dnd_commands_reach_the_wire() {
 fn the_docked_tabs_follow_the_dock_through_a_session() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    seat_player(&mut s);
+    s.keep_calls();
     // No engine behind it: `RaidFrame`'s `RequestRaidInfo()` at world entry is kept.
     s.keep_calls();
     s.set_screen_size(768.0 * 16.0 / 9.0, 768.0);

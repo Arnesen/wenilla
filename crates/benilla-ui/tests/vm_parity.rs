@@ -473,6 +473,7 @@ b]])"#),
     ("fix-libs bit_mod_overflow", "return S(E(bit.mod, -2^31, -1), E(bit.mod, 2^31, -1), E(bit.mod, 7, -1), E(bit.mod, -7, 2), E(bit.mod, 0/0, -1), E(bit.mod, 1/0, -1), E(bit.lshift, 1, 31), E(bit.arshift, -2^31, 31))"),
     ("fix-libs rep_format_sizes", r#"return S(string.rep("ab", 3), string.rep("", 1000000), string.rep("x", -1), string.rep("x", 0/0), E(string.format, "%123d", 1), E(string.format, "%1.123f", 1), string.format("%99d", 1) == string.rep(" ", 98) .. "1", string.len(string.format("%.99f", 1)), string.format("%-5c|%5s|%.1q", 65, "ab", "x"), table.concat({"a", 1, "b"}, string.rep("-", 3)), E(gsub, "abc", "%w", "%0%0%0"))"#),
     ("fix-libs deep_match", r#"local n = 3000 local s, p = string.rep("a", n), string.rep("a?", n) local t = {} for w in string.gfind(s, string.rep("(a)?", 30)) do table.insert(t, w) end return S(E(string.find, s, p), E(string.gsub, s, p, "x"), table.getn(t), E(string.find, s, string.rep("a-", 500) .. "$"))"#),
+    // `math_deg` multiplies by the double 180/pi (`0x7fb14d`, `0x822d28`).
     ("fix-libs deg_rad", r#"local bad = 0 for i = -720, 720 do if math.deg(math.rad(i)) ~= i then bad = bad + 1 end end
         local o = {} for _, x in {0.1, 1, 3, 0.7, 1e-300, 1e300, -2.5, 1/3} do table.insert(o, string.format("%.17g %.17g", math.deg(x), math.rad(x))) end
         return S(bad, math.deg(math.rad(3)) == 3, string.format("%.17g %.17g %.17g %.17g", asin(0.5), acos(0.3), atan(1), atan2(1, 2))) .. "|" .. table.concat(o, "|")"#),
@@ -589,6 +590,7 @@ b]])"#),
         E(function() local q = setmetatable({}, {__eq = 5}) return q == setmetatable({}, getmetatable(q)) end),
         E(function() local q = setmetatable({}, {__call = {}}) return q() end),
         E(function() local q = setmetatable({}, {__index = 5}) return q.x end))"#),
+    // `OP_UNM` calls `__unm` with the operand and a nil temporary (`0x6f8ea1`, `0x6f8edc`).
     ("fix-vm tm_unm_args", r#"local u = setmetatable({}, {__unm = function(a, b) return S(a == b, rawequal(a, b)) end})
         return -u"#),
     // ── perf-fix: gsub skips to a literal first byte; every shape answers as before ──
@@ -654,14 +656,16 @@ b]])"#),
           R(P .. 'local function two(a, b) local x, y = "X", "Y" end ' .. I .. 'two(1, 2, 3, 4, 5, 6, 7) end return n end' .. B),
           R(P .. 'local function w() local a, b, c, d, e, f, g, h = "a", "b", "c", "d", "e", "f", "g", "h" end '
             .. 'local function t2(a) end local function t1() return t2(1) end ' .. I .. 'w() t1() end return n end' .. B))"#),
-    // `__index` and `__newindex` chains: 5.1.5's `luaV_gettable` and `luaV_settable` take 100 steps.
+    // `__index` and `__newindex` chains: an instruction's `__index` chain reaches 102 tables
+    // (`luaV_gettable`, `0x6f7cf0`, entered with count 0 at `0x6f8940`), `__newindex` 101
+    // (`luaV_settable`, `0x6f7ffa`).
     ("fix-vm tag_loop", r#"local function chain(n, field)
           local last = {x = "found"}
           for i = 1, n do last = setmetatable({}, {[field] = last}) end
           return last
         end
         local o = {}
-        for _, n in {98, 99, 100, 101} do
+        for _, n in {99, 100, 101, 102} do
           table.insert(o, E(function() return chain(n, "__index").x end))
           table.insert(o, E(function() local t = chain(n, "__newindex") t.y = 1 return "set" end))
         end

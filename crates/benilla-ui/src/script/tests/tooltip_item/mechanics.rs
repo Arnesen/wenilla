@@ -247,6 +247,8 @@ fn a_bag_items_price_scales_by_its_charges_and_loses_its_repair_cost() {
 #[test]
 fn the_merchant_prices_an_object_held_past_the_worn_slots() {
     let mut s = script();
+    // The bank bands read through `GetItemInSlot`, open only at a banker.
+    s.set_bank(Some(crate::script::BankState::default()));
     s.set_screen_size(800.0, 600.0);
     for (id, name, sell_price) in [(4380, "Ring", 50), (4381, "Gem", 7), (4382, "Shard", 9)] {
         s.set_item_template(
@@ -876,6 +878,7 @@ fn a_looted_roll_shows_its_lines_and_never_the_placeholder() {
             quantity: 1,
             quality: Some(2),
             is_coin: false,
+            money: 0,
             item_id: 8888,
             link: Some("|cff1eff00|Hitem:8888:0:584:0|h[Bloodrazor of the Monkey]|h|r".into()),
             // The row carries the roll id; the engine resolves it, as the reference reads `+0x424`.
@@ -979,8 +982,9 @@ fn a_looted_item_with_no_roll_shows_neither_line_nor_placeholder() {
     );
 }
 
-/// A chat link is a block source too (`SetHyperlink` `0x532181`, p6 = 1): its `|Hitem:` token 2 is
-/// the roll, `0x52b7e0` expands it into slots 2..6, and `0x52c9a3` never reaches the placeholder.
+/// A link is a block source too (`SetHyperlink` `0x532181`, p6 = 1): its `item:` field 3 is the
+/// roll, `0x52b7e0` expands it into slots 2..6 and joins its suffix to the name (`0x5d8b00`), and
+/// `0x52c9a3` never reaches the placeholder.
 #[test]
 fn a_linked_roll_shows_its_lines_and_never_the_placeholder() {
     let mut s = script();
@@ -1014,7 +1018,8 @@ fn a_linked_roll_shows_its_lines_and_never_the_placeholder() {
         local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
         local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
         tt:SetOwner(Slot, "ANCHOR_RIGHT")
-        tt:SetHyperlink("|cff1eff00|Hitem:8888:0:584:0|h[Bloodrazor of the Monkey]|h|r")
+        ITEM_SUFFIX_TEMPLATE = "%s %s"
+        tt:SetHyperlink("item:8888:0:584:0")
     "#,
     )
     .unwrap();
@@ -1029,7 +1034,7 @@ fn a_linked_roll_shows_its_lines_and_never_the_placeholder() {
     assert_eq!(
         texts.first().map(String::as_str),
         Some("Bloodrazor of the Monkey"),
-        "the plate takes the link's own suffixed name — got {texts:?}"
+        "the builder joins the roll's suffix to the name — got {texts:?}"
     );
     assert!(
         texts.iter().any(|t| t == "Agility +7"),

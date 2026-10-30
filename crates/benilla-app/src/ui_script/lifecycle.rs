@@ -10,19 +10,23 @@ use benilla_ui::script::UiScript;
 use benilla_world::frame_pace::FrameStep;
 
 use super::manifest::silenced_ui_load;
-use super::{load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock, UiKeyboardCapture};
+use super::{load_ingame_ui, PlayerUiHover, UiClock, UiKeyboardCapture};
 use crate::ui_script::addons;
 use crate::ui_script::addons::Addon;
 
+/// The startup's glue: built, then put up on the screen the `movie` CVar picks
+/// ([`super::glue::startup_screen`]).
 pub(crate) fn setup_script(world: &mut World) {
-    install_glue_side_vm(world, super::glue::GlueScreen::Login.key());
+    if !install_glue_vm(world, None) {
+        error!("ui_script: the glue VM did not come up with its character select screen");
+    }
 }
 
 /// Install the VM the world holds outside the world: the glue screens', put up on the screen
 /// named `screen`. A glue whose select screen did not load (logged as an error by [`new_vm`] or
 /// the load) asks for no roster, and nothing else does.
 pub(super) fn install_glue_side_vm(world: &mut World, screen: &str) {
-    if !install_glue_vm(world, screen) {
+    if !install_glue_vm(world, Some(screen)) {
         error!("ui_script: the glue VM did not come up with its character select screen");
     }
 }
@@ -46,11 +50,11 @@ pub(crate) fn strings_vm(world: &mut World) -> Option<UiScript> {
     Some(script)
 }
 
-/// Build the glue VM, load the stock GlueXML onto it, install it and put `screen` up: the glue
-/// builder `0x46a7b0` then `SET_GLUE_SCREEN` (`0x402b65` at startup, `0x402090` back from the
-/// world). It holds what the glue state holds and nothing of a boot VM's: no `GlobalStrings.lua`,
-/// no emote tokens.
-fn install_glue_vm(world: &mut World, screen: &str) -> bool {
+/// Build the glue VM, load the stock GlueXML onto it, install it and put `screen` up, or with
+/// `None` the startup's pick: the glue builder `0x46a7b0` then `SET_GLUE_SCREEN` (`0x402b65` at
+/// startup, `0x402090` back from the world). It holds what the glue state holds and nothing of a
+/// boot VM's: no `GlobalStrings.lua`, no emote tokens.
+fn install_glue_vm(world: &mut World, screen: Option<&str>) -> bool {
     let Some(mut script) = new_vm(world, UiScript::new_glue) else {
         return false;
     };
@@ -70,6 +74,12 @@ fn install_glue_vm(world: &mut World, screen: &str) -> bool {
     start_server_alert(world, &script);
     // What the glue carries across its rebuild, in place before the screen's `OnShow` reads it.
     super::glue_mgr::seat_glue_build(world, &mut script);
+    // The startup reads the `movie` CVar after the build (`0x402b3b`), its write reaching the
+    // VM's mirror with the next sync.
+    let screen = match screen {
+        Some(screen) => screen,
+        None => super::glue::startup_screen(world.get_resource_mut::<crate::cvars::Cvars>()),
+    };
     // `SetCurrentScreen`'s buffer is the client's (`[0xb41478]`) and outlives the Lua state: a
     // rebuild signals what it holds (`0x46b9a2`), and the screen's handler writes the same name.
     script.set_glue_screen_name(screen);
@@ -155,8 +165,21 @@ fn new_vm<E: std::fmt::Display>(
     script.set_locale(super::client_locale().index());
     // `[0x882730]`, `Wow.ini`'s `Region`, read once alike and handed to the name check.
     script.set_client_region(super::client_region());
+    // The name checks' word lists, client globals start-up compiles once (`0x402b7f` → `0x6c91a0`).
+    if let Some(names) = world.get_resource::<crate::text_filter::NameFilter>() {
+        script.set_name_lists(std::rc::Rc::new(names.clone()));
+    }
     seed_vm_clock(world, &mut script);
     seed_game_time(world, &mut script);
+    // The ping's statics (`0xbc787c`, `0xbc7880`), which nothing clears, a `ReloadUI` included.
+    if let Some(ping) = world.get_resource::<crate::minimap::MinimapPing>() {
+        script.set_minimap_ping_point(ping.point());
+    }
+    // The joined-channel slots, the copy the lookups read with no host lent, so a `/reload`'s
+    // load reads `GetChannelName` as the slot array stands.
+    if let Some(channels) = world.get_resource::<crate::ui_chat::ChannelState>() {
+        channels.mirror_into(&mut script);
+    }
     // The reference seeds `rand` with the clock before `WinMain` (`0x5b800b`). Deviation: a
     // capture run (`scenario_active`) keeps the CRT's default seed, 1, so its frames reproduce.
     if crate::run_mode::scenario_active() {
@@ -186,10 +209,16 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
             ui_now: now,
         };
     }
+    if let Some(mut clock) = world.get_resource_mut::<super::HostClock>() {
+        clock.0 = UiClock {
+            anchor,
+            ui_now: now,
+        };
+    }
 }
 
 /// Start the new VM's `GetGameTime()` at the game clock as it stands: the reference's clock is one
-/// object (`0xce8538`) built at start-up with every field -1 (`0x643300`, `0x642300`) and reset
+/// object (`0xce8538`) built at start-up with its time at -1 (`0x643300`, `0x642300`) and reset
 /// by no logout or `ReloadUI`, so a VM answers -1, -1 before any server time and the last known
 /// time after it, from the first line its addons run.
 fn seed_game_time(world: &World, script: &mut UiScript) {
@@ -204,7 +233,7 @@ fn seed_game_time(world: &World, script: &mut UiScript) {
 /// authored size on an axis takes it from its art as the client's virtual size getters do. Each
 /// probe resolves through the store and the open its renderer reads (an interface texture's,
 /// [`LooseOpen::Index`], and a font face's, [`LooseOpen::BareNameFirst`]), so the answer is what
-/// draws; they test existence, not decode.
+/// draws; they test existence, not decode. The movie frame's reader rides along.
 fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
     let Some(mut assets) = world.get_resource_mut::<benilla_assets::WorldAssets>() else {
         return;
@@ -214,8 +243,12 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
     let chain = assets.chain.clone();
     let size_chain = chain.clone();
     let size_loose = loose.clone();
+    let cursor_chain = chain.clone();
+    let cursor_loose = loose.clone();
     let font_chain = chain.clone();
     let font_loose = loose.clone();
+    let movie_chain = chain.clone();
+    let movie_loose = loose.clone();
     // `SetTexture` runs per frame in the addons that set an icon every `OnUpdate`: the probe
     // keeps what it read of a file.
     let probe = benilla_assets::SpriteProbe::default();
@@ -231,6 +264,21 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
         let measured = benilla_assets::sprite_dimensions(&size_chain, &size_loose, path);
         sizes.borrow_mut().insert(path.to_string(), measured);
         measured
+    }));
+    // The movie frame's files: the `.avi` loose first (`0x78c39f`, flag 1), the `.sbt` from the
+    // archives alone (`0x6485f0`, flags 0).
+    script.set_movie_reader(Box::new(move |path, open| {
+        let open = match open {
+            benilla_ui::script::MovieOpen::LooseFirst => LooseOpen::Index,
+            benilla_ui::script::MovieOpen::Archives => LooseOpen::Archives,
+        };
+        benilla_assets::read_loose_or_chain(&movie_chain, &movie_loose, path, open)
+    }));
+    // `SetCursor`'s 32×32 test reads the picture the cursor code opens (`0x449610`), its `.blp`
+    // alone, decoded each call as `0x523c98` waits on the load.
+    script.set_cursor_size_probe(Box::new(move |path| {
+        benilla_assets::file_texture_rgba(&cursor_chain, &cursor_loose, path)
+            .map(|(w, h, _)| (w, h))
     }));
     // Existence over the same stores, in the same order, as `ui_text::engine`'s face loader,
     // memoised because a path's answer cannot change and an addon may call `SetFont` every frame.
@@ -341,6 +389,8 @@ struct EntryInputs {
     legacy_plates: crate::vplates::LegacyPlateSettings,
     /// `uiScale`, seated on `UIParent` at the load's close.
     ui_scale: f32,
+    /// The edge the load runs under.
+    seat: LoadSeat,
 }
 
 /// The glue VM, parked between the world-entry edge and the deferred load, out of every feed's
@@ -384,9 +434,10 @@ fn unpark_glue_vm(world: &mut World) {
 /// socket threads only enqueue (`0x537b7c`; `SMSG_PONG` at `0x537b56` the one bypass), and the
 /// login request waits for the UI (`0x46c272`).
 ///
-/// Two terms, because the latch trails the wire by a frame: `apply_net_updates` drains `Connected`
-/// and the login burst behind it in one pass, and the `InWorld` transition that arms the latch and
-/// parks the VM runs at the next frame's `StateTransition`; the `InWorld` term covers that frame.
+/// Two terms, because the latch trails the wire by a frame: [`crate::net::apply_net_updates`]
+/// drains `Connected`, holding the login burst behind it until the load has run, and the `InWorld`
+/// transition that arms the latch and parks the VM runs at the next frame's `StateTransition`; the
+/// `InWorld` term covers that frame.
 pub(crate) fn ingame_ui_up(
     pending: Option<Res<PendingEntryUiLoad>>,
     state: Option<Res<State<crate::client_state::ClientState>>>,
@@ -395,11 +446,19 @@ pub(crate) fn ingame_ui_up(
         && state.is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld)
 }
 
+/// [`ingame_ui_up`] off the world, for a caller that holds it.
+pub(crate) fn ingame_ui_up_in(world: &World) -> bool {
+    !world.contains_resource::<PendingEntryUiLoad>()
+        && world
+            .get_resource::<State<crate::client_state::ClientState>>()
+            .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld)
+}
+
 /// `PreUpdate`, after [`run_pending_reload`] so a reload never interleaves an armed entry load:
 /// run the armed entry load once the cover has presented, at once when there is no cover (a
 /// capture booting straight `InWorld`). Leaving the world first drops the latch unrun, and
-/// [`end_ui_session`] then skips the shutdown writes, so a UI-less VM never overwrites the saved
-/// files.
+/// [`shut_down_session`] then skips the shutdown writes, so a UI-less VM never overwrites the
+/// saved files.
 pub(crate) fn run_pending_entry_load(world: &mut World) {
     if world.get_resource::<PendingEntryUiLoad>().is_none() {
         return;
@@ -439,9 +498,20 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 cvars.set_read_only(name, true);
             }
         }
+        // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI.
+        crate::death::zero_release_timer(world);
     }
     unpark_glue_vm(world);
     if !ui_wanted(world) {
+        // A capture without the UI enters on a boot VM, since the glue VM's frames would paint
+        // the login screen over the world.
+        if world
+            .get_non_send_resource::<UiScript>()
+            .is_some_and(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
+        {
+            crate::cvars::fold_dying_vm_cvars(world);
+            install_boot_vm(world);
+        }
         world.remove_resource::<PendingEntryUiLoad>();
         // The world entry's own step still runs with no UI to load.
         crate::vplates::clear_at_world_entry(world);
@@ -565,7 +635,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     .unwrap_or_default();
                 entry_finish(world, &mut script, &pending.inputs);
                 script.pop_sound_suppression();
-                entry_close(world, script, pending.inputs.identity);
+                entry_close(world, script, pending.inputs.identity, pending.inputs.seat);
                 // The world entry's own step after the UI load, which a `ReloadUI()` never takes.
                 crate::vplates::clear_at_world_entry(world);
                 // Every entry logs the load's cost, over how many frames, whether the cover hid
@@ -599,16 +669,12 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 /// (`WorldMapFrame.lua:19-28`), which answer the root while `UIParent` is still at scale 1. With no
 /// atlas yet (it bakes on the first `Update`) the per-frame pass seats the measurer.
 fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
-    let (w, h) = {
-        let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world)
-            .map_or((0.0, 0.0), |win| (win.width(), win.height()))
-    };
-    let s = super::seam_scale(h);
-    if w > 0.0 && h > 0.0 {
-        // The VM lives in a 768-tall root, `768·a` wide for the window's aspect `a`. No
+    let screen = interface_screen(world);
+    let s = super::seam_scale(screen.size.y);
+    if screen.size.x > 0.0 && screen.size.y > 0.0 {
+        // The VM lives in a 768-tall root, `768·a` wide for the interface's aspect `a`. No
         // `UIParent_ManageFramePositions` here, unlike `tick_script`: nothing is laid out yet.
-        script.set_window_size(w, h);
+        script.set_screen_aspect(screen.aspect);
     }
     let Some(atlas) = world.get_resource::<crate::ui_text::UiFontAtlas>() else {
         return;
@@ -616,12 +682,23 @@ fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
     super::extract::seat_text_measurer(script, atlas, s);
 }
 
+/// The interface's screen for the primary window ([`super::UiScreen`]), of no area with no window.
+fn interface_screen(world: &mut World) -> super::UiScreen {
+    let widescreen = world.get_resource::<crate::video::Widescreen>().copied();
+    let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+    q.single(world)
+        .map_or(super::UiScreen::of(Vec2::ZERO, true), |win| {
+            super::UiScreen::of_window(win, widescreen.as_ref())
+        })
+}
+
 /// Which `"player"` a UI load runs its files under, by the edge that runs it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum LoadSeat {
     /// World entry: `UI_Init` runs before `CMSG_PLAYER_LOGIN` goes out (the load at `0x46c236`,
     /// the send in a later step at `0x46c272`), so no player object exists and the roster's
     /// record stands in ([`seat_from_roster`]).
+    #[default]
     Roster,
     /// `/reload`: the player object stays in the world through the teardown and the load, so the
     /// live one is seated ([`crate::ui_unit::live_player_seat`]), the roster's if none exists.
@@ -655,10 +732,22 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
 
 /// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has.
 fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
+    // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI; its
+    // place in the load is unseen here, as the new VM reads the death snapshot only after it.
+    crate::death::zero_release_timer(world);
     // The parked VM goes back into the world, where the CVar fold reads it; a reload has none
     // parked and uses the live one.
     unpark_glue_vm(world);
     if !ui_wanted(world) {
+        // A capture without the UI enters on a boot VM, since the glue VM's frames would paint
+        // the login screen over the world; a reload already holds one.
+        if world
+            .get_non_send_resource::<UiScript>()
+            .is_some_and(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
+        {
+            crate::cvars::fold_dying_vm_cvars(world);
+            install_boot_vm(world);
+        }
         return;
     }
     mint_entry_vm(world);
@@ -680,7 +769,7 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
         });
         entry_finish(world, script, &inputs);
     });
-    entry_close(world, script, inputs.identity);
+    entry_close(world, script, inputs.identity, seat);
 }
 
 /// The load's opening, before the first file: everything the VM is told out of the world.
@@ -716,7 +805,8 @@ fn entry_prepare(world: &mut World, script: &mut UiScript, seat: LoadSeat) -> En
     // The item locks before any file or event runs: a `/reload`'s survive, as on the reference's
     // item objects.
     crate::ui_items::locks::seed_vm_item_locks(world, script, seat == LoadSeat::Live);
-    crate::ui_party::seed_vm_ready_check(world, script, seat == LoadSeat::Live);
+    crate::ui_party::seed_vm_party(world, script, seat == LoadSeat::Live);
+    crate::ui_guild::seed_vm_guild(world, script, seat == LoadSeat::Live);
     // The realm before the load, since addons read `GetRealmName()` at file scope; the roster
     // carries the realm-list entry this session connected to.
     let realm = world
@@ -766,10 +856,9 @@ fn entry_prepare(world: &mut World, script: &mut UiScript, seat: LoadSeat) -> En
             }
         }
     }
-    // A reload's group, before any file reads it: the reference's frames load over the engine's
-    // roster and hear no group event for it ([`crate::ui_party::seed_reloaded_vm`]).
+    // A reload's bar, which the engine keeps through the reload (`0xbc6980`, `0xbc6390`).
     if seat == LoadSeat::Live {
-        crate::ui_party::seed_reloaded_vm(world, script);
+        crate::ui_action::seed_reloaded_vm(world, script);
     }
     // The addon version gate, read from the persisted base the fold above just made current, so a
     // character-screen "Load out of date AddOns" click counts. A bare test world is check on.
@@ -777,21 +866,25 @@ fn entry_prepare(world: &mut World, script: &mut UiScript, seat: LoadSeat) -> En
         .get_resource::<crate::cvars::Cvars>()
         .is_none_or(crate::cvars::Cvars::addon_version_check);
     // Per-VM `Update` claims the load itself reads, seeded now: the zone-channel catalog (empty,
-    // `General` would be filed and joined as a custom channel), the binding table (stock
-    // `ActionButton_OnLoad` paints the hotkeys), the default language (`ChatFrame_OnEvent`'s
-    // `PLAYER_ENTERING_WORLD` arm stores it, `ChatFrame.lua:1275-1276`) and the language table a
-    // file-scope `SendChatMessage` names its tongue from.
+    // `General` would be filed and joined as a custom channel), the default bindings the stored
+    // sets are diffs against, and the language table a file-scope
+    // `SendChatMessage` names its tongue from. The default language is never seeded: it is the
+    // held player's (`0x49fce9`), and a login's load runs before the player's create can arrive
+    // (the login-verify handler is registered after it, `0x401789`), so the load reads none.
     crate::ui_chat::seed_zone_channel_catalog(world, script);
-    crate::bindings::seed_bindings_for_vm(world, script);
-    // The engine globals a previous VM folded out: the quest log's fold mask and the tradeskill
-    // repeat.
-    crate::ui_quest_log::seed_quest_folds(world, script);
+    crate::bindings::seed_bindings_for_vm(script);
+    // The engine globals a previous VM folded out: the quest log's fold mask, with the records its
+    // cache holds, and the tradeskill repeat.
+    crate::ui_quest_log::seed_quest_log(world, script);
     crate::ui_tradeskill::seed_repeat(world, script);
-    crate::ui_unit::seed_default_language(world, script);
     crate::ui_unit::seed_language_table(world, script);
     // The world map's continent and zone lists: static DBC data in the reference, read at file
     // scope (Astrolabe builds its whole zone table from `GetMapContinents`/`GetMapZones` there).
     crate::ui_world_map::seed_world_map_catalog(world, script);
+    // The auction filter menus: `ItemClass.dbc` and `ItemSubClass.dbc` read inside the verbs, so a
+    // file-scope `GetAuctionItemClasses()` (and the stock `AuctionFrameBrowse_OnLoad`) sees them;
+    // and the lists the house holds, with their order and key stacks.
+    crate::ui_auction::seed_vm(world, script);
     // Screen size and measurer before the first `<OnLoad>`: this VM is loaded before `tick_script`
     // seats either, and the load measures text (the stock tab template's `OnLoad` sizes from its
     // text width, `UIPanelTemplates.xml:370-373`), which answers 0 with no measurer.
@@ -811,12 +904,19 @@ fn entry_prepare(world: &mut World, script: &mut UiScript, seat: LoadSeat) -> En
     } else {
         Default::default()
     };
+    // Our own `[0xb4b3e4]`, which `HasFullControl` reads and a reload leaves as it stands; its
+    // changes signal where the control packet stores them.
+    let in_control = !world
+        .get_resource::<crate::player::OwnControlLost>()
+        .is_some_and(|c| c.0);
+    script.set_player_control(in_control);
     EntryInputs {
         identity,
         roster,
         version_check,
         legacy_plates,
         ui_scale,
+        seat,
     }
 }
 
@@ -843,20 +943,26 @@ fn entry_finish(world: &mut World, script: &mut UiScript, inputs: &EntryInputs) 
             crate::vplates::seat_legacy_settings(script, &inputs.legacy_plates)
         });
     });
+    // The account-data readers register after `VARIABLES_LOADED`, in `CGGameUI::Initialize`'s
+    // order: the layout's (`0x4900c2`), the bindings' (`0x4900c7` → `0x4b62b0`), the macros'
+    // (`0x4900d1` → `0x4f0a70`), then the chat setup's below (`0x4900d6`). Each reads now on a
+    // settled section, a `/reload`'s, else once it settles.
+    crate::ui_layout::register_layout_reader(world, script);
+    crate::bindings::register_binding_readers(world, script);
+    crate::ui_macro::register_macro_readers(world, script);
     // The chat cache restores after `VARIABLES_LOADED` and before any chat is routed: its
     // `UPDATE_CHAT_WINDOWS` registers each chat frame for its `CHAT_MSG_*` events
     // (`ChatFrame.lua:1261-1273`).
     crate::ui_chat::restore_chat_looks(world, script);
+    // The trainer rows the engine holds through a reload, read with the files' strings.
+    if inputs.seat == LoadSeat::Live {
+        crate::ui_trainer::seed_reloaded_vm(world, script);
+    }
     // The UI scale lands on `UIParent` once the files, the addons and `VARIABLES_LOADED` are
     // done, after the chat reader (`0x4900d6`) and before the `PLAYER_LOGIN` arm (`0x49011d`),
     // through the display handler (`0x49010e` → `0x492e90`). So every `OnLoad` sees `UIParent`
     // at scale 1 and the root's size.
-    let display = {
-        let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world).map_or((0, 0), |w| {
-            (w.width().round() as u32, w.height().round() as u32)
-        })
-    };
+    let display = interface_screen(world).display();
     let cached = world.get_resource::<super::UiAutoScaleCache>().map(|c| c.0);
     let mut cache = cached.flatten();
     crate::script_calls::lent_by_world(world, script, |script| {
@@ -869,17 +975,24 @@ fn entry_finish(world: &mut World, script: &mut UiScript, inputs: &EntryInputs) 
 }
 
 /// The load's tail after the silent bracket; hands the VM to the world.
-fn entry_close(world: &mut World, mut script: UiScript, identity: Option<(String, String)>) {
+fn entry_close(
+    world: &mut World,
+    mut script: UiScript,
+    identity: Option<(String, String)>,
+    seat: LoadSeat,
+) {
     // The load's record goes to `Logs\FrameXML.log` (`0x490187`-`0x4901b6`), after any
     // `LoadAddOn` block the load ran; nothing reaches chat.
     script.finish_ui_load_log();
     super::load_log::write(script.take_load_log_writes());
-    // `DAMAGE_TEXT_FONT` binds at the end of the load, after every addon's `ADDON_LOADED` (where
-    // MikScrollingBattleText and pfUI assign it). The reference reads it eagerly, once per world
-    // entry (`0x6c8470`, called at `0x401620` in `0x401570`, after the UI load at `0x401602`),
-    // and never again: `[0xce8820]` has one writer, and a `/reloadui` does not re-run it, where
-    // this edge re-reads it on every reload.
-    world.insert_resource(crate::combat_text::read_damage_text_font(&script));
+    // `DAMAGE_TEXT_FONT` binds at the end of the world entry's load, after every addon's
+    // `ADDON_LOADED` (where MikScrollingBattleText and pfUI assign it): `0x6c8470` is called only at
+    // `0x401620` in `0x401570`, after the UI load at `0x401602`, and `0x401570` only from Enter
+    // World (`0x46c236`). A `/reload` runs the teardown and the load alone (`0x495664`,
+    // `0x495669`), so the face the login read stays until the next login.
+    if seat == LoadSeat::Roster {
+        world.insert_resource(crate::combat_text::read_damage_text_font(&script));
+    }
     // The load is over: disarm its instruction bound, so no handler is killed for being slow.
     script.clear_instruction_budget();
     world.insert_non_send_resource(script);
@@ -969,7 +1082,7 @@ pub(crate) fn seat_from_roster(
         is_player: true,
         player_controlled: true,
         // AceDB-2.0 concatenates `UnitFactionGroup("player")` at file scope, where nil is an error.
-        faction_group: crate::ui_unit::race_faction_group(row.race).map(str::to_string),
+        faction_group: names.faction_group(row.race).map(str::to_string),
         ..Default::default()
     })
 }
@@ -1019,8 +1132,10 @@ pub(crate) enum ShutdownRoot {
 ///   (`0x493549` → `0x467d00`, `0x4939d3`, returning at `0x4939df` before the send and the
 ///   event), and `CMSG_CANCEL_TRADE` still goes. The guard then finds no player.
 ///
-/// The sweep runs only with our own player present: the guard's `0x468550`, and on the teardown
-/// the destructor's own gate (`0x5dd71c`), so a refused login sweeps nothing.
+/// The sweep runs only with our own player present: on a `/reload` the guard's `0x468550`; on the
+/// teardown the destructor's own gate (`0x5dd71c`), which the world latch stands for, as a logout
+/// despawns our avatar in its packet's frame, a frame before this runs: our own create arms it
+/// (`0x5deb60`), so a refused login sweeps nothing.
 fn run_shutdown_front(world: &mut World, root: ShutdownRoot) -> bool {
     let seated = world
         .query_filtered::<(), With<crate::net::SelfPlayer>>()
@@ -1038,9 +1153,7 @@ fn run_shutdown_front(world: &mut World, root: ShutdownRoot) -> bool {
             silenced
         }
         ShutdownRoot::WorldTeardown => {
-            if seated {
-                super::run_leave_world_sweep(world);
-            }
+            super::run_leave_world_sweep(world);
             let silenced = silence_ui_shutdown(world);
             run_ui_shutdown_head(world, false);
             silenced
@@ -1064,7 +1177,8 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
         // A harness without the target stack has no selection to drop.
         let deselected =
             crate::script_calls::run_cached(world, crate::target::deselect_on_ui_shutdown)
-                .unwrap_or(false);
+                .ok()
+                .flatten();
         // The teardown's own loot close, on a window looting the target (`0x493959`-`0x493974`).
         let loot_closed = looting.is_some()
             && world
@@ -1074,14 +1188,11 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
         if loot_closed {
             let _ = crate::script_calls::run_cached(world, crate::ui_loot::tell_loot_closed);
         }
-        if deselected {
-            crate::script_calls::with_hosted_vm(world, |script| {
-                if let Some(script) = script {
-                    script.set_unit("target", None);
-                    script.set_unit("targettarget", None);
-                    script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-                }
-            });
+        // Then its signals, in place, after the loot close (`0x493a2a`, `0x493a73`).
+        if let Some(select) = deselected {
+            let _ =
+                world.run_system_cached_with(crate::target::signal_ui_shutdown_deselect, select);
+            crate::creature_anim::apply_unit_edits(world);
         }
     } else {
         let _ = crate::script_calls::run_cached(
@@ -1122,20 +1233,46 @@ fn cancel_move_action(world: &mut World) {
 /// ordered against each other; the layout save is here because a `/reload` never leaves
 /// `InWorld`. No autosave, as the reference has none (the layout cache's crash-only debounce in
 /// [`crate::ui_layout`] is ours).
-pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String, String)>) {
+///
+/// `layout_held`: the layout section is pending, its reader held, so its write is skipped
+/// (`0x5afed0` returns at `0x5afee0`).
+pub(crate) fn shutdown_ui_state(
+    script: &mut UiScript,
+    identity: Option<&(String, String)>,
+    layout_held: bool,
+) {
     script.fire_event("PLAYER_LOGOUT", vec![]);
-    crate::ui_layout::save_now(script, identity);
+    if !layout_held {
+        crate::ui_layout::save_now(script, identity);
+    }
     crate::ui_saved::save(script);
     addons::save_addon_variables(script, identity);
     addons::save_enable_state(script, identity);
 }
 
-/// `OnExit(InWorld)`, a `/logout` or a disconnect (two of the reference's five roots): run the
-/// shutdown tail, then end this session's Lua state, so no frame, global or addon upvalue reaches
-/// the next login. The reference's state outlives `0x490bd0` and is replaced twice through
-/// `0x703b80`, in `ShutdownGame` (at `0x491231`) and then in the glue build (`0x46a7b0`), so the
-/// character screen runs on a state of its own. Ours is a fresh glue VM ([`install_glue_side_vm`]).
+/// The session's end in `OnExit(InWorld)`, in its order: the shutdown with its `PLAYER_LOGOUT`
+/// ([`shut_down_session`]), then the clears of what the dying state still shows (the chat
+/// windows, the channels, the auras), then the glue VM ([`install_session_glue`]). In the
+/// reference `0x490bd0` signals `PLAYER_LOGOUT` (`0x490c2a`) to the world's state while it is
+/// whole, and that state is replaced only in `ShutdownGame` (`0x491231`).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SessionEnd {
+    Shutdown,
+    Clears,
+    Glue,
+}
+
+/// The session's end at once, both halves with no clears between them, as a test runs it.
+#[cfg(test)]
 pub(crate) fn end_ui_session(world: &mut World) {
+    shut_down_session(world);
+    install_session_glue(world);
+}
+
+/// `OnExit(InWorld)`, a `/logout` or a disconnect (two of the reference's five roots), up to the
+/// glue VM: the shutdown tail and the session's folds. [`install_session_glue`] then ends this
+/// session's Lua state, so no frame, global or addon upvalue reaches the next login.
+pub(crate) fn shut_down_session(world: &mut World) {
     close_ui_session(world, ShutdownRoot::WorldTeardown);
     // `ShutdownGame`'s clear of the world session's read-only flags (`0x491240`-`0x49125d`); a
     // `/reload` never comes here.
@@ -1153,9 +1290,13 @@ pub(crate) fn end_ui_session(world: &mut World) {
     {
         carry.0 = 0;
     }
-    if let Some(mut petition) = world.get_resource_mut::<crate::ui_petition::PetitionState>() {
-        petition.forget_announced();
-    }
+}
+
+/// The session's end's last step: the glue VM in place of the world's. The reference's state
+/// outlives `0x490bd0` and is replaced twice through `0x703b80`, in `ShutdownGame` (at
+/// `0x491231`) and then in the glue build (`0x46a7b0`), so the character screen runs on a state
+/// of its own. Ours is a fresh glue VM ([`install_glue_side_vm`]).
+pub(crate) fn install_session_glue(world: &mut World) {
     // `0x401ee0`'s glue leg: `"charselect"` after a logout, `"login"` after a disconnect
     // (`0x402084`); the state this exit enters says which.
     let screen = match world
@@ -1168,7 +1309,8 @@ pub(crate) fn end_ui_session(world: &mut World) {
     install_glue_side_vm(world, screen.key());
 }
 
-/// [`end_ui_session`] up to the new VM: the shutdown tail, the folds and the host values reset.
+/// The shutdown a logout and a reload share, up to the new VM: the shutdown tail, the folds and
+/// the host values reset.
 fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     // The front runs before the unpark, so a VM still parked (the load never ran) hears none of
     // it; the sweep's latch is spent at the root, so of this edge and the worldport's, the first
@@ -1182,12 +1324,20 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
+    let layout_held = world
+        .get_resource::<crate::account_data::AccountData>()
+        .is_some_and(|data| data.pending(crate::account_data::LAYOUT));
     if !ui_never_loaded {
         crate::script_calls::with_hosted_vm(world, |script| {
             if let Some(script) = script {
-                shutdown_ui_state(script, identity.as_ref());
+                shutdown_ui_state(script, identity.as_ref(), layout_held);
             }
         });
+        // The shutdown's account-data writes (`0x490c55`-`0x490c79` through `0x5afed0`) arm
+        // their uploads, which a `/reload`, staying in the world, lets run.
+        if let Some(data) = world.get_resource::<crate::account_data::AccountData>() {
+            data.shut_down_ui();
+        }
     }
     if silenced {
         unsilence_ui_shutdown(world);
@@ -1201,6 +1351,8 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     crate::ui_items::locks::fold_dying_vm_item_locks(world);
     // And the ready check, engine state the reference's reload never writes.
     crate::ui_party::fold_dying_vm_ready_check(world);
+    // The guild roster's show-offline flag and selection, which only a login zeroes.
+    crate::ui_guild::fold_dying_vm_guild(world);
     // So do the engine globals the VM holds for the session: the quest log's fold mask and the
     // tradeskill repeat, which no UI init resets.
     crate::ui_quest_log::fold_dying_vm_quest_folds(world);
@@ -1219,12 +1371,12 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
         keys.arrows_fall_through = false;
         keys.consumed.clear();
     }
-    if let Some(mut held) = world.get_resource_mut::<CursorPayloadHeld>() {
-        *held = CursorPayloadHeld::default();
-    }
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;
     }
+    // And the signals the frame's field callbacks and releases parked in it, for their lanes.
+    crate::field_callbacks::drop_parked(world);
+    crate::target::drop_parked_releases(world);
 }
 
 /// A `ReloadUI()` waiting to run: set when [`crate::ui_logout`] drains
@@ -1235,12 +1387,13 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
 pub(crate) struct ReloadUiPending(pub(crate) bool);
 
 /// Run a pending `ReloadUI()`: the reference's teardown and rebuild (`0x495664 call 0x490bd0`,
-/// `0x495669 call 0x48fbf0`), for us [`end_ui_session`] then the load without leaving the world,
-/// so a `DisableAddOn` staged in the dying VM reaches `AddOns.txt` before the rebuild reads it.
+/// `0x495669 call 0x48fbf0`), for us the session's shutdown then the load without leaving the
+/// world, so a `DisableAddOn` staged in the dying VM reaches `AddOns.txt` before the rebuild
+/// reads it.
 /// The load runs under the live player, which never left. `UI_Init` then enters the world-enter
 /// cascade itself (`0x490168`), firing the `PLAYER_LOGIN` it armed and `PLAYER_ENTERING_WORLD`;
-/// ours fire from [`crate::ui_unit`]'s feed on the new VM's first `Update`, once it has re-seated
-/// the player. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the request
+/// ours is the arrival lane's item ([`crate::ui_world_enter::Entry::Reload`]), which fires in the
+/// drain after the new VM's feeds have seated it. In-world only, as the reference's gate (`0x494a50(0xa)`) is; elsewhere the request
 /// is dropped, and the glue's own rebuild is [`super::glue::run_pending_glue_rebuild`]'s.
 pub(crate) fn run_pending_reload(world: &mut World) {
     if !std::mem::take(&mut world.resource_mut::<ReloadUiPending>().0) {
@@ -1269,7 +1422,24 @@ pub(crate) fn run_pending_reload(world: &mut World) {
         .next()
         .is_some();
     if seated {
-        world.write_message(crate::net::WorldEnterCascadeMessage);
+        // The cascade itself, as an item on the arrival lane at this place
+        // ([`crate::ui_world_enter`]).
+        if let Some(mut lane) = world.get_resource_mut::<crate::ui_world_enter::ArrivalLane>() {
+            lane.push(crate::ui_world_enter::Entry::Reload);
+        }
+        crate::ui_world_enter::owe_window_resets(world);
+        // Its release of every command (`0x49093c` → `0x5144c0`): the shutdown's leave cleared
+        // the once-per-world latch (`0x490c20`, `0x490a8d`), so the cascade runs whole. The new
+        // VM's mouse commands start clear; the look session's channels and the armed click go.
+        if let Some(mut rig) = world.get_resource_mut::<crate::player::CameraControl>() {
+            rig.world_mouse.release_all();
+        }
+        if let Some(mut binds) = world.get_resource_mut::<crate::bindings::BindingsState>() {
+            binds.release_primaries();
+        }
+        if let Some(mut arm) = world.get_resource_mut::<crate::target::ClickArm>() {
+            arm.disarm();
+        }
     }
 }
 
@@ -1295,9 +1465,12 @@ pub(crate) fn shutdown_on_exit(
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
+    let layout_held = world
+        .get_resource::<crate::account_data::AccountData>()
+        .is_some_and(|data| data.pending(crate::account_data::LAYOUT));
     crate::script_calls::with_hosted_vm(world, |script| {
         if let Some(script) = script {
-            shutdown_ui_state(script, identity.as_ref());
+            shutdown_ui_state(script, identity.as_ref(), layout_held);
         }
     });
     if silenced {
@@ -1449,6 +1622,140 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The logout's `OnExit(InWorld)`: `0x490bd0` signals `PLAYER_LOGOUT` (`0x490c2a`) while the
+    /// world's state is whole, so its handler reads the auras and the chat windows as they stood;
+    /// the session's clears then run on that same state, before the glue VM replaces it.
+    #[test]
+    fn the_logout_clears_run_after_player_logout_and_on_the_world_vm() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        // The whole schedule, with no world loaded: a system missing what world entry inserts
+        // (the camera rig, the map) skips rather than panics.
+        app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
+            bevy::ecs::error::ignore,
+        ));
+        let notes: Rc<RefCell<Vec<String>>> = Rc::default();
+        let mut script = UiScript::new().expect("a VM");
+        script.set_tracking(Some(benilla_ui::script::TrackingState {
+            spell_id: 2580,
+            name: None,
+            icon: Some("TRACK".into()),
+            cancelable: false,
+        }));
+        let sink = notes.clone();
+        let note = script
+            .lua()
+            .create_function(move |_, text: String| {
+                sink.borrow_mut().push(text);
+                Ok(())
+            })
+            .expect("the note");
+        script.lua().globals().set("Note", note).expect("Note");
+        script
+            .run(
+                "for _, name in ipairs({'ChatFrame1', 'ChatFrame2'}) do \
+                     setglobal(name, { Clear = function() Note('clear') end }) \
+                 end \
+                 local f = CreateFrame('Frame') f:RegisterEvent('PLAYER_LOGOUT') \
+                 f:SetScript('OnEvent', function() \
+                     Note('logout ' .. tostring(GetTrackingTexture())) \
+                 end)",
+            )
+            .expect("the recorder installs");
+        app.insert_non_send_resource(script);
+        app.world_mut()
+            .run_schedule(OnExit(crate::client_state::ClientState::InWorld));
+        assert_eq!(*notes.borrow(), ["logout TRACK", "clear", "clear"]);
+    }
+
+    /// A cinematic in flight at the logout: the shutdown's sweep drops it and tells the VM
+    /// `CINEMATIC_STOP` (`0x490b69`-`0x490b77`) ahead of `PLAYER_LOGOUT` (`0x490c2a`), so the
+    /// cinematic's own drop at the session's end runs after it and cannot swallow the event.
+    #[test]
+    fn a_cinematic_in_flight_at_the_logout_stops_in_the_shutdowns_sweep() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
+            bevy::ecs::error::ignore,
+        ));
+        app.insert_resource(crate::cinematic::Cinematic::playing_for_test());
+        app.world_mut()
+            .resource_mut::<super::super::LeavingWorldArmed>()
+            .arm();
+        let notes: Rc<RefCell<Vec<String>>> = Rc::default();
+        let script = UiScript::new().expect("a VM");
+        let sink = notes.clone();
+        let note = script
+            .lua()
+            .create_function(move |_, text: String| {
+                sink.borrow_mut().push(text);
+                Ok(())
+            })
+            .expect("the note");
+        script.lua().globals().set("Note", note).expect("Note");
+        script
+            .run(
+                "local f = CreateFrame('Frame') f:RegisterEvent('CINEMATIC_STOP') \
+                 f:RegisterEvent('PLAYER_LEAVING_WORLD') f:RegisterEvent('PLAYER_LOGOUT') \
+                 f:SetScript('OnEvent', function() Note(event) end)",
+            )
+            .expect("the recorder installs");
+        app.insert_non_send_resource(script);
+        app.world_mut()
+            .run_schedule(OnExit(crate::client_state::ClientState::InWorld));
+        assert_eq!(
+            *notes.borrow(),
+            ["PLAYER_LEAVING_WORLD", "CINEMATIC_STOP", "PLAYER_LOGOUT"]
+        );
+    }
+
+    /// Every system of `OnExit(InWorld)` that fires into the dying interface or clears what it
+    /// reads runs in the session's end order ([`SessionEnd`]); the rest touch no Lua-visible
+    /// state (the sound's beds, kits and reverb, the camera's saved pose).
+    #[test]
+    fn every_session_end_system_that_reaches_the_lua_is_ordered() {
+        use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoints};
+        const NO_LUA: &[&str] = &[
+            "::sound::kit::stop_all_channels",
+            "::sound::reverb::leave_world",
+            "::sound::interior::leave_world",
+            "::sound::zone::leave_world",
+            "::camera_saved::save_on_session_end",
+            "::area::clear_committed_zone",
+            // The pass's end: the hosts' unit edits applied after them (`crate::vm_pass`).
+            "::creature_anim::edits::flush_unit_edits",
+        ];
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let exit = census(
+            &mut app,
+            OnExit(crate::client_state::ClientState::InWorld),
+            SyncPoints::Declared,
+        );
+        if !type_names_available(&exit) {
+            return;
+        }
+        let mut loose: Vec<&str> = exit
+            .systems
+            .values()
+            .filter(|s| {
+                !s.sets
+                    .iter()
+                    .any(|set| ["Shutdown", "Clears", "Glue"].contains(&set.as_str()))
+            })
+            .map(|s| s.name.as_str())
+            .filter(|n| !NO_LUA.iter().any(|ok| n.ends_with(ok)))
+            .collect();
+        loose.sort();
+        assert!(
+            loose.is_empty(),
+            "unordered against the session's end: {loose:?}"
+        );
+    }
+
     /// The roster's stand-in `"player"` and the record `UnitRace`/`UnitClass` read carry the
     /// table's names at the install's locale, and the tokens beside them.
     #[test]
@@ -1515,7 +1822,63 @@ mod tests {
         }
     }
 
-    /// The game clock is one object built at start-up with every field -1 (`0x643300`, `0x642300`)
+    /// The word lists are client globals start-up compiles once (`0x402b7f` → `0x6c91a0`), so a
+    /// world VM's guild name check (`0x6c9b70`) searches them as the glue VM's name checks do: a
+    /// NamesProfanity or ChatProfanity hit is refused as reserved (`0x6c9a51`, `0x4f5160`), and
+    /// NamesReserved is not searched (`0x6c9b76`).
+    #[test]
+    fn a_world_vm_checks_a_guild_name_against_the_clients_word_lists() {
+        use benilla_ui::script::PetitionCall;
+        let list = |p: &str| {
+            vec![benilla_formats::FilterPattern {
+                id: 1,
+                pattern: p.into(),
+            }]
+        };
+        let mut world = World::new();
+        world.insert_resource(
+            crate::text_filter::TextFilter::new(&list("heck"), &[])
+                .name_filter(&list("darn"), &list("thrall")),
+        );
+        let mut script = new_vm(&mut world, UiScript::new).expect("a VM");
+        script.keep_calls();
+        let refused = PetitionCall::NameRefused("ERR_GUILD_NAME_RESERVED");
+        for (name, want) in [
+            ("Darnwood", refused.clone()),
+            ("Heckwood", refused),
+            ("Thrallwood", PetitionCall::Buy("Thrallwood".into())),
+        ] {
+            script.run(&format!("BuyGuildCharter({name:?})")).unwrap();
+            assert_eq!(script.take_petition_calls(), [want], "{name:?}");
+        }
+    }
+
+    /// The ping's two statics (`0xbc787c`, `0xbc7880`) outlive the VM, so a new one answers the
+    /// stored point from its first line: due north of a player at the origin, half the zoom
+    /// diameter out.
+    #[test]
+    fn a_new_vm_inherits_the_stored_ping() {
+        let mut world = World::new();
+        world.init_resource::<crate::minimap::MinimapPing>();
+        let d = 2.0 * benilla_ui::widget::minimap_radius_yd(3, 3, false);
+        world.resource_mut::<crate::minimap::MinimapPing>().member(
+            (0.5 * d, 0.0),
+            0xDEAD,
+            None,
+            None,
+        );
+        let mut script = new_vm(&mut world, UiScript::new).expect("a VM");
+        script.set_minimap_player(Some((0.0, 0.0)));
+        script
+            .run(r#"m = CreateFrame("Minimap", "Minimap")"#)
+            .unwrap();
+        let (x, y) = script
+            .eval::<(f64, f64)>("return m:GetPingPosition()")
+            .unwrap();
+        assert!(x.abs() < 1e-6 && (y - 0.5).abs() < 1e-6, "{x} {y}");
+    }
+
+    /// The game clock is one object built at start-up with its time at -1 (`0x643300`, `0x642300`)
     /// that no logout or `ReloadUI` resets, and `GetGameTime` reads it unguarded (`0x515ee0`), so a
     /// VM answers -1, -1 before any server time and the last known time after it, from the first
     /// line its addons run.
@@ -1607,6 +1970,28 @@ mod tests {
         assert!(world.get_non_send_resource::<ParkedGlueVm>().is_none());
     }
 
+    /// A capture without the UI enters the world on a boot VM, not the glue VM parked at the
+    /// entry edge, whose frames would paint the login screen over the world.
+    #[test]
+    fn a_capture_without_the_ui_enters_the_world_on_a_boot_vm() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _cap = EnvGuard::unset("WOW_CAPTURE");
+        let _ui = EnvGuard::unset("WOW_CAPTURE_UI");
+        let mut world = World::new();
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        world.insert_non_send_resource(UiScript::new_glue().unwrap());
+        arm_entry_ui_load(&mut world);
+        run_pending_entry_load(&mut world);
+        assert_eq!(
+            world.non_send_resource::<UiScript>().vm_kind(),
+            benilla_ui::script::VmKind::InGame
+        );
+    }
+
     /// The plate bits clear at the world entry (`0x401639`, in the entry setup `0x401570`) and
     /// not at a `ReloadUI()`, which never runs that setup. A capture world, so no UI is built.
     #[test]
@@ -1664,16 +2049,16 @@ mod tests {
     }
 
     /// A `ReloadUI()` runs the leave-world sweep (`0x490c20`, past the armed latch) and then
-    /// re-enters the world-enter cascade (`0x490168`), whose readers re-send the time, mail,
-    /// battlefield and meeting-stone queries, only with the active player set (`0x490166 je`).
+    /// re-enters the world-enter cascade (`0x490168`), queued on the arrival lane, only with the
+    /// active player set (`0x490166 je`).
     #[test]
     fn a_reload_sweeps_and_reenters_the_world_enter_cascade_once_the_player_exists() {
-        use crate::net::WorldEnterCascadeMessage;
+        use crate::ui_world_enter::{ArrivalLane, Entry};
         let reload = |seated: bool| {
             let mut world = World::new();
             world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
             world.insert_resource(crate::run_mode::CaptureMode);
-            world.init_resource::<Messages<WorldEnterCascadeMessage>>();
+            world.init_resource::<ArrivalLane>();
             world.init_resource::<super::super::SweptWorlds>();
             world.init_resource::<super::super::LeavingWorldArmed>();
             world
@@ -1686,16 +2071,79 @@ mod tests {
             run_pending_reload(&mut world);
             assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
             let sweeps = world.resource::<super::super::SweptWorlds>().0;
-            let cascades = world
-                .resource_mut::<Messages<WorldEnterCascadeMessage>>()
-                .drain()
-                .count();
-            (sweeps, cascades)
+            (sweeps, world.resource::<ArrivalLane>().entries())
         };
-        assert_eq!(reload(true), (1, 1), "in the world");
+        assert_eq!(reload(true), (1, vec![Entry::Reload]), "in the world");
         assert_eq!(
             reload(false).1,
-            0,
+            Vec::<Entry>::new(),
+            "no cascade before our own player's create"
+        );
+    }
+
+    /// `UI_Init` zeroes the release timer at each load (`0x490131`, `0x490137`), so a `/reload`
+    /// after our death answers 0 (`0x4962b6`) and shows no DEATH popup.
+    #[test]
+    fn a_reload_zeroes_the_release_timer() {
+        let mut world = World::new();
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        world.init_resource::<super::super::SweptWorlds>();
+        world.init_resource::<super::super::LeavingWorldArmed>();
+        world.init_resource::<crate::death::DeathNet>();
+        world.spawn(crate::net::SelfPlayer);
+        world
+            .resource_mut::<crate::death::DeathNet>()
+            .arm_release(true, 0.0);
+        world.insert_resource(ReloadUiPending(true));
+        run_pending_reload(&mut world);
+        assert_eq!(
+            world.resource::<crate::death::DeathNet>().release,
+            crate::death::ReleaseTimer::Unset
+        );
+    }
+
+    /// The reload's cascade runs the questgiver's world-enter reset (`0x490168` → `0x4908c0` →
+    /// `0x49099c` → `0x500af0`): the old panel's texts and pools read empty in the new UI.
+    #[test]
+    fn a_reload_resets_the_questgiver_cells_once_the_player_exists() {
+        use benilla_protocol::messages::{QuestGiverList, QuestListEntry};
+        let reload = |seated: bool| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.init_resource::<crate::ui_world_enter::ArrivalLane>();
+            world.init_resource::<super::super::SweptWorlds>();
+            world.init_resource::<super::super::LeavingWorldArmed>();
+            world.init_resource::<crate::ui_quest::QuestGiver>();
+            if seated {
+                world.spawn(crate::net::SelfPlayer);
+            }
+            world.resource_mut::<crate::ui_quest::QuestGiver>().open(
+                0x42,
+                crate::ui_quest::QuestView::Greeting(QuestGiverList {
+                    npc: 0x42,
+                    greeting: "Well met.".into(),
+                    emote_delay: 0,
+                    emote: 0,
+                    quests: vec![QuestListEntry {
+                        quest_id: 7,
+                        icon: 3,
+                        level: 5,
+                        title: "Wolves".into(),
+                    }],
+                }),
+            );
+            world.insert_resource(ReloadUiPending(true));
+            run_pending_reload(&mut world);
+            crate::ui_world_enter::fire_lane(&mut world);
+            let cells = &world.resource::<crate::ui_quest::QuestGiver>().cells.state;
+            (cells.greeting.clone(), cells.active_titles.clone())
+        };
+        assert_eq!(reload(true), (String::new(), Vec::<String>::new()));
+        assert_eq!(
+            reload(false),
+            ("Well met.".to_string(), vec!["Wolves".to_string()]),
             "no cascade before our own player's create"
         );
     }
@@ -1978,9 +2426,32 @@ mod tests {
         World,
         crossbeam_channel::Receiver<crate::net::ClientCommand>,
     ) {
+        front_world_in(World::new(), seated, charmed)
+    }
+
+    /// [`front_world`] on the whole client's world, headless, whose host the head's deselect
+    /// lends its signals.
+    fn hosted_front_world(
+        seated: bool,
+        charmed: bool,
+    ) -> (
+        World,
+        crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    ) {
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        front_world_in(std::mem::take(app.world_mut()), seated, charmed)
+    }
+
+    fn front_world_in(
+        mut world: World,
+        seated: bool,
+        charmed: bool,
+    ) -> (
+        World,
+        crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    ) {
         use benilla_protocol::messages::ObjectFields;
         let (tx, rx) = crossbeam_channel::unbounded();
-        let mut world = World::new();
         world.insert_resource(crate::net::NetCommands(tx));
         world.init_resource::<crate::target::Selection>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
@@ -2035,7 +2506,7 @@ mod tests {
     #[test]
     fn a_reload_drops_the_target_loudly_ends_the_follow_then_sweeps() {
         use crate::net::ClientCommand;
-        let (mut world, rx) = front_world(true, false);
+        let (mut world, rx) = hosted_front_world(true, false);
         assert!(run_shutdown_front(&mut world, ShutdownRoot::Reload));
         assert_eq!(
             front_seen(&world),
@@ -2060,6 +2531,37 @@ mod tests {
         );
         assert_eq!(world.resource::<crate::target::Selection>().guid, None);
         assert_eq!(world.resource::<crate::player::FollowState>().guid, None);
+    }
+
+    /// The `/reload` head's deselect signals in place: its teardown's StopAttack (`0x493a08`)
+    /// cancels a queued strike (`0x5ecb63` → `0x6e6f30`), whose stop reports after the loot close
+    /// (`0x493959`) and ahead of `PLAYER_TARGET_CHANGED` (`0x493a73`).
+    #[test]
+    fn a_reload_reports_its_strike_cancel_before_the_target_change() {
+        let (mut world, _rx) = hosted_front_world(true, false);
+        world.insert_non_send_resource(crate::ui_script::sweep_test::spied_vm(&[
+            "LOOT_CLOSED",
+            "SPELLCAST_STOP",
+            "PLAYER_TARGET_CHANGED",
+        ]));
+        let me = world
+            .query_filtered::<Entity, With<crate::net::SelfPlayer>>()
+            .single(&world)
+            .unwrap();
+        world
+            .entity_mut(me)
+            .insert(crate::creature_anim::Engaged(CORPSE));
+        world
+            .resource_mut::<crate::spell::QueuedMeleeSpell>()
+            .arm(78);
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .fill_record();
+        run_shutdown_front(&mut world, ShutdownRoot::Reload);
+        assert_eq!(
+            front_seen(&world),
+            ["LOOT_CLOSED", "SPELLCAST_STOP", "PLAYER_TARGET_CHANGED"]
+        );
     }
 
     /// A charmed player's `SetSelection` is a no-op (`0x493589`-`0x49359c`): a `/reload` keeps
@@ -2100,11 +2602,13 @@ mod tests {
         assert_eq!((selection.guid, selection.last), (None, Some(CORPSE)));
     }
 
-    /// A refused login has no player of ours to destroy, so no sweep; the head still cancels.
+    /// A refused login has no player of ours to destroy, so no sweep: no create of ours armed the
+    /// world latch; the head still cancels.
     #[test]
     fn a_refused_login_sweeps_nothing_and_cancels_the_trade() {
         use crate::net::ClientCommand;
         let (mut world, rx) = front_world(false, false);
+        world.insert_resource(super::super::LeavingWorldArmed::default());
         run_shutdown_front(&mut world, ShutdownRoot::WorldTeardown);
         assert!(front_seen(&world).is_empty());
         let sent: Vec<ClientCommand> = rx.try_iter().collect();
@@ -2149,7 +2653,7 @@ mod tests {
     #[test]
     fn a_shutdown_one_shot_applies_its_unit_edits_as_it_returns() {
         const ME: u64 = 0x10;
-        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(crate::net::NetCommands(tx));
         let world = app.world_mut();

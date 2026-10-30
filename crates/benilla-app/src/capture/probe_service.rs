@@ -281,13 +281,18 @@ fn open_window(
     None
 }
 
+/// The NPC windows' cells the probe reads, lent with the VM since the host holds them.
+type ServiceWindows = (
+    ResMut<'static, MerchantOpen>,
+    ResMut<'static, GossipState>,
+    ResMut<'static, QuestGiver>,
+    ResMut<'static, TrainerOpen>,
+);
+
 fn service_probe(
-    mut vm: crate::script_calls::VmWith<ResMut<'static, MerchantOpen>>,
+    mut vm: crate::script_calls::VmWith<ServiceWindows>,
     time: ProbeClock,
     mut probe: ResMut<ServiceProbe>,
-    mut gossip: ResMut<GossipState>,
-    mut giver: ResMut<QuestGiver>,
-    mut trainer: ResMut<TrainerOpen>,
     // `[0xb4e2d0]`'s mirror, what the re-click gate reads: armed by a window and only by one.
     interact: Res<InteractNpc>,
     objects: crate::net::Objects,
@@ -300,12 +305,16 @@ fn service_probe(
 ) {
     // The cursor legs pick up through the binding and read the bags through Lua, with the host
     // lent so a call that Lua makes applies inside its verb; the rest is an engine turn over the
-    // merchant window.
+    // merchant, gossip and questgiver windows.
     let lent = matches!(
         probe.phase,
         Phase::VendorArm { .. } | Phase::VendorSell { .. }
     );
-    let mut step = |script: Option<&mut UiScript>, mut merchant: Option<&mut MerchantOpen>| {
+    let mut step = |script: Option<&mut UiScript>,
+                    mut merchant: Option<&mut MerchantOpen>,
+                    mut gossip: Option<&mut GossipState>,
+                    mut giver: Option<&mut QuestGiver>,
+                    mut trainer: Option<&mut TrainerOpen>| {
         if self_player.is_empty() {
             return; // not in-world yet
         }
@@ -316,6 +325,13 @@ fn service_probe(
                 hop(&mut probe, &net, 0, 0, now);
             }
             Phase::Hop { i, hop: h, sent_at } => {
+                let (Some(gossip), Some(giver), Some(trainer)) = (
+                    gossip.as_deref_mut(),
+                    giver.as_deref_mut(),
+                    trainer.as_deref_mut(),
+                ) else {
+                    return;
+                };
                 if now - sent_at < SETTLE_SECS {
                     return;
                 }
@@ -454,6 +470,15 @@ fn service_probe(
                         let _ = net.0.send(cmd);
                         named
                     }
+                    // `TalkToTrainer`'s asked guid (`0x5df69f`), which the list's open tests, and
+                    // its send; no trainer is open here for its close.
+                    ServiceAction::TalkToTrainer => {
+                        trainer.asked = guid;
+                        let cmd = ClientCommand::TrainerList { trainer: guid };
+                        let named = format!("{cmd:?}");
+                        let _ = net.0.send(cmd);
+                        named
+                    }
                     // No leg here takes a dialog arm; if one ever does, say so rather than hang.
                     other => {
                         let why: &str = match other {
@@ -463,9 +488,9 @@ fn service_probe(
                                 "adopts the area spirit healer; the packet leaves from the cache"
                             }
                             ServiceAction::Silent(w) => w,
-                            ServiceAction::Send(_) | ServiceAction::SellFromCursor(_) => {
-                                unreachable!()
-                            }
+                            ServiceAction::Send(_)
+                            | ServiceAction::SellFromCursor(_)
+                            | ServiceAction::TalkToTrainer => unreachable!(),
                         };
                         warn!(
                             "PROBE_SERVICE: SKIP ({}) — arm {arm:?} opens no window from a packet \
@@ -490,8 +515,15 @@ fn service_probe(
                 };
             }
             Phase::Await { i, since, guid } => {
+                let (Some(gossip), Some(giver), Some(trainer)) = (
+                    gossip.as_deref_mut(),
+                    giver.as_deref_mut(),
+                    trainer.as_deref_mut(),
+                ) else {
+                    return;
+                };
                 let leg = &LEGS[i];
-                match open_window(guid, &gossip, &giver, &trainer) {
+                match open_window(guid, gossip, giver, trainer) {
                     Some(open) if open == leg.want_window => {
                         info!(
                             "PROBE_SERVICE: PASS ({}) — {:?} window open on {guid:#x}{}",
@@ -576,6 +608,13 @@ fn service_probe(
             }
             // ── The vendor fork ──────────────────────────────────────────────────
             Phase::VendorHop { sent_at } => {
+                let (Some(gossip), Some(giver), Some(trainer)) = (
+                    gossip.as_deref_mut(),
+                    giver.as_deref_mut(),
+                    trainer.as_deref_mut(),
+                ) else {
+                    return;
+                };
                 if now - sent_at < SETTLE_SECS {
                     return;
                 }
@@ -807,9 +846,19 @@ fn service_probe(
         }
     };
     if lent {
-        vm.run(|script| step(script, None));
+        vm.run(|script| step(script, None, None, None, None));
     } else {
-        vm.turn(|script, mut merchant| step(script, Some(&mut *merchant)));
+        vm.turn(
+            |script, (mut merchant, mut gossip, mut giver, mut trainer)| {
+                step(
+                    script,
+                    Some(&mut *merchant),
+                    Some(&mut *gossip),
+                    Some(&mut *giver),
+                    Some(&mut *trainer),
+                )
+            },
+        );
     }
 }
 

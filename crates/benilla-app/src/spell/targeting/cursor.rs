@@ -42,10 +42,18 @@ fn range_call<'a>(
         spell,
         row: spells.ranges.get(spell.range_index)?,
         mods: &checks.spell_mods,
-        caster: checks
-            .range_units
-            .unit(caster)
-            .unwrap_or(RangeUnit::still(crate::spell::DEFAULT_REACH)),
+        caster: {
+            let unit = checks
+                .range_units
+                .unit(caster)
+                .unwrap_or(RangeUnit::still(crate::spell::DEFAULT_REACH));
+            // Only the active player has a ranged slot to scale by.
+            if checks.self_q.iter().next().map(|(e, _)| e) == Some(caster) {
+                checks.player_caster(unit)
+            } else {
+                unit
+            }
+        },
         attack_target: checks.range_units.attack_target(caster),
     })
 }
@@ -155,7 +163,7 @@ pub(crate) fn drive_targeting_cursor(
     let me = caster
         .and_then(|e| go_tf.get(e).ok())
         .map(|tf| tf.translation);
-    // The arm the click would take ([`super::world::commit_object_cast_on_click`]): a GameObject
+    // The arm the click would take ([`super::world::ClickCommits::object`]): a GameObject
     // word's nearest GameObject, else the picked unit or corpse, else the terrain.
     let able = if targeting.wants(TargetingWants::GameObject)
         && crate::target::go_is_nearest(&hovered, &hovered_object)
@@ -166,6 +174,7 @@ pub(crate) fn drive_targeting_cursor(
             &go_tf,
             &lock_inputs,
             spell_id,
+            commit.item_guid(),
             range,
             me,
         )
@@ -195,7 +204,8 @@ pub(crate) fn drive_targeting_cursor(
     };
 }
 
-/// `0x6e6460`'s GameObject leg past the `& 0x4800` test: the lock predicate `0x5f8260`, then range.
+/// `0x6e6460`'s GameObject leg past the `& 0x4800` test: the lock predicate `0x5f8260`
+/// ([`super::spell_opens_go`]), then range.
 fn object_arm(
     hovered_object: &crate::target::HoveredObject,
     stores: &Query<(
@@ -206,40 +216,17 @@ fn object_arm(
     go_tf: &Query<&Transform>,
     lock_inputs: &crate::target::lock::GoLockInputs,
     spell_id: u32,
+    item: Option<u64>,
     range: Option<RangeCall>,
     me: Option<Vec3>,
 ) -> bool {
     let Some(entity) = hovered_object.target else {
         return false;
     };
-    // `0x5f8260`'s lookups: the template, then its `Lock.dbc` row. A template in flight is grey.
-    let Some(tmpl) = stores
-        .get(entity)
-        .ok()
-        .and_then(|(s, ..)| lock_inputs.templates.of(&s.0))
-    else {
-        return false;
-    };
-    let lock_id = tmpl.lock_id;
-    let Some(locks) = lock_inputs.locks.as_deref() else {
-        return false;
-    };
-    let Some(slots) = locks.0.slots(lock_id).filter(|_| lock_id != 0) else {
-        return false;
-    };
-    let Some(spells) = lock_inputs.spells.as_deref() else {
-        return false;
-    };
-    let Some(spell) = spells.catalog.get(spell_id) else {
-        return false;
-    };
-    let facts = crate::target::lock::go_facts(
-        stores
-            .get(entity)
-            .ok()
-            .map(|(s, anim, _)| (s, crate::go_anim::go_state(anim, s))),
-    );
-    if !crate::target::lock::spell_opens_lock(slots, spell, facts) {
+    let opens = stores.get(entity).ok().is_some_and(|(store, anim, _)| {
+        super::spell_opens_go(spell_id, item, store, anim, lock_inputs)
+    });
+    if !opens {
         return false;
     }
     // The range tail: the caster-to-object distance against the spell's min and max.
@@ -599,6 +586,7 @@ mod tests {
         let verdict =
             |spell: u32, talent: bool, self_reach: f32, engaged: Option<f32>, d: f32| -> bool {
                 let mut world = World::new();
+                world.init_resource::<crate::creature_anim::UnitEdits>();
                 world.init_resource::<WorldCursor>();
                 world.init_resource::<SpellTargeting>();
                 world.init_resource::<crate::target::Hovered>();
@@ -660,7 +648,7 @@ mod tests {
                     let target = world.spawn(fx::caster(reach)).id();
                     index.insert(ATTACK_TARGET, target);
                 }
-                world.insert_resource(crate::net::GuidIndex(index));
+                world.insert_resource(crate::net::GuidIndex(index.into_iter().collect()));
                 world.resource_mut::<SpellTargeting>().enter(
                     spell,
                     crate::spell::CastCommit::Spell,
@@ -746,7 +734,7 @@ mod tests {
             let pet = world
                 .spawn((Transform::from_xyz(pet_at, 0.0, 0.0), fx::caster(pet_reach)))
                 .id();
-            world.insert_resource(crate::net::GuidIndex(HashMap::from([(PET, pet)])));
+            world.insert_resource(crate::net::GuidIndex([(PET, pet)].into_iter().collect()));
             world.resource_mut::<SpellTargeting>().enter(
                 spell,
                 crate::spell::CastCommit::Pet { caster: PET },
@@ -772,7 +760,7 @@ mod tests {
     #[test]
     fn the_object_leg_reads_the_range_talent() {
         use super::super::corpse_fixture as fx;
-        use benilla_formats::{LockCatalog, LockSlot, OpenLock, LOCK_KEY_SKILL};
+        use benilla_formats::{LockCatalog, LockSlot, LOCK_KEY_SKILL};
         use bevy::ecs::system::RunSystemOnce;
         use std::collections::HashMap;
 
@@ -803,10 +791,9 @@ mod tests {
                     targets: 0x4000,
                     spell_family: 3,
                     spell_family_flags: 1 << 7,
-                    open_lock: Some(OpenLock {
-                        effect: 0,
-                        lock_type: 1,
-                    }),
+                    // Effect 0 is `OPEN_LOCK` (33) on LockType 1, as Opening's row has it.
+                    effects: [0x21, 0, 0],
+                    effect_misc_value: [1, 0, 0],
                     ..SpellDisplay::default()
                 },
             )]));
@@ -953,7 +940,7 @@ mod tests {
         );
     }
 
-    /// The unit leg's range compare, the tail of `SpellCanTargetUnit 0x6e6460`, hands
+    /// The unit leg's range compare, the tail of `SpellCanTargetObject 0x6e6460`, hands
     /// `GetMinMaxRange` the hovered unit (`0x6e679b`, `0x6e67d1`): a melee spell is in range to
     /// 7.667 yards while the caster and that unit both run, and to the 5.0 floor otherwise.
     #[test]
@@ -1030,6 +1017,7 @@ mod tests {
                     grounded: true,
                     run_mode: true,
                     deck: None,
+                    final_facing: benilla_protocol::MonsterMoveFacing::None,
                 });
             }
             world.insert_resource(crate::target::Hovered {

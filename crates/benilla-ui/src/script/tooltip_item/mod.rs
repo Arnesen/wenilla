@@ -26,10 +26,13 @@ use build::{build_item, InFlight, ItemBuild};
 use names::quality_color;
 use render::BuilderFlags;
 
-/// The cached template; a miss records the ask and waits for its answer (`0x52b716`).
+/// The cached template as the build reads it at the call, its spell lines expanded and its
+/// reputation line gendered against the player as it stands (`0x5075f0` at `0x52da24`,
+/// `0x52d80f`); a miss records the ask and waits for its answer (`0x52b716`).
 fn view_of(lua: &Lua, item_id: u32) -> Option<ItemTemplateView> {
+    let live = crate::script::item_stats::live_record(lua, item_id);
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let v = model.item_templates.get(&item_id).cloned();
+    let v = live.unwrap_or_else(|| model.item_templates.get(&item_id).cloned());
     if v.is_none() && item_id != 0 {
         model.item_stat_asks.insert(item_id);
         build::note_miss(&mut model, build::CacheWait::Template(item_id));
@@ -72,26 +75,29 @@ fn fire_add_money(lua: &Lua, h: crate::widget::FrameHandle, copper: i64) {
     }
 }
 
-fn hyperlink_enchant_spell(link: &str) -> Option<u32> {
-    let at = link.find("enchant:")? + 8;
-    let tail = &link[at..];
-    let end = tail
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(tail.len());
-    tail[..end].parse().ok().filter(|&id: &u32| id != 0)
+/// `SStrCmpI(link, prefix, len)` (`0x64a4c0`) answering 0: the link starts with `prefix`, ASCII
+/// case aside; the rest of the link.
+fn link_tail<'a>(link: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = link.as_bytes().get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix.as_bytes())
+        .then(|| &link[prefix.len()..])
 }
 
-/// A link's `item:<id>:<enchant>:<random property>` fields, each read by `atoi` (`0x64ac60`), so
-/// the enchant keeps its sign.
-fn hyperlink_item_fields(link: &str) -> Option<(u32, i32, u32)> {
-    let at = link.find("item:")? + 5;
-    let tail = &link[at..];
-    let end = tail.find("|h").unwrap_or(tail.len());
-    let mut fields = tail[..end].split(':').map(str::trim);
-    let item_id: u32 = fields.next()?.parse().unwrap_or(0);
-    let enchant_id: i32 = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-    let random_property_id = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-    (item_id != 0).then_some((item_id, enchant_id, random_property_id))
+/// An `item:` link's id and its `<enchant>:<random property>` fields, each `SStrToInt`
+/// (`0x64ac60`) after the next `:` (`0x5320fa`..`0x53214d`), a missing one 0; signed, as the
+/// reference keeps them.
+fn hyperlink_item_fields(tail: &str) -> (i32, i32, i32) {
+    let mut fields = tail.split(':').map(binding_abi::s_str_to_int);
+    let mut next = || fields.next().unwrap_or(0);
+    (next(), next(), next())
+}
+
+/// The spell record's `castUI` (column 3, `+0xc`) through the lent host, which an `enchant:` link
+/// tests against 3 (`0x532243`): `Some(None)` for an id with no record, `None` with no host to ask.
+pub struct SpellCastUiQuery(pub u32);
+
+impl super::live::LiveQuery for SpellCastUiQuery {
+    type Answer = Option<u32>;
 }
 
 /// A block's bare enchant id in `slot` as its line (`0x52c9f2`..`0x52ca46`): `abs(id)` names the
@@ -113,6 +119,7 @@ fn block_enchant(lua: &Lua, slot: u8, id: i32) -> Option<crate::script::EnchantV
 fn slot_instance(s: &crate::script::ContainerSlot, openable_source: bool) -> render::ItemInstance {
     render::ItemInstance {
         name: s.link.as_deref().and_then(link_name).map(str::to_string),
+        roll: 0,
         durability: s.durability,
         creator: s.creator.clone(),
         gift_creator: s.gift_creator.clone(),
@@ -149,7 +156,11 @@ fn slot_instance(s: &crate::script::ContainerSlot, openable_source: bool) -> ren
 /// charges are the summed absolute block-0 charges of every copy the same walk reaches
 /// (`0x622180` at `0x532553`, stored at `+0x428`); otherwise, and with no template cached
 /// (`0x532518`), they stay -1 and the builder reads the object's own.
-pub(super) fn owned_instance(model: &Model, item_id: u32) -> Option<render::ItemInstance> {
+pub(super) fn owned_instance(
+    lua: &Lua,
+    model: &Model,
+    item_id: u32,
+) -> Option<render::ItemInstance> {
     const BROKEN: u32 = 0x10;
     const WRAPPED: u32 = 0x8;
     let usable = |flags: u32, durability: Option<(u32, u32)>| {
@@ -161,21 +172,31 @@ pub(super) fn owned_instance(model: &Model, item_id: u32) -> Option<render::Item
         |s: &&crate::script::InvSlotView| s.item_id == item_id && usable(s.flags, s.durability);
     let held_copy =
         |s: &&crate::script::ContainerSlot| s.item_id == item_id && usable(s.flags, s.durability);
+    // Every bag slot now, in bag and slot order.
+    let bags = crate::script::held::bag_items(lua, model);
     let held = |bag: i64| -> Option<render::ItemInstance> {
-        let c = model.containers.get(&bag)?;
-        let mut slots: Vec<_> = c.slots.iter().collect();
-        slots.sort_by_key(|(n, _)| **n);
-        slots
-            .into_iter()
-            .map(|(_, s)| s)
+        bags.iter()
+            .filter(|(b, _, _)| *b == bag)
+            .map(|(_, _, s)| s)
             .find(held_copy)
             .map(|s| slot_instance(s, false))
     };
+    // The worn slots now, by live id (`0x6228a0`): the doll's keys, and a slot's view read once,
+    // only where its item is this one.
+    let keys = crate::script::worn::worn_keys(lua, model);
+    let views: [std::cell::OnceCell<Option<crate::script::InvSlotView>>;
+        crate::script::INVENTORY_SLOT_COUNT] = Default::default();
+    let worn_view = |i: usize| -> Option<&crate::script::InvSlotView> {
+        keys.get(i)
+            .copied()
+            .flatten()
+            .filter(|&(_, id)| id == item_id)?;
+        views[i]
+            .get_or_init(|| crate::script::worn::worn_slot(lua, model, i))
+            .as_ref()
+    };
     let worn = |i: usize| {
-        model
-            .inventory_slots
-            .get(i)
-            .and_then(Option::as_ref)
+        worn_view(i)
             .filter(worn_copy)
             .map(|s| worn_instance(s, true))
     };
@@ -192,11 +213,11 @@ pub(super) fn owned_instance(model: &Model, item_id: u32) -> Option<render::Item
     if !summed {
         return Some(found);
     }
-    let worn_charges = model.inventory_slots.iter().skip(1).take(23).flatten();
-    let held_charges = (0..=4)
-        .chain([super::char_stats::KEYRING_CONTAINER])
-        .filter_map(|bag| model.containers.get(&bag))
-        .flat_map(|c| c.slots.values());
+    let worn_charges = (1..crate::script::INVENTORY_SLOT_COUNT).filter_map(worn_view);
+    let held_charges = bags
+        .iter()
+        .filter(|(b, _, _)| (0..=4).contains(b) || *b == super::char_stats::KEYRING_CONTAINER)
+        .map(|(_, _, s)| s);
     let sum = worn_charges
         .filter(worn_copy)
         .map(|s| s.spell_charges[0])
@@ -209,7 +230,8 @@ pub(super) fn owned_instance(model: &Model, item_id: u32) -> Option<render::Item
 }
 
 /// A worn (or inspected) slot's item as the builder's item: an object of the player's own, else
-/// the visible-item record (`0x533354`), which has no durability or creator to show.
+/// the visible-item record (`0x533354`), which has no durability to show and whose creator guid
+/// the leg copies to `+0x410` (`0x5333cd`).
 pub(super) fn worn_instance(s: &crate::script::InvSlotView, object: bool) -> render::ItemInstance {
     render::ItemInstance {
         // App-composed, with the suffix off `ITEM_FIELD_RANDOM_PROPERTIES_ID`.
@@ -234,12 +256,8 @@ pub(super) fn worn_instance(s: &crate::script::InvSlotView, object: bool) -> ren
 
 /// The item at `(bag, slot)` in the cursor's numbering, as a live object with no block, for the
 /// sell and send-mail slots (`0x5357c3`, `0x5353a0`).
-fn held_instance(model: &Model, bag: i64, slot: u32) -> Option<render::ItemInstance> {
-    model
-        .containers
-        .get(&bag)
-        .and_then(|c| c.slots.get(&slot))
-        .map(|s| slot_instance(s, true))
+fn held_instance(lua: &Lua, model: &Model, bag: i64, slot: u32) -> Option<render::ItemInstance> {
+    crate::script::held::held_slot(lua, model, bag, slot).map(|s| slot_instance(&s, true))
 }
 
 /// The id-keyed render; on a miss, the ask and a name-only line, as `SetBagItem`'s miss path. The
@@ -283,7 +301,7 @@ pub(super) fn render_owned(
     let h = frame_handle_of(lua, this)?;
     let sell_count = inst.as_ref().filter(|i| i.object).and_then(|i| {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
-        build::container_object(&model, i.guid).map(|s| s.count.max(1))
+        build::container_object(lua, &model, i.guid).map(|s| s.count.max(1))
     });
     build_item(
         lua,
@@ -329,7 +347,11 @@ fn set_quest_item_view(
     item: Option<crate::script::quest::QuestItemView>,
 ) -> mlua::Result<()> {
     match item {
-        Some(it) => render_by_id(lua, this, it.item_id, it.name.clone(), Some(it.quality)),
+        // The row's -1 (no inventory type) names no colour.
+        Some(it) => {
+            let quality = u32::try_from(it.quality).ok();
+            render_by_id(lua, this, it.item_id, it.name.clone(), quality)
+        }
         None => {
             let h = frame_handle_of(lua, this)?;
             clear_silent(lua, h);
@@ -352,14 +374,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             const LINE: &str = r#"Invalid quest item in SetQuestItem("type", index)"#;
             let kind = binding_abi::string_arg(lua, kind, LINE)?;
             let index = binding_abi::index_arg(lua, index, LINE)?;
-            let item = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.quest.as_ref().and_then(|q| {
-                    crate::script::quest::item_vec(q, &kind)
-                        .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
-                        .cloned()
-                })
-            };
+            // The panel's rows as the host holds them at the call.
+            let item = crate::script::quest::state(lua).and_then(|q| {
+                crate::script::quest::item_vec(&q, &kind)
+                    .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
+                    .cloned()
+            });
             set_quest_item_view(lua, &this, item)
         })?,
     )?;
@@ -379,79 +399,88 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GameTooltip:SetHyperlink(link): the chat-link tooltip (`ItemRef.lua:60`). Takes an item
-    // link, escaped or a bare "item:<id>", or an enchant link; any other link does nothing.
+    // GameTooltip:SetHyperlink(link): the chat-link tooltip (`ItemRef.lua:60`), handed the link
+    // part alone, "item:<id>:..." or "enchant:<spellId>" (`0x531fd0`).
     m.set(
         "SetHyperlink",
-        lua.create_function(|lua, (this, link): (Table, String)| {
-            // The only other link it takes, the craft window's `|Henchant:<spellId>|h[name]|h`
-            // (`GetCraftItemLink`): the spell's own tooltip, behind its producer's castUI gate
-            // (`0x532243`).
-            if let Some(spell) = hyperlink_enchant_spell(&link) {
-                return super::tooltip_spell::set_spell_by_id(
+        lua.create_function(|lua, (this, link): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            // `is-number-or-string` else `Usage: SetHyperlink(link)` (`0x53208b`, `0x8551c4`).
+            let link = binding_abi::string_arg(lua, link, "Usage: SetHyperlink(link)")?;
+            // Each prefix is compared at the link's start (`0x5320b1`, `0x532218`); a miss, an
+            // item id at 0 or below (`0x532178`) and an enchant naming no spell of `castUI` 3
+            // (`0x53222a`..`0x532247`) raise `Unknown link type` (`0x8551e0`, `0x532269`).
+            let unknown = || mlua::Error::runtime("Unknown link type");
+            if let Some(tail) = link_tail(&link, "item:") {
+                let (id, enchant_id, roll) = hyperlink_item_fields(tail);
+                // The item the shown tooltip holds hides it instead (`0x5320c7`..`0x5320e9`): the
+                // shown bit (`+0xd0`) and the kept entry (`+0x398`, 0 with no item kept), tested
+                // before the id is, so the same link clicked twice closes the plate.
+                let holds = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let shown = model.arena.frame(h).is_some_and(|f| f.shown);
+                    let kept = model.item_builds.get(&h).map_or(0, |b| b.item_id);
+                    shown && kept == id as u32
+                };
+                if holds {
+                    super::visibility::set_shown(lua, h, false);
+                    return Ok(());
+                }
+                if id <= 0 {
+                    return Err(unknown());
+                }
+                // The fields fill a block (p6=1, `0x532181`): the enchant id to slot 0 (`+0x3d0`,
+                // `0x5321d3`), the roll to `+0x424` (its lines expanded into slots 2..6 and its
+                // suffix joined to the name by the builder, `0x52b7bf`), the unique id to `+0x420`,
+                // unread. So a link shows its enchant and its roll's lines, never the placeholder
+                // (`0x52cc33`). The creator and giver are zeroed (`0x5321ad`, `0x5321b3`), so a
+                // link never shows a maker line.
+                let mut enchants: Vec<_> = block_enchant(lua, 0, enchant_id).into_iter().collect();
+                enchants.extend(roll_enchants(lua, roll as u32));
+                let inst = render::ItemInstance {
+                    enchants,
+                    roll,
+                    ..Default::default()
+                };
+                build_item(
                     lua,
                     &this,
-                    spell,
-                    link_name(&link).map(str::to_string),
-                    Default::default(),
-                );
-            }
-            let Some((id, enchant_id, roll)) = hyperlink_item_fields(&link) else {
-                return Ok(());
-            };
-            let h = frame_handle_of(lua, &this)?;
-            // The item the shown tooltip holds hides it instead (`0x5320c7`..`0x5320e9`): the
-            // shown bit (`+0xd0`) and the kept entry (`+0x398`), so the same link clicked twice
-            // closes the plate, whatever its other fields.
-            let holds = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let shown = model.arena.frame(h).is_some_and(|f| f.shown);
-                shown && model.item_builds.get(&h).is_some_and(|b| b.item_id == id)
-            };
-            if holds {
-                super::visibility::set_shown(lua, h, false);
+                    h,
+                    ItemBuild {
+                        inst: Some(inst),
+                        ..ItemBuild::new(id as u32)
+                    },
+                )?;
                 return Ok(());
             }
-            // The reference's format is `"%s|Hitem:%d:%d:%d:%d|h[%s]|h%s"` (`0x8549c8`), and
-            // `SetHyperlink` (`0x532181`) parses it into a block (p6=1): the enchant id to slot 0
-            // (`+0x3d0`, `0x5321d3`), the roll to `+0x424` (expanded into slots 2..6 by
-            // `0x52b7bf`), the unique id to `+0x420`, unread; a missing field is 0. So a link
-            // shows its enchant and its roll's lines, never the placeholder (`0x52cc33`). The name
-            // is the link's own, built with the suffix joined (`0x5d8b00`). The block's creator and
-            // giver are zeroed (`0x5321ad`, `0x5321b3`), so a link never shows a maker line.
-            let name = link_name(&link).map(str::to_string);
-            let mut enchants: Vec<_> = block_enchant(lua, 0, enchant_id).into_iter().collect();
-            enchants.extend(roll_enchants(lua, roll));
-            let inst = render::ItemInstance {
-                name: name.clone(),
-                enchants,
-                ..Default::default()
-            };
-            let in_flight = match name {
-                Some(name) => InFlight::Name(name, quality_color(1)),
-                None => InFlight::Nothing,
-            };
-            build_item(
+            let tail = link_tail(&link, "enchant:").ok_or_else(unknown)?;
+            // The craft window's `enchant:<spellId>` (`GetCraftItemLink`): a positive id whose
+            // record's `castUI` is 3 (`0x532225`..`0x532247`), to the spell builder (`0x532259`).
+            // With no host to read the record, the id alone decides.
+            let spell = binding_abi::s_str_to_int(tail);
+            let craft = spell > 0
+                && super::live::ask(lua, &SpellCastUiQuery(spell as u32))
+                    .is_none_or(|cast_ui| cast_ui == Some(3));
+            if !craft {
+                return Err(unknown());
+            }
+            super::tooltip_spell::set_spell_by_id(
                 lua,
                 &this,
-                h,
-                ItemBuild {
-                    inst: Some(inst),
-                    in_flight,
-                    ..ItemBuild::new(id)
-                },
-            )?;
-            Ok(())
+                spell as u32,
+                None,
+                Default::default(),
+            )
         })?,
     )?;
 
     // GameTooltip:SetInventoryItem(unit, slot [, nameOnly]) -> hasItem, hasCooldown, repairCost
-    // (`0x532ee0`), three as `PaperDollFrame.lua:741` reads them; the arity is that consumer's,
-    // not byte-read as `SetBagItem`'s two is (`0x534985`). Unit-keyed through `Model::inv_slot`:
-    // an inspected item (`InspectPaperDollFrame.xml:20`) has no durability or creator, so those
-    // lines do not show, as in the reference. An armed shopping tooltip renders the compare
-    // shape; the arm is consumed either way. repairCost is the item's cost (`0x5332fb`), 0 for an
-    // inspected unit's.
+    // (`0x532ee0`), three as `PaperDollFrame.lua:741` reads them (`0x533300`, `0x53343e`), and
+    // two on the ammo slot (`0x533122`, `0x533140`). Unit-keyed through `Model::inv_slot`:
+    // an inspected item (`InspectPaperDollFrame.xml:20`) has no durability, so that line does not
+    // show, and its maker is the visible block's creator (`0x5333cd`). An armed shopping tooltip
+    // renders the compare shape; the arm is consumed either way. repairCost is the item's cost
+    // (`0x5332fb`), 0 for an inspected unit's.
     m.set(
         "SetInventoryItem",
         lua.create_function(
@@ -466,13 +495,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     unit,
                     "Usage: SetInventoryItem(unit, slot [, nameOnly])",
                 )?;
-                let slot0 = lua
-                    .coerce_number(slot)?
-                    .map(|n| super::binding_abi::ftol(n - 1.0))
-                    .filter(|&s| super::char_stats::inventory_slot_reader_accepts(s))
-                    .ok_or_else(|| {
-                        mlua::Error::runtime("Invalid inventory slot in SetInventoryItem")
-                    })?;
+                const SLOT_LINE: &str = "Invalid inventory slot in SetInventoryItem";
+                let slot0 = super::binding_abi::less_one_arg(lua, slot, SLOT_LINE)?;
+                if !super::char_stats::inventory_slot_reader_accepts(slot0) {
+                    return Err(mlua::Error::runtime(SLOT_LINE));
+                }
                 let slot = (slot0 + 1) as usize;
                 // `nameOnly` (usage string `0x8552dc`) is set only by a number above 0
                 // (`0x533027..0x53304c`); anything else builds the ordinary tooltip, without an
@@ -481,30 +508,35 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // The token's resolve (`0x533061`), which raises for one it does not know, then
                 // `CanReadUnitInventory` (`0x53306a`), through `Model::inv_slot`.
                 super::unit::check_unit_token(&Some(unit.clone()))?;
+                // The player's item object answers the cooldown query, which asks a missing
+                // record with the callback `0x6e2f70` inside the call (`0x533188` → `0x5331ec`,
+                // `0x6e2efb`); the ammo slot passes an entry and queries nothing (`0x53307d`).
+                if slot0 != -1
+                    && unit.eq_ignore_ascii_case("player")
+                    && super::char_stats::active_player_held(lua)
+                {
+                    let pending = {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        crate::script::char_stats::own_inv_view(lua, &model, slot)
+                    }
+                    .filter(|s| s.record_pending())
+                    .map(|s| s.item_id);
+                    if let Some(entry) = pending {
+                        super::container::ask_cooldown_record(lua, entry)?;
+                    }
+                }
                 let (item_id, name, quality, inst, count, repair_cost, currently_equipped) = {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     // Only the active player's slots hold item objects; another player's item is
                     // a block (`0x533354`).
-                    let player =
-                        model.inventory_reader(&unit) == Some(super::char_stats::InvReader::Own);
+                    let reader = super::char_stats::inventory_reader(lua, &model, &unit);
+                    let player = reader == Some(super::char_stats::InvReader::Own);
                     let armed = match super::tooltip::tip_mut(&mut model, h) {
                         Ok(t) => std::mem::take(&mut t.equipped_header_armed),
                         Err(_) => false,
                     };
-                    // The player's item object answers the cooldown query, which asks a missing
-                    // record with the callback `0x6e2f70` (`0x533188` → `0x5331ec`, `0x6e2efb`);
-                    // the ammo slot passes an entry and queries nothing (`0x53307d`).
-                    if slot0 != -1 && unit.eq_ignore_ascii_case("player") {
-                        if let Some(entry) = model
-                            .inv_slot("player", slot)
-                            .filter(|s| s.record_pending())
-                            .map(|s| s.item_id)
-                        {
-                            model.cooldown_record_asks.push(entry);
-                        }
-                    }
-                    let view = model
-                        .inv_slot(&unit, slot)
+                    let view = reader
+                        .and_then(|r| model.inv_slot_as(lua, r, slot))
                         .filter(|s| s.item_id != 0)
                         .map(|s| {
                             (s.item_id, s.name.clone(), s.quality, s.count.max(1), {
@@ -514,15 +546,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 // record has none. A running one takes the p6=1 leg
                                 // (`0x533267`), every other the p6=0 leg (`0x5332ad`), whose
                                 // open hint a lootable box in the vault shows.
-                                let cooldown = player.then(|| model.inv_slot_cooldown(slot));
+                                let cooldown = player.then(|| {
+                                    crate::script::char_stats::inv_slot_cooldown(lua, &model, slot)
+                                });
                                 let cooldown = cooldown.flatten();
                                 let running = cooldown
                                     .is_some_and(|(start, dur, on)| on && start > 0.0 && dur > 0.0);
                                 // The vault and keyring are bag slots, read as the object they
                                 // hold: its text id, flags and charter all reach the builder.
-                                let mut inst = match player.then(|| model.inv_container_slot(slot))
-                                {
-                                    Some(Some(c)) => slot_instance(c, !running),
+                                let mut inst = match player.then(|| {
+                                    crate::script::char_stats::inv_container_slot(lua, &model, slot)
+                                }) {
+                                    Some(Some(c)) => slot_instance(&c, !running),
                                     _ => {
                                         let mut inst = worn_instance(&s, player);
                                         inst.openable_source = player && !running;
@@ -538,14 +573,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             })
                         });
                     let cost = if player {
-                        model.inv_repair_cost(slot)
+                        model.inv_repair_cost(lua, slot)
                     } else {
                         0
                     };
                     match view {
                         Some((id, name, q, count, inst)) => (id, name, q, inst, count, cost, armed),
                         // An empty slot answers nil and still pushes the other two: callers
-                        // destructure all three first, and an addon may add up repairCost.
+                        // destructure all three first, and an addon may add up repairCost. The
+                        // ammo slot pushes two, nil and nil (`0x533130`..`0x533140`).
+                        None if slot0 == -1 => {
+                            return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]))
+                        }
                         None => {
                             return Ok(MultiValue::from_vec(vec![
                                 Value::Nil,
@@ -582,6 +621,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         ..ItemBuild::new(item_id)
                     },
                 )?;
+                // The ammo slot's leg drops the builder's answer and pushes 1 and nil
+                // (`0x53310e`..`0x533122`).
+                if slot0 == -1 {
+                    return Ok(MultiValue::from_vec(vec![Value::Integer(1), Value::Nil]));
+                }
                 Ok(MultiValue::from_vec(vec![
                     Value::Integer(1),
                     // hasCooldown is the builder's `[ebp-0x38]`, set by four lines: LOCKED, the
@@ -613,26 +657,23 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             let bag = i64::from(crate::script::binding_abi::ftol(bag));
             let slot = crate::script::binding_abi::ftol(slot) as u32;
+            // The cooldown query asks a missing record with the callback `0x6e2f70` inside the
+            // call (`0x53483a`, `0x6e2efb`), off its bag lookup, `0x4f93e0` (`0x534747`).
+            let held = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                crate::script::held::bag_slot(lua, &model, bag, slot)
+            };
+            let pending = held
+                .as_ref()
+                .filter(|s| s.record_pending())
+                .map(|s| s.item_id);
+            if let Some(entry) = pending {
+                super::container::ask_cooldown_record(lua, entry)?;
+            }
             let (item_id, count, link, quality, inst, repair_cost) = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                // The cooldown query asks a missing record with the callback `0x6e2f70`
-                // (`0x53483a`, `0x6e2efb`).
-                if let Some(entry) = model
-                    .containers
-                    .get(&bag)
-                    .and_then(|c| c.slots.get(&slot))
-                    .filter(|s| s.record_pending())
-                    .map(|s| s.item_id)
-                {
-                    model.cooldown_record_asks.push(entry);
-                }
-                let cost = model.repair_costs.bags.get(&(bag, slot)).copied();
-                match model
-                    .containers
-                    .get(&bag)
-                    .and_then(|c| c.slots.get(&slot))
-                    .filter(|s| s.item_id != 0)
-                {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let cost = crate::script::merchant::repair_cost_at(lua, &model, bag, slot);
+                match held.as_ref().filter(|s| s.item_id != 0) {
                     // `0x534620` takes the p6=1 leg iff the cooldown query `0x6e2ed0` reports
                     // enable, start and duration all non-zero; that boolean is the inverse of the
                     // openable gate. `hasCooldown` is the builder's own return. A charged
@@ -645,7 +686,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         // `start + duration - now` (`0x534882`..`0x53488c`), into `+0x408`.
                         let mut inst = slot_instance(s, !has_cd);
                         inst.cooldown_ms = super::tooltip_spell::live_remaining_ms(
-                            model.container_cooldowns.get(&(bag, slot)).copied(),
+                            crate::script::container::slot_cooldown(s),
                             model.now,
                         );
                         (
@@ -656,7 +697,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             // p6 = 0 iff no cooldown runs; mid-cooldown ITEM_COOLDOWN_TIME takes
                             // the openable line's place.
                             inst,
-                            cost.unwrap_or(0),
+                            cost,
                         )
                     }
                     None => return Ok(MultiValue::from_vec(vec![Value::Nil])),
@@ -699,27 +740,34 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     for (name, player_side) in [("SetTradePlayerItem", true), ("SetTradeTargetItem", false)] {
         m.set(
             name,
-            lua.create_function(move |lua, (this, slot): (Table, usize)| {
+            lua.create_function(move |lua, (this, slot): (Table, Value)| {
                 let h = frame_handle_of(lua, &this)?;
-                let cell = slot
-                    .checked_sub(1)
+                // `is-number` else `Invalid trade slot in SetTradePlayerItem` (`0x8554a0`,
+                // `0x5343ea`) or `… in SetTradeTargetItem` (`0x8554cc`, `0x5345f9`); `n - 1` out of
+                // `[0, 7)` names no slot and does nothing (`0x5342c1`, `0x5344f0`).
+                let slot0 =
+                    binding_abi::less_one_arg(lua, slot, &format!("Invalid trade slot in {name}"))?;
+                let cell = usize::try_from(slot0)
+                    .ok()
                     .filter(|&n| n < super::trade::TRADE_SLOTS);
                 let source = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
-                    let trade = model.trade.as_ref();
-                    let side = trade.map(|t| if player_side { &t.player } else { &t.target });
+                    // The slot as the getters read it at the call.
+                    let row =
+                        cell.and_then(|n| super::trade::slot_now(lua, &model, n + 1, player_side));
                     // The seventh slot alone proposes the spell cast on it (`0x534391`,
                     // `0x534598`, the block's `+0x40c`).
-                    let proposed = side
-                        .filter(|_| slot == 7)
-                        .and_then(|s| s.slots[6].as_ref()?.enchantment.clone());
+                    let proposed = row
+                        .as_ref()
+                        .filter(|_| slot0 == 6)
+                        .and_then(|s| s.enchantment.clone());
                     match player_side {
                         // The object's flags, creator and giver reach the LOCKED, wrapped and
                         // maker reads (`0x52bdb3`, `0x52b789`, `0x52e247`); the block's charges
                         // stay -1 and its lock id 0 (`0x534337`, `0x534341`).
                         true => cell
                             .and_then(|n| model.trade_offered[n].as_ref())
-                            .and_then(|offered| build::live_object(&model, offered.guid))
+                            .and_then(|offered| build::live_object(lua, &model, offered.guid))
                             .map(|held| {
                                 let inst = render::ItemInstance {
                                     openable_source: false,
@@ -731,25 +779,22 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         // The block carries the partner's lock id (`0x534563`), wrapped word
                         // (`0x534559`), gift creator (`0x534574`), creator (`0x53454f`), charges
                         // (`0x534595`) and durability (`0x5345b4`, `0x5345c0`).
-                        false => cell
-                            .and_then(|n| side?.slots[n].clone())
-                            .filter(|i| i.item_id != 0)
-                            .map(|item| {
-                                let inst = render::ItemInstance {
-                                    name: item.name.clone(),
-                                    block_lock_id: item.lock_id,
-                                    block_wrapped: item.wrapped,
-                                    gift_creator: item.gift_creator.clone(),
-                                    gift_creator_guid: item.gift_creator_guid,
-                                    creator: item.creator.clone(),
-                                    creator_guid: item.creator_guid,
-                                    proposed_enchant: proposed,
-                                    block_charges: Some(item.charges),
-                                    block_durability: item.durability,
-                                    ..Default::default()
-                                };
-                                (item.item_id, item.quality, inst)
-                            }),
+                        false => row.filter(|i| i.item_id != 0).map(|item| {
+                            let inst = render::ItemInstance {
+                                name: item.name.clone(),
+                                block_lock_id: item.lock_id,
+                                block_wrapped: item.wrapped,
+                                gift_creator: item.gift_creator.clone(),
+                                gift_creator_guid: item.gift_creator_guid,
+                                creator: item.creator.clone(),
+                                creator_guid: item.creator_guid,
+                                proposed_enchant: proposed,
+                                block_charges: Some(item.charges),
+                                block_durability: item.durability,
+                                ..Default::default()
+                            };
+                            (item.item_id, item.quality, inst)
+                        }),
                     }
                 };
                 let Some((item_id, quality, inst)) = source else {
@@ -785,13 +830,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // `is-number` else the client's `Invalid loot slot in SetInventoryItem`, its text
             // naming the other method (`0x855310`, `0x533528`).
             let slot = binding_abi::index_arg(lua, slot, "Invalid loot slot in SetInventoryItem")?;
+            // The row as the window holds it at the call (`0x533551`, `0x4c22a0`).
             let row = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                model
-                    .loot
-                    .as_ref()
-                    .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
-                    .and_then(|r| r.clone())
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                super::loot::slot_now(lua, &model, slot)
+                    .flatten()
                     .filter(|r| !r.is_coin && r.item_id != 0)
             };
             let Some(row) = row else {
@@ -845,23 +888,55 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     compare::install_methods(lua, m)?;
 
     // GameTooltip:SetMerchantItem(index) / SetBuybackItem(index): template sources, as the
-    // reference's `SetMerchantItem` (`0x534080`) is.
+    // reference's `SetMerchantItem` (`0x534080`) is. `SetBuybackItem` (`0x536300`) tests its slot
+    // with `lua_isnumber` before its receiver (`0x536322`, usage `0x855634`), then takes row
+    // `ftol(slot) - 1` when it is below the count, compared unsigned (`0x536401`-`0x53640f`).
     for (method, buyback) in [("SetMerchantItem", false), ("SetBuybackItem", true)] {
         m.set(
             method,
-            lua.create_function(move |lua, (this, index): (Table, usize)| {
-                let h = frame_handle_of(lua, &this)?;
-                let row = {
-                    let model = lua.app_data_mut::<Model>().expect("model app_data");
-                    let Some(merchant) = &model.merchant else {
+            lua.create_function(move |lua, (this, index): (Value, Value)| {
+                let (this, index) = if buyback {
+                    let Some(slot) = lua.coerce_number(index)? else {
+                        return Err(mlua::Error::runtime("Usage: SetBuybackItem(slot)"));
+                    };
+                    let this = crate::script::object::receiver_in(
+                        lua,
+                        &this,
+                        crate::script::tooltip::REG_TOOLTIP_METHODS,
+                    )?;
+                    let Ok(index) = usize::try_from(slot as i64) else {
                         return Ok(());
                     };
-                    let list = if buyback {
-                        &merchant.buyback
-                    } else {
-                        &merchant.items
+                    (this, index)
+                } else {
+                    let this = <Table as mlua::FromLua>::from_lua(this, lua)?;
+                    frame_handle_of(lua, &this)?;
+                    // `is-number` else `Invalid merchant slot in SetMerchantItem` (`0x855474`,
+                    // `0x5341c4`); `n - 1` below 0 names no row (`0x534166`).
+                    let slot0 = binding_abi::less_one_arg(
+                        lua,
+                        index,
+                        "Invalid merchant slot in SetMerchantItem",
+                    )?;
+                    let Ok(index) = usize::try_from(slot0) else {
+                        return Ok(());
                     };
-                    list.get(index.saturating_sub(1)).cloned()
+                    (this, index + 1)
+                };
+                let h = frame_handle_of(lua, &this)?;
+                // The open vendor's row as of the call.
+                let row = {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    if !crate::script::merchant::head(lua, &model).open {
+                        return Ok(());
+                    }
+                    if buyback {
+                        index
+                            .checked_sub(1)
+                            .and_then(|i| crate::script::merchant::buyback_row(lua, &model, i))
+                    } else {
+                        crate::script::merchant::row(lua, &model, index - 1)
+                    }
                 };
                 let Some(row) = row else { return Ok(()) };
                 // Nothing to arm: the vendor tab's row seats `ShoppingTooltip1/2` itself
@@ -904,15 +979,15 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetInboxItem",
         lua.create_function(|lua, (this, index): (Table, Value)| {
-            // `is-number` else `Usage: SetInboxItem(index)` (`0x855584`, `0x53559e`).
-            let index = binding_abi::index_arg(lua, index, "Usage: SetInboxItem(index)")?;
+            // `this` first (`0x53554f`), then `is-number` else `Usage: SetInboxItem(index)`
+            // (`0x855584`, `0x53559e`).
             let h = frame_handle_of(lua, &this)?;
+            let index = binding_abi::index_arg(lua, index, "Usage: SetInboxItem(index)")?;
+            // `ftol(n) - 1` compared unsigned (`0x5355ce`, `0x5355d1`): 0 names no row. The row
+            // as the session holds it at the call.
             let row = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                let Some(mail) = &model.mail else {
-                    return Ok(Value::Nil);
-                };
-                mail.inbox.get(index.saturating_sub(1)).cloned()
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                super::mail::row_now(lua, &model, index)
             };
             let Some(row) = row.filter(|r| r.item_id != 0) else {
                 return Ok(Value::Nil);
@@ -947,26 +1022,27 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetAuctionItem",
         lua.create_function(|lua, (this, kind, index): (Table, Value, Value)| {
-            // `is-number` on arg 3, `is-number-or-string` on arg 2 else
+            // `this` first, then `is-number` on arg 3, `is-number-or-string` on arg 2 else
             // `Usage: SetAuctionItem("type", index)` (`0x8555a0`, `0x535ab6`).
+            let h = frame_handle_of(lua, &this)?;
             let kind =
                 binding_abi::string_arg(lua, kind, r#"Usage: SetAuctionItem("type", index)"#)?;
             let index =
                 binding_abi::index_arg(lua, index, r#"Usage: SetAuctionItem("type", index)"#)?;
-            let h = frame_handle_of(lua, &this)?;
-            let (item_id, roll, name, charges) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                let Some(auction) = &model.auction else {
-                    return Ok(Value::Nil);
-                };
-                let Some(list) = super::auction::list_index_of(&kind) else {
-                    return Ok(Value::Nil);
-                };
-                match auction.lists[list].rows.get(index.saturating_sub(1)) {
-                    Some(r) => (r.item_id, r.random_property_id, r.name.clone(), r.charges),
-                    None => (0, 0, None, -1),
-                }
+            let held = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.auction.is_some()
             };
+            let Some(list) = super::auction::list_index_of(&kind).filter(|_| held) else {
+                return Ok(Value::Nil);
+            };
+            // `ftol(n) - 1` compared unsigned (`0x535933`, `0x535944`): 0 names no row. The
+            // record is read at the call, as the getters read it.
+            let (item_id, roll, name, charges) =
+                match super::auction_live::live_row_at(lua, list, index) {
+                    Some(r) => (r.item_id, r.random_property_id, r.name, r.charges),
+                    None => (0, 0, None, -1),
+                };
             if item_id == 0 {
                 return Ok(Value::Nil);
             }
@@ -1004,7 +1080,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let (item_id, inst) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 match model.auction_sell_item.as_ref() {
-                    Some(it) => (it.item_id, held_instance(&model, it.bag, it.slot)),
+                    Some(it) => (it.item_id, held_instance(lua, &model, it.bag, it.slot)),
                     None => (0, None),
                 }
             };
@@ -1036,7 +1112,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let (item_id, inst) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 match model.mail_send_item.as_ref() {
-                    Some(it) => (it.item_id, held_instance(&model, it.bag, it.slot)),
+                    Some(it) => (it.item_id, held_instance(lua, &model, it.bag, it.slot)),
                     None => (0, None),
                 }
             };
@@ -1058,36 +1134,37 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // GameTooltip:SetTradeSkillItem(skillIndex [, reagentIndex]): the reagent's item, or without
     // `reagentIndex` the recipe's product. A product id of 0 or an uncached template shows the
-    // recipe's or the reagent's name alone (`render_by_id`); a bad index does nothing.
+    // recipe's or the reagent's name alone (`render_by_id`).
     m.set(
         "SetTradeSkillItem",
         lua.create_function(
             |lua, (this, skill_index, reagent_index): (Table, Value, Value)| {
-                // `is-number` on the index else `Invalid trade skill item in
-                // SetTradeSkillItem(index [,reagent])` (`0x8553d8`, `0x533b78`); a non-number
-                // reagent is absent (`0x533be7`).
-                let skill_index = binding_abi::index_arg(
-                    lua,
-                    skill_index,
-                    "Invalid trade skill item in SetTradeSkillItem(index [,reagent])",
-                )?;
+                // `this` first (`0x533b6e`).
+                frame_handle_of(lua, &this)?;
+                // `is-number` on the index, a row below the count (`0x533b9f`) whose spell has a
+                // record (`0x533bbd`, a header's -1 has none), and a reagent number that names
+                // one of the recipe's reagents (`0x533c51`..`0x533c68`), else `Invalid trade skill
+                // item in SetTradeSkillItem(index [,reagent])` (`0x8553d8`, `0x533c6a`); a
+                // non-number reagent is absent (`0x533be7`).
+                const LINE: &str =
+                    "Invalid trade skill item in SetTradeSkillItem(index [,reagent])";
+                let skill_index = binding_abi::index_arg(lua, skill_index, LINE)?;
                 let reagent_index = binding_abi::index_or(lua, reagent_index)?.map(|i| i as usize);
                 let found = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     // A visible-row index, headers included (`0x4fca20`); a header is None.
-                    let Some(recipe) = super::tradeskill::recipe_at(&model, skill_index) else {
-                        return Ok(());
-                    };
-                    match reagent_index {
-                        Some(ri) => ri
-                            .checked_sub(1)
-                            .and_then(|i| recipe.reagents.get(i))
-                            .map(|r| (r.item, r.name.clone())),
-                        None => Some((recipe.product_item, Some(recipe.name.clone()))),
-                    }
+                    super::tradeskill::recipe_at(&model, skill_index).and_then(|recipe| {
+                        match reagent_index {
+                            Some(ri) => ri
+                                .checked_sub(1)
+                                .and_then(|i| recipe.reagents.get(i))
+                                .map(|r| (r.item, r.name.clone())),
+                            None => Some((recipe.product_item, Some(recipe.name.clone()))),
+                        }
+                    })
                 };
                 let Some((item_id, fb_name)) = found else {
-                    return Ok(());
+                    return Err(mlua::Error::runtime(LINE));
                 };
                 render_by_id(lua, &this, item_id, fb_name, None)
             },
@@ -1095,33 +1172,31 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // GameTooltip:SetCraftItem(craftIndex, reagentIndex): the reagent's item
-    // (`Blizzard_CraftUI.xml:33`); a craft has no product item, so both arguments are required. A
-    // bad index does nothing.
+    // (`Blizzard_CraftUI.xml:33`); a craft has no product item, so both arguments are required.
     m.set(
         "SetCraftItem",
         lua.create_function(
             |lua, (this, craft_index, reagent_index): (Table, Value, Value)| {
-                // `is-number` on both else `Invalid craft item in SetCraftItem(index, reagent)`
-                // (`0x855418`, `0x533d88`, `0x533d9c`).
+                // `this` first (`0x533d7b`).
+                frame_handle_of(lua, &this)?;
+                // `is-number` on both (`0x533d88`, `0x533d9c`), a row below the count
+                // (`0x533dc3`) whose spell has a record (`0x533dd9`), and a reagent number naming
+                // one of its reagents (`0x533e10`..`0x533e27`), else `Invalid craft item in
+                // SetCraftItem(index, reagent)` (`0x855418`, `0x533e29`).
                 const LINE: &str = "Invalid craft item in SetCraftItem(index, reagent)";
                 let craft_index = binding_abi::index_arg(lua, craft_index, LINE)?;
                 let reagent_index = binding_abi::index_arg(lua, reagent_index, LINE)?;
                 let found = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
-                    let Some(c) = &model.craft else {
-                        return Ok(());
-                    };
-                    let Some(recipe) = craft_index.checked_sub(1).and_then(|i| c.recipes.get(i))
-                    else {
-                        return Ok(());
-                    };
-                    reagent_index
-                        .checked_sub(1)
-                        .and_then(|i| recipe.reagents.get(i))
-                        .map(|r| (r.item, r.name.clone()))
+                    crate::script::craft::recipe(&model, craft_index).and_then(|recipe| {
+                        reagent_index
+                            .checked_sub(1)
+                            .and_then(|i| recipe.reagents.get(i))
+                            .map(|r| (r.item, r.name.clone()))
+                    })
                 };
                 let Some((item_id, fb_name)) = found else {
-                    return Ok(());
+                    return Err(mlua::Error::runtime(LINE));
                 };
                 render_by_id(lua, &this, item_id, fb_name, None)
             },

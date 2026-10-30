@@ -81,7 +81,8 @@ pub struct MultisampleFormat {
 /// One screen resolution the Video options dropdown offers, in physical pixels. Deviation: the
 /// list is the window sizes this client can present, not the device's display modes, because
 /// benilla makes no exclusive mode-set. `"WxH"` is a contract: `OptionsFrame.lua:281-284` splits
-/// on the `x` and `CT_Viewport.lua:107` matches `"(%d+)x(%d+)"`, both failing silently.
+/// on the `x`, raising on a string without one, and `CT_Viewport.lua:107` matches
+/// `"(%d+)x(%d+)"`, failing silently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenResolution {
     pub width: u32,
@@ -105,6 +106,73 @@ impl std::fmt::Display for ScreenResolution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}x{}", self.width, self.height)
     }
+}
+
+/// The Video menus' resolution list and the client's current entry, as the host reads them where
+/// a verb runs: the reference builds the list on the first use of any resolution verb
+/// (`0x48bc90`), so a call during the UI load answers it. Declined with no display to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenModesQuery;
+
+/// The host's answer to [`ScreenModesQuery`], as [`UiScript::set_screen_resolutions`] takes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenModes {
+    pub offered: Vec<ScreenResolution>,
+    pub current: Option<ScreenResolution>,
+}
+
+impl super::live::LiveQuery for ScreenModesQuery {
+    type Answer = ScreenModes;
+}
+
+/// The device's multisample formats, read where a multisample verb runs: the reference builds the
+/// list on the first use of any of them (`0x48c3e0`). Declined before the device is enumerated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MultisampleFormatsQuery;
+
+impl super::live::LiveQuery for MultisampleFormatsQuery {
+    type Answer = Vec<MultisampleFormat>;
+}
+
+/// Seat the live resolution list in the model before a resolution verb reads it (`0x48bc90`); the
+/// model's own list stands with no host to ask.
+fn read_screen_modes(lua: &Lua) {
+    if let Some(modes) = super::live::ask(lua, &ScreenModesQuery) {
+        seat_resolutions(
+            &mut lua.app_data_mut::<Model>().expect("model app_data"),
+            modes.offered,
+            modes.current,
+        );
+    }
+}
+
+/// Seat the live multisample list in the model before a multisample verb reads it (`0x48c3e0`).
+fn read_multisample_formats(lua: &Lua) {
+    if let Some(formats) = super::live::ask(lua, &MultisampleFormatsQuery) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .multisample_formats = formats;
+    }
+}
+
+/// Sort and dedupe `offered` by [`ScreenResolution::sort_key`], insert `current` when the list
+/// lacks it and seat both.
+fn seat_resolutions(
+    model: &mut Model,
+    mut offered: Vec<ScreenResolution>,
+    current: Option<ScreenResolution>,
+) {
+    offered.sort_by_key(ScreenResolution::sort_key);
+    offered.dedup();
+    let current = current.map(|c| {
+        offered.iter().position(|r| *r == c).unwrap_or_else(|| {
+            let at = offered.partition_point(|r| r.sort_key() < c.sort_key());
+            offered.insert(at, c);
+            at
+        })
+    });
+    model.screen_resolutions = offered;
+    model.current_resolution = current;
 }
 
 /// What `GetVideoCaps` answers, in `OptionsFrame.lua:59`'s order: anisotropic, pixel shaders,
@@ -239,6 +307,26 @@ impl super::UiScript {
             .collect()
     }
 
+    /// Every row of the mirror as `(name, value, default, reset)`, in its list order (each row's
+    /// insertion), for the console's prints inside a `ConsoleExec` call: the mirror holds what
+    /// the chunk's own writes left, as the reference's one record does.
+    pub fn cvar_rows(&self) -> Vec<(String, String, String, Option<String>)> {
+        let model = self.model_mut();
+        let mut slots: Vec<&CvarSlot> = model.cvars.values().collect();
+        slots.sort_by_key(|s| s.seq);
+        slots
+            .into_iter()
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    s.value.clone(),
+                    s.default.clone(),
+                    s.reset.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Drain the lines CVar change callbacks printed since the last call, for the console.
     pub fn take_cvar_console_lines(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().cvar_console)
@@ -325,21 +413,10 @@ impl super::UiScript {
     /// `arg[GetCurrentResolution()]` and silently falls back to 4:3 on a miss.
     pub fn set_screen_resolutions(
         &mut self,
-        mut offered: Vec<ScreenResolution>,
+        offered: Vec<ScreenResolution>,
         current: Option<ScreenResolution>,
     ) {
-        offered.sort_by_key(ScreenResolution::sort_key);
-        offered.dedup();
-        let current = current.map(|c| {
-            offered.iter().position(|r| *r == c).unwrap_or_else(|| {
-                let at = offered.partition_point(|r| r.sort_key() < c.sort_key());
-                offered.insert(at, c);
-                at
-            })
-        });
-        let mut model = self.model_mut();
-        model.screen_resolutions = offered;
-        model.current_resolution = current;
+        seat_resolutions(&mut self.model_mut(), offered, current);
     }
 
     /// Publish what this run's device and presentation path offer, behind `GetVideoCaps`.
@@ -347,8 +424,8 @@ impl super::UiScript {
         self.model_mut().video_caps = caps;
     }
 
-    /// Drain the `RestartGx()` calls queued since the last call; the host answers each by
-    /// re-asserting the staged video settings against the window.
+    /// Drain the restarts no call took ([`restart_gx`]); the host answers each by committing the
+    /// staged video settings and re-asserting them against the window.
     pub fn take_restart_gx_asks(&mut self) -> u32 {
         std::mem::take(&mut self.model_mut().restart_gx_asks)
     }
@@ -479,6 +556,22 @@ pub(super) fn write_cvar(model: &mut Model, name: &str, value: String) {
         return;
     }
     store(model, &key, value);
+}
+
+/// Hand the writes a verb just queued to the host inside its call ([`super::ScriptCall::CvarWritten`]),
+/// as `CVar::Set` (`0x63df50`) runs the row's change callback inside the write (`0x63df7d`): the
+/// engine's knob has moved before the verb's next line. With no host open (a bare VM) the host's
+/// frame sync takes them; nothing queued sends nothing.
+pub(super) fn written(lua: &Lua) -> mlua::Result<()> {
+    let queued = !lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .cvar_changes
+        .is_empty();
+    if queued && super::host::open(lua) {
+        return super::calls::submit(lua, super::ScriptCall::CvarWritten);
+    }
+    Ok(())
 }
 
 /// `Couldn't find CVar named '%s'` (`0x842310`), the error `GetCVar`, `SetCVar` and
@@ -638,6 +731,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetMultisampleFormats",
         lua.create_function(|lua, ()| {
+            read_multisample_formats(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             // Flat, three per entry (`0x48c360`); no formats is no values and an empty menu.
             let mut out = mlua::MultiValue::new();
@@ -652,6 +746,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCurrentMultisampleFormat",
         lua.create_function(|lua, ()| {
+            read_multisample_formats(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let cvar = |n: &str| model.cvars.get(n).and_then(|s| s.value.parse::<u32>().ok());
             let (Some(color), Some(depth), Some(samples)) = (
@@ -676,6 +771,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "SetMultisampleFormat",
         lua.create_function(|lua, id: Value| {
+            read_multisample_formats(lua);
             // `lua_isnumber` (`0x48c659`): a non-number is a missing id, which the deviation below
             // ignores.
             let id = crate::script::binding_abi::is_number(lua, id);
@@ -694,10 +790,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             set_from_engine(&mut model, "gxColorBits", f.color_bits.to_string());
             set_from_engine(&mut model, "gxDepthBits", f.depth_bits.to_string());
             set_from_engine(&mut model, "gxMultisample", f.samples.to_string());
-            // Deviation: the reference then runs the console command `gxRestart` (`0x842978`
-            // through `0x63ce00`); none is queued here, because `gxMultisample` applies at next
-            // launch anyway: the camera reads its sample count once, at spawn.
-            Ok(())
+            drop(model);
+            // Each `CVar::Set` (`0x48c72a`, `0x48c75b`, `0x48c78c`) runs its row's callback
+            // inside the call.
+            written(lua)?;
+            // Then `gxRestart`, always (`0x48c79b`).
+            restart_gx(lua)
         })?,
     )?;
 
@@ -729,6 +827,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 store(&mut model, &key, value.clone());
             }
+            // The callback, inside the write (`CVar::Set` at `0x488ca8`), ahead of the token's
+            // event (`0x488cad`).
+            written(lua)?;
             // A third argument that passes `lua_isstring` is the `CVAR_UPDATE` token, arg1, with
             // the value as arg2 (`0x488cad`-`0x488cd5`), fired on every such call, changed or not,
             // and inside it: `SignalEvent2` (`0x703f50`) walks the listeners in place. The 1.12
@@ -748,6 +849,44 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_world_detail_verbs(lua)?;
     super::video_pairs::install(lua)
 }
+
+/// `gxRestart`'s handler (`0x639f60`) inside the call that runs it: `RestartGx` (`0x48dab0`),
+/// `SetScreenResolution` (`0x48c0bc`) and `SetMultisampleFormat` (`0x48c79b`) through
+/// `ConsoleCommandExecute` (`0x63ce00`), which calls the handler synchronously, and
+/// `RestoreVideoDefaults`, which calls it directly (`0x639a51`). The host commits the latched rows
+/// (`0x639ec0`) before the verb goes on. With no host open (a bare VM) it is
+/// counted for the host's frame drain.
+fn restart_gx(lua: &Lua) -> mlua::Result<()> {
+    if super::host::open(lua) {
+        return super::calls::submit(lua, super::ScriptCall::RestartGx);
+    }
+    lua.app_data_mut::<Model>()
+        .expect("model app_data")
+        .restart_gx_asks += 1;
+    Ok(())
+}
+
+/// `names` each set to its registered default, through the host's callbacks inside the call.
+fn restore_defaults(lua: &Lua, names: &[&str]) -> mlua::Result<()> {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    for name in names {
+        let Some(default) = model
+            .cvars
+            .get(&name.to_ascii_lowercase())
+            .map(|slot| slot.default.clone())
+        else {
+            // Unregistered in a bare VM: nothing to restore, nothing to warn about.
+            continue;
+        };
+        set_from_engine(&mut model, name, default);
+    }
+    drop(model);
+    written(lua)
+}
+
+/// How many of [`VIDEO_DEFAULT_CVARS`] lead it as the device record's `gx*` writes, ahead of
+/// `RestoreVideoDefaults`' restart.
+const VIDEO_DEFAULT_GX: usize = 6;
 
 /// What `RestoreVideoDefaults` puts back: the CVars among the reference verb's writes that benilla
 /// registers, each at its registered default. The verb writes no `uiScale`, `useUiScale` or
@@ -793,6 +932,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetScreenResolutions",
         lua.create_function(|lua, ()| {
+            read_screen_modes(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let mut out = mlua::MultiValue::new();
             for r in &model.screen_resolutions {
@@ -806,11 +946,14 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     // (`0x48bf88`), so a 1 does not prove a match.
     //
     // Deviation: the index is of the live window size, not of the `gxResolution` CVar the
-    // reference parses (`0x48bf20`), because without an exclusive mode-set `gxResolution` is the
-    // windowed size, not the live one in borderless fullscreen, which `CT_Viewport` scales by.
+    // reference parses (`0x48bf20`), because the window here can be dragged to any size, where the
+    // reference's backbuffer stays at `gxResolution`'s, and `CT_Viewport` scales by the live one.
+    // The list and the window are logical pixels and the fullscreen `gxResolution` device pixels,
+    // so on a scaled display the entry this picks is not the size `GetCVar` answers.
     lua.globals().set(
         "GetCurrentResolution",
         lua.create_function(|lua, ()| {
+            read_screen_modes(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(model.current_resolution.map_or(1.0, |i| (i + 1) as f64))
         })?,
@@ -829,6 +972,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "SetScreenResolution",
         lua.create_function(|lua, id: Option<Value>| {
+            read_screen_modes(lua);
             // `is-number` (`0x48bfe8`) false leaves the index at entry 1 (`0x48bfe6`).
             let idx = match id {
                 Some(v) => lua.coerce_number(v)?.map_or(0, super::binding_abi::ftol),
@@ -853,8 +997,11 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             set_from_engine(&mut model, "gxResolution", want);
-            model.restart_gx_asks += 1;
-            Ok(())
+            drop(model);
+            // `CVar::Set` (`0x48c0ad`) runs the row's callback, then `gxRestart` runs
+            // (`0x48c0bc`), both inside the call.
+            written(lua)?;
+            restart_gx(lua)
         })?,
     )?;
     // ── GetRefreshRates ─────────────────────────────────────────────────────────────────────
@@ -899,40 +1046,24 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     // ── RestartGx ────────────────────────────────────────────────────────────────────────────
     // "Apply the staged video settings now": `0x48dab0` runs the console command `gxRestart`
     // (`0x63ce00`), whose handler `0x639f60` applies the staged device format and commits the
-    // fourteen latched CVars. Here it queues a counted request, as `Screenshot()` does; the host
-    // commits its gx stages (`Cvars::commit_latched`) and re-asserts them against the window.
-    // The reference runs each gx change callback at `SetCVar`, where it can veto the write; the
-    // host runs it at the commit. No restart applies `gxMultisample`: the camera reads it once.
-    lua.globals().set(
-        "RestartGx",
-        lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .restart_gx_asks += 1;
-            Ok(())
-        })?,
-    )?;
+    // fourteen latched CVars, synchronously ([`restart_gx`]). The reference runs each gx change
+    // callback at `SetCVar`, where it can veto the write; the host runs it at the commit. No
+    // restart applies `gxMultisample`: the camera reads it once.
+    lua.globals()
+        .set("RestartGx", lua.create_function(|lua, ()| restart_gx(lua))?)?;
     // ── RestoreVideoDefaults ─────────────────────────────────────────────────────────────────
     // The Defaults button's whole effect: `OptionsFrame_SetDefaults` only sets the widgets, which
-    // the button's `OnClick` then hides without `_Save` (`OptionsFrame.xml:688-690`). Ends with a
-    // restart, as the reference calls the `gxRestart` handler between its two passes (`0x639a51`).
+    // the button's `OnClick` then hides without `_Save` (`OptionsFrame.xml:688-690`).
     lua.globals().set(
         "RestoreVideoDefaults",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            for name in VIDEO_DEFAULT_CVARS {
-                let Some(default) = model
-                    .cvars
-                    .get(&name.to_ascii_lowercase())
-                    .map(|slot| slot.default.clone())
-                else {
-                    // Unregistered in a bare VM: nothing to restore, nothing to warn about.
-                    continue;
-                };
-                set_from_engine(&mut model, name, default);
-            }
-            model.restart_gx_asks += 1;
-            Ok(())
+            // The device record's `gx*` (`0x639c40`), the restart (`0x639a51`), then the quality
+            // rows (`0x639a60`), each write a `CVar::Set` that runs its row's callback inside the
+            // call.
+            let (gx, quality) = VIDEO_DEFAULT_CVARS.split_at(VIDEO_DEFAULT_GX);
+            restore_defaults(lua, gx)?;
+            restart_gx(lua)?;
+            restore_defaults(lua, quality)
         })?,
     )?;
     // ── GetGamma / SetGamma ──────────────────────────────────────────────────────────────────
@@ -949,11 +1080,12 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
             let gamma = model
                 .cvars
                 .get(&CVAR_GAMMA.to_ascii_lowercase())
-                .and_then(|slot| slot.value.parse::<f64>().ok())
+                // The record's float (`fld dword [eax+0x24]`, `0x4891cd`), not the text.
+                .map(|slot| super::binding_abi::record_float(&slot.value))
                 // A bare VM with no `gamma` row answers as if the default stood; the reference
                 // always finds its record (`0x63de30`).
                 .unwrap_or(1.0);
-            Ok(1.0 - gamma)
+            Ok(1.0 - f64::from(gamma))
         })?,
     )?;
     lua.globals().set(
@@ -961,19 +1093,14 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, value: Value| {
             // `lua_isnumber` (`0x4891fe`): a number or a numeric string; anything else raises
             // (`0x6f4940`).
-            let v = match &value {
-                Value::Integer(i) => *i as f64,
-                Value::Number(n) => *n,
-                Value::String(s) => {
-                    match s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()) {
-                        Some(n) => n,
-                        None => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
-                    }
-                }
-                _ => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
-            };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            write_cvar(&mut model, CVAR_GAMMA, format_f(1.0 - v));
+            let v = super::binding_abi::float_arg(lua, value, USAGE_SET_GAMMA)?;
+            write_cvar(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                CVAR_GAMMA,
+                format_f(1.0 - v),
+            );
+            // `CVar::Set` (`0x489267`) runs the row's callback inside the call.
+            written(lua)?;
             // Zero return values, not nil (`eax = 0` at every `ret`).
             Ok(mlua::MultiValue::new())
         })?,
@@ -1027,27 +1154,13 @@ fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
         "SetWorldDetail",
         lua.create_function(|lua, value: Value| {
             // `lua_isnumber`: a number or a numeric string; anything else is the usage error.
-            let n = match &value {
-                Value::Integer(i) => *i as f64,
-                Value::Number(n) => *n,
-                Value::String(s) => {
-                    match s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()) {
-                        Some(n) => n,
-                        None => return Err(mlua::Error::runtime(USAGE_SET_WORLD_DETAIL)),
-                    }
-                }
-                _ => return Err(mlua::Error::runtime(USAGE_SET_WORLD_DETAIL)),
+            let n = super::binding_abi::number_arg(lua, value, USAGE_SET_WORLD_DETAIL)?;
+            // `_ftol` (`0x488e0a`), then a signed `0..3` (`0x488e13`, `0x488e1c`): -0.5 is stop 0,
+            // only <= -1 raises, and NaN is stop 0, its QWORD `fistp` having a low dword of 0.
+            let stop = match usize::try_from(n) {
+                Ok(stop) if stop < 3 => stop,
+                _ => return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL)),
             };
-            // Truncate toward zero, then the reference's bounds: -0.5 is stop 0 and only <= -1
-            // raises. NaN raises too, as the reference's `fistp` gives the negative indefinite.
-            if n.is_nan() {
-                return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
-            }
-            let stop = n.trunc();
-            if !(0.0..3.0).contains(&stop) {
-                return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
-            }
-            let stop = stop as usize;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // The reference's two writes, `frillDensity` as "%d" (`0x488e26`) and `smallCull` as
             // "%f" of the f32 (`0x488e63`), then ours, the stop: writing it here keeps
@@ -1059,6 +1172,9 @@ fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
             );
             write_cvar(&mut model, CVAR_SMALL_CULL, small_cull_text(stop));
             write_cvar(&mut model, CVAR_WORLD_DETAIL, stop.to_string());
+            drop(model);
+            // Each `CVar::Set` (`0x488e51`, `0x488e8e`) runs its row's callback inside the call.
+            written(lua)?;
             // Zero return values, not nil (`eax = 0` at every `ret`).
             Ok(mlua::MultiValue::new())
         })?,
@@ -1211,6 +1327,7 @@ mod tests {
     #[test]
     fn console_exec_writes_a_valued_cvar_and_hands_a_bare_name_to_the_host() {
         let mut s = script_with_volume();
+        s.keep_calls();
         s.run(r#"ConsoleExec("MusicVolume 0.2")"#).unwrap();
         assert_eq!(
             s.eval::<String>(r#"return GetCVar("MusicVolume")"#)
@@ -1477,5 +1594,14 @@ mod tests {
             .eval(r#"return string.gsub(GetCVar("realmName"), "^%s*", "")"#)
             .unwrap();
         assert_eq!(trimmed, "Archimonde");
+    }
+
+    /// `RestoreVideoDefaults` restarts between the device record's writes and the quality rows'
+    /// (`0x639a51`), so the split falls after the last `gx*` row.
+    #[test]
+    fn the_video_defaults_split_after_the_device_records_rows() {
+        let (gx, quality) = super::VIDEO_DEFAULT_CVARS.split_at(super::VIDEO_DEFAULT_GX);
+        assert!(gx.iter().all(|n| n.starts_with("gx")), "{gx:?}");
+        assert!(!quality.iter().any(|n| n.starts_with("gx")), "{quality:?}");
     }
 }

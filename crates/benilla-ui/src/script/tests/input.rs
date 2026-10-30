@@ -120,10 +120,10 @@ fn onclick_fires_on_press_release_same_frame_not_when_release_lands_elsewhere() 
     s.run(
         r#"
         clicks_a, clicks_b, click_btn = 0, 0, nil
-        local a = CreateFrame("Frame", "A")   -- left half
+        local a = CreateFrame("Button", "A")   -- left half
         a:SetPoint("BOTTOMLEFT", 0, 0); a:SetWidth(400); a:SetHeight(600); a:EnableMouse(true)
         a:SetScript("OnClick", function() local self, button, down = this, arg1, arg2 clicks_a = clicks_a + 1; click_btn = button end)
-        local b = CreateFrame("Frame", "B")   -- right half
+        local b = CreateFrame("Button", "B")   -- right half
         b:SetPoint("BOTTOMLEFT", 400, 0); b:SetWidth(400); b:SetHeight(600); b:EnableMouse(true)
         b:SetScript("OnClick", function() local self, button, down = this, arg1, arg2 clicks_b = clicks_b + 1 end)
     "#,
@@ -553,7 +553,7 @@ fn a_half_finished_double_click_survives_the_cursor_leaving_the_window() {
     );
 }
 
-/// A name in `SCRIPT_KINDS` must have something that fires it, so this asserts the fire.
+/// A name in a type's script map must have something that fires it, so this asserts the fire.
 #[test]
 fn set_script_on_double_click_is_accepted_because_something_fires_it() {
     let mut s = script();
@@ -906,14 +906,80 @@ fn a_disabled_button_takes_the_hover_but_fires_no_enter_or_leave() {
         "no leave from the disabled button; the enabled one notifies normally"
     );
 
-    // Disabled while hovered: the leave is gated on the state at leave time.
+    // Disabled while hovered: `SetEnabled` runs the leave itself (`0x7791b4`), so the walk's
+    // later leave finds the state gone and fires nothing.
     s.run("On:Disable()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return table.concat(log, ',')").unwrap(),
+        "On:enter,On:leave",
+        "Disable() under the cursor fires the leave"
+    );
     s.mouse_move(400.0, 50.0);
     assert_eq!(
         s.eval::<String>("return table.concat(log, ',')").unwrap(),
-        "On:enter",
-        "a button disabled under the cursor swallows its own leave"
+        "On:enter,On:leave",
+        "the walk's leave is gated on the state at leave time"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `SetEnabled` (`0x779160`) on the hovered frame: `Disable()` runs the leave notify while the
+/// state still enables it (`0x7791b4`), and `Enable()` runs the enter notify once the state is set
+/// (`0x779192`). Off the hovered frame, or with no change, no script runs.
+#[test]
+fn enabling_or_disabling_a_hovered_button_fires_its_leave_and_enter() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        log = {}
+        local function mk(name, x)
+            local b = CreateFrame("Button", name)
+            b:SetPoint("BOTTOMLEFT", x, 0); b:SetWidth(100); b:SetHeight(100); b:EnableMouse(true)
+            b:SetScript("OnEnter", function() table.insert(log, name..":enter:"..b:IsEnabled()) end)
+            b:SetScript("OnLeave", function() table.insert(log, name..":leave:"..b:IsEnabled()) end)
+            return b
+        end
+        Hot = mk("Hot", 0)
+        Cold = mk("Cold", 200)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let log = |s: &mut crate::script::UiScript| {
+        s.eval::<String>("local t = table.concat(log, ',') log = {} return t")
+            .unwrap()
+    };
+
+    s.mouse_move(50.0, 50.0);
+    assert_eq!(log(&mut s), "Hot:enter:1");
+
+    // The leave runs with the state still enabled, then the button is disabled; the hover stays.
+    s.run("Hot:Disable()").unwrap();
+    assert_eq!(log(&mut s), "Hot:leave:1");
+    assert_eq!(s.eval::<i64>("return Hot:IsEnabled()").unwrap(), 0);
+    assert_eq!(
+        s.eval::<String>("return GetMouseFocus():GetName()")
+            .unwrap(),
+        "Hot"
+    );
+    // No change, nothing fires.
+    s.run("Hot:Disable()").unwrap();
+    assert_eq!(log(&mut s), "");
+
+    // The enter runs after the state is set.
+    s.run("Hot:Enable()").unwrap();
+    assert_eq!(log(&mut s), "Hot:enter:1");
+    s.run("Hot:Enable()").unwrap();
+    assert_eq!(log(&mut s), "");
+
+    // A button off the cursor fires neither way.
+    s.run("Cold:Disable() Cold:Enable()").unwrap();
+    assert_eq!(log(&mut s), "");
+
+    // The walk still leaves an enabled button normally.
+    s.mouse_move(250.0, 50.0);
+    assert_eq!(log(&mut s), "Hot:leave:1,Cold:enter:1");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 

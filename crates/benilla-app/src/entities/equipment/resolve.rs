@@ -14,7 +14,7 @@ use super::super::item_glow::{self, ItemGlows};
 use super::super::Creatures;
 use super::{
     attach_id, ensure_item_model, DisarmFreeze, Equipment, HeldItems, HeldSlot, ItemDisplays,
-    ItemModelKind, ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
+    ItemModelKind, WornPins, ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
 };
 
 /// Where one held slot's item hangs, if it shows: a melee item drawn in sheath state 1, else by
@@ -102,6 +102,8 @@ pub(in crate::entities) struct ResolveKey {
     visual_sheath: Option<[u8; 2]>,
     nocked: Option<u32>,
     latched: bool,
+    /// `(helm hidden, cloak hidden)`, the bits or a call's re-dress ahead of them ([`WornPins`]).
+    worn_hidden: (bool, bool),
 }
 
 /// The item entries a player's resolve last looked up, by visible slot and by quiver bag slot.
@@ -186,7 +188,7 @@ pub(crate) struct DressKey {
 #[allow(clippy::type_complexity)]
 pub(in crate::entities) fn resolve_equipment(
     mut commands: Commands,
-    units: Query<(
+    mut units: Query<(
         Entity,
         &NetEntity,
         Ref<ObjectStore>,
@@ -200,7 +202,7 @@ pub(in crate::entities) fn resolve_equipment(
         Option<&ResolveKey>,
         Option<&DressKey>,
         Option<&DisarmFreeze>,
-        Has<crate::net::SelfPlayer>,
+        (Has<crate::net::SelfPlayer>, Option<&mut WornPins>),
         Option<&LookedUp>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
@@ -251,9 +253,9 @@ pub(in crate::entities) fn resolve_equipment(
         current_key,
         current_dress,
         freeze,
-        is_self,
+        (is_self, mut pins),
         looked_up,
-    ) in &units
+    ) in &mut units
     {
         if !matches!(net_entity.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
@@ -264,11 +266,23 @@ pub(in crate::entities) fn resolve_equipment(
             .and_then(|c| c.state())
             .or_else(|| s.unit_sheath_state())
             .unwrap_or(0);
+        // A piece whose record a call waited on goes by the flag once the record lands.
+        if let Some(pins) = pins.as_mut() {
+            let landed = |slot| {
+                s.player_visible_item_entry(slot)
+                    .is_some_and(|entry| templates.template(entry, 0, Ask::Read).is_some())
+            };
+            pins.records_landed(landed);
+        }
         let key = ResolveKey {
             committed_sheath: committed,
             visual_sheath: visual_sheath.map(|v| v.0),
             nocked: nocked.map(|n| n.display_id),
             latched: nock_latched,
+            // `PLAYER_FLAGS`' `HIDE_HELM 0x400` and `HIDE_CLOAK 0x800` are public, so another
+            // player's choice shows here; a hidden piece is display id 0, so its model and
+            // `0x4799a0` masks go.
+            worn_hidden: WornPins::hidden(pins.as_deref(), s),
         };
         if !caches_moved && !store.is_changed() && current_key == Some(&key) {
             continue;
@@ -276,9 +290,7 @@ pub(in crate::entities) fn resolve_equipment(
         if current_key != Some(&key) {
             commands.entity(entity).insert(key);
         }
-        // `PLAYER_FLAGS`' `HIDE_HELM 0x400` and `HIDE_CLOAK 0x800` are public, so another player's
-        // choice shows here; a hidden piece is display id 0, so its model and `0x4799a0` masks go.
-        let (hide_helm, hide_cloak) = (s.player_hides_helm(), s.player_hides_cloak());
+        let (hide_helm, hide_cloak) = key.worn_hidden;
         let prev = looked_up.copied().unwrap_or_default();
         let mut reads = SlotReads {
             templates: &templates,
@@ -1122,8 +1134,8 @@ mod tests {
         );
     }
 
-    /// A disconnect keeps our own avatar and drops the in-flight asks (`Items::clear_session`,
-    /// the guild cache's world-entry release). A slot and a crest whose ask was dropped are
+    /// A disconnect keeps our own avatar and drops the in-flight asks (the saved stores' clear in
+    /// `wdb`, the guild cache's world-entry release). A slot and a crest whose ask was dropped are
     /// unknown to the cache, so the next resolve asks again rather than waiting forever.
     #[test]
     fn a_slot_whose_ask_was_dropped_is_asked_again() {
@@ -1146,7 +1158,7 @@ mod tests {
             .any(|c| matches!(c, ClientCommand::GuildQuery { guild_id: 7 })));
         assert!(!app.world().get::<Equipment>(player).unwrap().settled);
 
-        app.world_mut().resource_mut::<Items>().clear_session();
+        crate::wdb::SavedCache::forget_asks(&mut *app.world_mut().resource_mut::<Items>());
         app.world_mut()
             .resource_mut::<crate::ui_guild::GuildState>()
             .drop_pending_for_test();

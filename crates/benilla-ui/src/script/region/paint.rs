@@ -69,7 +69,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // GetVertexColor (`0x79aa50`): white when never set, and under a gradient (`0x77f8c0` answers
-    // white unless the slot holds exactly one colour).
+    // white unless the slot holds exactly one colour). Green, blue and alpha are stored through
+    // `f32` before the push (`0x79ab68`, `0x79ab79`, `0x79ab3a`), red pushed as the double.
     m.set(
         "GetVertexColor",
         lua.create_function(|lua, this: Table| {
@@ -79,7 +80,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 .region_data
                 .get(&rh)
                 .map_or(crate::color::Rgba8::WHITE, |d| d.vertex_color_or_white());
-            Ok(crate::script::object::colour_values(c))
+            Ok(crate::script::object::colour_values_f32_gba(c))
         })?,
     )?;
 
@@ -275,7 +276,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // SetTexCoordModifiesRect/GetTexCoordModifiesRect (`0x79c080`/`0x79c120`, table `0x87c128`):
     // the setter writes `[texture+0x124]` (`0x79c113`), as does installing the texture as a
-    // StatusBar's bar (`0x783220`); the getter answers 1 or nil. Stored, not applied: there a set
+    // StatusBar's bar (`0x783220`); the getter answers 1 or nil. The extract applies it: a set
     // flag makes `SetTexCoord` re-derive the rect from the UV quad (`0x770462`).
     m.set(
         "SetTexCoordModifiesRect",
@@ -309,7 +310,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // SetDrawLayer(layer) (`0x79a780`) reads the layer name alone, against the five-row table at
     // `0x811a80` (`0x6f18b0`); a further argument is never read, as 1.12 has no sub-level within a
     // layer. A name off the table, or no name, raises the Usage line naming the region
-    // (`0x87c42c`), and the layer stays.
+    // (`0x87c42c`), and the layer stays. A new layer relinks a drawn region at its tail
+    // (`0x79a851` → `0x77fd10`, `0x77fda5`-`0x77fdc6`); the same layer does nothing.
     m.set(
         "SetDrawLayer",
         lua.create_function(|lua, (this, layer): (Table, Value)| {
@@ -322,9 +324,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 return Err(usage(lua, &this, "SetDrawLayer(\"layer\")"));
             };
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            if let Some(region) = model.arena.region_mut(rh) {
-                region.draw_layer = dl;
-            }
+            let drew = model.region_draws(rh);
+            let relayered = model
+                .arena
+                .region_mut(rh)
+                .map(|r| std::mem::replace(&mut r.draw_layer, dl) != dl)
+                .unwrap_or(false);
+            model.note_region_registered(rh, drew, relayered);
             Ok(())
         })?,
     )?;

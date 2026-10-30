@@ -139,6 +139,45 @@ fn a_members_join_reaches_the_stock_frame_numbered() {
     assert!(f.script().errors().is_empty(), "{:?}", f.script().errors());
 }
 
+/// The join notice's second word is the slot's instance (`0x49bb20`, `+0x98`), which every event
+/// the channel's record stamps reads as arg10 (`0x49b115`): our own join, another member's, and
+/// a reused slot's, since no allocator writes it (`0x49ba01`).
+#[test]
+fn a_joins_instance_number_is_arg10_of_the_slots_events() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    f.name(ANN, "Ann");
+    f.push(
+        n::YOU_JOINED,
+        "Mychan",
+        ChannelNoticeTail::YouJoined {
+            flags: 0,
+            instance: 7,
+        },
+    );
+    f.drain();
+    assert_eq!(f.spy().1, "YOU_JOINED|||3. Mychan|||0|3|Mychan|7");
+    f.push(n::JOINED, "Mychan", ChannelNoticeTail::Guid(ANN));
+    f.drain();
+    assert_eq!(f.spy().1, "|Ann||3. Mychan|||0|3|Mychan|7");
+
+    // Freed and claimed again by another name, the slot keeps its instance until a join stores one.
+    let mut channels = f.world.resource_mut::<super::edit::ChannelState>();
+    channels.free_slot("Mychan");
+    channels.claim_slot("Otherchan", 0);
+    assert_eq!(channels.instances[2], 7);
+    let mut line =
+        super::event::ChatEvent::text_only(super::event::ChatEventKind::Channel, "".into());
+    line.channel = "Otherchan".into();
+    channels.stamp_channel(&mut line);
+    assert_eq!((line.channel_number, line.instance), (3, 7));
+    let mut missing =
+        super::event::ChatEvent::text_only(super::event::ChatEventKind::Channel, "".into());
+    missing.channel = "Nowhere".into();
+    channels.stamp_channel(&mut missing);
+    assert_eq!(missing.instance, 0, "no record, no instance");
+}
+
 /// A join whose name is not cached waits on the name query, then prints stamped, as the
 /// reference's queued node carries the channel name to the callback (`0x49cfb4`-`0x49cfc1`).
 #[test]
@@ -208,6 +247,98 @@ fn owner_change_and_kick_notices_print() {
     assert!(f.script().errors().is_empty(), "{:?}", f.script().errors());
 }
 
+/// A member's flags changing, name cached (`0x49e934`): bit 2 gained is `SET_MODERATOR`, lost
+/// `UNSET_MODERATOR`, then bit 4 `SET_VOICE` / `UNSET_VOICE`, each a `CHANNEL_NOTICE_USER`
+/// (`0x49e8a0`) naming the member; a bit that did not change prints nothing.
+#[test]
+fn a_mode_change_prints_its_moderator_and_voice_lines() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    f.name(ANN, "Ann");
+    let mode = |old_flags, new_flags| ChannelNoticeTail::ModeChange {
+        guid: ANN,
+        old_flags,
+        new_flags,
+    };
+    let before = f.lines();
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x00, 0x02));
+    f.drain();
+    assert_eq!(
+        f.spy(),
+        (
+            "CHAT_MSG_CHANNEL_NOTICE_USER".to_string(),
+            "SET_MODERATOR|Ann||3. Mychan|||0|3|Mychan|0".to_string()
+        )
+    );
+    assert_eq!(
+        f.last_added(),
+        "[3. Mychan] Moderation privileges given to Ann."
+    );
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x02, 0x00));
+    f.drain();
+    assert_eq!(f.spy().1, "UNSET_MODERATOR|Ann||3. Mychan|||0|3|Mychan|0");
+    assert_eq!(
+        f.last_added(),
+        "[3. Mychan] Moderation privileges removed from Ann."
+    );
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x00, 0x04));
+    f.drain();
+    assert_eq!(f.spy().1, "SET_VOICE|Ann||3. Mychan|||0|3|Mychan|0");
+    assert_eq!(f.last_added(), "[3. Mychan] Voice given to Ann.");
+
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x04, 0x00));
+    f.drain();
+    assert_eq!(f.spy().1, "UNSET_VOICE|Ann||3. Mychan|||0|3|Mychan|0");
+    assert_eq!(f.last_added(), "[3. Mychan] Ann muted.");
+    assert_eq!(f.lines(), before + 4);
+
+    // Both bits at once print the moderator line, then the voice line; the owner bit (1) and a
+    // bit that stays set print nothing.
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x01, 0x06));
+    f.drain();
+    assert_eq!(f.lines(), before + 6);
+    assert_eq!(f.spy().1, "SET_VOICE|Ann||3. Mychan|||0|3|Mychan|0");
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x03, 0x01));
+    f.drain();
+    assert_eq!(f.lines(), before + 7, "only the moderator bit was lost");
+    f.push(n::MODE_CHANGE, "Mychan", mode(0x06, 0x07));
+    f.drain();
+    assert_eq!(f.lines(), before + 7, "the owner bit alone prints nothing");
+    assert!(f.script().errors().is_empty(), "{:?}", f.script().errors());
+}
+
+/// A name the cache lacks shows nothing: `0x49e93d` returns on the miss and the callback `0x49e934`
+/// registers holds no line. The miss still asks for the name.
+#[test]
+fn a_mode_change_for_an_unknown_name_prints_nothing_and_asks() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut f = Feed::new();
+    let before = f.lines();
+    f.push(
+        n::MODE_CHANGE,
+        "Mychan",
+        ChannelNoticeTail::ModeChange {
+            guid: ANN,
+            old_flags: 0,
+            new_flags: 2,
+        },
+    );
+    f.drain();
+    assert!(
+        matches!(
+            f.sent.try_recv(),
+            Ok(crate::net::ClientCommand::NameQuery { guid: ANN })
+        ),
+        "the name was asked for"
+    );
+    f.name(ANN, "Ann");
+    f.drain();
+    assert_eq!(f.lines(), before, "and the answer shows no line");
+}
+
 /// An invite names a channel we are not in, so it stays unstamped (the miss leg `0x49aa86`,
 /// `0x49b12f`) and prints only through the stock filter's `INVITE` exemption (`ChatFrame.lua:1374`).
 #[test]
@@ -239,7 +370,10 @@ fn our_own_join_notice_is_unchanged() {
     f.push(
         n::YOU_JOINED,
         "Mychan",
-        ChannelNoticeTail::YouJoined { flags: 0 },
+        ChannelNoticeTail::YouJoined {
+            flags: 0,
+            instance: 0,
+        },
     );
     f.drain();
     assert_eq!(

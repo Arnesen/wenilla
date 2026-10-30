@@ -77,9 +77,13 @@ fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCo
     let mut data = [0i32; 24];
     data[0] = 1;
     books.insert(BOOK_ENTRY, 9, "Book".into(), &data);
+    // Its first page cached, which the reader's begin waits on (`0x4e3465`).
+    let mut pages = crate::ui_item_text::PageTexts::default();
+    pages.insert(1, "Page one.".into(), 0);
     app.insert_resource(NetCommands(tx))
         .add_message::<LatchVocal>()
         .insert_resource(books)
+        .insert_resource(pages)
         .init_resource::<crate::net::GuidIndex>()
         .init_resource::<crate::items::Items>()
         .init_resource::<TradeSession>()
@@ -112,7 +116,7 @@ fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCo
     (app, rx)
 }
 
-pub(super) fn latch(app: &App) -> Option<u64> {
+pub(crate) fn latch(app: &App) -> Option<u64> {
     app.world().resource::<InteractLatch>().guid()
 }
 
@@ -159,40 +163,57 @@ fn read_book(world: &mut World, npc: u64) {
         .0
         .contains_key(&npc)
     {
-        crate::items::test_spawn_object(world, npc, crate::go_templates::test_fields(BOOK_ENTRY));
+        crate::items::test_spawn_object(
+            world,
+            npc,
+            crate::go_templates::test_typed_fields(BOOK_ENTRY, 9),
+        );
     }
     crate::ui_item_text::read_now(world, npc);
 }
 
 /// Each window's open as its packet handler or click runs it, on `npc`.
-pub(super) fn open(app: &mut App, window: W, npc: u64) {
+pub(crate) fn open(app: &mut App, window: W, npc: u64) {
     let world = app.world_mut();
     match window {
         W::Trade => {
             world.resource_mut::<TradeSession>().begin(npc);
-            crate::ui_trade::open_window(world);
+            crate::ui_trade::open_window(world, None);
         }
         W::ItemText => {
-            // The reader finds the template through the object's own descriptor.
-            if !world
+            // The reader finds the template through the object's own descriptor: a book, unless
+            // the guid already holds a game object (a quest panel's unit gives way to it).
+            let book = crate::go_templates::test_typed_fields(BOOK_ENTRY, 9);
+            let held = world
                 .resource::<crate::net::GuidIndex>()
                 .0
-                .contains_key(&npc)
-            {
-                crate::items::test_spawn_object(
-                    world,
-                    npc,
-                    crate::go_templates::test_fields(BOOK_ENTRY),
-                );
+                .get(&npc)
+                .copied();
+            match held {
+                None => {
+                    crate::items::test_spawn_object(world, npc, book);
+                }
+                Some(e) => {
+                    let is_go = world
+                        .get::<crate::net::ObjectStore>(e)
+                        .and_then(|s| s.0.object_type_mask())
+                        .is_some_and(|m| m & 0x20 != 0);
+                    if !is_go {
+                        world.entity_mut(e).insert(crate::net::ObjectStore(book));
+                    }
+                }
             }
             crate::ui_item_text::read_now(world, npc)
         }
         W::Merchant => crate::ui_merchant::open_merchant(world, npc, Vec::new()),
         W::Bank => crate::ui_bank::open_bank(world, npc),
         W::Gossip => crate::ui_gossip::open_menu(world, npc, 0, Vec::new(), Vec::new()),
-        W::Quest => crate::ui_quest::open_panel(world, npc, greeting(npc)),
+        W::Quest => {
+            crate::ui_quest::hold_for_test(world, npc);
+            crate::ui_quest::open_panel(world, npc, greeting(npc))
+        }
         W::Trainer => crate::ui_trainer::open_trainer(world, npc, 0, Vec::new(), String::new()),
-        W::Taxi => crate::ui_taxi::open_map(world, npc, 1, Default::default()),
+        W::Taxi => crate::ui_taxi::open_unbuilt(world, npc),
         W::Stable => crate::ui_stable::open_stable(world, npc, 0, Vec::new()),
         W::Registrar => {
             use crate::target::cursor_mode::npc_flags::{PETITIONER, TABARDDESIGNER};
@@ -359,70 +380,6 @@ fn a_direct_close_of_the_latched_window_fires_its_event_twice_and_quest_once() {
     }
 }
 
-/// The stock frames answer `*_CLOSED` with `HideUIPanel`, whose `OnHide` calls the close verb.
-/// The verb runs inside the fire, as the reference's does. From the X button (the frame already
-/// hidden, its `OnHide` calling the verb) every core fires twice. From a walk-away the merchant's
-/// verb finds its cell already clear (`0x4fae0e` clears before `0x4fae2c` fires), while the bank's
-/// and the trainer's fire before they clear (`0x4f84df`, `0x4d7468`), so their verb fires again.
-#[test]
-fn a_stock_on_hide_close_inside_the_fire_runs_as_the_reference() {
-    for (window, event, verb, walk_away_times) in [
-        (
-            super::NpcWindow::Merchant,
-            "MERCHANT_CLOSED",
-            "CloseMerchant",
-            1,
-        ),
-        (
-            super::NpcWindow::Bank,
-            "BANKFRAME_CLOSED",
-            "CloseBankFrame",
-            2,
-        ),
-        (
-            super::NpcWindow::Trainer,
-            "TRAINER_CLOSED",
-            "CloseTrainer",
-            2,
-        ),
-    ] {
-        for walk_away in [false, true] {
-            let mut app = harness();
-            app.world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
-                .run(&format!(
-                    "SHOWN = true local f = CreateFrame('Frame') f:RegisterEvent('{event}') \
-                     f:SetScript('OnEvent', function() \
-                       if SHOWN then SHOWN = false {verb}() end end)"
-                ))
-                .unwrap();
-            open(&mut app, window, NPC);
-            if walk_away {
-                dispatch(app.world_mut());
-            } else {
-                // The X button: `HideUIPanel` hides the frame, and `OnHide` calls the verb.
-                app.world()
-                    .non_send_resource::<benilla_ui::script::UiScript>()
-                    .run("SHOWN = false")
-                    .unwrap();
-                close(&mut app, window);
-            }
-            let times = if walk_away { walk_away_times } else { 2 };
-            assert_eq!(
-                seen_in(&app),
-                vec![event; times],
-                "{window:?}, walk-away {walk_away}"
-            );
-            assert_eq!(latch(&app), None);
-            assert!(app
-                .world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
-                .errors()
-                .is_empty());
-        }
-    }
-}
-
 /// A trade holds the latch like an NPC window: a vendor's list closes it through the trade arm
 /// (`0x493365`), `TRADE_CLOSED` once and `CMSG_CANCEL_TRADE` once (`0x4bf527`); a trade's open
 /// closes the vendor and sends nothing of its own.
@@ -434,7 +391,7 @@ fn a_trade_and_an_npc_window_close_each_other() {
     app.world_mut()
         .resource_mut::<TradeSession>()
         .begin(PARTNER);
-    crate::ui_trade::open_window(app.world_mut());
+    crate::ui_trade::open_window(app.world_mut(), None);
     assert_eq!(latch(&app), Some(PARTNER));
     assert!(rx.try_iter().next().is_none(), "the open sends nothing");
 
@@ -451,7 +408,7 @@ fn a_trade_and_an_npc_window_close_each_other() {
     app.world_mut()
         .resource_mut::<TradeSession>()
         .begin(PARTNER);
-    crate::ui_trade::open_window(app.world_mut());
+    crate::ui_trade::open_window(app.world_mut(), None);
     assert_eq!(seen_in(&app), ["TRADE_CLOSED", "MERCHANT_CLOSED"]);
     assert!(
         rx.try_iter().next().is_none(),
@@ -492,7 +449,7 @@ fn a_book_over_a_trade_cancels_it_before_the_begin() {
     app.world_mut()
         .resource_mut::<TradeSession>()
         .begin(PARTNER);
-    crate::ui_trade::open_window(app.world_mut());
+    crate::ui_trade::open_window(app.world_mut(), None);
     read_book(app.world_mut(), NPC);
     assert_eq!(seen_in(&app), ["TRADE_CLOSED", "ITEM_TEXT_BEGIN"]);
     let sent: Vec<ClientCommand> = rx.try_iter().collect();
@@ -585,4 +542,38 @@ fn a_walk_away_says_no_goodbye() {
             "{window:?} again"
         );
     }
+}
+
+/// A window that writes its cell on a latched guid without registering leaves two holders, so a
+/// close verb releasing the latch inside its call (`LatchSteps::release`, which skips
+/// `0x493310`'s walk) would strand the other: the next walk's check trips in a debug build.
+#[test]
+#[should_panic(expected = "still hold the released guid")]
+fn a_second_holder_of_a_latched_guid_trips_the_walks_check() {
+    let mut app = harness();
+    let world = app.world_mut();
+    crate::ui_gossip::open_menu(world, NPC, 0, Vec::new(), Vec::new());
+    world
+        .resource_mut::<GuildRegistrarState>()
+        .open_for_test(NPC);
+    dispatch(world);
+}
+
+/// The leash (`0x493230`) runs in the frame time: the reference calls it from the world frame's
+/// update (`0x4818c0` in `CGWorldFrame::OnUpdate`, `0x481790`), after the frame's input records
+/// and its packets, so a click on an open window's button reads the latch as the last frame left
+/// it and a walk-away closes it after.
+#[test]
+fn the_leash_runs_after_the_input_records_and_the_packets() {
+    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    assert!(crate::test_support::runs_before(
+        &mut app,
+        crate::net::apply_net_updates,
+        super::latch::watch_interaction_range
+    ));
+    assert!(crate::test_support::runs_before(
+        &mut app,
+        crate::player::camera::latch_world_mouse,
+        super::latch::watch_interaction_range
+    ));
 }

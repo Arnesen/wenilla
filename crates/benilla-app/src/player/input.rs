@@ -2,9 +2,7 @@
 //! and [`move_axes`], the netted axes with the autorun latch. Netting once keeps the direction,
 //! the speed, the swim amounts and the streamed flags in agreement.
 
-use bevy::prelude::*;
-
-use super::{camera, state, CameraControl, LookButton, Player};
+use super::{camera, state, Player};
 
 /// What [`look_input`] read off the mouse and the bindings, before the look session runs.
 pub(super) struct LookInput {
@@ -20,57 +18,28 @@ pub(super) struct LookInput {
 pub(super) fn look_input(
     binds: &crate::bindings::BindingsState,
     player: &Player,
-    rig: &CameraControl,
+    lock: &super::MoverLock,
 ) -> LookInput {
     // Both buttons held run forward and steer with the mouse, whichever went down first.
     // MOVEANDSTEER is the same state: its 1.12 body runs CameraOrSelectOrMove and TurnOrAction.
-    let steer_held = binds.steering();
-    let both_buttons = rig.world_mouse.both() || steer_held;
+    let both_buttons = binds.steering();
 
     // 1.12's `[InputControl+0x4]`, bit for bit: the camera's auto-follow arms on its edges.
     let follow_command = {
         use camera::follow_cmd as bit;
-        let mut w = 0;
+        let mut w = command_word(binds);
         let mut set = |on: bool, b: u32| {
             if on {
                 w |= b;
             }
         };
-        set(rig.world_mouse.turn() || steer_held, bit::RIGHT_MOUSE);
-        set(
-            rig.world_mouse.held(LookButton::Left) || steer_held,
-            bit::LEFT_MOUSE,
-        );
         // The auto-move sets the forward bit through W's own setter, so it arms the camera like W.
-        set(
-            binds.pressed(crate::bindings::Input::MoveForward) || player.auto_forward,
-            bit::FORWARD,
-        );
-        set(
-            binds.pressed(crate::bindings::Input::MoveBackward),
-            bit::BACKWARD,
-        );
-        set(
-            binds.pressed(crate::bindings::Input::StrafeLeft),
-            bit::STRAFE_LEFT,
-        );
-        set(
-            binds.pressed(crate::bindings::Input::StrafeRight),
-            bit::STRAFE_RIGHT,
-        );
-        set(
-            binds.pressed(crate::bindings::Input::TurnLeft),
-            bit::TURN_LEFT,
-        );
-        set(
-            binds.pressed(crate::bindings::Input::TurnRight),
-            bit::TURN_RIGHT,
-        );
+        set(player.auto_forward, bit::FORWARD);
         set(player.autorun, bit::AUTORUN);
         // The reference keeps these two in the camera's own Track and Fear bits; here one word
         // carries every edge.
         set(player.server_riding, bit::TRACK);
-        set(player.control_lost, bit::FEAR);
+        set(lock.control_lost, bit::FEAR);
         w
     };
 
@@ -78,6 +47,55 @@ pub(super) fn look_input(
         both_buttons,
         follow_command,
     }
+}
+
+/// Whether `[InputControl+4]` holds a bit, without which the mouse's motion handler does nothing
+/// (`0x51440c`): a held command, autorun, the auto-move's forward or a ride's track bits, as
+/// `follow_command` carries them ([`look_input`]), or an emitter's latch on a start the mover
+/// still streams (`0x10000`-`0x80000`).
+pub(super) fn word_held(follow_command: u32, player: &Player) -> bool {
+    use crate::creature_anim::move_flags as f;
+    let latched = f::FORWARD
+        | f::BACKWARD
+        | f::STRAFE_LEFT
+        | f::STRAFE_RIGHT
+        | f::TURN_LEFT
+        | f::TURN_RIGHT
+        | f::PITCH_UP
+        | f::PITCH_DOWN;
+    follow_command & !camera::follow_cmd::FEAR != 0
+        || player.pitch_latch
+        || player.move_flags & latched != 0
+}
+
+/// The held command bits of `[InputControl+4]` the bindings' Starts and Stops and the world's
+/// mouse set (`0x514840`, `0x514b70`), in the camera's word ([`camera::follow_cmd`]): the mouse
+/// channels, the four directions, the turns and the pitches. Autorun's bit and follow's forward
+/// are the caller's.
+pub(super) fn command_word(binds: &crate::bindings::BindingsState) -> u32 {
+    use crate::bindings::Input;
+    use camera::follow_cmd as bit;
+    let mut w = 0;
+    let mut set = |on: bool, b: u32| {
+        if on {
+            w |= b;
+        }
+    };
+    set(binds.pressed(Input::TurnOrAction), bit::RIGHT_MOUSE);
+    set(binds.pressed(Input::CameraOrSelectOrMove), bit::LEFT_MOUSE);
+    for (input, b) in [
+        (Input::MoveForward, bit::FORWARD),
+        (Input::MoveBackward, bit::BACKWARD),
+        (Input::StrafeLeft, bit::STRAFE_LEFT),
+        (Input::StrafeRight, bit::STRAFE_RIGHT),
+        (Input::TurnLeft, bit::TURN_LEFT),
+        (Input::TurnRight, bit::TURN_RIGHT),
+        (Input::PitchUp, bit::PITCH_UP),
+        (Input::PitchDown, bit::PITCH_DOWN),
+    ] {
+        set(binds.pressed(input), b);
+    }
+    w
 }
 
 /// This frame's netted movement axes and modes; every consumer downstream reads these, not keys.
@@ -105,7 +123,17 @@ pub(super) struct MoveAxes {
 /// releases it when set (`0x514b70`), whatever drives the body. Whether this frame's press set it:
 /// the on edge, a press in the cancel mask. The window-deactivate handler (`0x514490`, called only
 /// from the WM_ACTIVATE slot at `0x493058`) releases every direction bit and keeps `0x1000`.
-pub(super) fn toggle_autorun(binds: &crate::bindings::BindingsState, player: &mut Player) -> bool {
+pub(super) fn toggle_autorun(
+    binds: &crate::bindings::BindingsState,
+    called: Option<bool>,
+    player: &mut Player,
+) -> bool {
+    // The calls that moved the bit inside them ([`super::press::CommandSteps`]) decided their
+    // cancels there: the latch takes what they left.
+    if let Some(bit) = called {
+        player.autorun = bit;
+        return false;
+    }
     if !binds.fired(crate::bindings::Input::ToggleAutoRun) {
         return false;
     }
@@ -117,21 +145,38 @@ pub(super) fn toggle_autorun(binds: &crate::bindings::BindingsState, player: &mu
 /// [`toggle_autorun`] has set this frame.
 pub(super) fn move_axes(
     binds: &crate::bindings::BindingsState,
-    buttons: &ButtonInput<MouseButton>,
     player: &mut Player,
-    rig: &CameraControl,
     both_buttons: bool,
     // The reference's input predicates `0x514560` and `0x5145b0` (`state::may_translate`,
     // `state::may_turn`); death takes both down.
     may_translate: bool,
     may_turn: bool,
 ) -> MoveAxes {
-    // Name an extra mouse button the bindings do not know, rather than fail silently.
-    for b in buttons.get_just_pressed() {
-        if let MouseButton::Other(n) = b {
-            info!("mouse: unmapped button Other({n}) — bindings know BUTTON4/BUTTON5 as winit Forward/Back");
-        }
-    }
+    let auto_forward = player.auto_forward;
+    move_axes_with(
+        binds,
+        &mut player.autorun,
+        auto_forward,
+        binds.pressed(crate::bindings::Input::TurnOrAction),
+        both_buttons,
+        may_translate,
+        may_turn,
+    )
+}
+
+/// [`move_axes`] over the autorun bit `autorun` and the auto-move's forward `auto_forward`: a
+/// call's tick reads the bit its calls left ([`super::press::CallAutorun`]) and nets the emitters'
+/// own totals, which count no auto-move (`0x514da0`).
+pub(super) fn move_axes_with(
+    binds: &crate::bindings::BindingsState,
+    autorun: &mut bool,
+    auto_forward: bool,
+    // Bit 0x1 of the command word, TurnOrAction's, as the emitters read it.
+    turn_or_action: bool,
+    both_buttons: bool,
+    may_translate: bool,
+    may_turn: bool,
+) -> MoveAxes {
     // ── The cancel set ── What clears autorun is what makes it a mode, not a held forward. Of
     // the reference's six writers, these have an analog here:
     // - A W or S key-down, unconditionally: the directional handlers tail into the shared SET
@@ -145,16 +190,21 @@ pub(super) fn move_axes(
     //   `control` clears the bit on that path, which never reaches here.
     // A jump, a chat EditBox taking focus and a zone change leave it set; mounting is untraced and
     // leaves it set here. A focused chat box releases nothing, so W held through ENTER still runs.
-    let both_buttons_engaged = both_engaged(binds, rig, both_buttons);
+    // A press made inside its call cleared the bit there, in its order with the toggles
+    // ([`super::press::CommandSteps`]).
+    use crate::bindings::Input;
+    let called = binds.settled(Input::TurnOrAction) || binds.settled(Input::CameraOrSelectOrMove);
+    let both_buttons_engaged = !called && both_engaged(binds);
+    let pressed = |i| binds.just_pressed(i) && !binds.settled(i);
     if state::autorun_cancelled(
-        binds.just_pressed(crate::bindings::Input::MoveForward),
-        binds.just_pressed(crate::bindings::Input::MoveBackward),
+        pressed(Input::MoveForward),
+        pressed(Input::MoveBackward),
         both_buttons_engaged,
         !may_translate,
     ) {
-        player.autorun = false;
+        *autorun = false;
     }
-    let autorun = player.autorun;
+    let autorun = *autorun;
     // ── The forward/back axis ── The order of S and autorun decides: S held, then autorun
     // toggled, keeps both (the toggle pushes `0x1000`, so `test cl,0x30` misses) and the
     // reference sends MSG_MOVE_STOP with S held; autorun, then S, clears the bit at key-down and
@@ -162,15 +212,17 @@ pub(super) fn move_axes(
     // setter, so it nets against S like W and never trips the cancel set, which fires on key-down
     // edges.
     let fwd_axis = state::forward_axis(
-        binds.pressed(crate::bindings::Input::MoveForward) || player.auto_forward,
+        binds.pressed(crate::bindings::Input::MoveForward) || auto_forward,
         binds.pressed(crate::bindings::Input::MoveBackward),
         both_buttons,
         autorun,
     );
-    // The 1.12 control model (`0x7c5360`): A/D turn the character unless right-mouse is held,
-    // when they strafe and the facing tracks the camera; Q/E always strafe. W walks along the
+    // A/D turn the character unless bit 0x1 is held, when they strafe: the turn emitter skips
+    // with it (`0x514f6d`) and the strafe emitter nets the turn bits under it
+    // (`0x514e98`-`0x514eb1`). The bit is the command's, not the look's: a `ToggleMouseMove` that
+    // left freelook during a right drag leaves it held. Q/E always strafe. W walks along the
     // character's facing, so a left-drag orbit does not change it.
-    let mouselook = both_buttons || rig.look == Some(LookButton::Right);
+    let mouselook = turn_or_action;
     // The strafe axis nets like `fwd_axis`: vmangos relays no packet carrying both strafe bits,
     // and the reference's 1.12.1 capture sends none.
     let strafe_left = binds.pressed(crate::bindings::Input::StrafeLeft);
@@ -202,18 +254,15 @@ pub(super) fn move_axes(
     }
 }
 
-/// The transition into both mouse bits held (`0x514a73`, `0x5150e2`): a channel rose with the
-/// other held, or MOVEANDSTEER began.
-pub(super) fn both_engaged(
-    binds: &crate::bindings::BindingsState,
-    rig: &CameraControl,
-    both_buttons: bool,
-) -> bool {
-    (both_buttons && rig.world_mouse.rose()) || binds.steering_began()
+/// The transition into both mouse bits held (`0x514a73`, `0x5150e2`): a primary bit rose with the
+/// other held, MOVEANDSTEER's among them.
+pub(super) fn both_engaged(binds: &crate::bindings::BindingsState) -> bool {
+    binds.steering_began()
 }
 
-/// Whether this frame's input cancels the cast in flight, as the press handler `0x515090` and
-/// `Script::Jump` (`0x513c43`) decide it: a press that newly set forward, back, strafe or autorun
+/// Whether this frame's input cancels the cast in flight, for the edges no call settled inside it
+/// ([`super::press::CommandSteps`]), as the press handler `0x515090` and `Script::Jump`
+/// (`0x513c43`) decide it: a press that newly set forward, back, strafe or autorun
 /// (the mask `0x10f0` at `0x5150ce`; a Start on a held bit is no edge, `0x51484c`), the press that
 /// completed both mouse bits (`0x5150e2`), or the Jump command, which cancels ahead of its own
 /// checks once the active mover resolves (`0x513be0`-`0x513c02`), so not while control is lost
@@ -236,10 +285,10 @@ pub(super) fn cancels_cast(
         Input::StrafeRight,
     ]
     .into_iter()
-    .any(|i| binds.just_pressed(i))
+    .any(|i| binds.just_pressed(i) && !binds.settled(i))
         || autorun_on
         || both_engaged
-        || has_mover && binds.fired(Input::Jump)
+        || has_mover && binds.fired(Input::Jump) && !binds.settled(Input::Jump)
 }
 
 #[cfg(test)]
@@ -260,18 +309,9 @@ mod tests {
         rooted: bool,
     ) -> bool {
         let binds = BindingsState::after_calls(earlier, now);
-        let rig = CameraControl::default();
-        let autorun_on = toggle_autorun(&binds, player);
-        let both = both_engaged(&binds, &rig, binds.steering());
-        move_axes(
-            &binds,
-            &ButtonInput::default(),
-            player,
-            &rig,
-            binds.steering(),
-            !rooted,
-            true,
-        );
+        let autorun_on = toggle_autorun(&binds, None, player);
+        let both = both_engaged(&binds);
+        move_axes(&binds, player, binds.steering(), !rooted, true);
         cancels_cast(&binds, autorun_on, both, true)
     }
 
@@ -318,7 +358,7 @@ mod tests {
     }
 
     /// Turn keys are bits 0x100 and 0x200, outside the mask `0x10f0`, even while the right
-    /// button makes them strafe (`0x7c5360`).
+    /// button makes them strafe (`0x514e80`).
     #[test]
     fn a_turn_key_that_strafes_does_not_cancel() {
         let mouse = vec![

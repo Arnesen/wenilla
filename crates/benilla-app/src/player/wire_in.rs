@@ -12,14 +12,13 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::creature_anim::{move_flags, wrap_pi};
 use crate::net::{
-    ClientCommand, ClientControlMessage, Embodied, Guid, KnockBackMessage, MoveModeMessage,
-    NetCommands, SelfMoveMessage, SpeedChangeMessage, TeleportMessage, WorldportMessage,
+    ClientCommand, ClientControlMessage, KnockBackMessage, MoveModeMessage, NetCommands,
+    SelfMoveMessage, SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
-use crate::transport::Transport;
 use benilla_world::world_map::CurrentMap;
 
 use super::camera::FlyCam;
-use super::{movement_net, OwnControlLost, Player, SETTLE_TIMEOUT};
+use super::{movement_net, MoverLock, OwnControlLost, Player, SETTLE_TIMEOUT};
 
 /// What one `SMSG_CLIENT_CONTROL_UPDATE` means for us. It says whether a unit may move, not who the
 /// mover is: the server revokes a mind-controlled victim's control by naming the victim.
@@ -64,24 +63,18 @@ fn yield_own_body(net_cmds: &NetCommands, player: &mut Player, self_guid: Option
     });
 }
 
-/// The control flags a verdict sets. `control_lost` is the mover we drive being unable to move:
+/// The movement flags a verdict sets. `control_lost` is the mover we drive being unable to move:
 /// our body revoked, or our possessed creature released while feared or confused (the possession
-/// standing). `own` is only `[0xb4b3e4]` (`0x4958e0`), which `0x5fa600` writes for our own
-/// character alone (`0x5fa6d0`): a grant or a release naming another unit never touches it.
-fn track_control(player: &mut Player, own: &mut OwnControlLost, verdict: ControlVerdict) {
+/// standing). Our own `[0xb4b3e4]` (`0x4958e0`), which `0x5fa600` writes for our own character
+/// alone (`0x5fa6d0`), is the packet's handler's to store, signal and refresh inside the packet,
+/// with the hold its fall drops (`on_client_control`).
+fn track_control(lock: &mut MoverLock, verdict: ControlVerdict) {
     match verdict {
-        ControlVerdict::Revoked => {
-            player.control_lost = true;
-            own.0 = true;
-        }
-        ControlVerdict::Restored => {
-            player.control_lost = false;
-            own.0 = false;
-        }
-        ControlVerdict::Granted(_) => player.control_lost = false,
+        ControlVerdict::Revoked => lock.control_lost = true,
+        ControlVerdict::Restored | ControlVerdict::Granted(_) => lock.control_lost = false,
         ControlVerdict::Released(guid) => {
-            if player.foreign_mover == Some(guid) {
-                player.control_lost = true;
+            if lock.foreign_mover == Some(guid) {
+                lock.control_lost = true;
             }
         }
     }
@@ -104,6 +97,9 @@ pub(super) struct ServerMoves {
     pub(super) speed_acks: Vec<SpeedChangeMessage>,
     /// An ack went out that ends the mover's precast ([`ack_ends_precast`]).
     pub(super) precast_ended: bool,
+    /// A root or unroot ack went out, which runs the mover's input tick after its send
+    /// (`0x60e33d` → `0x60e347`, for 0xe9 and 0xeb).
+    pub(super) input_ticked: bool,
 }
 
 /// Whether a mode's ack ends the mover's precast: the water-walk and hover acks go out through
@@ -115,14 +111,27 @@ fn ack_ends_precast(mode: MoveMode) -> bool {
 }
 
 /// Apply this frame's server-authored movement and send each ack ([`ServerMoves`]).
-/// `self_pose` is the streamed self entity's translation and yaw, the take-control target.
+/// Our own create's transport block, with the transport's entity and pose as they stand: the
+/// seat a login aboard a transport takes control in.
+#[derive(Clone, Copy)]
+pub(super) struct SelfSeat {
+    pub(super) entity: Entity,
+    pub(super) guid: u64,
+    /// The position and facing in the transport's frame, WoW axes.
+    pub(super) local_pos: [f32; 3],
+    pub(super) local_orientation: f32,
+    pub(super) deck: Transform,
+}
+
+/// `self_pose` is the streamed self entity's translation and yaw, the take-control target;
+/// `self_seat` its create's transport block.
 // `control`'s own transports query, passed through.
 #[allow(clippy::type_complexity)]
 pub(super) fn apply_server_moves(
     time: &Time,
     commands: &mut Commands,
     player: &mut Player,
-    own_control: &mut OwnControlLost,
+    lock: &mut MoverLock,
     cam: &mut FlyCam,
     net_cmds: &NetCommands,
     teleports: &mut MessageReader<TeleportMessage>,
@@ -132,35 +141,37 @@ pub(super) fn apply_server_moves(
     knock_msgs: &mut MessageReader<KnockBackMessage>,
     self_moves: &mut MessageReader<SelfMoveMessage>,
     control_msgs: &mut MessageReader<ClientControlMessage>,
+    mover: &mut crate::net::MoverClaim,
     self_guid: Option<u64>,
-    transports: &Query<
-        (&Transform, &Guid, Option<&avian3d::prelude::ColliderAabb>),
-        (With<Transport>, Without<Embodied>, Without<FlyCam>),
-    >,
+    transports: &super::TransportQuery,
     self_pose: Option<(Vec3, f32)>,
+    self_seat: Option<SelfSeat>,
 ) -> ServerMoves {
     // A grant must be claimed: vmangos drops every `MSG_MOVE_*` for an unconfirmed mover
     // (`MovementHandler.cpp:291-293`, `Player.cpp:20257-20272`).
     for c in control_msgs.read() {
         let verdict = control_verdict(c.mover, c.allow_move, self_guid);
-        track_control(player, own_control, verdict);
+        track_control(lock, verdict);
         match verdict {
             // Park, which stops the server extrapolating a run, and say nothing else: the mover has
             // not changed hands, and `CMSG_MOVE_NOT_ACTIVE_MOVER` would strand us.
+            // The stopped mover's global goes too (`0x5fa678`-`0x5fa696`, `0x6006e0(0)`).
             ControlVerdict::Revoked => {
                 movement_net::park_mover(&net_cmds.0, player);
+                if let Some(me) = self_guid {
+                    mover.forget(me);
+                }
             }
             ControlVerdict::Restored => {
-                player.foreign_mover = None;
-                player.reseat = true;
+                lock.foreign_mover = None;
+                lock.reseat = true;
                 // Re-claim ourselves, as login does (after a possession `m_clientMoverGuid` still
                 // names the creature), and send nothing else: `GetConfirmedMover` resolves the
                 // mismatch to us (`Player.cpp:20267-20269`), so a parting stop for the creature
                 // would move our own character to it.
-                super::move_trace::mover_claim("SET_ACTIVE_MOVER", c.mover);
-                let _ = net_cmds
-                    .0
-                    .send(ClientCommand::SetActiveMover { guid: c.mover });
+                if mover.claim(c.mover, net_cmds) {
+                    super::move_trace::mover_claim("SET_ACTIVE_MOVER", c.mover);
+                }
             }
             // Claim it; recording the claim stops our body's pose streaming under its guid.
             ControlVerdict::Granted(guid) => {
@@ -168,23 +179,27 @@ pub(super) fn apply_server_moves(
                 // mover, and only once: vmangos re-sends a grant each time a possessed creature
                 // stops fleeing (`FearMovementGenerator.cpp:155`, `Unit.cpp:11157`) and rejects a
                 // second yield (`MovementHandler.cpp:891-897`).
-                if player.foreign_mover.is_none() {
+                if lock.foreign_mover.is_none() {
                     yield_own_body(net_cmds, player, self_guid);
                 }
-                player.foreign_mover = Some(guid);
-                player.reseat = true;
-                super::move_trace::mover_claim("SET_ACTIVE_MOVER", guid);
-                let _ = net_cmds.0.send(ClientCommand::SetActiveMover { guid });
+                lock.foreign_mover = Some(guid);
+                lock.reseat = true;
+                if mover.claim(guid, net_cmds) {
+                    super::move_trace::mover_claim("SET_ACTIVE_MOVER", guid);
+                }
             }
             // vmangos sends this on unpossess, after `Restored`, and when the possessed unit is
             // feared or confused (`Unit.cpp:11157`). As in the reference (`0x5fa600`), only the
             // unit we drive matters: we keep it but may not move it. Clearing `foreign_mover`
             // would walk our own body while the server applies our steps to the creature.
-            ControlVerdict::Released(_) => {}
+            // Its mover global is zeroed (`0x5fa678`-`0x5fa696`), so a later grant claims it again.
+            ControlVerdict::Released(guid) => mover.forget(guid),
         }
     }
     // Cross-map worldport: snap, bump `CurrentMap` for the terrain streamer, ack if required.
     for w in worldports.read() {
+        // A transfer ends any teleport hold, so its loading screen reaches the window.
+        player.world_reload = false;
         let riding = w.transport_entry.is_some() && player.ride.is_some();
         if riding {
             // Riding through: the pose is deck-local (`Player.cpp:2114`) and the boat survived the
@@ -192,7 +207,7 @@ pub(super) fn apply_server_moves(
             // packet, which the server reads as a deboard mid-ocean.
             let ride = player.ride.as_mut().expect("riding checked above");
             ride.local_pos = wow_to_bevy(w.position);
-            if let Ok((boat, _, _)) = transports.get(ride.entity) {
+            if let Ok((boat, ..)) = transports.get(ride.entity) {
                 let boat_yaw = boat.rotation.to_euler(EulerRot::YXZ).0;
                 ride.boat_yaw = boat_yaw;
                 player.pos = boat.translation + boat.rotation * ride.local_pos;
@@ -272,10 +287,13 @@ pub(super) fn apply_server_moves(
     // clears the direction bits and stops the fall (`0x7c6290`); moving bits beside ROOT freeze
     // the reference and raise vmangos's `CHEAT_TYPE_ROOT_MOVE`. Turn bits are not moving bits.
     let mut precast_ended = false;
+    let mut input_ticked = false;
     for m in mode_msgs.read() {
         player.modes.set(m.mode, m.apply);
         if m.mode == MoveMode::Root && m.apply {
             movement_net::park_mover(&net_cmds.0, player);
+            // `0x7c734f`'s `and 0xffe07f00` takes the pitch-key bits with the direction bits.
+            player.pitch_keys = None;
             player.airborne_since = None;
             player.vel_y = 0.0;
             player.fall_far = false;
@@ -298,6 +316,7 @@ pub(super) fn apply_server_moves(
             orientation: facing,
         });
         precast_ended |= ack_ends_precast(m.mode);
+        input_ticked |= m.mode == MoveMode::Root;
         info!(
             "mover mode {:?} {} (acked)",
             m.mode,
@@ -321,11 +340,11 @@ pub(super) fn apply_server_moves(
 
     // Take control when the server first reports our position, and again on a mover change; only
     // the login (`first`) settles, flags a stale world and seats the camera.
-    let seizing = !player.active || player.reseat;
+    let seizing = !player.active || lock.reseat;
     if seizing {
         if let Some((pos, yaw)) = self_pose {
             let first = !player.active;
-            player.reseat = false;
+            lock.reseat = false;
             // A mover change tears down the outgoing mover's state, as the reference's
             // `SetActiveMover` (`0x6006e0`) resets its flags and click-to-move. A login needs none:
             // `release_on_session_end` already reset the whole resource.
@@ -343,6 +362,25 @@ pub(super) fn apply_server_moves(
             }
             player.pos = pos;
             player.active = true;
+            let mut yaw = yaw;
+            // 0x618b30: our create on a transport puts the mover in its frame, the deck-local
+            // position and facing of the status's transport block (`0x7c6900`), boarded
+            // (`0x618970`), never the login pose, which vmangos sends deck-local too.
+            if let Some(seat) = self_seat.filter(|_| first) {
+                let local = wow_to_bevy(seat.local_pos);
+                let boat_yaw = seat.deck.rotation.to_euler(EulerRot::YXZ).0;
+                player.pos = seat.deck.translation + seat.deck.rotation * local;
+                player.fall_start_y = player.pos.y;
+                yaw = wrap_pi(seat.local_orientation + boat_yaw);
+                player.ride = Some(super::state::PlayerRide {
+                    entity: seat.entity,
+                    guid: seat.guid,
+                    local_pos: local,
+                    boat_yaw,
+                    placed: false,
+                });
+                info!("took control aboard transport {:#x}", seat.guid);
+            }
             if first {
                 player.settling = true; // settle once the initial ground loads
                 player.settle_since = time.elapsed_secs();
@@ -362,7 +400,7 @@ pub(super) fn apply_server_moves(
             // the entity while `player.active` stays true.
             info!(
                 "took control of {} @ {:?} facing {:.3}{}",
-                match player.foreign_mover {
+                match lock.foreign_mover {
                     Some(guid) => format!("possessed unit {guid:#x}"),
                     None => "player".to_string(),
                 },
@@ -397,6 +435,7 @@ pub(super) fn apply_server_moves(
     ServerMoves {
         speed_acks,
         precast_ended,
+        input_ticked,
     }
 }
 
@@ -406,18 +445,47 @@ fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessag
     // (`Player.cpp:1866-1893`), and the reference's apply (`0x6186b0`) re-parents to the packet's
     // transport guid, zero here. A kept ride would carry us back onto the deck.
     player.ride = None;
+    let from = player.pos;
     player.pos = wow_to_bevy(t.position);
+    mark_world_reload(player, from, player.pos, now);
     player.face_yaw = t.orientation;
     *cam_yaw = t.orientation;
     player.move_flags = 0;
+    // `0x617e90` places the mover through `0x7c69a0`, whose `and 0xfbc07f00` (`0x7c69c2`) clears
+    // the pitch-key bits and which zeroes the pitch (`0x7c69cc`).
+    player.pitch_keys = None;
+    player.mover_pitch = 0.0;
     player.airborne_since = None; // a snap ends any jump arc (no phantom FALL_LAND)
-    player.settling = true; // hold (gravity off) until the destination loads
+    hold_until_resident(player, now);
+    // Voids any self ride: `drive_self_ride` drops it rather than mirror the stale pose over this.
+    player.ride_abort = true;
+}
+
+/// The teleport apply `0x617e90`'s reload, for every teleport that reaches it (the ack's snap and
+/// our own `MSG_MOVE_TELEPORT`): a move of more than 30 yards (`0x80c730`, squared against `d²`)
+/// of the unit the world view follows reloads the destination before the frame goes on
+/// (`0x630bd0`). `from` and `to` are in the mover's frame, deck-local aboard a transport, as `d²` is
+/// taken of the mover's own position (`+0x10`) after the transport is set (`0x617170`). Returns
+/// whether it does. Only marks: a later, shorter teleport (vmangos sends `MSG_MOVE_TELEPORT` twice,
+/// `MovementHandler.cpp:252,255`) leaves a hold up, which only its release ends; a far one restarts
+/// the hold's ceiling.
+fn mark_world_reload(player: &mut Player, from: Vec3, to: Vec3, now: f32) -> bool {
+    let far = !player.detached && super::world_focus::is_far_reload(from, to);
+    if far {
+        player.world_reload = true;
+        player.reloads = player.reloads.wrapping_add(1);
+        player.reload_ceiling = now + SETTLE_TIMEOUT;
+    }
+    far
+}
+
+/// Hold the body (gravity off) until the destination is resident, which releases it.
+fn hold_until_resident(player: &mut Player, now: f32) {
+    player.settling = true;
     player.settle_since = now;
     player.settle_deadline = now + SETTLE_TIMEOUT;
     // The destination's ground may not have streamed yet.
     player.world_stale = true;
-    // Voids any self ride: `drive_self_ride` drops it rather than mirror the stale pose over this.
-    player.ride_abort = true;
 }
 
 /// The reference's masked merge of a server-authored `MOVEMENTFLAGS` (`0x618c30` at `0x618deb`:
@@ -443,10 +511,7 @@ fn apply_self_move(
     player: &mut Player,
     cam: &mut FlyCam,
     time: &Time,
-    transports: &Query<
-        (&Transform, &Guid, Option<&avian3d::prelude::ColliderAabb>),
-        (With<Transport>, Without<Embodied>, Without<FlyCam>),
-    >,
+    transports: &super::TransportQuery,
 ) {
     let was_falling = player.move_flags & move_flags::FALLING != 0;
     player.move_flags = merge_server_flags(player.move_flags, m.flags);
@@ -462,6 +527,13 @@ fn apply_self_move(
     player.modes.merge_from_wire(player.move_flags);
     // Neither mode touches `settling`: the terrain streamer releases it in every mode alike.
 
+    // The mover's own frame for the reload's `d²`: deck-local when the packet places us on the
+    // deck we ride, else the world.
+    let deck_local = player.ride.as_ref().and_then(|r| {
+        let t = m.transport.filter(|t| t.guid == r.guid)?;
+        Some((r.local_pos, wow_to_bevy([t.pos.x, t.pos.y, t.pos.z])))
+    });
+    let from = player.pos;
     player.pos = wow_to_bevy(m.position);
     // Aim, body and camera turn by the same delta; the reference writes only the mover's facing,
     // and a hard camera set would yank the view on every `.cheat fly` toggle.
@@ -476,7 +548,7 @@ fn apply_self_move(
     // pose: at a cross-map seam our boat is still frozen on the source continent while `position`
     // is on the destination, so the subtraction would fling us thousands of yards.
     if let Some(ride) = player.ride.as_mut() {
-        if let Ok((boat, _, _)) = transports.get(ride.entity) {
+        if let Ok((boat, ..)) = transports.get(ride.entity) {
             match m.transport.filter(|t| t.guid == ride.guid) {
                 Some(t) => {
                     ride.local_pos = wow_to_bevy([t.pos.x, t.pos.y, t.pos.z]);
@@ -518,29 +590,47 @@ fn apply_self_move(
     }
     player.wedged = false;
     player.wedge_still = 0;
+    // A teleport's apply, unlike a placing relay's, reloads a far destination (`0x6186b0` →
+    // `0x617e90`), so the body waits for it as the ack's snap does.
+    let (from, to) = deck_local.unwrap_or((from, player.pos));
+    let now = time.elapsed_secs();
+    if m.teleport && mark_world_reload(player, from, to, now) {
+        hold_until_resident(player, now);
+    }
 }
 
-/// Our own player's create gives control back (`OnActiveArrival 0x5dea50`): with the manager's
-/// `+0xc8` clear (`0x5deb49`; its constructor `0x4650e7` is the only store, so every create),
-/// `0x5fa600(1)` (`0x5deb56`) raises `[0xb4b3e4]` through `0x4958e0` (`PLAYER_CONTROL_GAINED` if it
-/// was down) and `0x4958a0` (`0x5deb5b`) stores 1 and re-claims our own mover (the claim is sent
-/// by `enter_world_on_self_create`). vmangos sends a battleground's closing `control 0` and no
-/// restore (`BattleGround.cpp:905-908`). The event is the `ui_unit::feed_player_control` edge.
+/// Our own player's create gives control back (`OnActiveArrival 0x5dea50`), inside the update
+/// packet ([`crate::net::objects`]'s arrival): with the manager's `+0xc8` clear (`0x5deb49`; its
+/// constructor `0x4650e7` is the only store, so every create), `0x5fa600(1)` (`0x5deb56`) raises
+/// `[0xb4b3e4]` through `0x4958e0` (`PLAYER_CONTROL_GAINED` if it was down) and `0x4958a0`
+/// (`0x5deb5b`) stores 1 and re-claims our own mover, ending the movement lock and any
+/// possession. vmangos sends a battleground's closing `control 0` and no restore
+/// (`BattleGround.cpp:905-908`). Whether the flag was down, whose rise signals in the arrival's
+/// place (`0x4958f7`, `0x4958fc`, [`crate::ui_world_enter`]): the event, then the usable refresh.
+/// Only the arrival runs it: `0x4958a0` has the one caller `0x5deb5b`, and `0x5fa600` is called at
+/// `0x5deb56` and `0x603eeb` alone, so a `/reload`'s cascade (`0x490168` → `0x4908c0`) leaves the
+/// lock as it was.
 pub(crate) fn regain_control_on_arrival(
-    mut arrivals: MessageReader<crate::net::WorldEnterCascadeMessage>,
-    mut player: ResMut<Player>,
-    mut own_control: ResMut<OwnControlLost>,
-) {
-    if arrivals.read().next().is_none() {
-        return;
+    lock: Option<&mut MoverLock>,
+    own_control: Option<&mut OwnControlLost>,
+) -> bool {
+    let own = own_control.as_ref().is_some_and(|o| o.0);
+    let held = lock
+        .as_ref()
+        .is_some_and(|l| l.control_lost || l.foreign_mover.is_some());
+    if !own && !held {
+        return false;
     }
-    if own_control.0 || player.control_lost || player.foreign_mover.is_some() {
+    if let Some(own_control) = own_control {
         own_control.0 = false;
-        player.control_lost = false;
-        // The mover is ours again, as `ControlVerdict::Restored` seats it.
-        player.foreign_mover = None;
-        player.reseat = true;
     }
+    if let Some(lock) = lock {
+        lock.control_lost = false;
+        // The mover is ours again, as `ControlVerdict::Restored` seats it.
+        lock.foreign_mover = None;
+        lock.reseat = true;
+    }
+    own
 }
 
 /// On a `/logout` or a lost session, reset the whole resource to its boot state, so the next login
@@ -551,13 +641,17 @@ pub(super) fn release_on_session_end(
     mut logouts: MessageReader<crate::net::LoggedOutMessage>,
     mut lost: MessageReader<crate::net::DisconnectedMessage>,
     mut player: ResMut<Player>,
+    mut lock: ResMut<MoverLock>,
     mut own_control: ResMut<OwnControlLost>,
+    mut stand: ResMut<super::StandPending>,
 ) {
     // `|`, not `||`: both readers must drain, or the unread one carries into the next frame.
     if logouts.read().next().is_some() | lost.read().any(|m| m.session_over) {
         // vmangos re-sends the modes the new session holds (`Player.cpp:19297-19311`).
         *player = Player::default();
+        *lock = MoverLock::default();
         *own_control = OwnControlLost::default();
+        *stand = super::StandPending::default();
     }
 }
 
@@ -571,7 +665,9 @@ mod session_end_tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Player>()
+            .init_resource::<MoverLock>()
             .init_resource::<OwnControlLost>()
+            .init_resource::<super::super::StandPending>()
             .add_message::<LoggedOutMessage>()
             .add_message::<DisconnectedMessage>()
             .add_systems(Update, release_on_session_end);
@@ -591,8 +687,6 @@ mod session_end_tests {
             levitating: true,
         };
         p.autorun = true;
-        p.control_lost = true;
-        p.foreign_mover = Some(0xBB);
         p.server_riding = true;
         p.swimming = true;
         p.move_flags = crate::creature_anim::move_flags::FORWARD;
@@ -600,6 +694,9 @@ mod session_end_tests {
         p.owes_worldport_ack = true;
         p.airborne_since = Some(4.0);
         p.wedged = true;
+        let mut lock = app.world_mut().resource_mut::<MoverLock>();
+        lock.control_lost = true;
+        lock.foreign_mover = Some(0xBB);
     }
 
     /// `/logout` roots us (`MiscHandler.cpp:329`) and the next login is never unrooted:
@@ -627,6 +724,11 @@ mod session_end_tests {
             !app.world().resource::<OwnControlLost>().0,
             "`[0xb4b3e4]` is back at its boot value, in control (`0x48f626`)"
         );
+        assert_eq!(
+            *app.world().resource::<MoverLock>(),
+            MoverLock::default(),
+            "and the reins are ours"
+        );
     }
 
     /// A lost session is a different message on a different reader; the `|` draining both matters.
@@ -642,6 +744,7 @@ mod session_end_tests {
         app.update();
 
         assert!(*app.world().resource::<Player>() == Player::default());
+        assert_eq!(*app.world().resource::<MoverLock>(), MoverLock::default());
         assert!(!app.world().resource::<OwnControlLost>().0);
     }
 
@@ -790,30 +893,20 @@ mod control_tests {
         );
     }
 
-    /// A possessed creature feared or confused is released, so the mover we drive cannot move,
-    /// but `[0xb4b3e4]` is written for our own character alone (`0x5fa6d0`): the item and
-    /// cursor gates still see control.
+    /// A possessed creature feared or confused is released, so the mover we drive cannot move;
+    /// our own body's verdicts lock and free it.
     #[test]
-    fn releasing_a_possessed_creature_leaves_our_own_control_alone() {
-        let (mut player, mut own) = (Player::default(), OwnControlLost::default());
-        track_control(
-            &mut player,
-            &mut own,
-            control_verdict(CREATURE, true, Some(ME)),
-        );
-        assert!(!player.control_lost);
-        player.foreign_mover = Some(CREATURE);
-        track_control(
-            &mut player,
-            &mut own,
-            control_verdict(CREATURE, false, Some(ME)),
-        );
-        assert!(player.control_lost, "the creature we drive is stuck");
-        assert!(!own.0, "our own control stands");
-        track_control(&mut player, &mut own, control_verdict(ME, false, Some(ME)));
-        assert!(own.0);
-        track_control(&mut player, &mut own, control_verdict(ME, true, Some(ME)));
-        assert!(!own.0 && !player.control_lost);
+    fn releasing_a_possessed_creature_locks_the_creature_alone() {
+        let mut lock = MoverLock::default();
+        track_control(&mut lock, control_verdict(CREATURE, true, Some(ME)));
+        assert!(!lock.control_lost);
+        lock.foreign_mover = Some(CREATURE);
+        track_control(&mut lock, control_verdict(CREATURE, false, Some(ME)));
+        assert!(lock.control_lost, "the creature we drive is stuck");
+        track_control(&mut lock, control_verdict(ME, false, Some(ME)));
+        assert!(lock.control_lost);
+        track_control(&mut lock, control_verdict(ME, true, Some(ME)));
+        assert!(!lock.control_lost);
     }
 
     #[test]
@@ -841,6 +934,7 @@ mod teleport_tests {
                 guid: 0x1F,
                 local_pos: Vec3::new(1.0, 0.0, 2.0),
                 boat_yaw: 0.5,
+                placed: true,
             }),
             ..Default::default()
         };
@@ -851,109 +945,459 @@ mod teleport_tests {
             position: [-8_913.0, -136.0, 81.0],
             orientation: 1.25,
         };
+        player.pitch_keys = Some(true);
+        player.mover_pitch = 0.4;
         snap_near_teleport(&mut player, &mut cam_yaw, &t, 10.0);
         assert!(player.ride.is_none(), "the snap deboards");
+        assert_eq!(player.pitch_keys, None, "`0x7c69a0` clears the pitch keys");
+        assert_eq!(player.mover_pitch, 0.0, "and zeroes the pitch (`0x7c69cc`)");
         assert_eq!(player.pos, wow_to_bevy(t.position));
         assert_eq!((player.face_yaw, cam_yaw), (1.25, 1.25));
         assert!(player.settling && player.ride_abort && player.world_stale);
+    }
+
+    /// `0x617e90` reloads the world only for `d² > 900` of the unit the camera follows
+    /// (`0x630bd0`): a short hop, or a snap under a free-fly eye, holds no frame.
+    #[test]
+    fn only_a_snap_past_30_yards_of_the_followed_body_reloads_the_world() {
+        let snapped = |from: [f32; 3], to: [f32; 3], detached: bool| {
+            let mut player = Player {
+                active: true,
+                detached,
+                pos: wow_to_bevy(from),
+                ..Default::default()
+            };
+            let t = TeleportMessage {
+                guid: 0x45,
+                counter: 1,
+                position: to,
+                orientation: 0.0,
+            };
+            snap_near_teleport(&mut player, &mut 0.0, &t, 10.0);
+            player
+        };
+        let from = [16_222.0, 16_252.0, 12.5];
+        let south_seas = [-11_880.0, -4_700.0, 2.0];
+        let holds = |to, detached| snapped(from, to, detached).holds_the_frame();
+        assert!(holds(south_seas, false), "GM Island to the South Seas");
+        assert!(holds([16_222.0, 16_282.5, 12.5], false), "30.5 yards");
+        assert!(!holds([16_222.0, 16_281.5, 12.5], false), "29.5 yards");
+        assert!(!holds(south_seas, true), "the eye does not follow");
+
+        assert_eq!(
+            snapped(from, south_seas, false).reloads,
+            1,
+            "a far snap marks"
+        );
+        assert_eq!(snapped(from, [16_222.0, 16_281.5, 12.5], false).reloads, 0);
+
+        let mut player = snapped(from, south_seas, false);
+        player.end_settle(true, 11.0);
+        assert!(
+            !player.holds_the_frame(),
+            "the settle release ends the hold"
+        );
     }
 }
 
 #[cfg(test)]
 mod arrival_tests {
     use super::*;
-    use crate::net::WorldEnterCascadeMessage;
 
     const ME: u64 = 0x45;
 
-    /// The control-0 packet naming us.
-    fn lose_control(app: &mut App) {
-        let mut own = std::mem::take(&mut *app.world_mut().resource_mut::<OwnControlLost>());
-        let mut player = app.world_mut().resource_mut::<Player>();
-        track_control(&mut player, &mut own, control_verdict(ME, false, Some(ME)));
-        *app.world_mut().resource_mut::<OwnControlLost>() = own;
+    /// The control-0 packet naming us: its handler's flag and the controller's lock.
+    fn lose_control(lock: &mut MoverLock, own: &mut OwnControlLost) {
+        own.0 = true;
+        track_control(lock, control_verdict(ME, false, Some(ME)));
     }
 
-    fn harness() -> App {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Player>()
-            .init_resource::<OwnControlLost>()
-            .add_message::<WorldEnterCascadeMessage>()
-            .add_systems(Update, regain_control_on_arrival);
-        app
+    /// Whether the arrival's flag rise is owed its signals.
+    fn arrive(lock: &mut MoverLock, own: &mut OwnControlLost) -> bool {
+        regain_control_on_arrival(Some(lock), Some(own))
     }
 
     /// A battleground's end sends `control 0` for us and never the restore; the teleport out
     /// creates us afresh and that create gives control back, the movement lock and the bar's
-    /// `[0xb4b3e4]` flag both.
+    /// `[0xb4b3e4]` flag both, signalling the flag's rise and the usable refresh.
     #[test]
     fn a_control_loss_does_not_survive_the_next_self_create() {
-        let mut app = harness();
-        lose_control(&mut app);
-        assert!(app.world().resource::<Player>().control_lost);
-        assert!(app.world().resource::<OwnControlLost>().0);
-        app.update();
-        assert!(
-            app.world().resource::<OwnControlLost>().0,
-            "nothing restores it without a create"
-        );
-
-        app.world_mut().write_message(WorldEnterCascadeMessage);
-        app.update();
-        assert!(
-            !app.world().resource::<OwnControlLost>().0,
-            "the bar's flag is back"
-        );
-        let player = app.world().resource::<Player>();
-        assert!(!player.control_lost, "and the controller's movement lock");
-        assert_eq!(player.foreign_mover, None);
+        let (mut lock, mut own) = (MoverLock::default(), OwnControlLost::default());
+        lose_control(&mut lock, &mut own);
+        assert!(lock.control_lost && own.0);
+        let signals = arrive(&mut lock, &mut own);
+        assert!(!own.0, "the bar's flag is back");
+        assert!(!lock.control_lost, "and the controller's movement lock");
+        assert_eq!(lock.foreign_mover, None);
+        assert!(signals, "the flag's rise signals (`0x4958f7`, `0x4958fc`)");
     }
 
-    /// The real create system feeds it: a control-0 packet's verdict, then our own player's
-    /// create (`enter_world_on_self_create`), and the lock and the flag are gone.
-    #[test]
-    fn our_own_create_system_gives_control_back() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let mut app = harness();
-        app.insert_resource(crate::net::NetCommands(tx))
-            .add_systems(
-                Update,
-                crate::net::enter_world_on_self_create.before(regain_control_on_arrival),
-            );
-        lose_control(&mut app);
-        app.update();
-        assert!(app.world().resource::<OwnControlLost>().0);
-
-        app.world_mut()
-            .spawn((crate::net::Guid(ME), crate::net::SelfPlayer));
-        app.update();
-        let player = app.world().resource::<Player>();
-        assert!(!app.world().resource::<OwnControlLost>().0 && !player.control_lost);
-    }
-
-    /// A possession does not outlive the world either: the create claims our own mover.
+    /// A possession does not outlive the world either: the create claims our own mover, with no
+    /// signal, as the flag never fell.
     #[test]
     fn a_create_ends_a_possession_too() {
-        let mut app = harness();
-        {
-            let mut player = app.world_mut().resource_mut::<Player>();
-            player.foreign_mover = Some(0x99);
-            player.control_lost = true;
-        }
-        app.world_mut().write_message(WorldEnterCascadeMessage);
-        app.update();
-        let player = app.world().resource::<Player>();
-        assert_eq!(player.foreign_mover, None);
-        assert!(!player.control_lost && player.reseat);
+        let (mut lock, mut own) = (MoverLock::default(), OwnControlLost::default());
+        lock.foreign_mover = Some(0x99);
+        lock.control_lost = true;
+        let signals = arrive(&mut lock, &mut own);
+        assert_eq!(lock.foreign_mover, None);
+        assert!(!lock.control_lost && lock.reseat);
+        assert!(!signals, "the flag never fell");
     }
 
     /// A login in control touches nothing.
     #[test]
     fn a_create_in_control_changes_nothing() {
-        let mut app = harness();
-        app.world_mut().write_message(WorldEnterCascadeMessage);
-        app.update();
-        assert!(!app.world().resource::<Player>().reseat);
+        let (mut lock, mut own) = (MoverLock::default(), OwnControlLost::default());
+        let signals = arrive(&mut lock, &mut own);
+        assert!(!lock.reseat && !signals);
+    }
+}
+
+#[cfg(test)]
+mod self_teleport_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// One bare self-addressed move from GM Island's dock, applied as the controller applies it.
+    fn applied(to: [f32; 3], teleport: bool, detached: bool) -> Player {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(Player {
+            active: true,
+            detached,
+            pos: wow_to_bevy([16_222.0, 16_252.0, 12.5]),
+            ..Default::default()
+        });
+        let m = SelfMoveMessage {
+            position: to,
+            orientation: 0.0,
+            flags: 0,
+            pitch: 0.0,
+            fall_time: 0,
+            jump: None,
+            transport: None,
+            teleport,
+        };
+        world
+            .run_system_once(
+                move |time: Res<Time>,
+                      mut player: ResMut<Player>,
+                      transports: super::super::TransportQuery| {
+                    let mut cam = FlyCam {
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        speed: 0.0,
+                    };
+                    apply_self_move(&m, &mut player, &mut cam, &time, &transports);
+                },
+            )
+            .expect("runs");
+        world.remove_resource::<Player>().expect("player")
+    }
+
+    /// Our own mover's `MSG_MOVE_TELEPORT` reaches the teleport apply `0x617e90` (`0x6186ee`,
+    /// `0x61870c`), so it reloads under the same gate as the ack's snap: past 30 yards, with the
+    /// camera following. The other relays never reach it.
+    #[test]
+    fn a_self_teleport_past_30_yards_holds_the_body_and_the_frame() {
+        let south_seas = [-11_880.0, -4_700.0, 2.0];
+        let far = applied(south_seas, true, false);
+        assert!(
+            far.holds_the_frame(),
+            "GM Island to the South Seas holds the frame"
+        );
+        assert!(
+            far.settling && far.world_stale,
+            "and the body, until resident"
+        );
+        assert!(
+            !applied([16_222.0, 16_281.5, 12.5], true, false).holds_the_frame(),
+            "29.5 yards"
+        );
+        assert!(
+            applied([16_222.0, 16_282.5, 12.5], true, false).holds_the_frame(),
+            "30.5 yards"
+        );
+        assert!(
+            !applied(south_seas, true, true).holds_the_frame(),
+            "the eye does not follow"
+        );
+        let placed = applied(south_seas, false, false);
+        assert!(
+            !placed.holds_the_frame() && !placed.settling,
+            "a relay that only places the mover reloads nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod seat_tests {
+    use super::*;
+    use crate::player::FlyCam;
+    use bevy::ecs::message::Messages;
+    use bevy::ecs::system::RunSystemOnce;
+
+    const DECK: u64 = 0x1FC0_0000_0000_0042;
+
+    /// Take control at login with our create's transport block on a deck at `deck_at`, yawed a
+    /// quarter turn, then run one carry; `armed` puts the deck's path in place.
+    /// What the seat leaves: the ride's guid, deck-local feet and placed flag, the feet and the
+    /// facing.
+    type Seated = (Option<(u64, Vec3, bool)>, Vec3, f32);
+
+    #[allow(clippy::type_complexity)] // the system's message readers
+    fn login_aboard(armed: bool) -> (Seated, Transform) {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.init_resource::<Player>();
+        world.init_resource::<OwnControlLost>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<Messages<TeleportMessage>>();
+        world.init_resource::<Messages<WorldportMessage>>();
+        world.init_resource::<Messages<SpeedChangeMessage>>();
+        world.init_resource::<Messages<MoveModeMessage>>();
+        world.init_resource::<Messages<KnockBackMessage>>();
+        world.init_resource::<Messages<SelfMoveMessage>>();
+        world.init_resource::<Messages<ClientControlMessage>>();
+        let deck_at = Transform::from_xyz(100.0, 5.0, -40.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let mut deck = world.spawn((deck_at, crate::net::Guid(DECK)));
+        if armed {
+            deck.insert(crate::transport::Transport::parked_for_test());
+        }
+        let deck = deck.id();
+        world.insert_resource(crate::net::GuidIndex([(DECK, deck)].into_iter().collect()));
+        let seat = SelfSeat {
+            entity: deck,
+            guid: DECK,
+            local_pos: [2.0, 1.0, 3.0],
+            local_orientation: 0.5,
+            deck: deck_at,
+        };
+        let player = world
+            .run_system_once(
+                move |time: Res<Time>,
+                      mut commands: Commands,
+                      mut player: ResMut<Player>,
+                      net: Res<NetCommands>,
+                      mut readers: (
+                    MessageReader<TeleportMessage>,
+                    MessageReader<WorldportMessage>,
+                    MessageReader<SpeedChangeMessage>,
+                    MessageReader<MoveModeMessage>,
+                    MessageReader<KnockBackMessage>,
+                    MessageReader<SelfMoveMessage>,
+                    MessageReader<ClientControlMessage>,
+                ),
+                      transports: super::super::TransportQuery,
+                      index: Res<crate::net::GuidIndex>| {
+                    let mut cam = FlyCam {
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        speed: 0.0,
+                    };
+                    apply_server_moves(
+                        &time,
+                        &mut commands,
+                        &mut player,
+                        &mut crate::player::MoverLock::default(),
+                        &mut cam,
+                        &net,
+                        &mut readers.0,
+                        &mut readers.1,
+                        &mut readers.2,
+                        &mut readers.3,
+                        &mut readers.4,
+                        &mut readers.5,
+                        &mut readers.6,
+                        &mut crate::net::MoverClaim::default(),
+                        Some(1),
+                        &transports,
+                        // The create's world position, which the seat replaces.
+                        Some((Vec3::new(-500.0, 0.0, 0.0), 0.0)),
+                        Some(seat),
+                    );
+                    super::super::ride::carry(&mut player, &mut cam, &transports, &index);
+                    let ride = player
+                        .ride
+                        .as_ref()
+                        .map(|r| (r.guid, r.local_pos, r.placed));
+                    (ride, player.pos, player.face_yaw)
+                },
+            )
+            .expect("runs");
+        (player, deck_at)
+    }
+
+    /// `0x618b30`: our create on a transport seats the mover in its frame, from the status's
+    /// transport block, whether or not the transport's path is in place yet.
+    #[test]
+    fn a_login_aboard_a_transport_seats_us_on_its_deck() {
+        for armed in [false, true] {
+            let ((ride, pos, face_yaw), deck) = login_aboard(armed);
+            let (guid, local_pos, placed) = ride.expect("seated on the deck");
+            assert_eq!(guid, DECK);
+            let local = wow_to_bevy([2.0, 1.0, 3.0]);
+            assert_eq!(local_pos, local);
+            assert!(
+                (pos - (deck.translation + deck.rotation * local)).length() < 1e-4,
+                "the feet are the deck's pose composed with the deck-local seat, armed {armed}"
+            );
+            assert!(
+                (face_yaw - wrap_pi(0.5 + std::f32::consts::FRAC_PI_2)).abs() < 1e-5,
+                "the facing is the seat's on top of the deck's"
+            );
+            assert_eq!(placed, armed, "a deck without its path holds the seat");
+        }
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use bevy::ecs::system::SystemId;
+    use crossbeam_channel::Receiver;
+
+    const ME: u64 = 0x45;
+    const CREATURE: u64 = 0xF130_0000_0000_0077;
+
+    /// The control updates' path in the controller over one world, its mover claim and lock
+    /// persisting from round to round, as the client's do.
+    struct Rounds {
+        world: World,
+        system: SystemId,
+        sent: Receiver<ClientCommand>,
+    }
+
+    impl Rounds {
+        #[allow(clippy::type_complexity)] // the system's message readers
+        fn new() -> Self {
+            let mut world = World::new();
+            world.init_resource::<Time>();
+            world.init_resource::<Player>();
+            world.init_resource::<MoverLock>();
+            world.init_resource::<crate::net::MoverClaim>();
+            let (tx, sent) = crossbeam_channel::unbounded();
+            world.insert_resource(NetCommands(tx));
+            world.init_resource::<Messages<TeleportMessage>>();
+            world.init_resource::<Messages<WorldportMessage>>();
+            world.init_resource::<Messages<SpeedChangeMessage>>();
+            world.init_resource::<Messages<MoveModeMessage>>();
+            world.init_resource::<Messages<KnockBackMessage>>();
+            world.init_resource::<Messages<SelfMoveMessage>>();
+            world.init_resource::<Messages<ClientControlMessage>>();
+            let system = world.register_system(
+                |time: Res<Time>,
+                 mut commands: Commands,
+                 mut player: ResMut<Player>,
+                 mut lock: ResMut<MoverLock>,
+                 mut claim: ResMut<crate::net::MoverClaim>,
+                 net: Res<NetCommands>,
+                 mut readers: (
+                    MessageReader<TeleportMessage>,
+                    MessageReader<WorldportMessage>,
+                    MessageReader<SpeedChangeMessage>,
+                    MessageReader<MoveModeMessage>,
+                    MessageReader<KnockBackMessage>,
+                    MessageReader<SelfMoveMessage>,
+                    MessageReader<ClientControlMessage>,
+                ),
+                 transports: super::super::TransportQuery| {
+                    let mut cam = FlyCam {
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        speed: 0.0,
+                    };
+                    apply_server_moves(
+                        &time,
+                        &mut commands,
+                        &mut player,
+                        &mut lock,
+                        &mut cam,
+                        &net,
+                        &mut readers.0,
+                        &mut readers.1,
+                        &mut readers.2,
+                        &mut readers.3,
+                        &mut readers.4,
+                        &mut readers.5,
+                        &mut readers.6,
+                        &mut claim,
+                        Some(ME),
+                        &transports,
+                        None,
+                        None,
+                    );
+                },
+            );
+            Self {
+                world,
+                system,
+                sent,
+            }
+        }
+
+        /// The claims one round's control updates send, `(mover, allow_move)` each.
+        fn claims(&mut self, updates: &[(u64, bool)]) -> Vec<u64> {
+            for &(mover, allow_move) in updates {
+                self.world
+                    .write_message(ClientControlMessage { mover, allow_move });
+            }
+            self.world.run_system(self.system).expect("the round runs");
+            self.sent
+                .try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::SetActiveMover { guid } => Some(guid),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// `SetActiveMover` (`0x6006e0`) returns at once for the mover it holds (`0x6006ee`-
+    /// `0x6006fb`): a restore with our own body still claimed sends nothing, and one after a
+    /// revoke, which zeroes the mover (`0x5fa678`-`0x5fa696`), sends once.
+    #[test]
+    fn a_restore_claims_only_a_mover_it_does_not_hold() {
+        let mut rounds = Rounds::new();
+        let net = NetCommands(rounds.world.resource::<NetCommands>().0.clone());
+        rounds
+            .world
+            .resource_mut::<crate::net::MoverClaim>()
+            .claim(ME, &net);
+        assert_eq!(rounds.claims(&[]), [ME], "the arrival's claim");
+        assert_eq!(rounds.claims(&[(ME, true)]), Vec::<u64>::new(), "held");
+        assert_eq!(rounds.claims(&[(ME, false)]), Vec::<u64>::new(), "revoked");
+        assert_eq!(rounds.claims(&[(ME, true)]), [ME], "restored, once");
+        assert_eq!(
+            rounds.claims(&[(ME, true)]),
+            Vec::<u64>::new(),
+            "and not again"
+        );
+    }
+
+    /// A possession's grant claims the creature; its release under fear zeroes the mover
+    /// (`0x5fa678`-`0x5fa696`), so the grant that ends the fear claims it again: two claims.
+    #[test]
+    fn a_grant_a_release_and_a_grant_claim_twice() {
+        let mut rounds = Rounds::new();
+        assert_eq!(rounds.claims(&[(CREATURE, true)]), [CREATURE], "granted");
+        assert_eq!(
+            rounds.claims(&[(CREATURE, false)]),
+            Vec::<u64>::new(),
+            "released"
+        );
+        assert_eq!(
+            rounds.claims(&[(CREATURE, true)]),
+            [CREATURE],
+            "granted again"
+        );
+        assert_eq!(
+            rounds.claims(&[(CREATURE, true)]),
+            Vec::<u64>::new(),
+            "a grant of the claimed creature claims nothing"
+        );
     }
 }

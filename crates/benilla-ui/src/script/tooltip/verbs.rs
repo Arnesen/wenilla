@@ -4,7 +4,6 @@ use mlua::{Lua, Table, Value, Variadic};
 
 use crate::script::binding_abi::{self, optional_string, string_arg};
 use crate::script::object::frame_handle_of;
-use crate::script::region::region_handle_of;
 use crate::script::Model;
 use crate::widget::{KindState, TooltipAnchor};
 
@@ -12,6 +11,22 @@ use super::{
     append_line, clear, color_num, parse_line_color, parse_line_tail, set_owner_core, set_shown,
     text_of, with_tip, wrap_arg, REG_TOOLTIP_METHODS,
 };
+
+/// An owner argument's `[0]` as the reference reads it: `lua_gettable` of key 0 (`0x53119b`,
+/// `0x531077`), so a non-table raises the VM's index error, then `lua_touserdata`, `None` for
+/// anything but a non-NULL light userdata. The pointer is the object's id.
+fn owner_id(v: &Value) -> mlua::Result<Option<crate::layout::Handle>> {
+    let Value::Table(t) = v else {
+        return Err(mlua::Error::runtime(format!(
+            "attempt to index a {} value",
+            v.type_name()
+        )));
+    };
+    Ok(match t.get::<Value>(0)? {
+        Value::LightUserData(l) if !l.0.is_null() => Some(l.0 as usize as u32),
+        _ => None,
+    })
+}
 
 pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
@@ -31,9 +46,22 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 let h = frame_handle_of(lua, &this)?;
                 set_shown(lua, h, false);
                 // The owner is read after the hide (`0x531189`), so a bad one raises on a
-                // hidden tooltip.
-                let owner: Table = lua.unpack(owner)?;
-                let owner_h = frame_handle_of(lua, &owner)?;
+                // hidden tooltip: its `[0]` with no type test, so a texture or a font string
+                // owns it too; a NULL raises `%s:SetOwner(): Couldn't find 'this' in owner
+                // object`, naming the tooltip (`0x5311bb`, `0x855150`). Deviation: the reference
+                // anchors a Font object through its +0x24 with no type test (`0x5313c9`),
+                // undefined; benilla raises the owner line.
+                let owner_h = owner_id(&owner)?
+                    .filter(|id| {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        model.id_to_frame.contains_key(id) || model.id_to_region.contains_key(id)
+                    })
+                    .ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "{}:SetOwner(): Couldn't find 'this' in owner object",
+                            binding_abi::name_of(lua, &this)
+                        ))
+                    })?;
                 // The gate is `lua_isstring` (`0x6f3510`): a string or number is read, and any
                 // other type counts as absent rather than raising.
                 let anchor = optional_string(lua, &anchor);
@@ -84,18 +112,18 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     // IsOwned(frame) (`0x530fe0`): 1 (`0x5310ad`) or nil (`0x5310c0`), the hover loop's OnUpdate
     // gate (`ContainerFrame.lua:657`); the owner drops on hide, so a stale OnUpdate never brings a
-    // hidden tooltip back.
+    // hidden tooltip back. It compares the argument's `[0]` with the owner (`0x531065`..`0x5310ab`)
+    // and tests no type, so a table without one matches an unowned tooltip.
     m.set(
         "IsOwned",
-        lua.create_function(|lua, (this, frame): (Table, Table)| {
+        lua.create_function(|lua, (this, frame): (Table, Value)| {
             let owner = with_tip(lua, &this, |t| t.owner)?;
-            let fh = frame_handle_of(lua, &frame)?;
-            Ok(crate::script::binding_abi::flag(owner == Some(fh)))
+            Ok(crate::script::binding_abi::flag(owner == owner_id(&frame)?))
         })?,
     )?;
 
     // SetText(text, r, g, b, alpha, wrap) (`0x531b90`): alpha has its own number gate, default 1,
-    // and a text that is neither string nor number raises the binding's usage error. It clears,
+    // read only with a numeric r, and a text that is neither string nor number raises the binding's usage error. It clears,
     // writes line 1 and shows: the empty-slot hover calls no Show after it
     // (PaperDollFrame.lua:747).
     m.set(
@@ -111,13 +139,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 ));
             }
             let text = text_of(lua, args.first());
-            let [r, g, b, _] = parse_line_color(lua, args.get(1), args.get(2), args.get(3));
-            // The alpha is its own `lua_isnumber` gate (`0x531ddc`'s neighbour at idx 6), so a
+            let mut color = parse_line_color(lua, args.get(1), args.get(2), args.get(3));
+            // The alpha is read only past the r gate, which skips it with the colour
+            // (`0x531c58`), and has its own `lua_isnumber` gate (`0x531d23`), default 1, so a
             // numeric string counts.
-            let a = color_num(lua, args.get(4)).unwrap_or(1.0);
+            if color_num(lua, args.get(1)).is_some() {
+                color[3] = color_num(lua, args.get(4)).unwrap_or(1.0);
+            }
             let wrap = wrap_arg(args.get(5));
             clear(lua, h);
-            append_line(lua, &this, (text, [r, g, b, a]), None, wrap)?;
+            append_line(lua, &this, (text, color), None, wrap)?;
             set_shown(lua, h, true);
             Ok(())
         })?,
@@ -139,7 +170,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let lh = match model.arena.frame(h).map(|f| &f.kind_state) {
                 Some(KindState::Tooltip(t)) if t.num_lines > 0 => t.left_lines[0],
                 Some(KindState::Tooltip(_)) => return Ok(()),
-                _ => return Err(mlua::Error::runtime("not a GameTooltip")),
+                _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
             };
             let current = model
                 .region_data
@@ -206,9 +237,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // pair and raise the line limit by one (`0x529940`), keeping the caller's fonts.
     m.set(
         "AddFontStrings",
-        lua.create_function(|lua, (this, left, right): (Table, Table, Table)| {
-            let lh = region_handle_of(lua, &left)?;
-            let rh = region_handle_of(lua, &right)?;
+        lua.create_function(|lua, (this, left, right): (Table, Value, Value)| {
+            let lh = font_string_arg(lua, &this, &left)?;
+            let rh = font_string_arg(lua, &this, &right)?;
             super::add_font_strings(lua, &this, lh, rh)
         })?,
     )?;
@@ -258,4 +289,38 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
 
     lua.set_named_registry_value(REG_TOOLTIP_METHODS, m)?;
     Ok(())
+}
+
+/// One of `AddFontStrings`' two strings (`0x530cf6`-`0x530d4d`, arguments 2 then 3): a non-table
+/// raises the usage line (`0x85506c`), a table with no object `0x855034`'s, and an object that
+/// fails the FontString test `[0xcf2ccc]` `0x854ff8`'s, each naming the tooltip or `<unnamed>`.
+fn font_string_arg(
+    lua: &Lua,
+    this: &Table,
+    arg: &Value,
+) -> mlua::Result<crate::widget::RegionHandle> {
+    let who = binding_abi::name_of(lua, this);
+    let Value::Table(t) = arg else {
+        return Err(mlua::Error::runtime(format!(
+            "Usage: {who}:AddFontStrings(leftstring, rightstring)"
+        )));
+    };
+    let Ok(id) = crate::script::object::decode_id(t) else {
+        return Err(mlua::Error::runtime(format!(
+            "{who}:AddFontStrings(): Couldn't find 'this' in fontstring"
+        )));
+    };
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    model
+        .id_to_region
+        .get(&id)
+        .copied()
+        .filter(|&rh| {
+            model.arena.region(rh).map(|r| r.kind) == Some(crate::widget::RegionKind::FontString)
+        })
+        .ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "{who}:AddFontStrings(): Wrong object type, expected fontstring"
+            ))
+        })
 }

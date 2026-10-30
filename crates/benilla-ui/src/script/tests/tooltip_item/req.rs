@@ -134,6 +134,64 @@ fn already_known_tests_the_taught_spell_and_its_higher_ranks() {
     assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
 }
 
+/// A host answering the pet's book with `.0`, as the app's pet family does.
+struct PetBookHost(PetBookState);
+
+impl CallHost for PetBookHost {
+    fn apply(&mut self, _: &mut UiScript, _: ScriptCall) -> Option<CallTail> {
+        None
+    }
+
+    fn read_live(&mut self, ask: &mut live::LiveAsk<'_>) -> bool {
+        ask.answer(|_: &PetBookNow| Some(self.0.clone()))
+    }
+}
+
+/// A pet teach's known test reads the pet's book as it stands (`0x52d5ad` → `0x60c740`): the
+/// host's, where the VM's copy holds nothing, and the host's empty one over a stale copy.
+#[test]
+fn a_pet_teach_reads_the_pets_book_as_it_stands() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(
+        9503,
+        ItemTemplateView {
+            name: "Grimoire of Firebolt".into(),
+            quality: 1,
+            teaches: Some(TaughtSpell {
+                ranks: vec![3110],
+                pet: true,
+            }),
+            ..Default::default()
+        },
+    );
+    let known = |s: &mut UiScript, book: Vec<u32>| {
+        let mut host = PetBookHost(PetBookState {
+            token: Some("DEMON".into()),
+            slots: book
+                .into_iter()
+                .map(|spell_id| SpellSlotView {
+                    spell_id,
+                    ..Default::default()
+                })
+                .collect(),
+        });
+        s.hosted(&mut host, |s| render(s, 9503))
+            .iter()
+            .any(|(t, c)| t == "[ITEM_SPELL_KNOWN]" && *c == RED)
+    };
+    assert!(known(&mut s, vec![3110]), "the host's book knows it");
+    s.set_pet_book(PetBookState {
+        token: Some("DEMON".into()),
+        slots: vec![SpellSlotView {
+            spell_id: 3110,
+            ..Default::default()
+        }],
+    });
+    assert!(!known(&mut s, Vec::new()), "the host's book, not the copy");
+    assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
+}
+
 /// A required honor rank names the rank by the player's side and gender (`0x5efe60`,
 /// `PVP_RANK_%d_%d`, `_FEMALE` first), white at or above it (`fields+0x102b`); a required medal
 /// reads `PVP_MEDAL<n>`, white when bit `n-1` of `PLAYER_FIELD_PVP_MEDALS` is set (`fields+0x1034`).
@@ -296,4 +354,70 @@ fn a_required_spell_is_met_by_any_known_rank() {
     assert_eq!(line(&mut s).1, WHITE, "a later rank");
     assert!(usable(&mut s));
     assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
+}
+
+/// A host that holds no active player: the requirement head answers none, every other question is
+/// declined.
+struct NoPlayer;
+
+impl CallHost for NoPlayer {
+    fn apply(&mut self, _: &mut UiScript, _: ScriptCall) -> Option<CallTail> {
+        None
+    }
+
+    fn read_live(&mut self, ask: &mut live::LiveAsk<'_>) -> bool {
+        ask.answer(|_: &ReqHeadQuery| Some(None))
+    }
+}
+
+/// With no active player held the getters answer the reference's fixed values, never the VM's
+/// copy: the green range 0 (`0x4e17f8`), no combo points (`0x51a1bd` → `0x51a261`), a merchant row
+/// usable (`0x4fb293` → `0x4fb2f0`), `UnitLevel` past the hostile-level rule (`0x518055`), and the
+/// item build hidden (`0x52b699`).
+#[test]
+fn with_no_player_held_the_getters_answer_the_references_fixed_values() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    // Ravager wants level 37.
+    s.set_item_template(871, super::axe());
+    // The copy, which each answer below would read: a level-3 rogue on five points.
+    s.set_player_req_state(PlayerReqState {
+        level: 3,
+        class_id: 4,
+        race_id: 1,
+        ..Default::default()
+    });
+    s.set_combo_points(5, 0);
+    // Hostile and ten levels above the copy's player.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            level: 13,
+            reaction: 2,
+            ..Default::default()
+        }),
+    );
+    s.set_merchant(Some(MerchantState {
+        items: vec![MerchantItem {
+            item_id: 871,
+            name: Some("Ravager".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    const CHUNK: &str = r#"
+        local a = ReqSlot or CreateFrame("Button", "ReqSlot")
+        a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        local tt = TT or CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        SetItemByIdForTest(tt, 871)
+        local _, _, _, _, _, usable = GetMerchantItemInfo(1)
+        return GetQuestGreenRange(), GetComboPoints(), usable and 1 or 0, UnitLevel("target"),
+            tt:IsShown() and 1 or 0
+    "#;
+    let copy: (i64, i64, i64, i64, i64) = s.eval(CHUNK).unwrap();
+    assert_eq!(copy, (4, 5, 0, -1, 1), "the copy's level-3 rogue");
+    let none: (i64, i64, i64, i64, i64) = s.hosted(&mut NoPlayer, |s| s.eval(CHUNK).unwrap());
+    assert_eq!(none, (0, 0, 1, 13, 0), "no active player");
 }

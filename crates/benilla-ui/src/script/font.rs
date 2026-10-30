@@ -35,7 +35,7 @@ use super::{FontMask, FontObject, FontShadow, Model, RegionData};
 /// The shared metatable of every font-object handle.
 const REG_FONT_META: &str = "__benilla_font_meta";
 /// The font-object method table, which is the metatable's `__index`.
-const REG_FONT_METHODS: &str = "__benilla_font_methods";
+pub(super) const REG_FONT_METHODS: &str = "__benilla_font_methods";
 /// font id → handle, so `GameFontNormal == GameFontNormal` and a re-declared `<Font>` keeps identity.
 const REG_FONT_WRAPPERS: &str = "__benilla_font_wrappers";
 
@@ -206,11 +206,15 @@ pub(super) fn id_of_table(model: &Model, t: &Table) -> Option<FontId> {
     }
 }
 
-/// The font `this` is, for a Font method's receiver.
+/// The font `this` is, for a Font method's receiver, with the member prologue's raises: no object
+/// at `[0]`, or one that is no Font (`0x79fda0`..`0x7a0e70`).
 fn id_of(lua: &Lua, this: &Table) -> mlua::Result<FontId> {
+    let id = super::object::decode_id(this)?;
     let model = lua.app_data_ref::<Model>().expect("model");
-    id_of_table(&model, this)
-        .ok_or_else(|| mlua::Error::runtime("not a font object (missing T[0] font identity)"))
+    model
+        .fonts
+        .of_handle(id)
+        .ok_or_else(|| mlua::Error::runtime(super::object::ERR_WRONG_TYPE))
 }
 
 /// Which font verb an argument error names.
@@ -636,10 +640,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, _this: Table| Ok("Font"))?,
     )?;
     // `1` or nil, never a boolean, like the Region's (`0x7a1290`): the Font's own `IsObjectType`
-    // (`0x79fe60`) answers a number. Its argument handling is untraced; mlua's coercion applies.
+    // (`0x79fe60`) answers a number. Its argument passes `lua_isstring` (`0x79feec`), else
+    // `Usage: %s:IsObjectType("TYPE")` (`0x8794e4`) naming the font.
     m.set(
         "IsObjectType",
-        lua.create_function(|_, (_this, ty): (Table, String)| {
+        lua.create_function(|lua, (this, ty): (Table, Value)| {
+            id_of(lua, &this)?;
+            let ty = binding_abi::method_string(lua, &this, ty, r#"IsObjectType("TYPE")"#)?;
             Ok(binding_abi::flag(ty.eq_ignore_ascii_case("font")))
         })?,
     )?;
@@ -756,7 +763,8 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
 
     // ── face ────────────────────────────────────────────────────────────────────────────────
     // SetFont(path, height [, flags]) → 1, or nil when the font fails to load, which does not raise
-    // and writes nothing: an empty path, one the host's probe refuses, or a height of 0 or less.
+    // and writes nothing: an empty path, one the host's probe refuses, or a height outside (0, 1)
+    // of the screen ([`super::font_block::font_size_loads`]).
     m.set(
         "SetFont",
         lua.create_function(move |lua, (this, mut args): (Table, MultiValue)| {

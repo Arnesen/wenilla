@@ -76,6 +76,7 @@ pub(crate) struct BridgeReadout<'w, 's> {
     group: Option<Res<'w, crate::spell::group_relation::GroupRoster>>,
     classes: Option<Res<'w, ChrClassTable>>,
     races: Option<Res<'w, ChrRaceTable>>,
+    teams: Option<Res<'w, crate::chr_classes::RacePvpTeams>>,
     /// Click to Move's walk in flight (`self.autoMove`).
     approach: Option<Res<'w, crate::player::Approach>>,
     /// The questgiver dialog statuses the overhead `!`/`?` draw from (`questStatus`).
@@ -163,6 +164,7 @@ impl BridgeReadout<'_, '_> {
         let chr = crate::ui_unit::UnitNames {
             races: self.races.as_deref().map(|t| &t.0),
             classes: self.classes.as_deref().map(|t| &t.0),
+            teams: self.teams.as_deref(),
         };
         let self_row = self.self_q.single().ok();
         let self_store = self_row.map(|(store, _, _)| store);

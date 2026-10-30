@@ -21,7 +21,6 @@ use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfG
 use crate::spell::Cooldowns;
 use crate::ui_action::Spells;
 
-use super::bar::{feed_pet_bar, fire_pet_cooldown_events};
 use super::drain::PetPress;
 use super::PetBar;
 
@@ -90,6 +89,7 @@ pub(super) fn owned_pet() -> ObjectStore {
 /// [`owned_pet`] with more fields set, which win over its own.
 pub(super) fn owned_pet_with(extra: &[(u16, u32)]) -> ObjectStore {
     let mut pairs = vec![
+        (22, 100),
         (SUMMONEDBY, ME as u32),
         (SUMMONEDBY + 1, 0),
         (CREATEDBY, ME as u32),
@@ -153,7 +153,7 @@ pub(super) fn rig(
     slots: &[u32],
     pet: Option<ObjectStore>,
 ) -> Rig {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, commands) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     let world = app.world_mut();
@@ -177,31 +177,36 @@ pub(super) fn rig(
         bar.spells.bar[i] = PetActionEntry::from(spell_id | (u32::from(PET_ACT_ENABLED) << 24));
     }
     world.insert_non_send_resource(listening_vm());
-    // The order the plugin gives them: the feeds that push a pet cooldown, then the flush.
-    let mut feed = Schedule::default();
-    feed.add_systems(
-        (
-            super::drain::arm_owed_pet_gcds,
-            crate::ui_pet_book::feed_pet_book,
-            feed_pet_bar,
-            fire_pet_cooldown_events,
-        )
-            .chain(),
-    );
+    // The pet's feeds: none is left, as the send arms its GCD inside the call; the flush is the pet's
+    // cooldown lane's, in the drain.
+    let feed = Schedule::default();
     let mut rig = Rig {
         app,
         commands,
         feed,
     };
-    // The bar arriving is `PET_BAR_UPDATE`'s; every test reads what a press adds to it.
-    assert_eq!(rig.frame(), ["PET_BAR_UPDATE"], "the bar arrives");
+    // The bar arrives with no event: a packet's `PET_BAR_UPDATE` is the notice lane's
+    // (`SetPetGuid`, `0x4bc90c`). Every test reads what a press adds to it.
+    assert_eq!(rig.frame(), Vec::<String>::new(), "the bar arrives");
     rig
 }
 
 impl Rig {
-    /// The bar's feeds for one frame, and the events they fired.
+    /// The bar's feeds for one frame, then the lanes' drain, and the events they fired.
     pub(super) fn frame(&mut self) -> Vec<String> {
         self.feed.run(self.app.world_mut());
+        // The frame's clock pair, as the tick hands it to the call host's cooldown reads.
+        let clock = {
+            let c = self.app.world().resource::<crate::ui_script::UiClock>();
+            crate::ui_script::UiClock {
+                anchor: c.anchor,
+                ui_now: c.ui_now,
+            }
+        };
+        self.app
+            .world_mut()
+            .insert_resource(crate::ui_script::HostClock(clock));
+        crate::lanes::fire_in_order(self.app.world_mut());
         let mut script = self
             .app
             .world_mut()
@@ -243,13 +248,20 @@ impl Rig {
         self.commands.try_iter().collect()
     }
 
-    /// `GetPetActionCooldown(slot)`, off what the last feed pushed: `(start, duration, enable)`.
+    /// `chunk`'s answer through the lent host, as every production entry lends it.
+    pub(super) fn eval<T: benilla_ui::mlua::FromLuaMulti>(&mut self, chunk: &str) -> T {
+        crate::script_calls::with_hosted_vm(self.app.world_mut(), |s| {
+            s.expect("a VM").eval(chunk).expect("the chunk runs")
+        })
+    }
+
+    /// `GetPetActionCooldown(slot)` through the lent host: `(start, duration, enable)`.
     pub(super) fn cooldown(&mut self, slot: u32) -> (f64, f64, i32) {
-        self.app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
-            .eval(&format!("return GetPetActionCooldown({slot})"))
-            .unwrap()
+        crate::script_calls::with_hosted_vm(self.app.world_mut(), |s| {
+            s.expect("a VM")
+                .eval(&format!("return GetPetActionCooldown({slot})"))
+                .unwrap()
+        })
     }
 
     /// What the pet's own list reads for `spell_id`, as the bar's reader asks it.
@@ -361,6 +373,7 @@ fn view_on(rig: &mut Rig, guid: u64) {
 /// A unit the player mind-controls: charmed by us and possessed (`SpellAuras.cpp:2968-2969`).
 fn possessed() -> ObjectStore {
     ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (22, 100),
         (CHARMEDBY, ME as u32),
         (CHARMEDBY + 1, 0),
         (FLAGS, crate::target::UNIT_FLAG_POSSESSED),
@@ -404,7 +417,9 @@ fn a_possessed_units_press_casts_through_the_attempt_as_the_units_cast() {
         )]
     );
     assert!(rig.player_list_untouched(), "the GCD is not the player's");
-    // The send's GCD reaches the pet's list before the bar's feed reads it, and sweeps the slot.
+    // The send's GCD is in the pet's list as the call returns, with no system after it.
+    assert_eq!(rig.pet_reads(CLAW, &claw()).1, 1500, "armed at the send");
+    // Its flush fires on the pet's cooldown lane, and the slot sweeps.
     assert_eq!(
         rig.frame(),
         [
@@ -415,6 +430,20 @@ fn a_possessed_units_press_casts_through_the_attempt_as_the_units_cast() {
     );
     assert_eq!(rig.pet_reads(CLAW, &claw()).1, 1500);
     let (_, duration, enable) = rig.cooldown(1);
+    assert!((duration - 1.5).abs() < 1e-9 && enable == 1, "{duration}");
+}
+
+/// The send's GCD (`0x6e2de0` from `0x6e58fb`) is in the pet's list inside the call that sent it:
+/// the rest of the chunk, as a later packet's listener, reads it through `GetPetActionCooldown`.
+#[test]
+fn a_pet_casts_gcd_reads_in_the_chunk_that_cast_it() {
+    let mut rig = rig(vec![(CLAW, claw())], &[CLAW], Some(possessed()));
+    view_on(&mut rig, PET);
+
+    let (_, duration, enable): (f64, f64, i32) =
+        rig.eval("CastPetAction(1) return GetPetActionCooldown(1)");
+
+    assert_eq!(pet_casts(&rig.sent()).len(), 1, "the unit's cast went out");
     assert!((duration - 1.5).abs() < 1e-9 && enable == 1, "{duration}");
 }
 
@@ -576,7 +605,7 @@ fn a_possessed_units_combat_spell_picks_its_target_and_orders_the_attack() {
         "the Attack order follows the cast: {sent:?}"
     );
     assert!(
-        latched(&rig).2,
+        latched(&rig).1,
         "a possessed unit's Attack raises the latch"
     );
     assert!(errors(&mut rig).is_empty());
@@ -738,15 +767,16 @@ fn an_aura_cancel_press_starts_no_pet_gcd() {
     assert_eq!(rig.pet_reads(COWER, &cower()).1, 1500);
 }
 
-/// What a press latched: the mode word, its signal count and the attack latch.
-pub(super) fn latched(rig: &Rig) -> (u32, u32, bool) {
+/// What a press latched: the mode word and the attack latch.
+pub(super) fn latched(rig: &Rig) -> (u32, bool) {
     let bar = rig.app.world().resource::<PetBar>();
-    (bar.spells.state, bar.bar_signals, bar.attacking)
+    let latch = rig.app.world().resource::<super::PetAttackLatch>();
+    (bar.spells.state, latch.up())
 }
 
 /// Everything a refused spell press leaves untouched: no command on the wire, nothing latched, no
 /// GCD on the pet's list, no event.
-pub(super) fn assert_press_refused(rig: &mut Rig, before: (u32, u32, bool)) {
+pub(super) fn assert_press_refused(rig: &mut Rig, before: (u32, bool)) {
     assert!(rig.sent().is_empty(), "no packet of any kind");
     assert_eq!(latched(rig), before, "nothing latched");
     assert!(rig.pet_list_untouched(), "no GCD armed");
@@ -797,8 +827,9 @@ fn a_spell_press_with_no_player_object_sends_nothing() {
         .resource_mut::<GuidIndex>()
         .0
         .remove(&ME);
-    // The bar greys as the player leaves, which is its own repaint.
-    assert_eq!(rig.frame(), ["PET_BAR_UPDATE"]);
+    // The bar greys as the player leaves, with no `PET_BAR_UPDATE`: each of its sites is a write
+    // of the bar's own state (`0x4bc90c`, `0x4bc956`, `0x4bdb4f`).
+    assert!(rig.frame().is_empty());
     let before = latched(&rig);
 
     rig.press(1);
@@ -817,7 +848,7 @@ fn an_aura_cancel_press_with_no_player_object_sends_nothing() {
         .resource_mut::<GuidIndex>()
         .0
         .remove(&ME);
-    assert_eq!(rig.frame(), ["PET_BAR_UPDATE"], "the bar greys");
+    assert!(rig.frame().is_empty(), "the bar greys, unsignalled");
     let before = latched(&rig);
 
     rig.press(1);
@@ -932,7 +963,7 @@ fn an_attack_press_with_no_pet_object_sends_nothing() {
         ),
         "{sent:?}"
     );
-    assert!(!latched(&rig).2, "an ordinary pet's Attack raises no latch");
+    assert!(!latched(&rig).1, "an ordinary pet's Attack raises no latch");
 }
 
 /// The pet bar's Attack runs the attack validator (`0x4bd40d` → `0x612df0`), whose `SelectTarget`
@@ -1004,89 +1035,4 @@ fn a_pet_attack_with_the_cursor_up_casts_before_the_pet_acts() {
         ),
         "{sent:?}"
     );
-}
-
-/// `PetWait` signals `PET_BAR_UPDATE` in the verb (`0x4bc979`); the app's mirror of the latch and
-/// the bar catching up with it a frame later add no second signal.
-#[test]
-fn a_wait_press_is_signalled_once() {
-    let mut rig = rig(vec![], &[], Some(owned_pet()));
-    rig.app.world_mut().resource_mut::<PetBar>().spells.bar[0] = PetActionEntry::from(0x0700_0000);
-    assert_eq!(rig.frame(), ["PET_BAR_UPDATE"], "the token arrives");
-
-    rig.app
-        .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
-        .run("PetWait()")
-        .unwrap();
-    rig.order(0x0700_0000);
-    assert_eq!(rig.frame(), ["PET_BAR_UPDATE"], "the verb's own, in place");
-    assert!(rig.frame().is_empty(), "nothing more");
-    assert_eq!(pet_actions(&rig.sent()), 1, "and the order went out");
-}
-
-/// A press the app has not mirrored yet is not rolled back by a push of another slot: only a
-/// slot whose source moved is pushed.
-#[test]
-fn a_verbs_latch_survives_a_push_of_another_slot() {
-    let mut rig = rig(vec![], &[], Some(owned_pet()));
-    {
-        let mut bar = rig.app.world_mut().resource_mut::<PetBar>();
-        bar.spells.bar[0] = PetActionEntry::from(0x0700_0000);
-        // Following: Wait is unlit.
-        bar.spells.state = 1 << 8;
-    }
-    rig.frame();
-
-    let lit = |rig: &mut Rig| {
-        rig.app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
-            .eval::<bool>("local _, _, _, _, a = GetPetActionInfo(1) return a == 1")
-            .unwrap()
-    };
-    assert!(!lit(&mut rig));
-    rig.app
-        .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
-        .run("PetWait()")
-        .unwrap();
-    assert!(lit(&mut rig), "the verb lit Wait");
-    rig.app.world_mut().resource_mut::<PetBar>().spells.bar[1] = PetActionEntry::from(0x0700_0001);
-    rig.frame();
-    assert!(lit(&mut rig), "the stale store unlit it");
-}
-
-/// A latch the VM made but this side never sent (the pet not usable here that frame) does not
-/// outlive the next `SMSG_PET_SPELLS`: its signal (`0x4bc90c`) re-pushes the whole bar and the
-/// state word, equal values included.
-#[test]
-fn a_packet_overwrites_a_latch_this_side_never_sent() {
-    let mut rig = rig(vec![], &[], Some(owned_pet()));
-    {
-        let mut bar = rig.app.world_mut().resource_mut::<PetBar>();
-        bar.spells.bar[0] = PetActionEntry::from(0x0700_0000);
-        bar.spells.state = 1 << 8;
-    }
-    rig.frame();
-    let lit = |rig: &mut Rig| {
-        rig.app
-            .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
-            .eval::<bool>("local _, _, _, _, a = GetPetActionInfo(1) return a == 1")
-            .unwrap()
-    };
-    rig.app
-        .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
-        .run("PetWait()")
-        .unwrap();
-    assert!(lit(&mut rig), "the verb lit Wait");
-    // No order mirrored; the packet repeats the old state.
-    {
-        let mut bar = rig.app.world_mut().resource_mut::<PetBar>();
-        bar.bar_signals = bar.bar_signals.wrapping_add(1);
-    }
-    rig.frame();
-    assert!(!lit(&mut rig), "the packet's state is the bar's");
 }

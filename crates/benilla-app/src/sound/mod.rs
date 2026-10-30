@@ -32,6 +32,7 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+mod movie;
 mod net;
 // Crate-visible for the dev stall watchdog, which asks `output::device_open`.
 // On wasm32 the mixer runs on `web_backend` (`mixer::MixBackend`), so most of the
@@ -63,6 +64,7 @@ pub(crate) use greeting::NpcGreetingRequest;
 pub(crate) use kit::SoundKits;
 pub(crate) use message::MessageSounds;
 pub(crate) use mixer::Mixer;
+pub(crate) use movie::{MovieAudioReports, MovieAudioRequest};
 #[cfg(test)]
 pub(crate) use spell::HoldLoops;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
@@ -233,8 +235,8 @@ fn feed_music_suppression(
     }
 }
 
-/// The backend output; `mixer` is `None` with no device or under `$WOW_NOSOUND`. Non-Send: the
-/// device stream is not `Send` on every platform, so audio systems run on the main thread.
+/// The backend output; `mixer` is `None` with no device, under `$WOW_NOSOUND` or in a test.
+/// Non-Send: the device stream is not `Send` on every platform, so audio systems run on the main thread.
 pub(crate) struct SoundOutput {
     pub(crate) mixer: Option<Mixer>,
     /// Live kit channels, pumped by [`kit::pump_channels`].
@@ -248,6 +250,8 @@ pub(crate) struct SoundOutput {
     pub(crate) zone_streams: usize,
     pub(crate) glue_streams: usize,
     pub(crate) cinematic_streams: usize,
+    /// The movie frame's audio ([`movie`]).
+    pub(crate) movie_streams: usize,
     /// One-shots that lost their slot to a louder newcomer, and plays refused because nothing
     /// live was quieter.
     pub(crate) voices_stolen: u64,
@@ -259,7 +263,11 @@ pub(crate) struct SoundOutput {
 impl SoundOutput {
     /// Everything the device is mixing, the number [`kit::SOFTWARE_CHANNELS`] bounds.
     pub(crate) fn live_voices(&self) -> usize {
-        self.channels.len() + self.zone_streams + self.glue_streams + self.cinematic_streams
+        self.channels.len()
+            + self.zone_streams
+            + self.glue_streams
+            + self.cinematic_streams
+            + self.movie_streams
     }
 }
 
@@ -330,7 +338,10 @@ pub(crate) struct SoundPlugin;
 
 /// The sound CVars' change callback: volumes clamp to `[0, 1]`, enables are `!= 0` as the
 /// reference parses them (`0x4574d0`: `setne al`).
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<SoundConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut sound: bevy::prelude::Mut<'_, SoundConfig>,
+) {
     let v = ev.num();
     match ev.key().as_str() {
         "mastervolume" => sound.master = v.clamp(0.0, 1.0),
@@ -354,20 +365,21 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.add_observer(on_cvar);
-        // `$WOW_NOSOUND` (a silent unattended run) and `$WOW_CAPTURE` open no device at all, so
-        // they never hold the audio hardware against a session someone is listening to.
+        // `$WOW_NOSOUND` (a silent unattended run), `$WOW_CAPTURE` and a test build open no device
+        // at all, so they never hold the audio hardware against a session someone is listening to.
         let silent = ["WOW_NOSOUND", "WOW_CAPTURE"]
             .into_iter()
-            .find(|v| std::env::var_os(v).is_some());
+            .find(|v| std::env::var_os(v).is_some())
+            .map(|v| format!("${v} set"))
+            .or_else(|| cfg!(test).then(|| "a test build".to_owned()));
         // Before the mixer: the probe's taps are main-track effects, fixed when kira builds it.
         let probe_dir = if silent.is_some() {
             None
         } else {
             probe::output_dir()
         };
-        let mixer = if let Some(var) = silent {
-            info!("${var} set — audio disabled");
+        let mixer = if let Some(why) = silent {
+            info!("{why} — audio disabled");
             None
         } else {
             match Mixer::new(probe_dir.as_deref()) {
@@ -392,6 +404,7 @@ impl Plugin for SoundPlugin {
             zone_streams: 0,
             glue_streams: 0,
             cinematic_streams: 0,
+            movie_streams: 0,
             voices_stolen: 0,
             voices_denied: 0,
             copies_dropped: 0,
@@ -412,9 +425,11 @@ impl Plugin for SoundPlugin {
             (
                 // After Input writes the pose and camera, before Present's consumers read it.
                 update_audio_listener.in_set(WorldStage::Stream),
-                toggle_mute,
-                apply_master_volume.after(toggle_mute),
-                apply_focus_gate,
+                // The volumes are CVar knobs a call's callback writes: the mute key's write
+                // before the calls, which read it, and the apply after them.
+                toggle_mute.before(crate::vm_pass::VmPass::Start),
+                (apply_master_volume.after(toggle_mute), apply_focus_gate)
+                    .after(crate::vm_pass::VmPass::End),
                 poll_mix_health,
             ),
         );
@@ -441,6 +456,7 @@ impl Plugin for SoundPlugin {
         vocal::plugin(app);
         message::plugin(app);
         glue::plugin(app);
+        movie::plugin(app);
         money::plugin(app);
         reverb::plugin(app);
         interior::plugin(app);

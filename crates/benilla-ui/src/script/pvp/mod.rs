@@ -1,10 +1,12 @@
 //! `TogglePVP` and the thirteen honor bindings: the character and inspect windows' Honor tabs and
 //! the rank any unit frame can read off another player.
 //!
-//! The local player's counters are private descriptor fields the app pushes as a [`HonorState`];
-//! another player's arrive as a `MSG_INSPECT_HONOR_STATS` reply ([`InspectHonorData`]), whose
-//! presence is `HasInspectHonorData`. With nothing held every getter answers zeros at full width,
-//! as the reference reads zero-initialised slots ungated. A foreign player's current rank is
+//! The local player's counters are private descriptor fields, read off the active player's block
+//! at the call ([`HonorNow`]); another player's arrive as a `MSG_INSPECT_HONOR_STATS` reply held in
+//! the client's one inspect slot ([`InspectHonorNow`]), whose has-data flag is
+//! `HasInspectHonorData`. With nothing held every getter answers zeros at full width, as the
+//! reference reads zero-initialised slots ungated. With no host free to ask, the getters read the
+//! snapshots ([`super::UiScript::set_honor`], [`super::UiScript::set_inspect_honor`]). A foreign player's current rank is
 //! public (`PLAYER_BYTES_3` byte 3) and rides [`UnitState::pvp_rank`](super::UnitState::pvp_rank).
 //!
 //! The internal rank (0 none, 1..=4 dishonorable, 5..=18 Scout or Private to High Warlord or
@@ -19,7 +21,7 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{number_arg, string_arg};
-use super::unit::{check_unit_token, is_civilian_kill};
+use super::unit::{check_unit_token, is_civilian_kill, read_identity, read_record, unknownobject};
 use super::Model;
 
 /// The local player's honor snapshot, decoded by the app from the private honor descriptor
@@ -84,40 +86,83 @@ pub struct InspectHonorData {
     pub rank_bar: u8,
 }
 
+/// The self getters' question, through the lent host ([`super::live::ask`]): the active player's
+/// honor block as of the call (`0x51a4b0`-`0x51aa90` read `[+0xe68]`), zeros with no active player
+/// (`0x51a524`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HonorNow;
+
+impl super::live::LiveQuery for HonorNow {
+    type Answer = HonorState;
+}
+
+/// The client's one inspect-honor slot as of the call: its has-data (`0xb71fc8`) and pending
+/// (`0xb71fcc`) flags and the figures, which a new target leaves in place (`0x4c6f70`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InspectHonorSlot {
+    pub has_data: bool,
+    pub pending: bool,
+    pub figures: InspectHonorData,
+}
+
+/// The inspect getters' question, through the lent host ([`super::live::ask`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InspectHonorNow;
+
+impl super::live::LiveQuery for InspectHonorNow {
+    type Answer = InspectHonorSlot;
+}
+
+/// The PvP flag's verb the host applies inside its call ([`super::ScriptCall::Pvp`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PvpCall {
+    /// `TogglePVP()` (`0x48d700`): the empty `CMSG_TOGGLE_PVP` (`0x48d736`), one per call.
+    Toggle,
+}
+
 impl super::UiScript {
-    /// Drain the queued `TogglePVP` calls, one `CMSG_TOGGLE_PVP` each; the packet is empty, so
-    /// two toggles in a frame are two sends.
+    /// The `TogglePVP` calls a harness's VM kept ([`Self::keep_calls`]).
+    #[cfg(test)]
     pub fn take_pvp_toggles(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().pvp_toggles)
+        self.take_calls_like(&super::ScriptCall::Pvp(PvpCall::Toggle)) as u32
     }
 
-    /// Queue a toggle for `/pvp`, which benilla parses in Rust; the reference's `/pvp` is Lua over
-    /// `TogglePVP`.
-    pub fn queue_pvp_toggle(&mut self) {
-        self.model_mut().pvp_toggles += 1;
+    /// `/pvp`, which benilla parses in Rust: the reference's `/pvp` is Lua over `TogglePVP`, so the
+    /// same call.
+    pub fn toggle_pvp(&mut self) {
+        let lua = self.lua().clone();
+        if let Err(e) = super::calls::submit(&lua, super::ScriptCall::Pvp(PvpCall::Toggle)) {
+            self.model_mut().record_lua_error(&e);
+        }
     }
 
-    /// Push or clear the local player's honor snapshot, the self getters' only source. It fires
-    /// no event: the app fires `PLAYER_PVP_KILLS_CHANGED`/`PLAYER_PVP_RANK_CHANGED` alongside.
+    /// Push or clear the local player's honor snapshot, which the self getters read with no host
+    /// free to ask ([`HonorNow`]). It fires no event.
     pub fn set_honor(&mut self, honor: Option<HonorState>) {
         self.model_mut().honor = honor;
     }
 
-    /// Push or clear the last `MSG_INSPECT_HONOR_STATS` reply, paired with the pane's
-    /// `INSPECT_HONOR_UPDATE`. Its presence is `HasInspectHonorData`, so the app clears it on
-    /// `ClearInspectPlayer` and the pane's `OnShow` asks again for the next player. Either way
-    /// the in-flight latch clears, as the engine's reply (`0x4c6f4c`) and re-key (`0x4c6f9d`) do.
+    /// Push or clear the snapshot of the last `MSG_INSPECT_HONOR_STATS` reply, which the inspect
+    /// getters read with no host free to ask ([`InspectHonorNow`]); its presence is
+    /// `HasInspectHonorData`. Either way the in-flight latch clears, as the engine's reply
+    /// (`0x4c6f4c`) and re-key (`0x4c6f9d`) do.
     pub fn set_inspect_honor(&mut self, data: Option<InspectHonorData>) {
         let mut model = self.model_mut();
         model.inspect_honor = data;
         model.inspect_honor_pending = false;
     }
 
-    /// Drain the queued `RequestInspectHonorData` calls, each a `MSG_INSPECT_HONOR_STATS` send for
-    /// the app's inspect target. At most 1: the `pending` latch (`0x4c80b6`) refuses another until
-    /// [`Self::set_inspect_honor`] resolves the first.
+    /// The `RequestInspectHonorData` calls a harness's VM kept ([`Self::keep_calls`]), each a
+    /// `MSG_INSPECT_HONOR_STATS` send for the app's inspect target. The `pending` latch
+    /// (`0x4c80b6`) is the host's to set, after its send ([`Self::latch_inspect_honor_ask`]).
     pub fn take_inspect_honor_requests(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().inspect_honor_requests)
+        self.take_calls_like(&super::ScriptCall::Inspect(super::InspectCall::Honor)) as u32
+    }
+
+    /// The snapshot's inspect honor query is in flight (`[0xb71fcc] = 1`, `0x4c811b`), cleared by
+    /// [`Self::set_inspect_honor`]; a lent host keeps its own.
+    pub fn latch_inspect_honor_ask(&mut self) {
+        self.model_mut().inspect_honor_pending = true;
     }
 
     /// A rank's localized title for the app's `SMSG_PVP_CREDIT` chat line, `None` if missing or
@@ -164,14 +209,26 @@ fn rank_progress(bar: u8) -> f64 {
     f64::from(bar) * RANK_BAR_SCALE
 }
 
-fn honor(lua: &Lua) -> Option<HonorState> {
-    lua.app_data_ref::<Model>().expect("model app_data").honor
+/// The active player's honor block as of the call, the snapshot's with no host free to ask.
+fn honor(lua: &Lua) -> HonorState {
+    super::live::ask(lua, &HonorNow).unwrap_or_else(|| {
+        lua.app_data_ref::<Model>()
+            .expect("model app_data")
+            .honor
+            .unwrap_or_default()
+    })
 }
 
-fn inspect_honor(lua: &Lua) -> Option<InspectHonorData> {
-    lua.app_data_ref::<Model>()
-        .expect("model app_data")
-        .inspect_honor
+/// The inspect-honor slot as of the call, the snapshot's with no host free to ask.
+fn inspect_honor(lua: &Lua) -> InspectHonorSlot {
+    super::live::ask(lua, &InspectHonorNow).unwrap_or_else(|| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        InspectHonorSlot {
+            has_data: model.inspect_honor.is_some(),
+            pending: model.inspect_honor_pending,
+            figures: model.inspect_honor.unwrap_or_default(),
+        }
+    })
 }
 
 /// A GlobalString off the VM's globals, `None` when absent or empty, as `GetPVPRankInfo` tests
@@ -205,18 +262,18 @@ fn team_arg(lua: &Lua, v: Value) -> mlua::Result<i64> {
     let Some(token) = lua.coerce_string(v)? else {
         // Absent, boolean or table: the local player.
         let model = lua.app_data_ref::<Model>().expect("model app_data");
-        return Ok(model.unit("player").map_or(0, team_of));
+        return Ok(crate::script::unit::view(lua, &model, "player").map_or(0, |u| team_of(&u)));
     };
     let token = Some(token.to_str()?.to_owned());
     check_unit_token(&token)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
     Ok(token
         .as_ref()
-        .and_then(|t| model.unit(t))
+        .and_then(|t| crate::script::unit::view(lua, &model, t))
         // `0x51a9af`'s player gate (`shr edx,4; test dl,1`), applied here unlike in `UnitPVPRank`:
         // on this arm nothing else tells a creature, which has a race too, from a player.
         .filter(|u| u.is_player)
-        .map_or(0, team_of))
+        .map_or(0, |u| team_of(&u)))
 }
 
 /// `PVP_RANK_<internal>_<team>`, ungendered: `GetPVPRankInfo`'s lookup, `0x703bf0(key, -1, 0)`
@@ -363,9 +420,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "TogglePVP",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.pvp_toggles += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Pvp(PvpCall::Toggle))
         })?,
     )?;
 
@@ -377,7 +432,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPVPSessionStats",
         lua.create_function(|lua, ()| {
-            let h = honor(lua).unwrap_or_default();
+            let h = honor(lua);
             Ok((i64::from(h.session_hk), i64::from(h.session_dk)))
         })?,
     )?;
@@ -386,7 +441,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPVPYesterdayStats",
         lua.create_function(|lua, ()| {
-            let h = honor(lua).unwrap_or_default();
+            let h = honor(lua);
             Ok((
                 i64::from(h.yesterday_hk),
                 i64::from(h.yesterday_dk),
@@ -399,7 +454,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPVPThisWeekStats",
         lua.create_function(|lua, ()| {
-            let h = honor(lua).unwrap_or_default();
+            let h = honor(lua);
             Ok((i64::from(h.this_week_hk), i64::from(h.this_week_honor)))
         })?,
     )?;
@@ -409,7 +464,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPVPLastWeekStats",
         lua.create_function(|lua, ()| {
-            let h = honor(lua).unwrap_or_default();
+            let h = honor(lua);
             Ok((
                 i64::from(h.last_week_hk),
                 i64::from(h.last_week_dk),
@@ -425,7 +480,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPVPLifetimeStats",
         lua.create_function(|lua, ()| {
-            let h = honor(lua).unwrap_or_default();
+            let h = honor(lua);
             let highest = if h.highest_rank >= 5 {
                 h.highest_rank
             } else {
@@ -442,7 +497,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetPVPRankProgress() → the bar fraction (`rank_progress`), 0.0 before the first push.
     g.set(
         "GetPVPRankProgress",
-        lua.create_function(|lua, ()| Ok(rank_progress(honor(lua).unwrap_or_default().rank_bar)))?,
+        lua.create_function(|lua, ()| Ok(rank_progress(honor(lua).rank_bar)))?,
     )?;
 
     // GetPVPRankInfo(rank [, unit]) → rankName, rankNumber: the title and the visual rank for an
@@ -491,7 +546,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(token
                 .as_ref()
-                .and_then(|t| model.unit(t))
+                .and_then(|t| crate::script::unit::view(lua, &model, t))
                 .map_or(0i64, |u| i64::from(u.pvp_rank)))
         })?,
     )?;
@@ -504,8 +559,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     //   B  else a unit passing the civilian predicate (`0x612550`): `PVP_RANK_CIVILIAN`, a space
     //      and the name. Only creatures reach it.
     //   C  else the plain name.
-    // No snapshot, no object (the unit lookup `0x517309`, typemask 8, finds none and pushes nil
-    // at `0x51733e`) or an unresolved name answers nil.
+    // No snapshot or no object (the unit lookup `0x517309`, typemask 8, finds none and pushes nil
+    // at `0x51733e`) answers nil. A held unit whose name is not cached yet is built from
+    // `UNKNOWNOBJECT` (`0x609210` returns it on a miss, `0x609324`-`0x60933c`; `0x5172b0` always
+    // pushes the buffer), and the miss asks the name cache with its callback (`0x55f080`,
+    // `0x5fb840`) as `UnitName`'s does.
     //
     // Deviation: a token resolving to guid 0 answers nil too. The reference jumps from the guid
     // test (`0x5172f6`) to `return 1` (`0x517343`) with nothing pushed, so the one value is its
@@ -522,16 +580,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (unit, player_level) = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 (
-                    token.as_ref().and_then(|t| model.unit(t)).cloned(),
-                    model.player_req.level,
+                    token
+                        .as_ref()
+                        .and_then(|t| crate::script::unit::view(lua, &model, t))
+                        .map(std::borrow::Cow::into_owned),
+                    crate::script::requirements::player_head(lua, &model).map_or(0, |h| h.level),
                 )
             };
-            let Some(u) = unit.filter(|u| u.has_object) else {
+            let Some(mut u) = unit.filter(|u| u.has_object) else {
                 return Ok(Value::Nil);
             };
-            let Some(name) = u.name.clone() else {
-                return Ok(Value::Nil);
+            // The name (`GetUnitName`, `0x609210`) and the civilian leg (`0x612550`) are read off
+            // the name caches as the call runs, the snapshot's only with no host free to ask.
+            let tok = token.as_deref().unwrap_or_default();
+            let name = match read_identity(lua, tok, |_, id| id.name()).flatten() {
+                Some(name) => name,
+                None => unknownobject(lua)?.to_str()?.to_string(),
             };
+            if let Some(civilian) = read_record(lua, tok, |_, r| r.civilian) {
+                u.civilian = civilian;
+            }
             let decorated = pvp_name(lua, &u, &name, player_level);
             Ok(Value::String(lua.create_string(&decorated)?))
         })?,
@@ -541,23 +609,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // RequestInspectHonorData(): `InspectHonorFrame_OnShow` calls it while
     // `HasInspectHonorData()` is false; the app sends `MSG_INSPECT_HONOR_STATS` for its inspect
-    // target. Zero return values (`0x4c9610`).
+    // target, inside the call. Zero return values (`0x4c9610`).
     //
     // `0x4c80a0` bails silently if data is held (`0x4c80a6`), if a query is in flight (`pending`,
-    // `0x4c80b6`, `[0xb71fcc]`) or if the target guid is 0 (`0x4c80c2`). The first two are here;
-    // the guid is the app's, which drops a request with no target. Our `pending` latches on
-    // queue, not send, so a dropped request holds it until the next `set_inspect_honor`, which
-    // `ClearInspectPlayer` calls as `0x4c6f70` clears the engine's.
+    // `0x4c80b6`, `[0xb71fcc]`) or if the target guid is 0 (`0x4c80c2`). The first two are here,
+    // read as of the call; the guid is the host's, which sends and then latches `pending`
+    // (`0x4c811b`), so a request with no target leaves it clear.
     g.set(
         "RequestInspectHonorData",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.inspect_honor.is_some() || model.inspect_honor_pending {
+            let slot = inspect_honor(lua);
+            if slot.has_data || slot.pending {
                 return Ok(());
             }
-            model.inspect_honor_requests += 1;
-            model.inspect_honor_pending = true;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Inspect(super::InspectCall::Honor))
         })?,
     )?;
 
@@ -565,7 +630,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "HasInspectHonorData",
         lua.create_function(|lua, ()| {
-            Ok(if inspect_honor(lua).is_some() {
+            Ok(if inspect_honor(lua).has_data {
                 Value::Integer(1)
             } else {
                 Value::Nil
@@ -576,13 +641,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetInspectHonorData() → the reference's twelve, in its order:
     //   sessionHK, sessionDK, yesterdayHK, yesterdayHonor, thisweekHK, thisweekHonor,
     //   lastweekHK, lastweekHonor, lastweekStanding, lifetimeHK, lifetimeDK, lifetimeRank
-    // Twelve on every path: `0x4c9620` never checks for data and reads zero-initialised slots.
-    // Clearing drops the data here, while the reference's re-key zeroes only the flags and can
-    // still answer the previous target's numbers; matching that needs a latch apart from the data.
+    // Twelve on every path: `0x4c9620` never checks the flag and reads the cells, zeros before
+    // any reply; the app's slot zeroes them on a re-key too, its own `Deviation:`.
     g.set(
         "GetInspectHonorData",
         lua.create_function(|lua, ()| {
-            let d = inspect_honor(lua).unwrap_or_default();
+            let d = inspect_honor(lua).figures;
             let out = vec![
                 Value::Integer(i64::from(d.session_hk)),
                 Value::Integer(i64::from(d.session_dk)),
@@ -606,11 +670,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // kernel at `0x51ab04` is byte-identical to `0x51aace`, so it too reads 0.0 when empty.
     g.set(
         "GetInspectPVPRankProgress",
-        lua.create_function(|lua, ()| {
-            Ok(rank_progress(
-                inspect_honor(lua).unwrap_or_default().rank_bar,
-            ))
-        })?,
+        lua.create_function(|lua, ()| Ok(rank_progress(inspect_honor(lua).figures.rank_bar)))?,
     )?;
 
     Ok(())

@@ -8,8 +8,8 @@
 use mlua::{Lua, Table};
 
 use crate::script::tooltip::{append_line, duration_text, plural_template};
-use crate::script::{ItemTemplateView, Model};
-use crate::strings::{fill, Arg};
+use crate::script::{ItemTemplateView, Model, ReqRead};
+use crate::strings::{fill, Arg, Strings};
 
 use super::build::{note_miss, CacheWait};
 use super::names::*;
@@ -19,8 +19,12 @@ use super::names::*;
 #[derive(Clone, Default)]
 pub(in crate::script) struct ItemInstance {
     /// The name with its random suffix joined, which the reference composes in the builder
-    /// (`0x52b7bf`, `0x5d8b00` through `ITEM_SUFFIX_TEMPLATE`); `None` takes the template's.
+    /// (`0x52b7bf`, `0x5d8b00` through `ITEM_SUFFIX_TEMPLATE`); `None` takes the template's,
+    /// joined to [`Self::roll`]'s suffix.
     pub name: Option<String>,
+    /// The block's random property (`+0x424`), whose suffix the builder joins to the template's
+    /// name (`0x52b7bf`, `0x5d8b00`) when no [`Self::name`] is given; 0 for none.
+    pub roll: i32,
     /// Live `(current, max)`; `None` for an indestructible item or one not yet streamed.
     pub durability: Option<(u32, u32)>,
     /// The resolved `ITEM_FIELD_CREATOR` name (the reference's `0x55f080`); `None` while it is
@@ -215,37 +219,46 @@ pub(super) fn render_view_flagged(
     inst: Option<&ItemInstance>,
 ) -> mlua::Result<Option<bool>> {
     let mut live = false;
+    // The pet's book as it stands, which a pet teach's known test reads (`0x52d5ad` → `0x60c740`).
+    let pet_book = crate::script::live::ask(lua, &crate::script::PetBookNow);
     let (req, known_spell, taught_known, set_view, equipped, rank_title) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let known =
-            v.required_spell != 0 && v.knows_required_spell(|id| model.known_spells.contains(&id));
+        let pet_slots = &pet_book.as_ref().unwrap_or(&model.pet_book).slots;
+        // The known-spell list as the call runs (`0x60c740`).
+        let knows = |id| crate::script::requirements::knows_spell(lua, &model, id);
+        let known = v.required_spell != 0 && v.knows_required_spell(knows);
         // The first slot's taught spell, or a higher rank of it, known to the player, or to the
         // pet for a pet-target teach (`0x52d54f`..`0x52d5bb`): the always-red ITEM_SPELL_KNOWN.
         let taught = v.teaches.as_ref().is_some_and(|t| {
             t.ranks.iter().any(|id| match t.pet {
-                true => model.pet_book.slots.iter().any(|s| s.spell_id == *id),
-                false => model.known_spells.contains(id),
+                true => pet_slots.iter().any(|s| s.spell_id == *id),
+                false => knows(*id),
             })
         });
         // The required rank's title for the player's side and gender (`0x5efe60` on the active
         // player): `PVP_RANK_<rank>_<side>`, its `_FEMALE` twin first (`0x612bf0`).
         let rank_title = (v.required_honor_rank != 0).then(|| {
-            let (side, female) = model
-                .unit("player")
+            let (side, female) = crate::script::unit::view(lua, &model, "player")
                 .map_or((0, false), |u| (u.pvp_team, u.sex == 3));
             (format!("PVP_RANK_{}_{side}", v.required_honor_rank), female)
         });
-        // The set view and the equipped ids the set block counts. A miss records the ask, and a
-        // member still unnamed skips its line (`0x52df5a`); either waits for its answer.
+        // The set view, read as the call runs, and the equipped ids the set block counts. A member
+        // still unnamed skips its line (`0x52df5a`) and waits for its answer; with no host lent, a
+        // set the VM's copy lacks waits for its push.
         let set_view = (v.item_set != 0)
             .then(|| {
-                let view = model.item_sets.get(&v.item_set).cloned();
-                match &view {
+                let view = match crate::script::item_stats::live_item_set(lua, v.item_set) {
+                    Some(view) => view,
                     None => {
-                        model.item_set_asks.insert(v.item_set);
-                        note_miss(&mut model, CacheWait::Set(v.item_set));
+                        let view = model.item_sets.get(&v.item_set).cloned();
+                        if view.is_none() {
+                            note_miss(&mut model, CacheWait::Set(v.item_set));
+                        }
+                        view
                     }
-                    // One item-name ask per member still unnamed (`0x52df4b`).
+                };
+                match &view {
+                    None => {}
                     Some(view) => {
                         for &(item, _) in view.members.iter().filter(|(_, n)| n.is_none()) {
                             let set = v.item_set;
@@ -256,14 +269,18 @@ pub(super) fn render_view_flagged(
                 view
             })
             .flatten();
-        let equipped: std::collections::HashSet<u32> = model
-            .inventory_slots
-            .iter()
-            .flatten()
-            .map(|s| s.item_id)
-            .collect();
+        // The worn item ids as the call runs (`0x6228a0`), off the doll's keys, for a set alone.
+        let equipped: std::collections::HashSet<u32> = if set_view.is_some() {
+            crate::script::worn::worn_keys(lua, &model)
+                .iter()
+                .flatten()
+                .map(|&(_, id)| id)
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
         (
-            model.player_req.clone(),
+            crate::script::requirements::player_req(lua, &model),
             known,
             taught,
             set_view,
@@ -288,9 +305,10 @@ pub(super) fn render_view_flagged(
     if flags.currently_equipped {
         keyed("CURRENTLY_EQUIPPED", &[], GRAY, false)?;
     }
-    let name = inst
-        .and_then(|i| i.name.clone())
-        .unwrap_or_else(|| v.name.clone());
+    let name = match inst {
+        Some(ItemInstance { name: Some(n), .. }) => n.clone(),
+        _ => crate::script::item_stats::suffixed_name(lua, &v.name, inst.map_or(0, |i| i.roll)),
+    };
     // `nameOnly` paints the name white (`0x52b8b3`), else the quality arm colours it (`0x52b8ca`);
     // nothing else recolors it, not even for an unusable item.
     let name_color = if flags.name_only {
@@ -318,9 +336,12 @@ pub(super) fn render_view_flagged(
         };
         if let Some(wait) = wait {
             let ends = matches!(wait, CacheWait::Petition(_));
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.petition_asks.insert(i.guid);
-            note_miss(&mut model, wait);
+            note_miss(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                wait,
+            );
+            // Asked inside the build, as both lookups pass the callback (`0x52b93b`, `0x52b9d2`).
+            crate::script::calls::ask(lua, crate::script::RecordAsk::Petition(i.guid))?;
             if ends {
                 return Ok(None);
             }
@@ -339,7 +360,9 @@ pub(super) fn render_view_flagged(
         }
         // The count, white, with itself as the plural ordinal; none at 0 (`0x52ba51`..`0x52ba8d`).
         if p.signatures != 0 {
-            if let Some(t) = plural_template("PETITION_NUM_SIGNATURES", p.signatures, &get) {
+            if let Some(t) =
+                plural_template("PETITION_NUM_SIGNATURES", p.signatures, Strings::Vm(lua))
+            {
                 add((fill(&t, &[Arg::D(i64::from(p.signatures))]), WHITE))?;
             }
         }
@@ -431,7 +454,7 @@ pub(super) fn render_view_flagged(
         };
         let mut left_red = false;
         let mut right_red = false;
-        if let Some(&mask) = req.proficiency.get(&v.class) {
+        if let Some(mask) = req.proficiency(v.class) {
             if mask & (1 << v.subclass) == 0 {
                 let alt_ok =
                     v.class == 2 && v.proficiency_alt.is_some_and(|a| mask & (1 << a) != 0);
@@ -442,7 +465,7 @@ pub(super) fn render_view_flagged(
                 }
             }
         }
-        if v.inventory_type == 22 && !req.can_dual_wield {
+        if v.inventory_type == 22 && !req.can_dual_wield() {
             left_red = true;
         }
         match (slot, ty) {
@@ -619,7 +642,7 @@ pub(super) fn render_view_flagged(
             let mut text = match e.remaining_ms {
                 // A missing template skips the slot, not falling back to the bare name: the
                 // reference formats an empty string, which `AddLine` drops.
-                Some(ms) => match enchant_time_left(&e.name, ms, &get) {
+                Some(ms) => match enchant_time_left(&e.name, ms, Strings::Vm(lua)) {
                     Some(t) => {
                         live = true;
                         t
@@ -631,7 +654,7 @@ pub(super) fn render_view_flagged(
             // The slot's charges: ITEM_SPELL_CHARGES inside the literal `" (%s)"` (`0x854820`,
             // `0x52caa6..0x52cb38`), none at 0 (`0x52cac9`).
             if let Some(charges) = (e.charges != 0)
-                .then(|| charges_phrase(e.charges, &get))
+                .then(|| charges_phrase(e.charges, Strings::Vm(lua)))
                 .flatten()
             {
                 text.push_str(&format!(" ({charges})"));
@@ -667,7 +690,7 @@ pub(super) fn render_view_flagged(
     // 49.7 days saturates here; no 1.12 item lasts past a fortnight.
     if let Some(ms) = inst.and_then(|i| i.duration_ms) {
         let ms = u32::try_from(ms).unwrap_or(u32::MAX);
-        if let Some(line) = duration_text(ms, "ITEM_DURATION", true, &get) {
+        if let Some(line) = duration_text(ms, "ITEM_DURATION", true, Strings::Vm(lua)) {
             add((line, WHITE))?;
             live = true;
         }
@@ -681,7 +704,8 @@ pub(super) fn render_view_flagged(
             .map(|&(_, n)| n)
             .collect();
         if !list.is_empty() {
-            let ok = req.class_id > 0 && v.allowable_class & (1 << (req.class_id - 1)) != 0;
+            let class = req.head().class_id;
+            let ok = class > 0 && v.allowable_class & (1 << (class - 1)) != 0;
             keyed(
                 "ITEM_CLASSES_ALLOWED",
                 &[Arg::S(&list.join(", "))],
@@ -698,7 +722,8 @@ pub(super) fn render_view_flagged(
             .map(|&(_, n)| n)
             .collect();
         if !list.is_empty() {
-            let ok = req.race_id > 0 && v.allowable_race & (1 << (req.race_id - 1)) != 0;
+            let race = req.head().race_id;
+            let ok = race > 0 && v.allowable_race & (1 << (race - 1)) != 0;
             keyed(
                 "ITEM_RACES_ALLOWED",
                 &[Arg::S(&list.join(", "))],
@@ -712,14 +737,14 @@ pub(super) fn render_view_flagged(
         keyed(
             "ITEM_MIN_LEVEL",
             &[Arg::D(v.required_level.into())],
-            req_color(req.level >= v.required_level),
+            req_color(req.head().level >= v.required_level),
             false,
         )?;
     }
     // ITEM_MIN_SKILL with a rank, ITEM_REQ_SKILL without (`0x52d34e`, `0x52d355`); the required
     // spell takes ITEM_REQ_SKILL too (`0x52d650`).
     if let Some(skill) = &v.required_skill_name {
-        let have = req.skills.get(&v.required_skill).copied().unwrap_or(0);
+        let have = req.skill(v.required_skill).unwrap_or(0);
         let color = req_color(have >= v.required_skill_rank.max(1));
         if v.required_skill_rank > 0 {
             let args = [Arg::S(skill), Arg::D(v.required_skill_rank.into())];
@@ -751,21 +776,18 @@ pub(super) fn render_view_flagged(
             .flatten()
             .filter(|t| !t.is_empty());
         let title = gendered.or_else(|| get(key)).unwrap_or_default();
-        let ok = u32::from(req.honor_rank) >= v.required_honor_rank;
+        let ok = u32::from(req.head().honor_rank) >= v.required_honor_rank;
         keyed("ITEM_REQ_SKILL", &[Arg::S(&title)], req_color(ok), false)?;
     }
     if v.required_city_rank != 0 {
         let medal = get(&format!("PVP_MEDAL{}", v.required_city_rank)).unwrap_or_default();
-        let ok = req.pvp_medals & crate::script::item_stats::medal_bit(v.required_city_rank) != 0;
+        let medals = req.head().pvp_medals;
+        let ok = medals & crate::script::item_stats::medal_bit(v.required_city_rank) != 0;
         keyed("ITEM_REQ_SKILL", &[Arg::S(&medal)], req_color(ok), false)?;
     }
     if let Some(rep) = &v.required_rep_line {
         // Red (`0xc0d390`) below the required rank (`[+0x58]`); an unfed faction reads as unmet.
-        let rank = req
-            .rep_ranks
-            .get(&v.required_rep_faction)
-            .copied()
-            .unwrap_or(0);
+        let rank = req.rep_rank(v.required_rep_faction);
         add((
             rep.clone(),
             req_color(u32::from(rank) >= v.required_rep_rank),
@@ -795,7 +817,9 @@ pub(super) fn render_view_flagged(
             Some(i) => i.charges(line.block, line.charges),
             None => (line.charges != 0 && line.charges != -1).then_some(line.charges),
         };
-        if let Some(phrase) = charges.and_then(|n| charges_phrase(n.unsigned_abs(), &get)) {
+        if let Some(phrase) =
+            charges.and_then(|n| charges_phrase(n.unsigned_abs(), Strings::Vm(lua)))
+        {
             add((phrase, WHITE))?;
         }
         if let Some(recipe) = &line.recipe {
@@ -827,7 +851,7 @@ pub(super) fn render_view_flagged(
             false,
         )?;
         let skill_met = set.required_skill == 0 || {
-            let have = req.skills.get(&set.required_skill).copied().unwrap_or(0);
+            let have = req.skill(set.required_skill).unwrap_or(0);
             have >= set.required_skill_rank
         };
         if let Some(skill) = &set.required_skill_name {
@@ -841,7 +865,12 @@ pub(super) fn render_view_flagged(
         }
         // The two-space indent is the literal `"  %s"` (`0x854b14`), not a key.
         for (id, name) in &set.members {
-            let Some(name) = name else { continue };
+            // A member still unnamed is asked where its line would go, inside the build
+            // (`0x52df4b`), and skipped (`0x52df5a`).
+            let Some(name) = name else {
+                crate::script::calls::ask(lua, crate::script::RecordAsk::ItemName(*id))?;
+                continue;
+            };
             let color = if equipped.contains(id) { CREAM } else { GRAY };
             add((format!("  {name}"), color))?;
         }
@@ -862,7 +891,7 @@ pub(super) fn render_view_flagged(
     // recovery, unlike the spell's. `0x52fa50` rounds days, hours and minutes up and seconds down.
     // The return value is set after the add whether or not the install's strings gave a line.
     if let Some(ms) = inst.map(|i| i.cooldown_ms).filter(|&ms| ms > 0) {
-        if let Some(line) = duration_text(ms, "ITEM_COOLDOWN_TIME", true, &get) {
+        if let Some(line) = duration_text(ms, "ITEM_COOLDOWN_TIME", true, Strings::Vm(lua)) {
             add((line, WHITE))?;
         }
         live = true;
@@ -893,9 +922,12 @@ pub(super) fn render_view_flagged(
         false => (&inst.creator, inst.creator_guid),
     };
     if asked.is_none() && guid != 0 {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        model.item_name_asks.insert(guid);
-        note_miss(&mut model, CacheWait::Name(guid));
+        note_miss(
+            &mut lua.app_data_mut::<Model>().expect("model app_data"),
+            CacheWait::Name(guid),
+        );
+        // Asked inside the build, with the callback (`0x52e204`, `0x52e29d`).
+        crate::script::calls::ask(lua, crate::script::RecordAsk::ItemBuildName(guid))?;
     }
     if inst.wrapped() {
         if let Some(name) = &inst.gift_creator {
@@ -973,7 +1005,8 @@ fn lock_lines(lua: &Lua, v: &ItemTemplateView, inst: Option<&ItemInstance>) -> O
         return None;
     }
     let slots = &model.lock_rows[&row];
-    let openers = model.lock_openers.as_ref();
+    let openers = crate::script::lock_check::lock_openers(lua, model);
+    let openers = openers.as_deref();
     let color = match check_lock(slots, v.item_level, openers) {
         LockCheck::Closed => RED,
         LockCheck::Open => LOCK_GREEN,
@@ -1026,9 +1059,9 @@ pub(super) fn render_view(
 /// A temporary enchant's name with its countdown (`0x52fa50`): `ITEM_ENCHANT_TIME_LEFT_<unit>`, its
 /// `_P1` twin picked by [`plural_template`]. Two holes, the name then the count, so not
 /// `duration_text`; `None` when the install lacks the family, and the caller draws no line.
-fn enchant_time_left(name: &str, ms: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+fn enchant_time_left(name: &str, ms: u64, strings: Strings<'_>) -> Option<String> {
     let (suffix, n) = time_bucket(ms);
-    let template = plural_template(&format!("ITEM_ENCHANT_TIME_LEFT_{suffix}"), n, get)?;
+    let template = plural_template(&format!("ITEM_ENCHANT_TIME_LEFT_{suffix}"), n, strings)?;
     Some(fill(&template, &[Arg::S(name), Arg::D(i64::from(n))]))
 }
 
@@ -1104,8 +1137,8 @@ fn add_recipe(
 
 /// `ITEM_SPELL_CHARGES` or its `_P1` twin (`0x84e3b4`), pushed at `0x52cae8` for the enchant
 /// suffix and `0x52db61` for the charges line, `n` its own plural ordinal.
-fn charges_phrase(n: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let template = plural_template("ITEM_SPELL_CHARGES", n, get)?;
+fn charges_phrase(n: u32, strings: Strings<'_>) -> Option<String> {
+    let template = plural_template("ITEM_SPELL_CHARGES", n, strings)?;
     Some(fill(&template, &[Arg::D(i64::from(n))]))
 }
 
@@ -1135,7 +1168,7 @@ mod tests {
     /// The `0x52fa50` ladder: minutes and seconds have no `_P1` twin, so each reaches one key.
     #[test]
     fn enchant_countdown_buckets_and_rounding() {
-        let t = |ms| enchant_time_left("Rockbiter", ms, &table);
+        let t = |ms| enchant_time_left("Rockbiter", ms, Strings::Host(&table));
         // Seconds truncate: 1900 ms is 1, not 2.
         assert_eq!(t(1_900).as_deref(), Some("<Rockbiter :: 1 S>"));
         assert_eq!(t(59_999).as_deref(), Some("<Rockbiter :: 59 S>"));
@@ -1202,14 +1235,26 @@ mod tests {
 
     #[test]
     fn a_missing_countdown_family_draws_nothing() {
-        assert_eq!(enchant_time_left("Rockbiter", 60_000, &|_| None), None);
-        assert_eq!(charges_phrase(3, &|_| None), None);
+        assert_eq!(
+            enchant_time_left("Rockbiter", 60_000, Strings::Host(&|_| None)),
+            None
+        );
+        assert_eq!(charges_phrase(3, Strings::Host(&|_| None)), None);
     }
 
     #[test]
     fn charges_phrase_picks_the_plural() {
-        assert_eq!(charges_phrase(1, &table).as_deref(), Some("<1 chg>"));
-        assert_eq!(charges_phrase(5, &table).as_deref(), Some("<5 chgs>"));
-        assert_eq!(charges_phrase(0, &table).as_deref(), Some("<0 chgs>"));
+        assert_eq!(
+            charges_phrase(1, Strings::Host(&table)).as_deref(),
+            Some("<1 chg>")
+        );
+        assert_eq!(
+            charges_phrase(5, Strings::Host(&table)).as_deref(),
+            Some("<5 chgs>")
+        );
+        assert_eq!(
+            charges_phrase(0, Strings::Host(&table)).as_deref(),
+            Some("<0 chgs>")
+        );
     }
 }

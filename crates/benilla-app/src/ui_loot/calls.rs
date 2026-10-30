@@ -1,9 +1,9 @@
-//! The loot window's reference functions, shared by the verbs' calls and the feed's turns
+//! The loot window's reference functions, shared by the verbs' calls and the loot lane's turns
 //! ([`LootSteps`]): the take dispatcher `0x4c2790`, `EndLootWindow 0x48f200` with the VM at hand,
 //! the auto-loot sweep `0x4c1fa0`, the interactions' `SetAutoLoot 0x5df460`, `OpenItem
 //! 0x5edc80`'s send and the master-loot give `0x4c2940`. A function that signals goes
 //! on once its listeners have returned (`SignalEvent` runs them in place), so what it does after
-//! the signal is a [`Then`], run by the call's tail ([`UiScript::resume_loot`]) or by the feed's
+//! the signal is a [`Then`], run by the call's tail ([`UiScript::resume_loot`]) or by the lane's
 //! next turn ([`super::run_then`]): the listeners read the state as the signal left it.
 
 use benilla_protocol::messages::{loot_type, slot_type};
@@ -12,7 +12,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::{
-    bind_confirm_required, close_interaction, show, unlock_closed_source, AutoLootByte,
+    bind_confirm_required, close_interaction_in_place, unlock_closed_source, AutoLootByte,
     DeadUnitDeselect, LootAction, LootConfig, LootLatch, LootState,
 };
 use crate::items::Items;
@@ -45,21 +45,26 @@ pub(super) enum Then {
     /// The sweep after its `LOOT_BIND_CONFIRM` for `row` (`0x4c21dc` on): the stash, the rows
     /// after it, and its end, with the sweep's flag.
     SweepRest { row: u32, flag: bool },
+    /// The sweep's rows and end after its money line's `CHAT_MSG_MONEY` (`0x4c2170` →
+    /// `AddChatLine 0x49a870`, then `0x4c2180`), with the sweep's flag.
+    SweepRows { flag: bool },
     /// The coin click after its `LOOT_SLOT_CLEARED` (`0x4c286a`-`0x4c287c`): the close with
     /// release when nothing is left.
     CloseIfEmpty,
     /// A close's two unlocks (`0x48f2bd`, `0x4c1d36`), after the line its flag shows
     /// (`0x48f27b`).
     Unlocks,
-    /// A close's teardown after its unlocks' signals: the window goes and `LOOT_CLOSED`
-    /// (`0x4c1dac`).
+    /// A close's teardown after its unlocks' signals: the source zeroed and `LOOT_CLOSED`
+    /// (`0x4c1da0`, `0x4c1dac`).
     Announce,
+    /// A close's last step after its window went: a dead unit's deselect (`0x48f369`).
+    Deselect(u64),
     /// `OpenItem` past its `SetAutoLoot` (`0x5edcbb` on), once a sweep that made has run.
     OpenItem(OpenItem),
 }
 
 /// The loot window's state and what its functions send and signal through: the engine half of
-/// the loot calls ([`crate::script_calls::ScriptCallHost`]) and of the feed's and the drain's
+/// the loot calls ([`crate::script_calls::ScriptCallHost`]) and of the lane's and the drain's
 /// turns.
 #[derive(SystemParam)]
 pub(crate) struct LootSteps<'w, 's> {
@@ -73,11 +78,44 @@ pub(crate) struct LootSteps<'w, 's> {
     group: Res<'w, GroupState>,
     pickup: MessageWriter<'w, crate::sound::LootPickupSound>,
     errors: Res<'w, UiErrorKeys>,
+    /// The name cache a candidate's lookup asks; absent in a harness without it.
+    names: Option<Res<'w, crate::names::NameCache>>,
     chat: Res<'w, crate::ui_chat::ChatLog>,
     cfg: Res<'w, LootConfig>,
 }
 
 impl LootSteps<'_, '_> {
+    /// A stand state change's loot close inside its call, `0x48f200(1, 1, 0)` at `0x5f07d5`: the
+    /// movement start's close ([`super::LootMoveStart`]), its release sent now.
+    pub(crate) fn close_for_stand(&mut self) {
+        let closed = super::close_on_move_start(&mut self.loot, &mut self.latch, &self.net);
+        self.dead.after_close(closed);
+    }
+
+    /// A movement start's close inside its call, `0x48f200(1, 1, 0)` at `0x60e9dd`: what `dl`
+    /// keeps stays ([`super::move_start_keeps`]), anything else closes as `CloseLoot` closes it,
+    /// its release now and `LOOT_CLOSED` in the call's tail, before the script's next line.
+    pub(crate) fn close_for_move(&mut self, script: &mut UiScript) -> Option<CallTail> {
+        let source = self.loot.source()?;
+        if super::move_start_keeps(&self.loot, source) {
+            return None;
+        }
+        let depth = self.loot.then.len();
+        self.end_window(script, false);
+        self.resume_tail(depth)
+    }
+
+    /// `GetMasterLootCandidate`'s lookup inside its call
+    /// ([`benilla_ui::script::RecordAsk::MasterLootName`]): the name cache asks a miss, and the
+    /// callback `0x4c2fb0` waits on the name, once per call (`0x4c2f61`). The getter makes it only on
+    /// a miss, having read the cache first ([`benilla_ui::script::MasterLootCandidateQuery`]).
+    pub(crate) fn wait_for_name(&mut self, guid: u64) {
+        if let Some(names) = self.names.as_deref() {
+            let _ = names.resolve_player(guid, crate::query_cache::Ask::Event(&self.net));
+        }
+        self.loot.wait_for_name(guid);
+    }
+
     /// Apply `call` inside its verb. What its signals' listeners leave it to do runs in its tail,
     /// a call of its own once they have returned ([`LootCall::Resume`]).
     pub(crate) fn apply(&mut self, script: &mut UiScript, call: LootCall) -> Option<CallTail> {
@@ -164,14 +202,6 @@ impl LootSteps<'_, '_> {
                 // The money cell to -1 (`0x4c2858`) and `LOOT_SLOT_CLEARED` 1 (`0x4c2862`), whose
                 // listeners read the coin row gone.
                 self.loot.take_coin();
-                if let Some(mut shown) = script.shown_loot() {
-                    if shown.has_money {
-                        if let Some(coin) = shown.rows.first_mut() {
-                            *coin = None;
-                        }
-                    }
-                    script.set_loot(Some(shown));
-                }
                 script.fire_event("LOOT_SLOT_CLEARED", vec![ScriptValue::Int(1)]);
                 self.loot.then.push(Then::CloseIfEmpty);
             }
@@ -241,7 +271,21 @@ impl LootSteps<'_, '_> {
     /// the release and the teardown. The line, which a call signals as it returns, comes before
     /// the unlocks ([`Then::Unlocks`]), and those before the window goes ([`Then::Announce`]).
     pub(super) fn end_window(&mut self, script: &mut UiScript, failed: bool) {
-        if self.loot.source().is_none() {
+        let Some(source) = self.loot.source() else {
+            return;
+        };
+        if self.loot.window_closed_since() {
+            // Its release went at the later packet: the close's signals alone, if still owed.
+            if !self.loot.take_queued_close(source) {
+                return;
+            }
+            if failed {
+                self.errors.push(UiError::key("ERR_LOOT_NO_UI"));
+            }
+            self.loot.unlock_item_source(source);
+            self.loot.unlock_item_source(source);
+            self.loot.then.push(Then::Announce);
+            self.loot.then.push(Then::Unlocks);
             return;
         }
         if self.loot.disenchant_hold(&self.objects) {
@@ -251,15 +295,23 @@ impl LootSteps<'_, '_> {
         if failed {
             self.errors.push(UiError::key("ERR_LOOT_NO_UI"));
         }
-        let closed = close_interaction(&mut self.loot, &mut self.latch, Some(&self.net));
-        self.dead.after_close(closed);
+        let closed = close_interaction_in_place(&mut self.loot, &mut self.latch, Some(&self.net));
+        // The window goes (`0x48f33d` → `0x4c1cb0`) before the dead unit's deselect (`0x48f369`).
+        if let Some(source) = self.dead.dead_unit(closed) {
+            self.loot.then.push(Then::Deselect(source));
+        }
         self.loot.then.push(Then::Announce);
         self.loot.then.push(Then::Unlocks);
     }
 
-    /// `0x4c2940`: nothing with no window (`0x4c2953`) or for a row that is no master row
-    /// (`0x4c298e`); else `CMSG_LOOT_MASTER_GIVE` with the row's wire slot and the candidate.
+    /// `GiveMasterLoot` (`0x4c2fd0`): the candidate at the 1-based index of the list packet's
+    /// array (`0x61c660`), nothing for a zero one (`0x4c3021`); then `0x4c2940`: nothing with no
+    /// window (`0x4c2953`) or for a row that is no master row (`0x4c298e`); else
+    /// `CMSG_LOOT_MASTER_GIVE` with the row's wire slot and the candidate.
     fn give_master(&mut self, slot: u32, candidate: u32) {
+        let target = candidate
+            .checked_sub(1)
+            .and_then(|i| self.loot.master_candidate(i as usize));
         let window = &self.loot.window;
         let Some(guid) = window.source else {
             return;
@@ -271,10 +323,7 @@ impl LootSteps<'_, '_> {
                 ..
             }),
             Some(target),
-        ) = (
-            window.action_at(slot),
-            window.master_candidate(candidate, &self.group),
-        )
+        ) = (window.action_at(slot), target)
         else {
             debug!("ui_loot: GiveMasterLoot({slot}, {candidate}) unresolvable — ignored");
             return;
@@ -293,7 +342,10 @@ impl LootSteps<'_, '_> {
     /// The copier's end (`0x4c1ea8`-`0x4c1ee6`, the cache callback's `0x4c2afe`-`0x4c2b37`): the
     /// sweep while the auto-loot byte is set (`0x4c1ed3`, `0x4c2b29`), else `LOOT_OPENED`. With
     /// `autoLootDefault` on, a pickpocket or disenchant window, which no interaction stores the
-    /// byte for, stores it here from the Shift held now ([`LootConfig`]'s deviation).
+    /// byte for, stores it here from the Shift held now ([`LootConfig`]'s deviation). The
+    /// reference ends the copier inside its packet, its window open; a close a later packet's
+    /// handler made has already released the window, which leaves nothing to sweep, so the end
+    /// clears the byte as the sweep's would (`0x4c2219`) and signals `LOOT_OPENED`.
     pub(super) fn copier_end(&mut self, script: &mut UiScript) {
         if self.cfg.auto_loot
             && matches!(
@@ -303,9 +355,11 @@ impl LootSteps<'_, '_> {
         {
             self.byte.0 = interaction_byte(&self.cfg, script.shift_key_down());
         }
-        if self.byte.0 {
+        let open = self.loot.window.source.is_some() && !self.loot.window_closed_since();
+        if self.byte.0 && open {
             self.sweep(script, false);
         } else {
+            self.byte.0 = false;
             script.fire_event("LOOT_OPENED", vec![]);
         }
     }
@@ -315,7 +369,8 @@ impl LootSteps<'_, '_> {
     /// cell, -1 included (`0x4c1ff4`): the coin request, sent while the loot target is held
     /// (`0x4c1ffc` → `0x5ea8c6`), and once a session for money above 0 (`0x4c2008`, `0x4c2015`)
     /// the money line, which a party (`0x4c2030`) or a raid (`0x4c203d`) skips, added in place
-    /// (`0x4c2170` → `AddChatLine 0x49a870`). Its early coin (`0x4c201b`-`0x4c2020`) is not played
+    /// (`0x4c2170` → `AddChatLine 0x49a870`), whose listeners run before the rows
+    /// ([`Then::SweepRows`]). Its early coin (`0x4c201b`-`0x4c2020`) is not played
     /// (`crate::sound`'s money module). Then the rows.
     pub(super) fn sweep(&mut self, script: &mut UiScript, flag: bool) {
         if self.loot.records_pending(&self.items) {
@@ -338,6 +393,8 @@ impl LootSteps<'_, '_> {
                     money_line(script, window.gold),
                 );
                 self.chat.show_now(script, &line);
+                self.loot.then.push(Then::SweepRows { flag });
+                return;
             }
         }
         self.sweep_rows(script, 1, false, flag);
@@ -378,7 +435,7 @@ impl LootSteps<'_, '_> {
     fn sweep_end(&mut self, script: &mut UiScript, flag: bool) {
         self.byte.0 = false;
         self.loot.coin_line_shown = true; // `0x4c221e`
-        if self.loot.has_contents(&self.objects) {
+        if self.loot.sweep_has_contents(&self.objects) {
             if !flag {
                 script.fire_event("LOOT_OPENED", vec![]);
             }
@@ -395,13 +452,15 @@ impl LootSteps<'_, '_> {
                 self.loot.pending_bind_confirm = Some(row); // `0x4c21dc`
                 self.sweep_rows(script, row + 1, true, flag);
             }
+            Then::SweepRows { flag } => self.sweep_rows(script, 1, false, flag),
             Then::CloseIfEmpty => {
                 if !self.loot.has_contents(&self.objects) {
                     self.end_window(script, false);
                 }
             }
             Then::Unlocks => unlock_closed_source(script, &mut self.loot, &self.objects),
-            Then::Announce => show(script, None),
+            Then::Announce => self.loot.tear_down_here(script),
+            Then::Deselect(source) => self.dead.deselect(source),
             Then::OpenItem(open) => self.send_open_item(script, open),
         }
     }
@@ -439,4 +498,31 @@ fn money_line(script: &UiScript, copper: u32) -> String {
         &script.global_text("YOU_LOOT_MONEY"),
         &[benilla_ui::strings::Arg::S(&coins)],
     )
+}
+
+/// The group share's line (`0x5ebf20`): `LOOT_MONEY_SPLIT` over the coins, gold first, each nonzero
+/// one `"%d %s"` (`0x847fdc`) with its `GOLD`, `SILVER` or `COPPER` global (`0x6c6230`) and every
+/// later one `", %d %s"` (`0x860698`). Nothing for 0 (`0x5ebf3a`); the amount splits as a signed
+/// word (`SplitCopper 0x6c6260`), so a negative one is all copper.
+pub(super) fn share_line(script: &UiScript, amount: u32) -> Option<String> {
+    let copper = amount as i32;
+    if copper == 0 {
+        return None;
+    }
+    let (g, s, c) = if copper < 0 {
+        (0, 0, copper)
+    } else {
+        (copper / 10_000, copper / 100 % 100, copper % 100)
+    };
+    let mut coins = String::new();
+    for (n, key) in [(g, "GOLD"), (s, "SILVER"), (c, "COPPER")] {
+        if n != 0 {
+            let sep = if coins.is_empty() { "" } else { ", " };
+            coins.push_str(&format!("{sep}{n} {}", script.global_text(key)));
+        }
+    }
+    Some(benilla_ui::strings::fill(
+        &script.global_text("LOOT_MONEY_SPLIT"),
+        &[benilla_ui::strings::Arg::S(&coins)],
+    ))
 }

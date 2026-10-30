@@ -27,7 +27,6 @@ use crate::net::{ChatKind, ClientCommand, Guid, HomeBind, NetCommands, NetEntity
 use crate::player::Player;
 use crate::ui_binder::BinderState;
 use crate::ui_gossip::GossipState;
-use crate::ui_session::NpcSession;
 
 /// Innkeeper Keldamyr's spawn (vmangos `creature` guid 46343), the `.go xyz` target.
 const INNKEEPER_AT: [f32; 3] = [9802.21, 982.608, 1313.98];
@@ -179,21 +178,43 @@ fn vm_bind_location(script: &UiScript) -> String {
         .unwrap_or_default()
 }
 
+/// The gossip menu as the step reads it, taken outside the VM: the gossip verbs write the state
+/// in the host, which the step's Lua runs with.
+struct Menu {
+    npc: Option<u64>,
+    options: Vec<benilla_protocol::messages::GossipOption>,
+}
+
+impl Menu {
+    fn of(gossip: &GossipState) -> Self {
+        Menu {
+            npc: gossip.npc,
+            options: gossip.options.clone(),
+        }
+    }
+}
+
 fn binder_probe(
     time: ProbeClock,
     mut probe: ResMut<BinderProbe>,
-    gossip: Res<GossipState>,
     binder: Res<BinderState>,
-    mut home: ResMut<HomeBind>,
     areas: Option<Res<AreaTableRes>>,
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // The gossip slots, read outside the VM: the gossip verbs write them in the host; and the bind
+    // point, which the trainer's description getters read through it.
+    mut vm: crate::script_calls::VmWith<(Res<'static, GossipState>, ResMut<'static, HomeBind>)>,
     self_player: Query<(), With<SelfPlayer>>,
     player: Res<Player>,
     units: Query<(&Guid, &NetEntity, &ObjectStore, &Transform), Without<SelfPlayer>>,
     net: Res<NetCommands>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    hosted_vm.run(|script| {
+    // The step's Lua runs with the host lent, so the calls it makes apply inside their verbs.
+    let (gossip, mut home) = {
+        let (gossip, home) = vm.own();
+        (Menu::of(&gossip), home.0)
+    };
+    let was = home;
+    vm.run(|script| {
         if self_player.is_empty() {
             return; // not in-world yet
         }
@@ -315,7 +336,7 @@ fn binder_probe(
                     probe.phase = Phase::Done;
                     return;
                 };
-                let pending = binder.npc() == Some(innkeeper);
+                let pending = binder.pending() == Some(innkeeper);
                 let fired = events_len(script) > events_baseline;
                 let area = last_event(script);
                 if pending && fired && !area.is_empty() {
@@ -336,7 +357,7 @@ fn binder_probe(
                          {innkeeper:#x}), CONFIRM_BINDER fired={fired}, arg1={area:?}. A packet \
                          with no parse arm at all falls through to ServerPacket::Other — that is \
                          what this reading looks like.",
-                        binder.npc()
+                        binder.pending()
                     );
                     probe.fails += 1;
                     probe.phase = Phase::Done;
@@ -346,8 +367,8 @@ fn binder_probe(
                 if !sent {
                     // Clear the bind before answering: a rebind to the same area re-sends an
                     // identical `SMSG_BINDPOINTUPDATE`, so only None → Some proves a fresh packet.
-                    probe.baseline_area = home.0;
-                    home.0 = None;
+                    probe.baseline_area = home;
+                    home = None;
                     if let Err(e) = script.run("ConfirmBinder()") {
                         warn!(
                             "PROBE_BINDER: SKIP (6 bind) — ConfirmBinder() would not run in the \
@@ -368,7 +389,6 @@ fn binder_probe(
                     return;
                 }
                 let name = home
-                    .0
                     .and_then(|id| areas.as_deref()?.0.name(id))
                     .unwrap_or_default()
                     .to_string();
@@ -377,7 +397,7 @@ fn binder_probe(
                     info!(
                         "PROBE_BINDER: PASS (6 bind) — HomeBind repopulated to area {:?} = \
                          {name:?} (was {:?}), and the VM's GetBindLocation() agrees: {vm:?}",
-                        home.0, probe.baseline_area
+                        home, probe.baseline_area
                     );
                     probe.passes += 1;
                     probe.bound_name = name;
@@ -387,7 +407,7 @@ fn binder_probe(
                         "PROBE_BINDER: FAIL (6 bind) — the hearthstone did not take within \
                          {BIND_TIMEOUT_SECS}s of ConfirmBinder(): HomeBind={:?} AreaTable \
                          name={name:?} GetBindLocation()={vm:?} (was area {:?} before the clear)",
-                        home.0, probe.baseline_area
+                        home, probe.baseline_area
                     );
                     probe.fails += 1;
                     probe.phase = Phase::Done;
@@ -430,13 +450,16 @@ fn binder_probe(
                 });
             }
         }
-    })
+    });
+    if home != was {
+        vm.own().1 .0 = home;
+    }
 }
 
 /// Steps 3 and 4: the bind row's icon, then the click. Sets `probe.phase` on every path.
 fn assert_icon_and_select(
     probe: &mut BinderProbe,
-    gossip: &GossipState,
+    gossip: &Menu,
     script: &UiScript,
     net: &NetCommands,
     innkeeper: u64,
@@ -515,6 +538,7 @@ fn assert_icon_and_select(
     let _ = net.0.send(ClientCommand::GossipSelectOption {
         guid: innkeeper,
         option: opt.index,
+        code: None,
     });
     info!(
         "PROBE_BINDER: (4 select) GossipSelectOption({innkeeper:#x}, wire index {}) sent for {:?}",
