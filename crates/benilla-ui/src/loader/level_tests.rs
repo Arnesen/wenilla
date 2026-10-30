@@ -1,5 +1,5 @@
 //! The loader's per-level reads: what the reference reads on each `inherits` node in turn
-//! ([`Loader::levels`]) rather than on the merged element.
+//! ([`Loader::levels`]), each on its own node.
 
 use crate::framexml;
 use crate::loader::*;
@@ -584,6 +584,42 @@ fn a_font_element_reads_its_flags_only_beside_its_own_font_file() {
 }
 
 const NOPE: &str = r"Fonts\NOPE.TTF";
+
+/// A FontString's `font=` file loads through the string's own `SetFont` (`0x771214` →
+/// `0x7714f0`), whose factory refuses a size at or past the screen's height (`0x5c1afe`): the
+/// string keeps the font it follows and the failure is logged like a missing file.
+#[test]
+fn an_xml_font_file_at_the_screens_height_does_not_load() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Font name="TallParent" font="Fonts\FRIZQT__.TTF" virtual="true">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+            </Font>
+            <Frame name="TallHost">
+                <Layers><Layer>
+                    <FontString name="TallString" inherits="TallParent" font="Fonts\ARIALN.TTF">
+                        <FontHeight><AbsValue val="900"/></FontHeight>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    assert_eq!(
+        s.eval::<String>("local f, h = TallString:GetFont() return f .. ' ' .. h")
+            .unwrap(),
+        r"Fonts\FRIZQT__.TTF 12.000000298023"
+    );
+    assert!(
+        has_line(
+            &report,
+            r"FontString TallString: Unable to load font file Fonts\ARIALN.TTF"
+        ),
+        "{:?}",
+        report.warnings
+    );
+}
 
 /// `0x770f40`, `0x783c30`: a `font=` file that fails to load writes nothing, is logged
 /// (`0x878dc8`, `0x87a4c8`) and the node goes on to `spacing`, so a FontString or a Font keeps the
@@ -1484,6 +1520,74 @@ fn a_message_frame_lays_its_lines_out_inside_its_text_insets() {
     assert!(has_line(&report, line), "{:?}", report.status.lines());
 }
 
+/// A MessageFrame's and a ScrollingMessageFrame's `<FontString bytes="N">` (`0x785b10`,
+/// `0x787d19`) is the length of each line's text buffer (`0x786176`, `0x78898d` → `0x771680`),
+/// which `SStrCopy` fills to N - 1 bytes (`0x771e0f`, `0x64a5cf`), backing up to a character
+/// start; 0 or an empty value leaves the lines whole, and a negative one (`0x771692` tests only
+/// zero) empties them.
+#[test]
+fn a_message_frames_fontstring_bytes_cuts_its_lines() {
+    let mut s = ui();
+    let frame = |tag: &str, name: &str, bytes: &str, y: u32| {
+        format!(
+            r#"<{tag} name="{name}" font="BytesFont">
+                <Size><AbsDimension x="300" y="100"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"><Offset x="0" y="{y}"/></Anchor></Anchors>
+                <FontString bytes="{bytes}"/>
+            </{tag}>"#
+        )
+    };
+    let xml = format!(
+        r#"<Ui>
+            <Font name="BytesFont" font="Fonts\FRIZQT__.TTF">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+            </Font>
+            {}{}{}{}{}</Ui>"#,
+        frame("ScrollingMessageFrame", "CutSmf", "6", 0),
+        frame("MessageFrame", "CutMf", "6", 100),
+        frame("ScrollingMessageFrame", "EmptyNeg", "-2", 200),
+        frame("MessageFrame", "WholeEmpty", "", 300),
+        frame("MessageFrame", "CutMulti", "5", 400),
+    );
+    let report = load_str(&s, &xml);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    for (f, text) in [
+        ("CutSmf", "abcdefghij"),
+        ("CutMf", "klmnopqrst"),
+        ("EmptyNeg", "uvwxyzuvwxyz"),
+        ("WholeEmpty", "ABCDEFGHIJ"),
+        ("CutMulti", "a\u{e9}\u{e9}\u{e9}"),
+    ] {
+        s.run(&format!("{f}:AddMessage('{text}', 1, 1, 1)"))
+            .unwrap();
+    }
+    s.resolve();
+    let reqs = s.message_lines_needing_measure();
+    let answers: Vec<(u32, u32, u16, u64)> =
+        reqs.iter().map(|r| (r.frame, r.index, 1, r.key)).collect();
+    s.set_message_line_rows(&answers);
+    let texts: Vec<String> = s
+        .extract()
+        .into_iter()
+        .filter_map(|q| match q.content {
+            crate::script::QuadContent::Text { text: Some(t), .. } => Some(t),
+            _ => None,
+        })
+        .collect();
+    for want in ["abcde", "klmno", "ABCDEFGHIJ", "a\u{e9}"] {
+        assert!(texts.iter().any(|t| t == want), "{want}: {texts:?}");
+    }
+    for uncut in [
+        "abcdefghij",
+        "klmnopqrst",
+        "a\u{e9}\u{e9}\u{e9}",
+        "uvwxyzuvwxyz",
+        "uvwxyzuvwx",
+    ] {
+        assert!(!texts.iter().any(|t| t == uncut), "{uncut}: {texts:?}");
+    }
+}
+
 /// An anchor's `<Offset>` is read only after its `relativeTo` resolves and is not the object
 /// itself (`0x767946`-`0x767992`), so a skipped anchor reads, and logs, nothing of it.
 #[test]
@@ -2032,4 +2136,142 @@ fn every_rel_reader_keeps_its_layout_length() {
         g_quarter
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The frame load faults go to the load status at severity 1, in the reference's words: an
+/// `inherits` miss at any level (`0x769861`, a texture's `0x76fe60`, `0x8786a8`), an unknown type
+/// (`0x6ee35f`, `0x871124`), a missing `parent=` (`0x6ee3fa`, `0x8710f0`), an unknown strata
+/// naming the frame (`0x76999c`, `0x878658`), and a stray child of `<Layers>` or a `<Layer>`
+/// (`0x769de6`, `0x769eb6`, `0x8786e0`).
+#[test]
+fn frame_load_faults_reach_the_load_status() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="MidLevel" virtual="true" inherits="NoSuchRoot"/>
+            <Frame name="MissesOwn" inherits="NoSuchTemplate"/>
+            <Frame name="MissesDeep" inherits="MidLevel"/>
+            <Bogus name="NotAFrame"/>
+            <Frame name="Orphan" parent="NoSuchParent"/>
+            <Frame name="Strata" frameStrata="BACKGROUND "/>
+            <Frame frameStrata="NOPE"/>
+            <Frame name="Strays">
+                <Layers>
+                    <Layer><Texture name="StrayTex" inherits="NoSuchTexture"/><Bad/></Layer>
+                    <Junk/>
+                </Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    for line in [
+        "Couldn't find inherited node: NoSuchTemplate",
+        "Couldn't find inherited node: NoSuchRoot",
+        "Unknown frame type: Bogus",
+        "Couldn't find frame parent: NoSuchParent",
+        "Frame Strata: Unknown frame strata: BACKGROUND ",
+        "Frame <unnamed>: Unknown frame strata: NOPE",
+        "Couldn't find inherited node: NoSuchTexture",
+        "Frame Strays: Unknown child node in Layer element: Bad",
+        "Frame Strays: Unknown child node in Layers element: Junk",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+    assert_eq!(
+        report.status.lines().len(),
+        9,
+        "{:?}",
+        report.status.lines()
+    );
+    assert!(s
+        .eval::<bool>("return MissesDeep ~= nil and StrayTex ~= nil")
+        .unwrap());
+}
+
+/// `0x769820` reads the flags on each level, template first (`0x76985c`): an empty one is skipped
+/// (`cmp byte [eax],0`), an unknown strata leaves the template's (`0x769968`-`0x7699ad`), and
+/// `enableMouse`/`enableKeyboard` only enable (`0x769aaf`, `0x769adb`).
+#[test]
+fn frame_flags_apply_level_by_level() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="FlagTemplate" virtual="true" hidden="true" frameStrata="HIGH"
+                   enableMouse="true" enableKeyboard="true" movable="true" alpha="0.5"/>
+            <Frame name="EmptyOver" inherits="FlagTemplate" hidden="" frameStrata="" alpha=""/>
+            <Frame name="FalseOver" inherits="FlagTemplate" enableMouse="false"
+                   enableKeyboard="false" movable="false" frameStrata="BOGUS"/>
+        </Ui>"#,
+    );
+    let got: String = s
+        .eval(
+            r#"return table.concat({ tostring(EmptyOver:IsShown()), EmptyOver:GetFrameStrata(),
+                string.format("%.2f", EmptyOver:GetAlpha()), tostring(FalseOver:IsMouseEnabled()),
+                tostring(FalseOver:IsKeyboardEnabled()), tostring(FalseOver:IsMovable()),
+                FalseOver:GetFrameStrata() }, ",")"#,
+        )
+        .unwrap();
+    assert_eq!(got, "nil,HIGH,0.50,1,1,nil,HIGH");
+    assert!(has_line(
+        &report,
+        "Frame FalseOver: Unknown frame strata: BOGUS"
+    ));
+}
+
+/// Each level sets its `<Scripts>` before its typed values (`0x769d18` → `0x769ef0`, then
+/// `0x789656`, `0x7896a2`; StatusBar `0x783270`, `0x783371`), and the first SetValue always fires
+/// (`0x789a1e`-`0x789a44`): a `defaultValue` beside an OnValueChanged runs it at load, ahead of
+/// OnLoad, and a template's level runs the template's handler.
+#[test]
+fn a_default_value_fires_the_levels_on_value_changed_at_load() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Slider name="SlideTemplate" virtual="true" minValue="0" maxValue="10"
+                    defaultValue="2">
+                <Scripts><OnValueChanged>Seen = (Seen or "") .. "t" .. arg1 .. ","</OnValueChanged></Scripts>
+            </Slider>
+            <Slider name="Slide" inherits="SlideTemplate" minValue="0" maxValue="10"
+                    defaultValue="5">
+                <Scripts>
+                    <OnValueChanged>Seen = (Seen or "") .. "i" .. arg1 .. ","</OnValueChanged>
+                    <OnLoad>Seen = (Seen or "") .. "load,"</OnLoad>
+                </Scripts>
+            </Slider>
+            <StatusBar name="Bar" minValue="0" maxValue="4" defaultValue="3">
+                <Scripts><OnValueChanged>BarSeen = arg1</OnValueChanged></Scripts>
+            </StatusBar>
+        </Ui>"#,
+    );
+    assert_eq!(s.eval::<String>("return Seen").unwrap(), "t2,i5,load,");
+    assert_eq!(s.eval::<f64>("return BarSeen").unwrap(), 3.0);
+}
+
+/// `0x771034` calls `SetText` with its grammar flag set: a `text=` is rewritten like Lua's.
+#[test]
+fn an_xml_text_runs_the_grammar_escapes() {
+    let s = ui();
+    s.eval::<()>("LEVEL_TEST_ZONE = \"|2Orgrimmar\"").unwrap();
+    load_str(
+        &s,
+        &format!(
+            r#"<Ui>{TEST_FONT}
+            <Frame name="Host">
+                <Layers><Layer>
+                    <FontString name="Literal" inherits="LevelTestFont" text="2|1A;B;"/>
+                    <FontString name="Keyed" inherits="LevelTestFont" text="LEVEL_TEST_ZONE"/>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#
+        ),
+    );
+    let text = |expr: &str| s.eval::<Option<String>>(&format!("return {expr}")).unwrap();
+    assert_eq!(text("Literal:GetText()").as_deref(), Some("2B"));
+    assert_eq!(text("Keyed:GetText()").as_deref(), Some("d'Orgrimmar"));
 }

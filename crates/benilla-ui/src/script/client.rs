@@ -1,10 +1,19 @@
 //! The client-identity and script verbs: build, locale, realm, bind location and framerate, with
-//! `RunScript` and `FrameXML_Debug`. The realm, bind location and framerate read slots the app
-//! pushes.
+//! `RunScript` and `FrameXML_Debug`. The realm and framerate read slots the app pushes; the bind
+//! location reads the bind point at the call ([`BindLocationQuery`]).
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::{Model, UiScript};
+
+/// The question: the bind point's area name as `GetBindLocation` reads it at the call
+/// (`0x5ed420`, then the `AreaTable` row's name at `+0x2c`, `0x48db07`); `None` for a zone with no
+/// row, or no bind point yet.
+pub struct BindLocationQuery;
+
+impl super::live::LiveQuery for BindLocationQuery {
+    type Answer = Option<String>;
+}
 
 /// The 1.12.1 client's build identity, as the strings in its binary spell it.
 pub(super) const VERSION: &str = "1.12.1";
@@ -65,15 +74,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     }
 
     // `OpeningCinematic()` (`0x48c8c0`): sends an empty `CMSG_OPENING_CINEMATIC` (`0xf9`,
-    // `0x48c8c9` into `0x5ab630`) and returns nothing; the server may answer with
+    // `0x48c8c9` into `0x5ab630`) inside the call and returns nothing; the server may answer with
     // `SMSG_TRIGGER_CINEMATIC`. Arguments are ignored.
     g.set(
         "OpeningCinematic",
         lua.create_function(|lua, _: MultiValue| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .opening_cinematic_asks += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::OpeningCinematic)
         })?,
     )?;
 
@@ -171,20 +177,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let name = raw.to_vec();
             // The chunk and every call it makes run under `[0x83de24]` (`0x48b9bb`), the macro
             // context the protected-action gate refuses ([`super::taint`]).
-            let ran = lua
-                .load(&*raw)
-                .set_name(name)
-                .set_mode(mlua::ChunkMode::Text)
-                .into_function()
-                .and_then(|chunk| {
-                    super::taint::tag(lua, &chunk, &super::taint::Context::Macro);
-                    chunk.call::<()>(())
-                });
+            let ran = super::execute_buffer(lua, &raw, name, |chunk| {
+                super::taint::tag(lua, chunk, &super::taint::Context::Macro);
+            });
             if let Err(e) = ran {
                 let bare = super::stdlib::lua_message(&e);
                 lua.app_data_mut::<crate::script::Model>()
                     .expect("model")
-                    .record_error(bare, super::model::HandlerArg::Error(e));
+                    .record_error(bare);
             }
             Ok(())
         })?,
@@ -200,26 +200,34 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `RequestTimePlayed()` queues a `CMSG_PLAYED_TIME` and returns nothing; the answer is the
-    // `TIME_PLAYED_MSG(total, level)` the app fires when `SMSG_PLAYED_TIME` lands.
+    // `RequestTimePlayed()` (`0x48a900`) sends the empty `CMSG_PLAYED_TIME` (0x1cc, `0x48a936`)
+    // inside the call and returns nothing; the answer is the `TIME_PLAYED_MSG(total, level)` the
+    // app fires when `SMSG_PLAYED_TIME` lands (`0x4018df`).
     g.set(
         "RequestTimePlayed",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .played_time_asks += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::RequestTimePlayed)
         })?,
     )?;
 
-    // `GetBindLocation()`: the hearthstone's bind location name, which the instance-boot dialog
-    // formats into its text (`StaticPopup.lua:1742`). `""` until `SMSG_BINDPOINTUPDATE` lands, as
-    // the reference's empty buffer, never nil, since addons concatenate it.
+    // `GetBindLocation()` (`0x48dae0`): the hearthstone's bind location name, which the
+    // instance-boot dialog formats into its text (`StaticPopup.lua:1742`), read off the bind point
+    // at the call (`0x48dae3` → `0x5ed420`) through the lent host, else the VM's copy. A bind zone
+    // below 0, past the max or without an AreaTable row, which is every zone before
+    // `SMSG_BINDPOINTUPDATE` lands, answers the `HOME_INN` text (`48db19`-`48db2c`), never nil.
     g.set(
         "GetBindLocation",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            lua.create_string(&model.bind_location)
+            let named = super::live::ask(lua, &BindLocationQuery).unwrap_or_else(|| {
+                lua.app_data_ref::<Model>()
+                    .expect("model app_data")
+                    .bind_location
+                    .clone()
+            });
+            match named {
+                Some(name) => lua.create_string(name),
+                None => lua.create_string(super::glue_core::global_text(lua, "HOME_INN")),
+            }
         })?,
     )?;
 
@@ -237,23 +245,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 impl super::UiScript {
-    /// Drain the `RequestTimePlayed()` asks, each a `CMSG_PLAYED_TIME`: a count, as the request
-    /// body is empty.
+    /// The `RequestTimePlayed()` sends a harness's VM kept ([`Self::keep_calls`]): a count, as the
+    /// request body is empty.
+    #[cfg(test)]
     pub fn take_played_time_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().played_time_asks)
+        self.take_calls_where(|call| {
+            matches!(call, super::ScriptCall::RequestTimePlayed).then_some(())
+        })
+        .len() as u32
     }
 
-    /// Drain the `OpeningCinematic()` calls, each an empty `CMSG_OPENING_CINEMATIC`.
+    /// The `OpeningCinematic()` calls a harness's VM kept ([`Self::keep_calls`]).
     pub fn take_opening_cinematic_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().opening_cinematic_asks)
+        self.take_calls_like(&super::ScriptCall::OpeningCinematic) as u32
     }
 
-    /// Push the bind location's name, resolved from `SMSG_BINDPOINTUPDATE`'s AreaTable id through
-    /// the catalog the hearthstone's `$z` uses, so the two agree; empty until the packet lands.
-    pub fn set_bind_location(&mut self, area_name: &str) {
+    /// The bind location's name as the VM's copy holds it ([`Self::set_bind_location`]).
+    pub fn bind_location(&self) -> Option<String> {
+        self.model_ref().bind_location.clone()
+    }
+
+    /// Seat the bind location's name `GetBindLocation` answers with no host lent, as a harness
+    /// seats it; with one lent it reads the bind point at the call ([`BindLocationQuery`]).
+    /// `None` answers the `HOME_INN` text.
+    pub fn set_bind_location(&mut self, area_name: Option<&str>) {
         let mut model = self.model_mut();
-        if model.bind_location != area_name {
-            model.bind_location = area_name.to_string();
+        if model.bind_location.as_deref() != area_name {
+            model.bind_location = area_name.map(str::to_string);
         }
     }
 
@@ -366,6 +384,12 @@ impl UiScript {
     /// word there, and only 1 to 5 picks a charset pair of its own.
     pub fn set_client_region(&mut self, region: i32) {
         self.model_mut().client_region = region;
+    }
+
+    /// Seat the word lists the character and guild name checks search, which start-up compiles
+    /// once for the whole client (`0x6c91a0`).
+    pub fn set_name_lists(&mut self, lists: std::rc::Rc<dyn super::NameLists>) {
+        self.model_mut().name_lists = Some(lists);
     }
 }
 
@@ -551,17 +575,18 @@ mod tests {
         assert_eq!(s.arity("GetDebugStats()").unwrap(), 0);
     }
 
-    /// Each `OpeningCinematic()` queues one send and returns nothing.
+    /// Each `OpeningCinematic()` hands the host one send and returns nothing.
     #[test]
-    fn opening_cinematic_queues_one_send_per_call() {
+    fn opening_cinematic_hands_one_send_per_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert_eq!(s.arity("OpeningCinematic()").unwrap(), 0);
         s.run("OpeningCinematic(1)").unwrap();
         assert_eq!(s.take_opening_cinematic_asks(), 2);
         assert_eq!(
             s.take_opening_cinematic_asks(),
             0,
-            "the drain empties the queue"
+            "the take empties what was kept"
         );
     }
 
@@ -652,5 +677,34 @@ mod tests {
         // A number argument is turned into its string first (`lua_tostring`), then swapped.
         s.run("SetEuropeanNumbers(1) fs:SetText(2.5)").unwrap();
         assert_eq!(s.eval::<String>("return fs:GetText()").unwrap(), "2,5");
+    }
+
+    /// `0x771d80` rewrites `|1` and `|2` (`0x7716f0`) before it stores the text, with no locale
+    /// gate and whether or not the numbers swap, for a FontString and a Button alike.
+    #[test]
+    fn set_text_rewrites_the_grammar_escapes() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            local f = CreateFrame("Frame", "Owner")
+            fs = f:CreateFontString("FS", "ARTWORK"); fs:SetFont("Fonts\\FRIZQT__.TTF", 12)
+            btn = CreateFrame("Button", "Btn")
+            function Put(text)
+                fs:SetText(text)
+                btn:SetText(text)
+                return fs:GetText(), btn:GetText()
+            end
+        "#,
+        )
+        .unwrap();
+        let put =
+            |text: &str| -> (String, String) { s.eval(&format!("return Put({text:?})")).unwrap() };
+        let both = |text: &str| (text.to_string(), text.to_string());
+        assert_eq!(put("Bataille |2Orgrimmar"), both("Bataille d'Orgrimmar"));
+        assert_eq!(put("2|1A;B;"), both("2B"));
+        assert_eq!(put("|cFF00FF00x|r"), both("|cFF00FF00x|r"));
+        // The rewrite runs first, the separator pass on its result.
+        s.run("SetEuropeanNumbers(1)").unwrap();
+        assert_eq!(put("|2Orgrimmar 1.5"), both("d'Orgrimmar 1,5"));
     }
 }

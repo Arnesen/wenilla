@@ -30,9 +30,8 @@ use std::hash::Hash;
 use std::sync::Mutex;
 
 use benilla_assets::LockRecover;
-use bevy::prelude::*;
 
-use crate::net::{EnteredWorldMessage, NetCommands};
+use crate::net::NetCommands;
 
 /// How a read reaches the server on a miss: the reference's lookup with a callback or without, and
 /// the runs of a reader that builds its view every frame between the events that stand for the
@@ -241,8 +240,8 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
         was
     }
 
-    /// Forgets the in-flight asks, which a disconnect or a send before the writer existed may
-    /// have dropped; [`register`] runs it on every world entry.
+    /// Forgets the in-flight asks, which a disconnect may have dropped. The world entry wipes only
+    /// the unsaved caches (`DBCacheClearUnsaved`, `0x555740`), and a saved cache's asks stand.
     pub(crate) fn clear_pending(&mut self) {
         self.pending
             .get_mut()
@@ -269,6 +268,7 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
         self.answered.iter()
     }
 
+    #[cfg(test)]
     /// How many records it holds.
     pub(crate) fn len(&self) -> usize {
         self.answered.len()
@@ -278,32 +278,6 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
     pub(crate) fn is_empty(&self) -> bool {
         self.answered.is_empty()
     }
-}
-
-/// A resource that owns one or more [`QueryCache`]s: what to forget on world entry.
-pub(crate) trait AskOnce: Resource {
-    fn clear_pending(&mut self);
-}
-
-/// Registers a cache owner to clear its in-flight asks on world entry, so a key asked before the
-/// writer existed, or across a disconnect, is asked again.
-pub(crate) fn register<T: AskOnce>(app: &mut App) {
-    app.add_systems(
-        Update,
-        release_on_enter::<T>
-            .in_set(benilla_world::schedule::WorldStage::Net)
-            .after(crate::net::apply_net_updates),
-    );
-}
-
-fn release_on_enter<T: AskOnce>(
-    mut entered: MessageReader<EnteredWorldMessage>,
-    mut cache: ResMut<T>,
-) {
-    if entered.read().count() == 0 {
-        return;
-    }
-    cache.clear_pending();
 }
 
 /// The cache queries `rx` holds, drained: what a reader's runs asked.
@@ -320,6 +294,7 @@ pub(crate) fn queries(
                     | C::CreatureQuery { .. }
                     | C::PetNameQuery { .. }
                     | C::ItemQuery { .. }
+                    | C::ItemNameQuery { .. }
                     | C::NpcTextQuery { .. }
                     | C::GameObjectQuery { .. }
                     | C::PageTextQuery { .. }

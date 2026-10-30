@@ -328,7 +328,8 @@ pub(crate) struct CastTargeting<'w, 's> {
     auto_self_cast: Res<'w, AutoSelfCast>,
     factions: Option<Res<'w, Factions>>,
     reputations: Res<'w, Reputations>,
-    /// The party slots and raid roster as the frame began; a harness without them has no group.
+    /// The party slots and raid roster as the feed last published them; a harness without them has
+    /// no group.
     roster: Option<Res<'w, GroupRoster>>,
     /// The creature-type gate's template cache and form table; a harness without them resolves
     /// no type.
@@ -339,6 +340,8 @@ pub(crate) struct CastTargeting<'w, 's> {
     /// `Option`: the body exists only in world, and the cast-result handler must fetch this param
     /// anywhere. With no body the moving gate passes and the server decides.
     player: Option<Res<'w, crate::player::Player>>,
+    /// The predicted stand state `GetStandState` reads (`0x5ed570`).
+    stand_pending: Option<Res<'w, crate::player::StandPending>>,
     /// `[0xb4b3e4]`, for the cast tail's start of melee.
     own_control: Option<Res<'w, crate::player::OwnControlLost>>,
     /// The caster's and the selection's reach and motion, for the range gate.
@@ -353,6 +356,8 @@ pub(crate) struct CastTargeting<'w, 's> {
     /// The pet bar's unit's answer, which a unit caster's place rungs read; absent outside the
     /// world.
     bar_unit_outdoors: Option<Res<'w, crate::player::BarUnitOutdoors>>,
+    /// The item cache the range's ranged-slot scale reads ([`super::with_ranged_slot`]).
+    items: Option<Res<'w, crate::items::Items>>,
 }
 
 impl CastTargeting<'_, '_> {
@@ -485,7 +490,15 @@ impl CastTargeting<'_, '_> {
                 target_pos: target
                     .and_then(|e| self.transforms.get(e).ok())
                     .map(|t| t.translation),
-                caster: self.range_units.caster(),
+                caster: super::with_ranged_slot(
+                    self.range_units.caster(),
+                    self_store.map(|s| &s.0),
+                    |g| {
+                        let e = *self.index.as_deref()?.0.get(&g)?;
+                        self.stores.get(e).ok().map(|s| &s.0)
+                    },
+                    self.items.as_deref(),
+                ),
                 target: target.and_then(|e| self.range_units.unit(e)),
             },
             main_hand_item: self
@@ -497,7 +510,9 @@ impl CastTargeting<'_, '_> {
             self_move_flags: self.player.as_deref().map_or(0, |p| p.move_flags()),
             self_stand_state: {
                 let byte = self_store.map_or(0, |s| s.0.unit_stand_state());
-                self.player.as_deref().map_or(byte, |p| p.stand_state(byte))
+                self.stand_pending
+                    .as_deref()
+                    .map_or(byte, |p| p.stand_state(byte))
             },
             // The cached state, seeded from `UNIT_FIELD_BYTES_2` byte 0 and moved by the local
             // setter `0x611cf0` ahead of its echo; the descriptor's byte until it is driven.
@@ -523,7 +538,10 @@ const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 pub(crate) struct AutoSelfCast(pub(crate) bool);
 
 /// `autoSelfCast`'s change callback: a flag.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut auto: ResMut<AutoSelfCast>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut auto: bevy::prelude::Mut<'_, AutoSelfCast>,
+) {
     if ev.is("autoSelfCast") {
         auto.0 = ev.flag();
     }
@@ -1297,13 +1315,12 @@ mod tests {
     }
 
     fn rel_none() -> TargetRelations<'static> {
-        static EMPTY: Reputations = Reputations::from_slots(Vec::new());
         TargetRelations {
             target_store: None,
             target_owner_store: None,
             self_store: None,
             factions: None,
-            reputations: &EMPTY,
+            reputations: Reputations::empty(),
             types: Default::default(),
             group: Default::default(),
         }

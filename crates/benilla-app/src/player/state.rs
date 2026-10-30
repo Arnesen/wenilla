@@ -224,8 +224,8 @@ pub(crate) struct MoverInput {
     pub(crate) dead: bool,
     /// The far-sight term, held true while our view is out on a far-sight object and we drive our
     /// own body: `[mover+0x1c70] & 1`, read only when the mover is the active player (`0x514537`).
-    /// The latch sets only once the subject resolves (`0x5ee3f6`), so this follows the resolved
-    /// [`super::view_subject::ViewSubject`], not the raw `PLAYER_FARSIGHT` field.
+    /// It is the latch ([`super::view_subject::FarSight::on`]), not the raw `PLAYER_FARSIGHT`
+    /// field: it sets only once the subject resolves (`0x5ee3f6`).
     pub(crate) view_is_out: bool,
 }
 
@@ -293,6 +293,42 @@ pub(crate) fn incapacitated_flags(flags: u32, translate_gated: bool, turn_gated:
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OwnControlLost(pub(crate) bool);
 
+/// A stand state committed locally, sent or from `SMSG_STANDSTATE_UPDATE`, whose echo into
+/// `UNIT_FIELD_BYTES_1` has not landed: the reference's predicted cache `[player+0x1d68]`
+/// (`0x5f0790`). A resource of its own, so a script call's stand change writes it inside the call
+/// while the call host's other readers of [`Player`] read on.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StandPending(pub(super) Option<u8>);
+
+impl StandPending {
+    /// `CGPlayer_C::GetStandState` (`0x5ed570`) for the active player: the local state
+    /// `[player+0x1d68]`, a committed change ahead of its echo, else `descriptor`, the
+    /// `UNIT_FIELD_BYTES_1` byte 0 it tracks.
+    pub(crate) fn stand_state(&self, descriptor: u8) -> u8 {
+        self.0.unwrap_or(descriptor)
+    }
+}
+
+/// Who we drive and whether we may: the mover's lock, apart from [`Player`]'s frame-time movement
+/// state, as the packets write it inside their handlers (our own create's arrival) and the
+/// controller (a control update), where the frame's movement is the controller's alone.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MoverLock {
+    /// `SMSG_CLIENT_CONTROL_UPDATE` with `allowMove = 0` named the unit we drive: us, while someone
+    /// mind-controls us, or our possessed creature when feared or confused, the possession
+    /// standing. The reference zeroes its mover; vmangos neither roots a charmed player nor refuses
+    /// its movement, so nothing else holds the body. Unlike a root, it stops turning too.
+    pub(crate) control_lost: bool,
+    /// The unit we drive in place of our body (a mind-controlled creature, Eye of Kilrogg), `None`
+    /// for our own. Our body must then send nothing: outbound `MSG_MOVE_*` carry no guid, so the
+    /// server applies them to whatever we last claimed.
+    pub(crate) foreign_mover: Option<u64>,
+    /// The driven body changed, and we drive nothing until its streamed pose is adopted, since
+    /// `pos` and the facing still describe the last one. Set when the mover guid changes, cleared
+    /// at the take-control edge.
+    pub(crate) reseat: bool,
+}
+
 /// Our avatar: until `active` the camera free-flies, then we drive the body the server placed.
 /// `PartialEq` serves the test that the session end resets the whole of it to `Player::default()`.
 #[derive(Resource, Default, PartialEq)]
@@ -315,19 +351,6 @@ pub(crate) struct Player {
     pub(super) auto_forward: bool,
     /// Free-fly (`F`): the camera moves on its own and the avatar/server position is frozen.
     pub(crate) detached: bool,
-    /// `SMSG_CLIENT_CONTROL_UPDATE` with `allowMove = 0` named the unit we drive: us, while someone
-    /// mind-controls us, or our possessed creature when feared or confused, the possession
-    /// standing. The reference zeroes its mover; vmangos neither roots a charmed player nor refuses
-    /// its movement, so nothing else holds the body. Unlike a root, it stops turning too.
-    pub(crate) control_lost: bool,
-    /// The unit we drive in place of our body (a mind-controlled creature, Eye of Kilrogg), `None`
-    /// for our own. Our body must then send nothing: outbound `MSG_MOVE_*` carry no guid, so the
-    /// server applies them to whatever we last claimed.
-    pub(crate) foreign_mover: Option<u64>,
-    /// The driven body changed, and we drive nothing until its streamed pose is adopted, since
-    /// `pos` and the facing still describe the last one. Set when the mover guid changes, cleared
-    /// at the take-control edge.
-    pub(crate) reseat: bool,
     /// Feet position in Bevy coords, converted to WoW coords only for the wire.
     pub(crate) pos: Vec3,
     /// Vertical velocity (yd/s, Bevy +Y up), zeroed while grounded.
@@ -338,18 +361,24 @@ pub(crate) struct Player {
     /// The movement flags we last streamed; this frame's are diffed against them to emit a
     /// `MSG_MOVE_*` per axis transition.
     pub(super) move_flags: u32,
-    /// Last frame's facing: any change off the turn axis streams `MSG_MOVE_SET_FACING`, moving or
-    /// not (the reference's detector `0x617170`, exact equality).
+    /// The held command bits of `[InputControl+4]` the last input pass found
+    /// ([`super::input::command_word`]): a change is a `SetCommands` that changed a bit, which
+    /// runs the tick inside the press ([`super::press`]).
+    pub(super) input_word: u32,
+    /// The pitch the last stream carried, the swim pitch the frame presented: what a command
+    /// press's message carries, built before the frame's swim step.
+    pub(super) wire_pitch: f32,
+    /// A command press's message ended the mover's precast ([`super::press`]), for the frame time
+    /// to apply with its own.
+    pub(super) press_ended_precast: bool,
+    /// Last frame's facing: a change off the turn axis is a mouse turn's facing set (`0x619860`,
+    /// drained at `0x615fae`-`0x615fc6`), which offers `MSG_MOVE_SET_FACING` to the throttled send.
     pub(super) last_facing: f32,
     /// The exact position floats we last sent (WoW coords). vmangos interrupts a cast on any change
     /// to its stored position (`Player.cpp:6092`), so the resolver's tiny settle after a reported
     /// rest is sent on its own ([`super::movement_net::stream_self_movement`]) before the next
     /// facing change can carry it as a move.
     pub(super) last_pos: [f32; 3],
-    /// A stand state committed locally, sent or from `SMSG_STANDSTATE_UPDATE`, whose echo into
-    /// `UNIT_FIELD_BYTES_1` has not landed: the reference's predicted cache `[player+0x1d68]`
-    /// (`0x6127b0`).
-    pub(super) stand_pending: Option<u8>,
     /// Holding the body still, gravity off, after a teleport, summon or login until the
     /// destination's colliders stream in. Released by the terrain streamer on residency or at
     /// [`SETTLE_TIMEOUT`], never by ground contact, which a flyer or a swimmer never makes.
@@ -363,6 +392,16 @@ pub(crate) struct Player {
     /// before the streamer swaps maps. Set at every snap, cleared once the destination is resident;
     /// while set, the streamer judges no release and pushes [`Player::settle_deadline`] on.
     pub(crate) world_stale: bool,
+    /// The snap moved the body the camera follows more than 30 yards, which the reference answers
+    /// by reloading the destination before the frame goes on (`0x617e90` calls `0x630bd0` for
+    /// `d² > 900`): the frame is held until the settle hold ends ([`Self::holds_the_frame`]).
+    pub(crate) world_reload: bool,
+    /// How many far reloads the body's snaps have asked for ([`Self::world_reload`]'s marks), which
+    /// the stream's focus carries so it re-arms its load on each.
+    pub(crate) reloads: u32,
+    /// When the reload hold gives up (`Time::elapsed_secs`): the stall budget from its snap, never
+    /// extended, as the reference's wait-all ends once every read has, failed or not (`0x443d30`).
+    pub(crate) reload_ceiling: f32,
     /// The camera pitch the login seize seats: the saved pose's `cameraPitch` when
     /// [`super::camera_saved`] restored one, else the stock opening pitch.
     pub(super) login_pitch: Option<f32>,
@@ -421,6 +460,10 @@ pub(crate) struct Player {
     /// Airborne at the end of the last mover step: the mover's own record, since
     /// [`Self::airborne_since`] is written by [`super::flags`], which runs after the mover.
     pub(super) airborne_prev: bool,
+    /// Where the last resolved step left the body standing, with its walkable floor: an idle mover,
+    /// no bit of `0x200f`, runs no resolver (`0x634100`), so until something moves the body it
+    /// stands there without a collide, a classify or a fall.
+    pub(super) rest: Option<(Vec3, Option<Entity>)>,
     /// The direction bits the current arc launched with: mid-air they are the actual motion, so the
     /// live flags read them instead of the keys; re-seeded by the air nudge, stale while grounded.
     pub(super) airborne_dirs: u32,
@@ -449,10 +492,24 @@ pub(crate) struct Player {
     /// swim test), and it holds when unsteered; only stop-swim and teleport zero it (`0x7c6e80`).
     /// Swimming reads it for travel, pose and the wire; on land, water walking does (`0x63161e`).
     pub(super) mover_pitch: f32,
-    /// The camera pitch the last pitch push carried: the reference pushes only on mouse motion
-    /// (`0x514400`), so a push here needs the aim to differ, and a still mouse leaves the drunk
-    /// wobble and the stop-swim levelling (`0x7c6e80`) in place.
-    pub(super) aim_pitch_seen: f32,
+    /// A mouse-look hand-off set the pitch this frame ([`super::swim::hand_off_pitch`]): the
+    /// drained set (`0x615bc0`) offers `MSG_MOVE_SET_PITCH` to the send, which takes it only
+    /// under its throttle ([`super::movement_net::stream_self_movement`]).
+    pub(super) set_pitch_due: bool,
+    /// The facing and pitch the last built move message carried, `[unit+0xc70]` and
+    /// `[unit+0xc74]`: `0x600a30` copies the facing on every build and the pitch only while
+    /// swimming (`0x600a5d`-`0x600a72`), for the facing and pitch sends' throttle (`0x60e1f0`).
+    pub(super) sent_facing: f32,
+    pub(super) sent_pitch: f32,
+    /// The mover's pitch-key bits, `CMovement+0x40` `0x40` (up, `true`) or `0x80`: set by the
+    /// pitch starts only while swimming (`0x7c6df0`), cleared by the stop (`0x7c6e30`), StopSwim
+    /// (`0x7c6e80`), `SetPitch` (`0x7c6f70`), `SetRoot` (`0x7c7340`) and a teleport (`0x7c69a0`).
+    /// [`super::swim::integrate_pitch_keys`] turns them into pitch.
+    pub(super) pitch_keys: Option<bool>,
+    /// `[InputControl+4] & 0x80000`, the pitch emitter's latch (`0x515059`, `0x515078`).
+    pub(super) pitch_latch: bool,
+    /// The pitch send the emitter queued this frame (tags 0xb, 0xc, 0xd), for the move stream.
+    pub(super) pitch_send: Option<crate::net::MoveKind>,
     /// This frame's flag-derived swim speed (yd/s), 0 without swim input: the stroke's playback
     /// numerator, as `0x5fe2f0` divides `GetCurrentSpeed` by the clip's speed. Stale on land.
     pub(super) swim_stroke_speed: f32,
@@ -487,6 +544,10 @@ pub(super) struct PlayerRide {
     /// The transport's yaw at the snapshot: the carry turns `face_yaw` by its per-frame delta, and
     /// the wire's local orientation is `face_yaw − boat_yaw`.
     pub(super) boat_yaw: f32,
+    /// The transport has been placed since the ride began. A ride seated from our own create
+    /// (`0x618b30`) can name a transport whose path is not built yet; the carry holds it until
+    /// the transport ticks, where it drops a ride whose transport has gone.
+    pub(super) placed: bool,
 }
 
 /// A knockback aimed at our mover (`SMSG_MOVE_KNOCK_BACK`), latched until the mover flies it. The
@@ -505,6 +566,21 @@ pub(super) struct PendingKnockback {
 
 impl Player {
     /// A player whose last streamed movement word is `flags`, for the gates that read it.
+    /// Riding `entity`, placed on its deck at its origin, for other modules' tests.
+    #[cfg(test)]
+    pub(crate) fn riding_for_test(entity: Entity, guid: u64) -> Self {
+        Self {
+            ride: Some(PlayerRide {
+                entity,
+                guid,
+                local_pos: Vec3::ZERO,
+                boat_yaw: 0.0,
+                placed: true,
+            }),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_move_flags(flags: u32) -> Self {
         Self {
@@ -534,13 +610,11 @@ impl Player {
         self.face_yaw += radians;
     }
 
-    /// Set the mover pitch, the scripted dive (`capture::probe_pitch`), under `SetPitch`'s ±89°
-    /// clamp (`0x7c6f70`) but without its 2^-20 deadband (`[0x8026bc]`); returns the value stored.
+    /// Set the mover pitch, the scripted dive (`capture::probe_pitch`), under the mouse-look
+    /// hand-off's ±89° clamp (`0x5103e0`) but without `SetPitch`'s 2^-20 deadband (`[0x8026bc]`);
+    /// returns the value stored.
     pub(crate) fn aim_pitch(&mut self, radians: f32) -> f32 {
         self.mover_pitch = radians.clamp(-MOUSELOOK_PITCH_CLAMP, MOUSELOOK_PITCH_CLAMP);
-        // Mouse-look pushes on a camera-pitch edge; parking the edge here keeps a still camera
-        // from overwriting the script next frame.
-        self.aim_pitch_seen = self.mover_pitch;
         self.mover_pitch
     }
 
@@ -554,8 +628,15 @@ impl Player {
     /// [`SETTLE_TIMEOUT`] fired first, which the `sett` trace records.
     pub(crate) fn end_settle(&mut self, resident: bool, now: f32) {
         self.settling = false;
+        self.world_reload = false;
         let waited = now - self.settle_since;
         super::move_trace::settle(resident, waited, self.pos);
+    }
+
+    /// The window keeps its last presented frame: a reloading snap's settle hold is up, as the
+    /// reference's reload holds its frame until the destination is in (`0x694920`).
+    pub(crate) fn holds_the_frame(&self) -> bool {
+        self.active && self.settling && self.world_reload
     }
 
     /// The movement flags as last streamed; the water foam tests `& 0xf` (translating) and `& 0x30`
@@ -564,24 +645,17 @@ impl Player {
         self.move_flags
     }
 
-    /// `CGPlayer_C::GetStandState` (`0x5ed570`) for the active player: the local state
-    /// `[player+0x1d68]`, a committed change ahead of its echo, else `descriptor`, the
-    /// `UNIT_FIELD_BYTES_1` byte 0 it tracks.
-    pub(crate) fn stand_state(&self, descriptor: u8) -> u8 {
-        self.stand_pending.unwrap_or(descriptor)
-    }
-
     /// The states on this resource that stop WASD, comma-joined, or `"none"`: an instrument for the
     /// log after a session boundary, not a gate. A stun lives on the descriptor and does not show.
-    pub(crate) fn movement_suppressors(&self) -> String {
+    pub(crate) fn movement_suppressors(&self, lock: &MoverLock) -> String {
         let named = [
             (!self.active, "inactive"),
             (self.detached, "free-fly"),
             (self.modes.rooted, "root"),
-            (self.control_lost, "control-lost"),
+            (lock.control_lost, "control-lost"),
             (self.server_riding, "server-ride"),
-            (self.foreign_mover.is_some(), "possession"),
-            (self.reseat, "reseat-pending"),
+            (lock.foreign_mover.is_some(), "possession"),
+            (lock.reseat, "reseat-pending"),
         ];
         let list: Vec<&str> = named
             .into_iter()
@@ -619,6 +693,26 @@ impl Player {
     /// `UnitOnTaxi`, which reads [`crate::player::UNIT_FLAG_TAXI_FLIGHT`] (`0x517a86`).
     pub(crate) fn server_riding(&self) -> bool {
         self.server_riding
+    }
+
+    /// The root mode as the frame's acks left it (`MOVEMENTFLAGS & 0x1200`).
+    pub(crate) fn rooted(&self) -> bool {
+        self.modes.rooted
+    }
+
+    /// Rooted, as a root's ack leaves the mover, for a test.
+    #[cfg(test)]
+    pub(crate) fn root_for_test(&mut self) {
+        self.modes.rooted = true;
+    }
+
+    /// Autorun, for a test to hold and read.
+    #[cfg(test)]
+    pub(crate) fn autorun_for_test(&mut self, held: Option<bool>) -> bool {
+        if let Some(held) = held {
+            self.autorun = held;
+        }
+        self.autorun
     }
 }
 

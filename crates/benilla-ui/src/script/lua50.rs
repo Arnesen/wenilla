@@ -17,7 +17,8 @@ use mlua::Lua;
 #[cfg(test)]
 mod table_size;
 
-/// Install the dialect. Runs before the WoW stdlib layer, so its aliases bind these functions.
+/// Install the dialect: the string type without a metatable and the `__pow` global. The bare
+/// aliases are not here; the state's own `compat.lua` chunk defines them.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
@@ -942,7 +943,6 @@ mod error_quoting_tests {
         .unwrap();
         s.fire_event("PLAYER_ALIVE", vec![]);
         s.run("RunScript('return \\233 +')").unwrap();
-        s.dispatch_script_errors_to_handler();
         // `RunScript`'s chunk is named by its source's bytes (`0x48b9bb`).
         assert!(s
             .eval::<bool>(
@@ -992,7 +992,9 @@ mod error_quoting_tests {
     /// binding that returns nothing.
     #[test]
     fn select_is_not_a_1_12_global_and_arg_n_answers_instead() {
-        let s = UiScript::new().unwrap();
+        let mut s = UiScript::new().unwrap();
+        // `ShowNameplates` below submits to a call host; this VM keeps the call instead.
+        s.keep_calls();
         assert!(
             s.eval::<bool>("return select == nil").unwrap(),
             "`select` is 5.1's base library; `reference/lua_globals.tsv` has no row for it"

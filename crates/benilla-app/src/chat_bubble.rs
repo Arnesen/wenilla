@@ -9,7 +9,8 @@
 //!   20 yd (3-D). Self is not excluded. A new line replaces the old bubble, never queues.
 //! - Lifetime and fade (`0x4b0c30`): a 250 ms fade in, the line's [`duration_ms`], a 250 ms fade
 //!   out, then the frame goes back to the pool. Out of range, or with the speaker not drawn in the
-//!   last render ([`speaker_drawn`]), it fades out and hides, and fades back in on return.
+//!   last render ([`crate::entities::SceneDrawn`]), it fades out and hides, and fades back in on
+//!   return.
 //! - Anchor (`0x4b0c30`): unit z + height × model scale + 0.7, the text's BOTTOM on the projected
 //!   point (`0x4b157a`), growing upward. The height is the Stand sequence box's Z extent from the
 //!   model header (`0x711a20`), not the posed attachment the overhead name reads (`0x608640`),
@@ -40,7 +41,7 @@ use crate::vplates::{gx_px, plate_basis, text_px, VPlateSet, VPlates};
 use benilla_world::view::WorldCamera;
 
 /// The two bubble CVars (registrar `0x603280`), booting at the reference's defaults.
-#[derive(Resource)]
+#[derive(Resource, Clone, Copy)]
 pub(crate) struct BubbleConfig {
     /// `ChatBubbles`: say, yell and their monster variants.
     pub(crate) all: bool,
@@ -312,22 +313,6 @@ struct Bubble {
     depth: Option<f32>,
 }
 
-/// Whether the speaker was drawn in the last render: the reference's scene-node test `0x6704c0`
-/// (`node && [node+0x94] == 0`, read at `0x4b0cab`). Every frame sets `[node+0x94]` on every node
-/// in the scene list `[0xca7d70]` (`0x698a07`) and clears it only for a node that passes the
-/// frustum test `0x682ef0` and the horizon test `0x686000` (`0x6833dd`-`0x6833ec`, and
-/// `0x68359b`-`0x6835aa` in WMO groups). Here it is any of the unit's meshes passing last frame's
-/// visibility check; benilla has no horizon cull yet, so that is the frustum verdict alone.
-fn speaker_drawn(
-    unit: Entity,
-    children: &Query<&Children>,
-    meshes: &Query<&ViewVisibility, With<Mesh3d>>,
-) -> bool {
-    children
-        .get(unit)
-        .is_ok_and(|kids| kids.iter().any(|c| meshes.get(c).is_ok_and(|v| v.get())))
-}
-
 /// The live bubbles by speaker guid, at most one per unit, their stacking, and the next line's
 /// number.
 #[derive(Resource, Default)]
@@ -417,10 +402,13 @@ fn drive_bubbles(
     camera: Query<(&Camera, &Transform), With<WorldCamera>>,
     heights: Query<&StandBoxHeight>,
     time: Res<Time>,
-    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    (window, widescreen): (
+        Query<&Window, With<bevy::window::PrimaryWindow>>,
+        Option<Res<crate::video::Widescreen>>,
+    ),
     mut feed: ResMut<BubbleFeed>,
-    // The speakers' meshes and their last-frame visibility, for [`speaker_drawn`].
-    drawn: (Query<&Children>, Query<&ViewVisibility, With<Mesh3d>>),
+    // Whether the last render drew each speaker (`0x6704c0`, read at `0x4b0cab`).
+    drawn: crate::entities::SceneDrawn,
 ) {
     active.0.clear();
     feed.states.clear();
@@ -498,8 +486,8 @@ fn drive_bubbles(
         let (Some((entity, _, tf)), Some(s)) = (find(*guid), self_tf) else {
             return false;
         };
-        let in_range = speaker_drawn(entity, &drawn.0, &drawn.1)
-            && (tf.translation - s.translation).length_squared() < MAX_DIST_SQ;
+        let in_range =
+            drawn.unit(entity) && (tf.translation - s.translation).length_squared() < MAX_DIST_SQ;
         b.fade.tick(now, in_range, b.born, b.duration)
     });
 
@@ -521,9 +509,14 @@ fn drive_bubbles(
     let viewport = cam
         .and_then(|(c, _)| c.logical_viewport_size())
         .or_else(|| window.map(|w| Vec2::new(w.width(), w.height())));
-    let Some(viewport) = viewport.filter(|v| v.x > 0.0 && v.y > 0.0) else {
+    let Some(cam_viewport) = viewport.filter(|v| v.x > 0.0 && v.y > 0.0) else {
         return;
     };
+    // The bubbles seat on the interface's screen, 4:3 and stretched with `widescreen` 0
+    // ([`crate::ui_script::UiScreen`]), whose diagonal is their gx unit.
+    let ui_screen =
+        crate::ui_script::UiScreen::of(cam_viewport, widescreen.as_deref().is_none_or(|w| w.0));
+    let viewport = ui_screen.size;
     // Everything below is in window px, divided by the seam once for the `WorldFrame`'s units.
     let seam = window.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
     let scale = window.map_or(1.0, Window::scale_factor);
@@ -559,7 +552,10 @@ fn drive_bubbles(
                 shown: b.fade.shown,
                 alpha: b.fade.alpha,
                 seat: match seat {
-                    Some((_, p)) => (p.x / seam, (viewport.y - p.y) / seam),
+                    Some((_, p)) => {
+                        let p = ui_screen.point(p);
+                        (p.x / seam, (viewport.y - p.y) / seam)
+                    }
                     // Short of the near plane (behind the camera) the projection writes no point
                     // (`0x483f7a`) and the placement ignores its verdict, seating the zeroed one
                     // (`0x4b14e4`): the text's BOTTOM on the screen's bottom-left corner. Bevy's
@@ -620,7 +616,10 @@ pub(crate) struct BubbleSet;
 pub(crate) struct ChatBubblePlugin;
 
 /// The two bubble CVars' change callback.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut bubbles: ResMut<BubbleConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut bubbles: bevy::prelude::Mut<'_, BubbleConfig>,
+) {
     match ev.key().as_str() {
         "chatbubbles" => bubbles.all = ev.flag(),
         "chatbubblesparty" => bubbles.party = ev.flag(),
@@ -630,7 +629,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut bubbles: ResMut<Bub
 
 impl Plugin for ChatBubblePlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.init_resource::<BubbleQueue>()
             .init_resource::<BubbleConfig>()
             .init_resource::<Bubbles>()

@@ -71,6 +71,7 @@ const BARS: &[&str] = &[
 /// with no loader warning of any kind.
 fn setup_counted(extra: &[&str]) -> (UiScript, usize) {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     let mut built = 0;
     for file in super::test_ui::production_order(&[BARS, GROUP_LOOT, extra]) {
@@ -105,6 +106,7 @@ fn rolls() -> LootRollsState {
                 item_id: 17182,
                 link: Some(STAFF_LINK.into()),
                 random_property_id: 0,
+                closed: false,
             },
             LootRollEntry {
                 roll_id: 8,
@@ -116,6 +118,7 @@ fn rolls() -> LootRollsState {
                 item_id: 25,
                 link: Some(SWORD_LINK.into()),
                 random_property_id: 0,
+                closed: false,
             },
             // No template yet: name, texture, quality and link (which embeds the name) are nil.
             LootRollEntry {
@@ -128,6 +131,7 @@ fn rolls() -> LootRollsState {
                 item_id: 4306,
                 link: None,
                 random_property_id: 0,
+                closed: false,
             },
         ],
     }
@@ -403,7 +407,7 @@ fn in_flight_roll_opens_without_a_name_or_icon() {
 
 /// The stock popup paints only in `OnShow`, so a `START_LOOT_ROLL` that beats its roll to the model
 /// stays blank. On a cache miss the reference fires it from the item-template arrival callback
-/// (`0x61b460`, armed by `0x61b310`), and `feed_loot_rolls` holds it the same way.
+/// (`0x61b460`, armed by `0x61b310`), and the roll handlers hold it the same way.
 #[test]
 fn nothing_repaints_a_frame_that_opened_before_its_snapshot() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -463,6 +467,7 @@ fn nothing_repaints_a_frame_that_opened_before_its_snapshot() {
 fn managed_positions_engage_for_the_bare_frame_name() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // `GameTooltip.xml` brings `TOOLTIP_DEFAULT_COLOR`, which the dropdown lists read in their
     // OnLoad (`UIDropDownMenuTemplates.xml:186`).
@@ -633,6 +638,7 @@ fn the_roll_template_carries_the_reference_name_and_the_parts_addons_reach_for()
 fn the_stock_group_loot_frame_survives_an_in_flight_roll() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::LOOT_UI,

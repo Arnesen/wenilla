@@ -123,7 +123,8 @@ pub fn loot_master_give(loot_guid: u64, slot: u8, player_guid: u64) -> Vec<u8> {
 }
 
 /// `SMSG_LOOT_START_ROLL` (`Loot.cpp:43-51`): a group roll opened on one drop, sent to every
-/// eligible roller. Its `randomSuffix` is always 0 (`Group/Group.cpp:765`) and is discarded.
+/// eligible roller. Its `randomSuffix`, 0 from vmangos (`Group/Group.cpp:765`), is
+/// [`Self::suffix_factor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootStartRoll {
     pub looted_target: u64,
@@ -131,6 +132,9 @@ pub struct LootStartRoll {
     pub item_slot: u32,
     pub item_id: u32,
     pub random_property_id: u32,
+    /// The roll's other property word, which the client keeps at `+0x24` and links as the
+    /// item's fourth number (`0x61c16e`); vmangos sends 0.
+    pub suffix_factor: u32,
     /// How long the roll stays open, in ms (vmangos: `60_000`, `Group.cpp:67`).
     pub countdown_ms: u32,
 }
@@ -145,6 +149,9 @@ pub struct LootRoll {
     pub roller: u64,
     pub item_id: u32,
     pub random_property_id: u32,
+    /// The roll's other property word, which the client keeps at `+0x24` and links as the
+    /// item's fourth number (`0x61c16e`); vmangos sends 0.
+    pub suffix_factor: u32,
     pub roll_number: u8,
     pub roll_type: u8,
 }
@@ -174,6 +181,9 @@ pub struct LootRollWon {
     pub item_slot: u32,
     pub item_id: u32,
     pub random_property_id: u32,
+    /// The roll's other property word, which the client keeps at `+0x24` and links as the
+    /// item's fourth number (`0x61c16e`); vmangos sends 0.
+    pub suffix_factor: u32,
     pub winner: u64,
     /// The winning dice value, or 100 with Need when only one player may roll (`Group.cpp:1110`).
     pub roll_number: u8,
@@ -189,13 +199,17 @@ pub struct LootAllPassed {
     pub item_slot: u32,
     pub item_id: u32,
     pub random_property_id: u32,
+    /// The roll's other property word, which the client keeps at `+0x24` and links as the
+    /// item's fourth number (`0x61c16e`); vmangos sends 0.
+    pub suffix_factor: u32,
 }
 
 pub(super) fn read_loot_start_roll(r: &mut &[u8]) -> io::Result<LootStartRoll> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
     let item_id = read_u32_le(r)?;
-    let _random_suffix = read_u32_le(r)?; // literal 0 on the wire (Group.cpp:765)
+    // Kept at `+0x24`, then `+0x20` (`0x61b3c7`, `0x61b3d2`).
+    let suffix_factor = read_u32_le(r)?;
     let random_property_id = read_u32_le(r)?;
     let countdown_ms = read_u32_le(r)?;
     Ok(LootStartRoll {
@@ -203,6 +217,7 @@ pub(super) fn read_loot_start_roll(r: &mut &[u8]) -> io::Result<LootStartRoll> {
         item_slot,
         item_id,
         random_property_id,
+        suffix_factor,
         countdown_ms,
     })
 }
@@ -212,7 +227,8 @@ pub(super) fn read_loot_roll(r: &mut &[u8]) -> io::Result<LootRoll> {
     let item_slot = read_u32_le(r)?;
     let roller = read_u64_le(r)?;
     let item_id = read_u32_le(r)?;
-    let _random_suffix = read_u32_le(r)?; // literal 0 on the wire (Group.cpp:794)
+    // Kept at `+0x24`, then `+0x20` (`0x61bff4`, `0x61bfff`).
+    let suffix_factor = read_u32_le(r)?;
     let random_property_id = read_u32_le(r)?;
     let roll_number = read_u8(r)?;
     let roll_type = read_u8(r)?;
@@ -222,6 +238,7 @@ pub(super) fn read_loot_roll(r: &mut &[u8]) -> io::Result<LootRoll> {
         roller,
         item_id,
         random_property_id,
+        suffix_factor,
         roll_number,
         roll_type,
     })
@@ -231,7 +248,8 @@ pub(super) fn read_loot_roll_won(r: &mut &[u8]) -> io::Result<LootRollWon> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
     let item_id = read_u32_le(r)?;
-    let _random_suffix = read_u32_le(r)?; // literal 0 on the wire (Group.cpp:821)
+    // Kept at `+0x24`, then `+0x20`, for a roll the client holds no record of (`0x61b92b`).
+    let suffix_factor = read_u32_le(r)?;
     let random_property_id = read_u32_le(r)?;
     let winner = read_u64_le(r)?;
     let roll_number = read_u8(r)?;
@@ -241,6 +259,7 @@ pub(super) fn read_loot_roll_won(r: &mut &[u8]) -> io::Result<LootRollWon> {
         item_slot,
         item_id,
         random_property_id,
+        suffix_factor,
         winner,
         roll_number,
         roll_type,
@@ -251,13 +270,15 @@ pub(super) fn read_loot_all_passed(r: &mut &[u8]) -> io::Result<LootAllPassed> {
     let looted_target = read_u64_le(r)?;
     let item_slot = read_u32_le(r)?;
     let item_id = read_u32_le(r)?;
+    // The other way round: `+0x20`, then `+0x24` (`0x61b597`, `0x61b59d`).
     let random_property_id = read_u32_le(r)?;
-    let _random_suffix = read_u32_le(r)?; // the swapped tail, a literal 0 (Group.cpp:850)
+    let suffix_factor = read_u32_le(r)?;
     Ok(LootAllPassed {
         looted_target,
         item_slot,
         item_id,
         random_property_id,
+        suffix_factor,
     })
 }
 
@@ -477,11 +498,57 @@ mod tests {
                     item_slot: 1,
                     item_id: 17182,
                     random_property_id: 0,
+                    suffix_factor: 0,
                     countdown_ms: 60_000,
                 }
             ),
             other => panic!("expected LootStartRoll, got {}", other.name()),
         }
+    }
+
+    /// The two property words land where the client keeps them: in `SMSG_LOOT_START_ROLL`,
+    /// `SMSG_LOOT_ROLL` and `SMSG_LOOT_ROLL_WON` the first at `+0x24` and the second, the random
+    /// property, at `+0x20` (`0x61b3c7`, `0x61bff4`, `0x61b92b`); `SMSG_LOOT_ALL_PASSED` the other
+    /// way round (`0x61b597`, `0x61b59d`).
+    #[test]
+    fn the_roll_packets_keep_both_property_words() {
+        let head = |roller: Option<u64>| {
+            let mut b = 0xAAu64.to_le_bytes().to_vec();
+            b.extend_from_slice(&1u32.to_le_bytes());
+            if let Some(g) = roller {
+                b.extend_from_slice(&g.to_le_bytes());
+            }
+            b.extend_from_slice(&17182u32.to_le_bytes());
+            b.extend_from_slice(&0x1111u32.to_le_bytes());
+            b.extend_from_slice(&0x2222u32.to_le_bytes());
+            b
+        };
+        let mut start = head(None);
+        start.extend_from_slice(&60_000u32.to_le_bytes());
+        let mut roll = head(Some(0xBB));
+        roll.extend_from_slice(&[57, 2]);
+        let mut won = head(None);
+        won.extend_from_slice(&0xBBu64.to_le_bytes());
+        won.extend_from_slice(&[57, 2]);
+        let passed = head(None);
+        let words = |p: ServerPacket| match p {
+            ServerPacket::LootStartRoll(p) => (p.suffix_factor, p.random_property_id),
+            ServerPacket::LootRoll(p) => (p.suffix_factor, p.random_property_id),
+            ServerPacket::LootRollWon(p) => (p.suffix_factor, p.random_property_id),
+            ServerPacket::LootAllPassed(p) => (p.suffix_factor, p.random_property_id),
+            other => panic!("{}", other.name()),
+        };
+        for (op, body) in [
+            (opcode::SMSG_LOOT_START_ROLL, start),
+            (opcode::SMSG_LOOT_ROLL, roll),
+            (opcode::SMSG_LOOT_ROLL_WON, won),
+        ] {
+            assert_eq!(words(parse_server(op, &body).unwrap()), (0x1111, 0x2222));
+        }
+        assert_eq!(
+            words(parse_server(opcode::SMSG_LOOT_ALL_PASSED, &passed).unwrap()),
+            (0x2222, 0x1111)
+        );
     }
 
     /// A Greed vote `(128, 2)` and a Greed roll `(1..=100, 2)` share their `roll_type`.
@@ -511,6 +578,7 @@ mod tests {
                 roller: 0xBB,
                 item_id: 17182,
                 random_property_id: 0,
+                suffix_factor: 0,
                 roll_number: 0,
                 roll_type: 0,
             }
@@ -558,6 +626,7 @@ mod tests {
                     item_slot: 1,
                     item_id: 17182,
                     random_property_id: 0,
+                    suffix_factor: 0,
                     winner: 0xBB,
                     roll_number: 84,
                     roll_type: roll_vote::NEED,
@@ -584,6 +653,7 @@ mod tests {
                     item_slot: 1,
                     item_id: 17182,
                     random_property_id: 7,
+                    suffix_factor: 0,
                 }
             ),
             other => panic!("expected LootAllPassed, got {}", other.name()),

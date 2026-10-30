@@ -130,8 +130,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         m,
         Side::Frame,
         "SetWidth",
-        |lua, (this, w): (Table, f32)| {
+        |lua, (this, w): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // `lua_isnumber` (`0x7a1fb0`), else `Usage: %s:SetWidth(width)` (`0x87cbec`).
+            let w =
+                crate::script::binding_abi::method_number(lua, &this, w, "SetWidth(width)")? as f32;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
             let changed = input.width.bits() != crate::layout::Len::Script(w).bits();
@@ -151,8 +154,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         m,
         Side::Frame,
         "SetHeight",
-        |lua, (this, ht): (Table, f32)| {
+        |lua, (this, ht): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // `lua_isnumber` (`0x7a21e0`), else `Usage: %s:SetHeight(height)` (`0x87cc08`).
+            let ht = crate::script::binding_abi::method_number(lua, &this, ht, "SetHeight(height)")?
+                as f32;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
             let changed = input.height.bits() != crate::layout::Len::Script(ht).bits();
@@ -279,17 +285,10 @@ pub(crate) fn layout_scale(model: &Model, h: FrameHandle) -> f32 {
         .unwrap_or(1.0)
 }
 
+/// `GetEffectiveScale` (`0x77505f`): the layout scale `[+0x7c]` as stored, never 0
+/// (`0x768366`).
 pub(crate) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
-    let s = model
-        .arena
-        .frame(h)
-        .map(|f| f.effective_scale)
-        .unwrap_or(1.0);
-    if s.abs() < 1e-6 {
-        1.0
-    } else {
-        s
-    }
+    layout_scale(model, h)
 }
 
 /// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`): the size the frame was given as it is stored
@@ -341,7 +340,7 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let me = model.frame_id(h);
     let parent = default_parent_id(&mut model, h);
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, parent)?;
-    let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
+    let (point, rel_point, x, y) = (p.point, p.rel_point(&who)?, p.x, p.y);
 
     let units = model.layout_units();
     let anchor = Anchor::new(point, rel_to_id, rel_point, x, y);

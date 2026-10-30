@@ -1,27 +1,203 @@
 //! The console command registry: the reference's `ConsoleCommand` table
 //! (`ConsoleCommandRegister` `0x63f9e0`, runtime `[0x63f880, 0x640c50)`). Subsystems register
-//! from their plugins. A line from Lua (`ConsoleExec`, and so the typed `/console`) runs its CVar
-//! writes on the VM's mirror inside the call, as the reference's runs inside `ConsoleExec`
-//! (`0x515f43`); the rest reaches [`execute`] through the chat drain, which reads it with the same
-//! split ([`benilla_ui::script::console_word`]).
+//! from their plugins. A line from Lua (`ConsoleExec`, and so the typed `/console`) runs inside the
+//! call, as the reference's runs inside `ConsoleExec` (`0x515f43`): its CVar writes on the VM's
+//! mirror, the rest through the call host ([`ConsoleSteps`]), which reads it with the same split
+//! ([`benilla_ui::script::console_word`]). A command that sends, prints or raises a request runs
+//! there, on what the host lends; one that writes engine state no script reads (the renderer's
+//! flags, the camera's words, the window) runs against the world at the call's next sync point,
+//! as the host's unit edits do ([`crate::creature_anim::UnitEdits`]).
 //!
 //! Each CVar is also a command under its own name (`0x63dde0`): a bare name prints
 //! `CVar "%s" is "%s"` here, looked up after the registered commands; with a value it was a write,
 //! which `ConsoleExec` ran. The built-ins here are `ConsoleVar.cpp`'s `cvarlist` and the registry's
 //! `help`, which also lists the commands `ConsoleExec` runs (`CVAR_COMMANDS`).
 //!
-//! What a command prints goes to the log ([`run`]): the reference's `ConsoleWrite` (`0x63cb50`)
+//! What a command prints goes to the log ([`ConsoleSteps::run`]): the reference's `ConsoleWrite` (`0x63cb50`)
 //! only links a line into the console screen's list, which opens only with `-console`
 //! (`0x63c49b`), and fires no event, so in play nobody sees it.
 
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::cvars::Cvars;
-
-/// A command's body: the world and the argument tail in, the lines to print out.
+/// A command's body: the world and the argument tail in, the lines to print out. It writes engine
+/// state no script reads (the renderer's flags and levels, the camera's words, the window), which
+/// no call host lends, and runs against the world at the call's next sync point.
 pub(crate) type ConsoleHandler = fn(&mut World, &str) -> Vec<String>;
+
+/// A command's body that runs inside the `ConsoleExec` call, on what the call host lends
+/// ([`ConsoleSteps`]): a send, whose packet goes out in call order, a print, or a request flag.
+pub(crate) type ConsoleCallHandler = fn(&mut ConsoleSteps, &str) -> Vec<String>;
+
+/// How a command runs.
+#[derive(Clone, Copy)]
+enum ConsoleRun {
+    InCall(ConsoleCallHandler),
+    World(ConsoleHandler),
+}
+
+/// What the in-call commands read and write, which the call host lends to `ConsoleExec` inside
+/// its call ([`crate::script_calls::ScriptCallHost`]), and the queue the others run from at the
+/// call's next sync point; each piece is absent in a harness without it, and a command that needs
+/// it does nothing.
+#[derive(SystemParam)]
+pub(crate) struct ConsoleSteps<'w, 's> {
+    table: Option<Res<'w, ConsoleCommands>>,
+    /// The CVar rows a listing command reads, the calling VM's ([`ConsoleCvars`]), seated for
+    /// the lines whose command lists them and empty for the rest.
+    cvars: Local<'s, ConsoleCvars>,
+    /// The socket the player commands send on.
+    pub(crate) net: Option<Res<'w, crate::net::NetCommands>>,
+    pub(crate) player: Option<Res<'w, crate::player::Player>>,
+    pub(crate) maps: Option<Res<'w, benilla_assets::MapCatalogRes>>,
+    pub(crate) real_time: Option<Res<'w, Time<Real>>>,
+    /// `reloadUI`'s two requests: the glue's rebuild and the in-game UI's reload.
+    pub(crate) glue_rebuild: Option<ResMut<'w, crate::ui_script::glue::GlueRebuild>>,
+    pub(crate) reload: Option<ResMut<'w, crate::ui_script::ReloadUiPending>>,
+    /// The queue the commands that run against the world wait in.
+    world: Option<Res<'w, crate::creature_anim::UnitEdits>>,
+}
+
+/// Where a console line reads the CVars: the calling VM's mirror inside a `ConsoleExec` call,
+/// which holds what the chunk's own writes left, as the reference's one table does.
+pub(crate) trait ConsoleCvarSource {
+    /// Every row, for a command that lists them (`cvarlist`, `help`).
+    fn rows(&self) -> ConsoleCvars;
+    /// One CVar's applied value, for a bare name.
+    fn value(&self, name: &str) -> Option<String>;
+}
+
+/// One CVar row as a console line reads it.
+struct ConsoleCvar {
+    name: String,
+    value: String,
+    default: String,
+    reset: Option<String>,
+}
+
+/// The CVar rows a listing command reads, in the registry's list order
+/// ([`crate::cvars::Cvars::listed`]).
+#[derive(Default)]
+pub(crate) struct ConsoleCvars(Vec<ConsoleCvar>);
+
+impl ConsoleCvars {
+    /// The rows of the calling VM's mirror, as `(name, value, default, reset)`.
+    pub(crate) fn of_vm(rows: Vec<(String, String, String, Option<String>)>) -> Self {
+        Self::listed(
+            rows.into_iter()
+                .map(|(name, value, default, reset)| ConsoleCvar {
+                    name,
+                    value,
+                    default,
+                    reset,
+                }),
+        )
+    }
+
+    /// The rows of the registry.
+    #[cfg(test)]
+    pub(crate) fn of_registry(cvars: &crate::cvars::Cvars) -> Self {
+        Self::listed(cvars.listed().into_iter().map(|r| ConsoleCvar {
+            name: r.name.clone(),
+            value: r.value.clone(),
+            default: r.default.clone(),
+            reset: r.reset.clone(),
+        }))
+    }
+
+    /// `rows` in list order, a stable sort by rank over the order they came in.
+    fn listed(rows: impl Iterator<Item = ConsoleCvar>) -> Self {
+        let mut rows: Vec<ConsoleCvar> = rows.collect();
+        rows.sort_by_key(|r| crate::cvars::list_rank(&r.name));
+        Self(rows)
+    }
+
+    fn row(&self, name: &str) -> Option<&ConsoleCvar> {
+        self.0.iter().find(|r| r.name.eq_ignore_ascii_case(name))
+    }
+}
+
+#[cfg(test)]
+impl ConsoleCvarSource for crate::cvars::Cvars {
+    fn rows(&self) -> ConsoleCvars {
+        ConsoleCvars::of_registry(self)
+    }
+
+    fn value(&self, name: &str) -> Option<String> {
+        self.get(name).map(str::to_string)
+    }
+}
+
+/// The source for a harness with no CVars: none.
+#[cfg(test)]
+struct NoCvars;
+
+#[cfg(test)]
+impl ConsoleCvarSource for NoCvars {
+    fn rows(&self) -> ConsoleCvars {
+        ConsoleCvars::default()
+    }
+
+    fn value(&self, _: &str) -> Option<String> {
+        None
+    }
+}
+
+impl ConsoleSteps<'_, '_> {
+    /// Run one console line `ConsoleExec` handed on inside its call, against the calling VM's
+    /// CVars, its replies to the log.
+    pub(crate) fn run(&mut self, cvars: &dyn ConsoleCvarSource, line: &str) {
+        for text in self.execute(cvars, line) {
+            info!("console: {text}");
+        }
+    }
+
+    /// Runs one console line `ConsoleExec` handed on, the reference's `ConsoleCommandExecute`
+    /// (`0x63ce00`): a registered command, else a CVar's name, matched case-insensitively, else
+    /// `Unknown command` (`0x865104`, `0x63cf2e`), an empty line too. Returns the lines to print.
+    pub(crate) fn execute(&mut self, cvars: &dyn ConsoleCvarSource, line: &str) -> Vec<String> {
+        let (name, args) = benilla_ui::script::console_word(line);
+        let command = self.table.as_deref().and_then(|t| t.get(name));
+        *self.cvars = match command {
+            Some(c) if c.lists_cvars => cvars.rows(),
+            _ => ConsoleCvars::default(),
+        };
+        match command.map(|c| c.run) {
+            Some(ConsoleRun::InCall(run)) => return run(self, args),
+            Some(ConsoleRun::World(run)) => {
+                let args = args.to_string();
+                if let Some(queue) = self.world.as_deref() {
+                    queue.push_world(Box::new(move |world: &mut World| {
+                        for text in run(world, &args) {
+                            info!("console: {text}");
+                        }
+                    }));
+                }
+                return Vec::new();
+            }
+            None => {}
+        }
+        if let Some(value) = cvars.value(name) {
+            // `0x63dde0` with no value (`ConsoleExec` ran every line that had one): `CVar "%s" is
+            // "%s"` (`0x8652e0`) of the name as typed, the parse buffer in `ecx` (`0x63ce97`), and
+            // the applied value, through `ConsolePrintf`'s 1024 bytes (`0x63cd50`).
+            let mut line = format!("CVar \"{name}\" is \"{value}\"");
+            cut_to_bytes(&mut line, 0x3ff);
+            return vec![line];
+        }
+        vec!["Unknown command".to_string()]
+    }
+
+    /// Queue `command` for the write thread, which drops it with no session as `NetClient::Send`
+    /// (`0x5379a0`) sends nothing unconnected.
+    pub(crate) fn send(&self, command: crate::net::ClientCommand) {
+        if let Some(net) = self.net.as_deref() {
+            let _ = net.0.send(command);
+        }
+    }
+}
 
 /// The nine command categories `help` names (`0x8653a0`, an id then a name per 0x18 bytes), in
 /// id order: the index is the category a registration passes (`ConsoleCommandRegister`'s
@@ -52,7 +228,9 @@ struct ConsoleCommand {
     /// `None` for a registration that passes no help (`+0x1c` zero), which `help` answers with
     /// `No help yet` (`0x64008f`).
     help: Option<&'static str>,
-    run: ConsoleHandler,
+    run: ConsoleRun,
+    /// Whether it lists the CVar rows, which are seated for it alone ([`ConsoleSteps::execute`]).
+    lists_cvars: bool,
 }
 
 /// The registry: commands in registration order, and lowercased name to index.
@@ -72,12 +250,22 @@ impl ConsoleCommands {
 
 /// Registers a command from a plugin, the reference's `ConsoleCommandRegister`.
 pub(crate) trait ConsoleCommandApp {
+    /// A command that runs against the world ([`ConsoleHandler`]).
     fn console_command(
         &mut self,
         name: &'static str,
         category: ConsoleCategory,
         help: Option<&'static str>,
         run: ConsoleHandler,
+    ) -> &mut Self;
+
+    /// A command that runs inside the `ConsoleExec` call ([`ConsoleCallHandler`]).
+    fn console_command_in_call(
+        &mut self,
+        name: &'static str,
+        category: ConsoleCategory,
+        help: Option<&'static str>,
+        run: ConsoleCallHandler,
     ) -> &mut Self;
 }
 
@@ -89,23 +277,45 @@ impl ConsoleCommandApp for App {
         help: Option<&'static str>,
         run: ConsoleHandler,
     ) -> &mut Self {
-        let mut table = self.world_mut().get_resource_or_init::<ConsoleCommands>();
-        let key = name.to_ascii_lowercase();
-        // Two registrations of one name is a wiring bug.
-        assert!(
-            !table.by_key.contains_key(&key),
-            "console command {name:?} registered twice"
-        );
-        let at = table.commands.len();
-        table.commands.push(ConsoleCommand {
-            name,
-            category,
-            help,
-            run,
-        });
-        table.by_key.insert(key, at);
-        self
+        register(self, name, category, help, ConsoleRun::World(run), false)
     }
+
+    fn console_command_in_call(
+        &mut self,
+        name: &'static str,
+        category: ConsoleCategory,
+        help: Option<&'static str>,
+        run: ConsoleCallHandler,
+    ) -> &mut Self {
+        register(self, name, category, help, ConsoleRun::InCall(run), false)
+    }
+}
+
+fn register<'a>(
+    app: &'a mut App,
+    name: &'static str,
+    category: ConsoleCategory,
+    help: Option<&'static str>,
+    run: ConsoleRun,
+    lists_cvars: bool,
+) -> &'a mut App {
+    let mut table = app.world_mut().get_resource_or_init::<ConsoleCommands>();
+    let key = name.to_ascii_lowercase();
+    // Two registrations of one name is a wiring bug.
+    assert!(
+        !table.by_key.contains_key(&key),
+        "console command {name:?} registered twice"
+    );
+    let at = table.commands.len();
+    table.commands.push(ConsoleCommand {
+        name,
+        category,
+        help,
+        run,
+        lists_cvars,
+    });
+    table.by_key.insert(key, at);
+    app
 }
 
 /// `ConsoleVar.cpp`'s commands that write a CVar, which `ConsoleExec` runs on the VM's mirror
@@ -123,61 +333,95 @@ const CVAR_COMMANDS: [(&str, &str); 3] = [
     ),
 ];
 
-/// The built-ins: `ConsoleVar.cpp`'s `cvarlist` (`0x63d423`) and `help` (`0x6400f1`).
+/// The built-ins: `ConsoleVar.cpp`'s `cvarlist` (`0x63d423`), then `RegisterBuiltinCommands`'
+/// four (`0x6400e0`, from `InitializeGlobal` at `0x40236b`): `help`, and `quit`, `ver` and
+/// `setmap` in category 5 with no help.
 pub(crate) struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ConsoleCommands>()
-            .console_command("cvarlist", DEFAULT, Some("List cvars"), cvarlist)
-            .console_command(
-                "help",
-                CONSOLE,
-                Some("Provides help information about a command."),
-                help,
-            );
+        app.init_resource::<ConsoleCommands>();
+        let listing = |run| ConsoleRun::InCall(run);
+        register(
+            app,
+            "cvarlist",
+            DEFAULT,
+            Some("List cvars"),
+            listing(cvarlist),
+            true,
+        );
+        register(
+            app,
+            "help",
+            CONSOLE,
+            Some("Provides help information about a command."),
+            listing(help),
+            true,
+        )
+        .console_command("quit", DEFAULT, None, quit)
+        .console_command_in_call("ver", DEFAULT, None, ver)
+        .console_command_in_call("setmap", DEFAULT, None, setmap);
     }
 }
 
-/// Run one console line `ConsoleExec` handed on, its replies to the log.
-pub(crate) fn run(world: &mut World, line: &str) {
-    for text in execute(world, line) {
-        info!("console: {text}");
+/// `quit` (`0x640130`): `0x63cdf0` closes the current context (`0x41f9b0`), the call the window's
+/// close box makes (`0x63c9a0`), so the client goes down at once, with no logout countdown and
+/// nothing printed. Here it asks the primary window to close, the path a click on its close box
+/// takes.
+fn quit(world: &mut World, _args: &str) -> Vec<String> {
+    let mut windows = world.query_filtered::<Entity, With<bevy::window::PrimaryWindow>>();
+    if let Ok(window) = windows.single(world) {
+        world.write_message(bevy::window::WindowCloseRequested { window });
     }
+    Vec::new()
 }
 
-/// Runs one console line `ConsoleExec` handed on, the reference's `ConsoleCommandExecute`
-/// (`0x63ce00`): a registered command, else a CVar's name, matched case-insensitively, else
-/// `Unknown command` (`0x865104`, `0x63cf2e`), an empty line too. Returns the lines to print.
+/// `ver` (`0x640140`): the build line (`0x80e238`), whatever follows.
+fn ver(_steps: &mut ConsoleSteps, _args: &str) -> Vec<String> {
+    vec!["WoW [Release] Build 5875 (Sep 19 2006)".to_string()]
+}
+
+/// `setmap` (`0x63cf70`): returns 1 and does nothing else.
+fn setmap(_steps: &mut ConsoleSteps, _args: &str) -> Vec<String> {
+    Vec::new()
+}
+
+/// Run one console line against the world, as the call host runs it inside `ConsoleExec`, for a
+/// harness with no VM ([`ConsoleSteps::execute`]), a command that runs against the world at once.
+/// Returns the lines to print.
+#[cfg(test)]
 pub(crate) fn execute(world: &mut World, line: &str) -> Vec<String> {
     let (name, args) = benilla_ui::script::console_word(line);
     let command = world
         .get_resource::<ConsoleCommands>()
         .and_then(|t| t.get(name));
-    if let Some(command) = command {
-        return (command.run)(world, args);
+    if let Some(ConsoleRun::World(run)) = command.map(|c| c.run) {
+        return run(world, args);
     }
-    if let Some(row) = world.get_resource::<Cvars>().and_then(|c| c.row(name)) {
-        // `0x63dde0` with no value (`ConsoleExec` ran every line that had one): `CVar "%s" is
-        // "%s"` (`0x8652e0`) of the name as typed, the parse buffer in `ecx` (`0x63ce97`), and
-        // the applied value, through `ConsolePrintf`'s 1024 bytes (`0x63cd50`).
-        let mut line = format!("CVar \"{name}\" is \"{}\"", row.value);
-        cut_to_bytes(&mut line, 0x3ff);
-        return vec![line];
+    let cvars = world.remove_resource::<crate::cvars::Cvars>();
+    let mut state = bevy::ecs::system::SystemState::<ConsoleSteps>::new(world);
+    let mut steps = state.get_mut(world);
+    let out = match &cvars {
+        Some(cvars) => steps.execute(cvars, line),
+        None => steps.execute(&NoCvars, line),
+    };
+    state.apply(world);
+    if let Some(cvars) = cvars {
+        world.insert_resource(cvars);
     }
-    vec!["Unknown command".to_string()]
+    out
 }
 
 /// `cvarlist` (`0x63d6f0`), which reads no argument: one line per row in list order
-/// ([`Cvars::listed`]), `  "%s" is "%s"` (`0x8652a8`) of the name and the applied value, then
+/// ([`crate::cvars::Cvars::listed`]), `  "%s" is "%s"` (`0x8652a8`) of the name and the applied value, then
 /// ` (default "%s")` (`0x865298`) and ` (reset "%s")` (`0x865288`), each when the slot holds text
 /// that differs from the value case-sensitively (`SStrCmp`, `0x63d753`, `0x63d7a2`). The line is
 /// built in 0x100 bytes, so it stops at 255.
-fn cvarlist(world: &mut World, _args: &str) -> Vec<String> {
-    world
-        .resource::<Cvars>()
-        .listed()
-        .into_iter()
+fn cvarlist(steps: &mut ConsoleSteps, _args: &str) -> Vec<String> {
+    steps
+        .cvars
+        .0
+        .iter()
         .map(|r| {
             let mut line = format!("  \"{}\" is \"{}\"", r.name, r.value);
             if r.default != r.value {
@@ -230,7 +474,7 @@ const HELP_COMMAND_LINE: usize = 0xc4;
 /// line's `set` (`0x63d569`-`0x63d582`), which registered its command in category 5 with the help
 /// `""` (`0x63ddc9`), and the later registration finds the record and returns without registering
 /// again (`0x63dc1a`-`0x63dc87`), so what `help` says would hang on what the file held.
-fn help(world: &mut World, args: &str) -> Vec<String> {
+fn help(steps: &mut ConsoleSteps, args: &str) -> Vec<String> {
     if args.is_empty() {
         return vec![
             "Console help categories: ".to_string(),
@@ -238,8 +482,10 @@ fn help(world: &mut World, args: &str) -> Vec<String> {
             "For more information type 'help [command] or [category]'".to_string(),
         ];
     }
-    let table = world.resource::<ConsoleCommands>();
-    let cvars = world.resource::<Cvars>();
+    let Some(table) = steps.table.as_deref() else {
+        return Vec::new();
+    };
+    let cvars = &steps.cvars;
     let mut out = Vec::new();
     if let Some(category) = CATEGORIES.iter().position(|c| c.eq_ignore_ascii_case(args)) {
         let category = category as ConsoleCategory;
@@ -258,8 +504,8 @@ fn help(world: &mut World, args: &str) -> Vec<String> {
                     .map(|(name, _)| *name),
             );
         let rows = cvars
-            .listed()
-            .into_iter()
+            .0
+            .iter()
             .filter(|r| crate::cvars::reference_help(&r.name).0 == category)
             .map(|r| r.name.as_str());
         let names: Vec<&str> = commands.chain(rows).collect();
@@ -297,6 +543,7 @@ fn help(world: &mut World, args: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cvars::Cvars;
 
     fn console_app() -> App {
         let mut app = App::new();
@@ -308,6 +555,44 @@ mod tests {
 
     fn run(app: &mut App, line: &str) -> Vec<String> {
         execute(app.world_mut(), line)
+    }
+
+    /// A source that counts how often a line asks it for every row.
+    struct Counting<'a>(&'a Cvars, std::cell::Cell<usize>);
+
+    impl ConsoleCvarSource for Counting<'_> {
+        fn rows(&self) -> ConsoleCvars {
+            self.1.set(self.1.get() + 1);
+            ConsoleCvarSource::rows(self.0)
+        }
+
+        fn value(&self, name: &str) -> Option<String> {
+            ConsoleCvarSource::value(self.0, name)
+        }
+    }
+
+    /// Only the commands that list the CVars (`cvarlist`, `help`) have the rows built; any other
+    /// command, and a bare name, which reads its one value, never do.
+    #[test]
+    fn only_a_listing_command_builds_the_rows() {
+        let mut app = console_app();
+        let world = app.world_mut();
+        let cvars = world.remove_resource::<Cvars>().unwrap();
+        let mut state = bevy::ecs::system::SystemState::<ConsoleSteps>::new(world);
+        let mut steps = state.get_mut(world);
+        let mut built = |line: &str| {
+            let source = Counting(&cvars, std::cell::Cell::new(0));
+            let out = steps.execute(&source, line);
+            (source.1.get(), out)
+        };
+        assert_eq!(built("ver").0, 0);
+        assert_eq!(built("nosuchthing").0, 0);
+        assert_eq!(
+            built("MusicVolume"),
+            (0, vec!["CVar \"MusicVolume\" is \"0.4\"".to_string()])
+        );
+        assert_eq!(built("cvarlist").0, 1);
+        assert_eq!(built("help default").0, 1);
     }
 
     /// `0x63ce00`: a registered command, else a CVar's own command, which prints the name as
@@ -481,6 +766,46 @@ mod tests {
             run(&mut app, "help set ").is_empty(),
             "the whole tail is the word"
         );
+    }
+
+    /// `0x6400e0` registers `quit`, `ver` and `setmap` in category 5 with no help: `ver` writes
+    /// the build line (`0x640140`, `0x80e238`), `setmap` only returns 1 (`0x63cf70`), and `quit`
+    /// closes the context as the window's close box does (`0x640130` to `0x63cdf0`), with nothing
+    /// printed and no countdown.
+    #[test]
+    fn quit_ver_and_setmap_are_the_references_built_ins() {
+        let mut app = console_app();
+        app.add_message::<bevy::window::WindowCloseRequested>();
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), bevy::window::PrimaryWindow))
+            .id();
+        assert_eq!(
+            run(&mut app, "VER whatever"),
+            ["WoW [Release] Build 5875 (Sep 19 2006)"]
+        );
+        assert!(run(&mut app, "setmap 1 2 3").is_empty());
+        assert_eq!(
+            run(&mut app, "help ver"),
+            ["Help for command ver:", "     ver No help yet"]
+        );
+        let default = run(&mut app, "help default");
+        for name in ["quit", "ver", "setmap"] {
+            assert!(
+                default[1..]
+                    .iter()
+                    .any(|l| l.split(", ").any(|n| n == name)),
+                "{name} lists under default: {default:?}"
+            );
+        }
+        assert!(run(&mut app, "quit now").is_empty());
+        let asked: Vec<Entity> = app
+            .world_mut()
+            .resource_mut::<Messages<bevy::window::WindowCloseRequested>>()
+            .drain()
+            .map(|c| c.window)
+            .collect();
+        assert_eq!(asked, [window], "the primary window is asked to close");
     }
 
     #[test]

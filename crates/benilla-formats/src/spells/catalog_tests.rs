@@ -18,12 +18,12 @@ fn real_learn_spell_hop_resolves_the_taught_ability() {
             "learn wrapper {wrapper} teaches ability {ability}"
         );
         assert_eq!(
-            skills.spell_to_line(wrapper),
+            skills.first_line(wrapper),
             None,
             "the wrapper {wrapper} is not itself in SkillLineAbility (the bug's root)"
         );
         assert_eq!(
-            skills.spell_to_line(ability),
+            skills.first_line(ability),
             Some(line),
             "the taught ability {ability} groups under skill line {line}"
         );
@@ -1271,6 +1271,21 @@ fn real_spell_catalog_reputation_columns() {
     assert_eq!(rows, [(6994, 369, 4)]);
 }
 
+/// `RequiredAuraVision` (column 172, `SpellRec+0x2b0`), the aura rows' vision test
+/// (`0x519873`): set on one 5875 row, 26869 Amorous, at 1.
+#[test]
+fn real_spell_catalog_required_aura_vision_column() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    let rows: Vec<(u32, u32)> = cat
+        .iter()
+        .filter(|(_, d)| d.required_aura_vision != 0)
+        .map(|(id, d)| (id, d.required_aura_vision))
+        .collect();
+    assert_eq!(rows, [(26869, 1)]);
+}
+
 /// A chat language reaches its skill only through the spell whose `Effect_1` is
 /// `SPELL_EFFECT_LANGUAGE` (`0x4b2656`). On 5875, 813-817 all declare Common (7), so Demonic,
 /// Titan, Thalassian and Kalimag garble for everyone, and a language-to-spell map would resolve
@@ -1302,7 +1317,7 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
     // The fourteenth, "Lesser Draconic (Language)", declares Draconic (11) but has no
     // `SkillLineAbility` row, so the gate's second hop dead-ends and Draconic always garbles.
     assert_eq!(spells.declared_language(25674), Some(11));
-    assert_eq!(skills.spell_to_line(25674), None);
+    assert_eq!(skills.first_line(25674), None);
 
     assert_eq!(
         spells.declared_languages().count(),
@@ -1317,7 +1332,7 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
         );
         // The second hop the garble gate walks: spell -> SkillLineAbility -> SkillLine.dbc id.
         assert_eq!(
-            skills.spell_to_line(spell),
+            skills.first_line(spell),
             Some(line),
             "spell {spell} -> skill line"
         );
@@ -1326,7 +1341,7 @@ fn the_language_declaring_spells_cover_nine_of_thirteen_languages() {
     // Both hops walked, only the eight player languages can ever be understood.
     let understandable: std::collections::BTreeSet<u32> = spells
         .declared_languages()
-        .filter(|(spell, _)| skills.spell_to_line(*spell).is_some())
+        .filter(|(spell, _)| skills.first_line(*spell).is_some())
         .map(|(_, l)| l)
         .collect();
     assert_eq!(
@@ -1616,4 +1631,36 @@ fn creature_type_mask_rule() {
         "type 1 is bit 0, not the wrapped bit 32"
     );
     assert!(masked(1).admits_creature_type(33), "bit 32 wraps to bit 0");
+}
+
+/// The weapon-skill table `0x5e2ca0` builds (`0xc4d738`), by weapon subclass: One-Handed Axes
+/// 196, Bows 264, One-Handed Swords 201, Daggers 1180, Wands 5009, Fishing Poles 7738; the
+/// obsolete subclass 9 names none, and no weapon-skill spell names a subclass past 20, the last
+/// class-2 row of `ItemSubClass.dbc` that bounds the table.
+#[test]
+fn the_weapon_skill_table_reads_the_real_file() {
+    let data = crate::wow_data_or_skip!();
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let spells = load_spell_catalog(&mut chain).expect("load Spell.dbc");
+    for (subclass, spell) in [
+        (0, 196),
+        (2, 264),
+        (7, 201),
+        (15, 1180),
+        (19, 5009),
+        (20, 7738),
+    ] {
+        assert_eq!(
+            spells.weapon_skill_spell(subclass),
+            Some(spell),
+            "{subclass}"
+        );
+    }
+    assert_eq!(spells.weapon_skill_spell(9), None);
+    assert!(spells.iter().all(|(_, d)| {
+        !(d.attributes & 0x40 != 0
+            && d.equipped_item_class == 2
+            && d.equipped_item_subclass_mask.is_power_of_two())
+            || d.equipped_item_subclass_mask.trailing_zeros() <= 20
+    }));
 }

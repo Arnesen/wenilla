@@ -41,23 +41,26 @@ impl UiScript {
     /// that tick's `OnUpdate` pass: the host's lane ([`Model::pending_events`]), for a producer
     /// outside any Lua verb. A drain runs a step behind its input, so firing at once would
     /// overtake events the host already queued. A Lua verb's own events never wait here: they
-    /// fire inside it ([`verb`]), so the soulbind confirm for an item placed into a worn slot
-    /// follows that placement's `CURSOR_UPDATE`, whose handler hides it (`UIParent.lua:357-361`).
+    /// fire inside it ([`verb`]).
+    #[track_caller]
     pub fn queue_event(&mut self, event: &str, args: Vec<ScriptValue>) {
-        self.model_mut()
-            .pending_events
-            .push((event.to_string(), args));
+        self.model_mut().queue_event(event, args);
     }
 
-    /// Fire an event to every frame registered for it, shown or not, setting both the
-    /// `this`/`event`/`arg1..argN` globals and the `(self, event, ...)` arguments (`0x704d50`,
-    /// `0x704f10`); handler errors go to [`UiScript::errors`]. Frames fire in registration order,
+    /// Fire an event to every frame registered for it, shown or not, setting the
+    /// `this`/`event`/`arg1..argN` globals and calling each handler with no arguments, as
+    /// `lua_pcall(0, 0)` (`0x704e79`, `0x705199`) calls it; a handler's error reaches the Lua error
+    /// handler at the raise, then [`UiScript::errors`]. Frames fire in registration order,
     /// as `SignalEvent` (`0x703e50`) walks its tail-appended list (`0x7052d0`), and consumers rely
     /// on it: both ZoneText frames write `PVPInfoTextString` on one event, and the last one wins.
     ///
     /// The walk steps by the next listener saved before each handler runs (`0x703ee8`), so a
-    /// handler that unregisters itself does not skip its successor. Deviation: a handler that
-    /// unregisters the saved next ends the dispatch, because the reference then reads a freed node.
+    /// handler that unregisters itself does not skip its successor, and one that unregisters a
+    /// listener further on unlinks it before the walk gets there. A handler that unregisters the
+    /// saved next leaves the walk on a node whose links the unlink zeroed (`0x70559d`, `0x7055a3`)
+    /// and whose free keeps its object (`0x645eb0`): that listener runs once more, then the walk
+    /// ends, and the listeners after it miss the event.
+    #[track_caller]
     pub fn fire_event(&mut self, event: &str, args: Vec<ScriptValue>) {
         fire_event_into(&self.lua, event, args);
     }
@@ -71,11 +74,20 @@ impl Model {
     /// returns, once the segment's borrow drops; anywhere else it joins the host queue
     /// ([`Model::pending_events`]) for the next tick. So a helper shared by a Lua verb and a host
     /// path, such as the cursor's clear, fires in place for the one and queues for the other.
+    #[track_caller]
     pub(crate) fn raise(&mut self, event: &str, args: Vec<ScriptValue>) {
         match &mut self.verb_events {
             Some(segment) => segment.push(Raised::Event(event.to_string(), args)),
-            None => self.pending_events.push((event.to_string(), args)),
+            None => self.queue_event(event, args),
         }
+    }
+
+    /// Queue `event` on the host's lane ([`Model::pending_events`]) for the next tick: the one
+    /// push onto it, where the raise's origin is judged ([`super::origin`]).
+    #[track_caller]
+    pub(crate) fn queue_event(&mut self, event: &str, args: Vec<ScriptValue>) {
+        super::origin::check(event, None);
+        self.pending_events.push((event.to_string(), args));
     }
 
     /// Inside a [`verb`] segment, show `payload` on the cursor to the handlers of the events
@@ -105,6 +117,17 @@ impl Model {
         }
     }
 
+    /// Inside a [`verb`] segment, hand `call` to the host in its place among the segment's
+    /// signals, as engine code a verb shares makes it there: `0x4e58e0`'s send ahead of the
+    /// `ACTIONBAR_SLOT_CHANGED` it signals (`0x4e5998`). Engine code reaches this only inside a
+    /// verb.
+    pub(crate) fn call_in_verb(&mut self, call: super::ScriptCall) {
+        match &mut self.verb_events {
+            Some(segment) => segment.push(Raised::Call(Box::new(call))),
+            None => debug_assert!(false, "a call outside a verb segment: {call:?}"),
+        }
+    }
+
     /// End the view [`Model::view_cursor`] opened.
     pub(crate) fn end_cursor_view(&mut self) {
         if let Some(segment) = &mut self.verb_events {
@@ -126,6 +149,9 @@ pub(crate) enum Raised {
     EndCursorView,
     /// A cursor write, its own records inside it ([`super::cursor::write`]).
     CursorWrite(Box<super::cursor::CursorWrite>),
+    /// A call the engine code made in its place among the segment's signals
+    /// ([`Model::call_in_verb`]), handed to the host there.
+    Call(Box<super::ScriptCall>),
 }
 
 /// Undo `raised`'s writes, last first: each lock bit as it was, and each cursor write
@@ -137,7 +163,8 @@ pub(crate) fn rewind(model: &mut Model, raised: &[Raised]) {
                 set_lock_bit(model, *guid, *was);
             }
             Raised::CursorWrite(write) => write.rewind(model),
-            Raised::Event(..) | Raised::CursorView(_) | Raised::EndCursorView => {}
+            Raised::Event(..) | Raised::CursorView(_) | Raised::EndCursorView | Raised::Call(_) => {
+            }
         }
     }
 }
@@ -151,7 +178,8 @@ fn roll_back_locks(model: &mut Model, raised: &[Raised]) {
                 set_lock_bit(model, *guid, *was);
             }
             Raised::CursorWrite(write) => roll_back_locks(model, &write.raised),
-            Raised::Event(..) | Raised::CursorView(_) | Raised::EndCursorView => {}
+            Raised::Event(..) | Raised::CursorView(_) | Raised::EndCursorView | Raised::Call(_) => {
+            }
         }
     }
 }
@@ -182,6 +210,10 @@ pub(crate) enum Fan {
 /// ([`super::calls::Held::Segment`]); the writes stand meanwhile, and the take puts them back to
 /// make them again in their places, a cursor write as its operation ([`Fan::Again`]).
 pub(crate) fn verb<R>(lua: &Lua, body: impl FnOnce(&mut Model) -> R) -> R {
+    super::origin::within(super::origin::Origin::Script, || verb_segment(lua, body))
+}
+
+fn verb_segment<R>(lua: &Lua, body: impl FnOnce(&mut Model) -> R) -> R {
     let (out, raised) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
         let outer = model.verb_events.replace(Vec::new());
@@ -190,14 +222,8 @@ pub(crate) fn verb<R>(lua: &Lua, body: impl FnOnce(&mut Model) -> R) -> R {
         (out, model.verb_events.take().unwrap_or_default())
     };
     if super::host::holding(lua) {
-        if raised.iter().any(|r| {
-            matches!(
-                r,
-                Raised::Event(..) | Raised::Lock { .. } | Raised::CursorWrite(_)
-            )
-        }) {
-            super::calls::hold(lua, super::calls::Held::Segment(raised));
-        }
+        let raised = super::calls::apply_split_calls(lua, raised);
+        super::calls::hold_segment(lua, raised);
         return out;
     }
     // The body's lock changes are rolled back, then replayed in place as the absolute writes they
@@ -249,6 +275,13 @@ pub(crate) fn fan_out(lua: &Lua, raised: Vec<Raised>, how: Fan) {
                 );
             }
             Raised::Event(event, args) => fire_event_into(lua, &event, args),
+            Raised::Call(call) => {
+                if let Err(e) = super::calls::submit(lua, *call) {
+                    lua.app_data_mut::<Model>()
+                        .expect("model app_data set")
+                        .record_lua_error(&e);
+                }
+            }
             Raised::CursorView(payload) => {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
                 hidden.push(std::mem::replace(&mut model.cursor, payload));
@@ -314,7 +347,12 @@ pub(crate) fn show_chat_line_into(lua: &Lua, key: &'static str, text: String) {
 /// assignment to it reaches the next listener. The walk takes each listener's successor before
 /// its call (`0x703ee8`): one appended meanwhile is reached unless the running one was the tail.
 /// An engine step that cannot lend the host holds the walk for it ([`super::host::holding`]).
+///
+/// Every fire into the VM comes this way, and the raise's origin is judged here
+/// ([`super::origin`]).
+#[track_caller]
 pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
+    super::origin::check(event, Some(lua));
     let model_mut = || lua.app_data_mut::<Model>().expect("model app_data set");
     let held = super::host::holding(lua);
     let mut at = {
@@ -349,27 +387,19 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
     let mut next_index = 0;
     while let Some(h) = at {
         let mut model = model_mut();
-        // A saved next that the previous handler unregistered ends the walk.
-        let Some(pos) = model.event_to_frames.get(event).and_then(|l| {
+        // The successor is read before the handler runs (`0x703ee8`). A saved next the previous
+        // handler unregistered still runs, and its zeroed link ends the walk.
+        let next = model.event_to_frames.get(event).and_then(|l| {
             #[cfg(target_os = "macos")]
-            {
-                l.iter().position(|&x| x == h)
-            }
+            let pos = l.iter().position(|&x| x == h)?;
+            #[cfg(not(target_os = "macos"))]
+            let pos = wenilla_listener::position(l, &h, next_index)?;
             #[cfg(not(target_os = "macos"))]
             {
-                wenilla_listener::position(l, &h, next_index)
+                next_index = pos + 1;
             }
-        }) else {
-            break;
-        };
-        let next = model
-            .event_to_frames
-            .get(event)
-            .and_then(|l| l.get(pos + 1).copied());
-        #[cfg(not(target_os = "macos"))]
-        {
-            next_index = pos + 1;
-        }
+            l.get(pos + 1).copied()
+        });
         let id = model.frame_id(h);
         drop(model);
         if let Err(e) = event::fire_event_handler(lua, id, &args) {
@@ -398,17 +428,11 @@ impl super::UiScript {
     /// range); drains the layout again (`0x765799`); then re-picks the hover against those rects
     /// (`0x7657be`). The draw pass fires `OnUpdateModel`.
     pub fn tick(&mut self, elapsed: f32) {
-        self.model_mut().nameplates.begin_update();
-        self.model_mut().now += f64::from(elapsed);
-        // Events queued since the last tick fire before this tick's OnUpdate.
-        let pending = std::mem::take(&mut self.model_mut().pending_events);
-        for (event, args) in pending {
-            self.fire_event(&event, args);
-        }
-        // The item tooltips the caches answered since the last tick rebuild (`0x52e530`).
-        for e in super::tooltip_item::build::answer_item_caches(&self.lua) {
-            self.push_error(e);
-        }
+        super::origin::within(super::origin::Origin::Tick, || self.tick_within(elapsed));
+    }
+
+    fn tick_within(&mut self, elapsed: f32) {
+        self.advance_clock_and_events(elapsed);
         self.resolve();
         self.update_walk(elapsed);
         self.resolve();
@@ -424,9 +448,55 @@ impl super::UiScript {
         if let Some((x, y)) = repick {
             self.mouse_move(x, y);
         }
+        // The draw pass opens with the overlap bits of the strata whose levels went dirty.
+        super::object::toplevel::refresh_overlap_bits(&mut self.model_mut());
         self.paint_model_panes();
+        self.paint_movies();
         // `WOW_UI_HANDLERS=<secs>`: last, so its report covers everything this tick fired.
         self.report_handler_profile(elapsed);
+    }
+
+    /// A frame whose pass skips the interface's layer, as under the loading screen: its layer
+    /// takes the unit square out of what the layers below see (`0x442431`-`0x442437`), and the
+    /// pass calls no layer left empty (`0x4424b9`/`0x4424ca`). So neither the pump nor the draw
+    /// pass of [`Self::tick`] runs (`0x764330`), and the frame's elapsed time is cleared unread
+    /// (`0x4426c3`): the next walk gets its own frame's. The clock and the queued events still
+    /// advance, being no part of the layer.
+    pub fn tick_covered(&mut self, elapsed: f32) {
+        super::origin::within(super::origin::Origin::Tick, || {
+            self.advance_clock_and_events(elapsed);
+        });
+    }
+
+    /// The `GetTime()` clock, then the events queued since the last tick and the item and spell
+    /// tooltips the caches answered (`0x52e530`, `0x52f820`), all ahead of the tick's `OnUpdate`.
+    fn advance_clock_and_events(&mut self, elapsed: f32) {
+        self.model_mut().nameplates.begin_update();
+        self.model_mut().now += f64::from(elapsed);
+        let pending = std::mem::take(&mut self.model_mut().pending_events);
+        for (event, args) in pending {
+            self.fire_event(&event, args);
+        }
+        for e in super::tooltip_item::build::answer_item_caches(&self.lua, None) {
+            self.push_error(e);
+        }
+        for e in super::tooltip_spell::answer_spell_items(&self.lua, None) {
+            self.push_error(e);
+        }
+    }
+
+    /// The tooltips' callbacks on the item record cache's answer for `entry`, found, run at its
+    /// packet's place once the VM's copy holds the record ([`Self::set_item_template`];
+    /// `ItemCacheReceive` `0x55bdb0`, `0x55bf39`): each item tooltip waiting on it rebuilds
+    /// (`0x52e530`), then each spell tooltip counts it down (`0x52f820`). The tick answers what
+    /// landed with no answer's packet: a new VM's seat, a cache file's load, another cache.
+    pub fn answer_item_tooltips(&mut self, entry: u32) {
+        for e in super::tooltip_item::build::answer_item_caches(&self.lua, Some(entry)) {
+            self.push_error(e);
+        }
+        for e in super::tooltip_spell::answer_spell_items(&self.lua, Some(entry)) {
+            self.push_error(e);
+        }
     }
 }
 

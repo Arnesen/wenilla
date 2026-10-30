@@ -12,27 +12,30 @@ use benilla_protocol::messages::PetSpells;
 
 use crate::net::{GuidIndex, ObjectStore};
 use crate::spell::Cooldowns;
-use crate::ui_action::CooldownEvents;
-use crate::ui_unit::UnitFeed;
 
 mod bar;
-pub(crate) use bar::active_aura_press;
+#[cfg(test)]
+use bar::drop_bar;
+pub(crate) use bar::{active_aura_press, reset_pet_on_world_enter};
 mod drain;
+mod live;
+pub(crate) use live::PetLive;
 mod menu;
 mod net;
+mod steps;
 mod unit;
 mod usable;
 // The predicate `0x4bcf70` over what the caller already holds, for the action bar's pet legs.
 pub(crate) use usable::actions_usable as pet_actions_usable;
 
-use bar::{feed_pet_bar, fire_pet_cooldown_events};
-pub(crate) use drain::drain_pet_actions;
-// A pet bar press, applied in call order by `crate::script_calls`.
-pub(crate) use drain::pet_stop_on_old_target_clear;
-pub(crate) use drain::{cast_pet_press, PetPress, PetStep};
-use menu::{drain_pet_menu, feed_pet_menu};
-pub(crate) use unit::feed_pet_unit;
+// A pet bar press and the pet's other verbs, applied in call order by `crate::script_calls`.
+pub(crate) use drain::call_pet_off;
+pub(crate) use drain::{arm_pet_gcd, cast_pet_press, PetPress, PetStep};
+pub(crate) use steps::PetSteps;
+pub(crate) use unit::on_field_edge;
 
+#[cfg(test)]
+mod call_tests;
 #[cfg(test)]
 mod flush_tests;
 #[cfg(test)]
@@ -44,27 +47,46 @@ mod usable_tests;
 
 /// The pet action bar's state. A zero `spells.pet_guid` means no bar: the teardown packet carries
 /// only that guid.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(crate) struct PetBar {
     /// The last `SMSG_PET_SPELLS`, with `SMSG_PET_MODE` and local presses folded in.
     pub(crate) spells: PetSpells,
     /// The pet's own cooldowns, the list at `0xcecb04`. Seeded from `SMSG_PET_SPELLS`, topped up
     /// by `SMSG_SPELL_COOLDOWN` for the pet's guid, by the pet's own `SMSG_SPELL_GO` and by a
-    /// press's GCD. Each mutation but the seed fires the flush, off [`Cooldowns::generation`]
-    /// (`bar::fire_pet_cooldown_events`).
+    /// press's GCD. Each mutation but the seed fires the flush at its place, on the pet's cooldown
+    /// lane (`crate::ui_action::cooldown_lane`).
     pub(crate) cooldowns: Cooldowns,
-    /// The client's `[0xb714b0]`, a local latch: all of `IsPetAttackActive`, and the only thing
-    /// that lights Attack (`0x4bdf16`-`0x4bdf22`). Raised only for a possessed unit (`0x4bd420`),
-    /// so never on a hunter's bar; lowered by `PetStopAttack` (`0x4bd650`), a new pet (`0x4bc8ce`)
-    /// and the old-target clear (`0x493a18`). `PET_ATTACK_*` read the pet's flag `0x800` instead.
-    pub(crate) attacking: bool,
-    /// `PET_BAR_UPDATE` signals, counted. Both state writes signal unconditionally (`0x4bc940`,
-    /// `0x4bc960`), and `OnClick`'s `SetChecked(0)` needs that repaint to relight a press on the
-    /// current mode, so the count is in the feed's dedup key. Wrapping: only a change is read.
-    pub(crate) bar_signals: u32,
     /// `[0xb714a8]`: the charm or possess expiry, the packet's duration past its arrival; `None`
     /// when the duration is 0, as for a hunter's or warlock's own pet.
     pub(crate) expires: Option<Instant>,
+}
+
+/// The client's `[0xb714b0]`, a local latch: all of `IsPetAttackActive`, and the only thing that
+/// lights Attack (`0x4bdf16`-`0x4bdf22`). Raised only for a possessed unit (`0x4bd420`), so never
+/// on a hunter's bar; lowered by `PetStopAttack` (`0x4bd650`), a new pet (`0x4bc8ce`) and the
+/// selection's release (`0x493a18`). `PET_ATTACK_*` read the pet's flag `0x800` instead. Up, it
+/// holds the bar's guid it was raised under (`[0xb714a0]`), the guid the stop is sent for, which
+/// a new pet's lowering keeps the bar's; apart from [`PetBar`], so the selection's release
+/// reaches it beside every holder of the bar.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PetAttackLatch(pub(crate) Option<u64>);
+
+impl PetAttackLatch {
+    /// Whether the latch is up.
+    pub(crate) fn up(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Default for PetBar {
+    /// No bar, and the pet's list ([`Cooldowns::pet`]).
+    fn default() -> Self {
+        Self {
+            spells: PetSpells::default(),
+            cooldowns: Cooldowns::pet(),
+            expires: None,
+        }
+    }
 }
 
 impl PetBar {
@@ -85,47 +107,48 @@ impl PetBar {
     }
 }
 
+/// `CGUnit_C::IsPlayerOrHunterPet` (`0x6116e0`) on `unit`, held under `guid`: a player
+/// (`0x6116ec`), or a unit with a pet number (`0x611704`) that our charm, else our summon, names
+/// (`0x61172d`-`0x61174a`) while our class is Hunter (`0x611757`). `player` is our own object,
+/// `None` while it is not held (`0x611725`). The unit must resolve as a unit first (typemask 8).
+pub(crate) fn is_player_or_hunter_pet(
+    unit: &crate::net::ObjectStore,
+    guid: u64,
+    player: Option<&crate::net::ObjectStore>,
+) -> bool {
+    /// `TYPEMASK_UNIT` and `TYPEMASK_PLAYER`.
+    const UNIT: u32 = 0x8;
+    const PLAYER: u32 = 0x10;
+    /// `UNIT_FIELD_BYTES_0` byte 1, Hunter.
+    const CLASS_HUNTER: u8 = 3;
+    let mask = unit.0.object_type_mask().unwrap_or(0);
+    if mask & UNIT == 0 {
+        return false;
+    }
+    if mask & PLAYER != 0 {
+        return true;
+    }
+    if unit.0.unit_pet_number() == 0 {
+        return false;
+    }
+    let Some(player) = player else {
+        return false;
+    };
+    player.0.unit_pet_guid() == Some(guid) && player.0.unit_class() == Some(CLASS_HUNTER)
+}
+
 pub(crate) struct UiPetPlugin;
 
 impl Plugin for UiPetPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<PetBar>().add_systems(
-            Update,
-            (
-                // Feeds ride the unit feed, before the VM ticks; drains run after the input pass so
-                // a click is sent that frame (a press is a script call, `PetPress`). The old-target
-                // clear precedes the bar feed so Attack
-                // goes dark the frame the selection moves.
-                pet_stop_on_old_target_clear
-                    .in_set(UnitFeed)
-                    .before(feed_pet_bar),
-                // The GCDs the attempt's sends owe the pet's list, in before the bar reads it.
-                drain::arm_owed_pet_gcds
-                    .in_set(UnitFeed)
-                    .before(feed_pet_bar),
-                // After the pet snapshot: these feeds' events reach Lua at once, and their
-                // handlers read `HasPetUI()`, which `crate::ui_pet_stats` pushes. The bar pushes
-                // its cooldown triples before the cooldown events and the pet's flush fires after
-                // them, so the buttons it wakes read the new list.
-                feed_pet_bar
-                    .in_set(UnitFeed)
-                    .after(crate::ui_pet_stats::PetSnapshot)
-                    .before(CooldownEvents),
-                fire_pet_cooldown_events
-                    .in_set(UnitFeed)
-                    .after(CooldownEvents),
-                feed_pet_unit
-                    .in_set(UnitFeed)
-                    .in_set(crate::ui_unit::field_events::FieldEventPushes)
-                    .after(crate::ui_pet_stats::PetSnapshot),
-                feed_pet_menu.in_set(UnitFeed),
-                // After this frame's presses, as the one drain before it ran them ahead of the
-                // toggles, stops and writes.
-                drain_pet_actions.in_set(crate::ui_script::UiDrain),
-                drain_pet_menu.in_set(crate::ui_script::UiDrain),
-            ),
-        );
+        app.init_resource::<PetBar>()
+            .init_resource::<PetAttackLatch>()
+            // `SMSG_PET_SPELLS` writes its `UNIT_PET` there; the unit plugin fires the lane.
+            // The getters read the bar, its pet and its book at the call (`PetLive`), the `"pet"`
+            // token its unit (`crate::ui_unit::live`), and every verb is a script call
+            // (`PetPress`, `PetSteps`).
+            .init_resource::<crate::field_watch::NoticeLane>();
     }
 }
 

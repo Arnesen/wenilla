@@ -22,8 +22,7 @@ use bevy::prelude::*;
 
 use benilla_formats::{SpellDisplay, SpellRange};
 
-use crate::chr_classes::ChrClassTable;
-use crate::net::{ObjectStore, SelfPlayer};
+use crate::net::ObjectStore;
 
 /// SpellModOps per row: the index stride (`imul eax,eax,0x1d`; the reader's `add edx,0x74`).
 const OPS: usize = 29;
@@ -149,6 +148,11 @@ impl SpellModifiers {
         }
     }
 
+    /// The gate's class family.
+    pub(crate) fn class_family(&self) -> u32 {
+        self.class_family
+    }
+
     /// Set the gate's class family (`0x6e6ca0`).
     pub(crate) fn set_class_family(&mut self, family: u32) {
         self.class_family = family;
@@ -167,32 +171,6 @@ impl SpellModifiers {
         d.spell_family != 0
             && d.spell_family == self.class_family
             && d.attributes_ex3 & ATTR_EX3_IGNORE_CASTER_MODIFIERS == 0
-    }
-
-    /// The `SpellFamilyFlags` bits whose cells any read for `d` can sum, whatever the op: its
-    /// whole mask past the gates, none before them. A change to another bit's cells cannot move
-    /// a value modified for `d`; a change of the class family can, whatever the bit.
-    pub(crate) fn read_bits(&self, d: &SpellDisplay) -> u64 {
-        if self.gates_pass(d) {
-            d.spell_family_flags
-        } else {
-            0
-        }
-    }
-
-    /// What differs from `prev`: the `SpellFamilyFlags` bits with any changed cell, in either
-    /// table and at any op, and whether the class family moved.
-    pub(crate) fn diff(&self, prev: &SpellModifiers) -> ModsDiff {
-        let bits = (0..BITS).fold(0u64, |bits, bit| {
-            let row = bit * OPS..(bit + 1) * OPS;
-            let same = self.flat[row.clone()] == prev.flat[row.clone()]
-                && self.pct[row.clone()] == prev.pct[row];
-            bits | u64::from(!same) << bit
-        });
-        ModsDiff {
-            bits,
-            class_family: self.class_family != prev.class_family,
-        }
     }
 
     /// `GetSpellModifiers 0x6e6b30` for one spell and op. `None` covers all four of its false
@@ -270,8 +248,9 @@ impl SpellModifiers {
         })
     }
 
-    /// `GetMinMaxRange` modifies only the maximum at its common tail, after the moving bonus
-    /// (`0x6e3648`-`0x6e36a2`, then op 5 at `0x6e3746`). The on-next-swing `Attributes & 0x404` arm
+    /// `GetMinMaxRange` modifies only the maximum at its common tail, after the moving bonus and
+    /// the ranged-slot scale (`0x6e3648`-`0x6e373a`, then op 5 at `0x6e3746`), so a range talent's
+    /// flat yards land on a max the scale zeroed. The on-next-swing `Attributes & 0x404` arm
     /// returns before that tail (`0x6e350f`).
     pub(crate) fn min_max_range(
         &self,
@@ -292,14 +271,6 @@ impl SpellModifiers {
     }
 }
 
-/// How one snapshot of the tables differs from an earlier one ([`SpellModifiers::diff`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ModsDiff {
-    /// Bit `b` set: a cell of family-flag bit `b` changed, in either table at any op.
-    pub(crate) bits: u64,
-    pub(crate) class_family: bool,
-}
-
 /// The description expander's view of the tables.
 impl benilla_formats::SpellMods for SpellModifiers {
     fn apply_int(&self, d: &SpellDisplay, op: u8, value: i32) -> i32 {
@@ -310,25 +281,6 @@ impl benilla_formats::SpellMods for SpellModifiers {
     }
     fn apply_soft(&self, d: &SpellDisplay, op: u8, value: f32) -> f32 {
         SpellModifiers::apply_soft(self, d, op, value)
-    }
-}
-
-/// Keep the class family in step with the avatar (`0x6e6ca0`, called from `0x5debcc`: byte 1, the
-/// class, of `UNIT_FIELD_BYTES_0` into `ChrClasses` field 15). An absent avatar keeps the last
-/// value, as a cross-map worldport drops the entity mid-session; only world-enter zeroes it.
-pub(super) fn track_class_family(
-    mut mods: ResMut<SpellModifiers>,
-    classes: Option<Res<ChrClassTable>>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-) {
-    let Some(classes) = classes else { return };
-    let Some(class) = self_q.iter().next().and_then(|s| s.0.unit_class()) else {
-        return;
-    };
-    let family = classes.0.spell_family(u32::from(class));
-    // Guarded: the tooltip feed diffs the tables whenever the resource is marked changed.
-    if mods.class_family != family {
-        mods.set_class_family(family);
     }
 }
 
@@ -526,19 +478,9 @@ mod tests {
     /// (`0x6e3422`-`0x6e3456`): a 3 s cast reads 4.5 s at Curse of Tongues' 1.5, `fistp` rounds a
     /// half to even, a factor within 2^-22 of 1 keeps the time, and an ability, a trade skill, a
     /// time at or below zero and a caster not streamed are not scaled. A field never sent is the
-    /// descriptor's 0. The level and the speed are reported where they are read.
+    /// descriptor's 0.
     #[test]
     fn the_cast_time_takes_the_casters_cast_speed() {
-        use crate::spell::{SpellReads, UnitField};
-        #[derive(Default)]
-        struct Log(Vec<UnitField>);
-        impl SpellReads for Log {
-            fn unit(&mut self, field: UnitField) {
-                self.0.push(field);
-            }
-            fn item_search(&mut self, _: u32) {}
-            fn skill_line(&mut self, _: u32) {}
-        }
         let mut spells = crate::ui_action::Spells::empty_for_tests();
         let row = |base_ms, per_level_ms| benilla_formats::SpellCastTime {
             base_ms,
@@ -564,35 +506,25 @@ mod tests {
         };
         let time = |d: &SpellDisplay, speed: Option<f32>| {
             let caster = unit(speed);
-            let mut log = Log::default();
             let level = crate::spell::SpellLevel::Known(1);
-            let t = spells.cast_time_unclamped_ms(d, Some(&caster), level, &mods, &mut log);
-            (t, log.0)
+            spells.cast_time_unclamped_ms(d, Some(&caster), level, &mods)
         };
         let three = spell(1, 0);
-        assert_eq!(time(&three, Some(1.5)), (4500, vec![UnitField::CastSpeed]));
-        assert_eq!(time(&three, Some(1.0)).0, 3000);
-        assert_eq!(
-            time(&three, Some(1.0 + 1.0e-7)).0,
-            3000,
-            "within the epsilon"
-        );
-        assert_eq!(time(&three, None).0, 0, "the descriptor's 0");
+        assert_eq!(time(&three, Some(1.5)), 4500);
+        assert_eq!(time(&three, Some(1.0)), 3000);
+        assert_eq!(time(&three, Some(1.0 + 1.0e-7)), 3000, "within the epsilon");
+        assert_eq!(time(&three, None), 0, "the descriptor's 0");
         // 1001 × 0.5 = 500.5, to even.
-        assert_eq!(time(&spell(2, 0), Some(0.5)).0, 500);
-        assert_eq!(time(&spell(2, 0), Some(1.5)).0, 1502);
+        assert_eq!(time(&spell(2, 0), Some(0.5)), 500);
+        assert_eq!(time(&spell(2, 0), Some(1.5)), 1502);
         for attributes in [0x10, 0x20] {
-            assert_eq!(time(&spell(1, attributes), Some(1.5)), (3000, vec![]));
+            assert_eq!(time(&spell(1, attributes), Some(1.5)), 3000);
         }
-        assert_eq!(time(&spell(3, 0), Some(1.5)), (-1_000_000, vec![]));
-        assert_eq!(
-            time(&spell(4, 0), Some(1.0)),
-            (1100, vec![UnitField::CastSpeed])
-        );
-        let mut log = Log::default();
+        assert_eq!(time(&spell(3, 0), Some(1.5)), -1_000_000);
+        assert_eq!(time(&spell(4, 0), Some(1.0)), 1100);
         let level = crate::spell::SpellLevel::Known(60);
-        let unseen = spells.cast_time_unclamped_ms(&three, None, level, &mods, &mut log);
-        assert_eq!((unseen, log.0), (3000, vec![]), "no caster to read");
+        let unseen = spells.cast_time_unclamped_ms(&three, None, level, &mods);
+        assert_eq!(unseen, 3000, "no caster to read");
     }
 
     #[test]

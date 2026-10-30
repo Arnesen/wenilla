@@ -150,11 +150,11 @@ pub(crate) struct KeybindState {
     /// Bumped by every change to the live table or the commands: the app's signal to re-derive
     /// dispatch. It says nothing of `UPDATE_BINDINGS`.
     generation: u64,
-    /// A host-side load of a set into the live table (the seed at the VM's birth) is owed its
-    /// `UPDATE_BINDINGS`, which the reference signals at the copy into set 3 (`0x4b649d`). The Lua
-    /// verbs signal in place (`SetBinding` `0x4b805b`, `LoadBindings`) and leave the debt, a
-    /// separate signal; a registration (`0x4b6f70`) signals nothing, so it moves
-    /// [`Self::generation`] alone.
+    /// A host-side load of a set into the live table (the binding reader's set choice) is owed its
+    /// `UPDATE_BINDINGS`, which the reference signals at the copy into set 3 (`0x4b649d`) and the
+    /// host pays there. The Lua verbs signal in place (`SetBinding` `0x4b805b`, `LoadBindings`)
+    /// and leave the debt, a separate signal; a registration (`0x4b6f70`) signals nothing, so it
+    /// moves [`Self::generation`] alone.
     signal_owed: bool,
     requests: Vec<KeybindRequest>,
 }
@@ -230,6 +230,35 @@ impl KeybindState {
             .map(|(k, _)| k)
     }
 
+    /// `set` as `(command, chords)`: every declared command in registration order, then any other
+    /// name a key is bound to.
+    fn snapshot(&self, set: &[KeyBinding]) -> Vec<(String, Vec<String>)> {
+        let keys_of = |command: &str| {
+            set.iter()
+                .filter(|(_, c)| c.eq_ignore_ascii_case(command))
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        let mut out: Vec<(String, Vec<String>)> = self
+            .entries
+            .iter()
+            .map(|e| (e.name.clone(), keys_of(&e.name)))
+            .collect();
+        for (key, command) in set {
+            if self.by_name.contains_key(&command.to_ascii_uppercase()) {
+                continue;
+            }
+            match out
+                .iter_mut()
+                .find(|(n, _)| n.eq_ignore_ascii_case(command))
+            {
+                Some((_, keys)) => keys.push(key.clone()),
+                None => out.push((command.clone(), vec![key.clone()])),
+            }
+        }
+        out
+    }
+
     /// Open a section: a `HEADER_<header>` row, unless one of that name exists, which the reference
     /// refuses (`0x4b71c9`-`0x4b7258`) and loads the binding under the section already open.
     fn open_header(&mut self, header: &str) {
@@ -256,8 +285,9 @@ impl KeybindState {
     }
 
     /// `LoadBindings(set)`: 0 defaults, 1 account, 2 character, which falls back to the account
-    /// set (the reference's starts as a copy), each falling back to the defaults. Loading defaults
-    /// keeps the current set, as the window's Reset To Default does.
+    /// set (the reference's starts as a copy), each falling back to the defaults. The current set
+    /// stays: the verb only copies the set into the live one (`0x4b8249`-`0x4b8252`), so the
+    /// window's Cancel (`LoadBindings(GetCurrentBindingSet())`) reloads the set saved last.
     fn load(&mut self, set: u32) {
         let list = match set {
             0 => &self.defaults,
@@ -269,9 +299,6 @@ impl KeybindState {
             _ => return,
         };
         self.live = list.clone();
-        if set != 0 {
-            self.current_set = set;
-        }
         self.generation += 1;
     }
 
@@ -375,9 +402,13 @@ impl super::UiScript {
         }
     }
 
-    /// Host-side `LoadBindings` (world entry: character set if it exists, else account).
+    /// Host-side `LoadBindings` (world entry: character set if it exists, else account), which
+    /// makes `set` current first, as the sets' read does (`0x4b64cb`).
     pub fn load_binding_set(&mut self, set: u32) {
         let mut model = self.model_mut();
+        if set != 0 {
+            model.keybinds.current_set = set;
+        }
         model.keybinds.load(set);
         model.keybinds.signal_owed = true;
     }
@@ -388,28 +419,19 @@ impl super::UiScript {
     }
 
     /// The live table as `(command, chords)`: every declared command in registration order, then
-    /// any other name a key is bound to, for the save and the tests.
+    /// any other name a key is bound to, for the tests.
     pub fn keybind_snapshot(&self) -> Vec<(String, Vec<String>)> {
-        let model = self.model_mut();
-        let kb = &model.keybinds;
-        let mut out: Vec<(String, Vec<String>)> = kb
-            .entries
-            .iter()
-            .map(|e| (e.name.clone(), kb.keys_of(&e.name).cloned().collect()))
-            .collect();
-        for (key, command) in &kb.live {
-            if kb.by_name.contains_key(&command.to_ascii_uppercase()) {
-                continue;
-            }
-            match out
-                .iter_mut()
-                .find(|(n, _)| n.eq_ignore_ascii_case(command))
-            {
-                Some((_, keys)) => keys.push(key.clone()),
-                None => out.push((command.clone(), vec![key.clone()])),
-            }
-        }
-        out
+        let kb = &self.model_mut().keybinds;
+        kb.snapshot(&kb.live)
+    }
+
+    /// Stored set `which` (1 account, 2 character) in [`Self::keybind_snapshot`]'s form, the copy
+    /// `SaveBindings` took of the live table inside the call (`0x4b8260` -> `0x4b6310`), for the
+    /// save; `None` for a set that is not stored, as a later `SaveBindings(1)` drops set 2.
+    pub fn stored_binding_snapshot(&self, which: u32) -> Option<Vec<(String, Vec<String>)>> {
+        let kb = &self.model_mut().keybinds;
+        let set = kb.stored.get(which.checked_sub(1)? as usize)?.as_ref()?;
+        Some(kb.snapshot(set))
     }
 
     /// Bumped by every table change; re-derive dispatch when it moves.
@@ -471,7 +493,8 @@ pub(crate) fn run_command(lua: &Lua, command: &str, down: bool) -> mlua::Result<
     let g = lua.globals();
     g.set("keystate", if down { "down" } else { "up" })?;
     // The body was compiled under its addon's context when the file loaded (`0x4b73f9`), and the
-    // runner's call of it makes that the context again (`0x704cf0`).
+    // runner's call of it makes that the context again (`0x704cf0`), under the error function
+    // (`0x704cfb`). A body that fails to compile is no reference (`0x704c9f`), heard by no handler.
     let ran = lua
         .load(body.as_str())
         .set_name(name)
@@ -481,7 +504,7 @@ pub(crate) fn run_command(lua: &Lua, command: &str, down: bool) -> mlua::Result<
             if let Some(addon) = context {
                 super::taint::tag(lua, &chunk, &super::taint::Context::Addon(addon));
             }
-            chunk.call::<()>(())
+            super::run_under_error_function(lua, &chunk)
         });
     g.set("keystate", Value::Nil)?;
     ran.map(|()| true)
@@ -976,6 +999,34 @@ mod tests {
         assert_eq!(s.current_binding_set(), 1);
         assert!(!s.character_bindings_exist());
         assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(1)]);
+    }
+
+    /// Ticking Character Specific loads set 2 (`KeyBindingFrame_ChangeBindingProfile`), and
+    /// Cancel's `LoadBindings(GetCurrentBindingSet())` puts the account set back: `LoadBindings`
+    /// never writes the current set (`0x4b8249`-`0x4b8252`), so it is still 1.
+    #[test]
+    fn a_cancelled_character_tick_leaves_the_account_set_live() {
+        let mut s = script();
+        s.run(r#"SetBinding("F", "JUMP") SaveBindings(1)"#).unwrap();
+        s.run(r#"SetBinding("F", "CAMERAZOOMIN") SaveBindings(2)"#)
+            .unwrap();
+        // World entry on the account set.
+        s.load_binding_set(1);
+        assert_eq!(s.current_binding_set(), 1);
+        s.run("LoadBindings(2)").unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("F")"#).unwrap(),
+            "CAMERAZOOMIN",
+            "the tick shows the character set"
+        );
+        assert_eq!(s.eval::<i64>("return GetCurrentBindingSet()").unwrap(), 1);
+        s.run("LoadBindings(GetCurrentBindingSet())").unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("F")"#).unwrap(),
+            "JUMP",
+            "Cancel puts the account set back"
+        );
+        assert_eq!(s.current_binding_set(), 1);
     }
 
     #[test]

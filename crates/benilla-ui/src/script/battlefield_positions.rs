@@ -1,18 +1,22 @@
 //! The battleground position verbs `WorldMapFrame.lua` and `Blizzard_BattlefieldMinimap.lua` poll
 //! to place teammates and the flag carrier (opcode `0x2E9`, handler `0x4aad40`). The reference
 //! drops itself, its party and its raid, prefers a live object's position and projects onto the
-//! active slot's map; the app does all that and pushes the finished list here.
+//! active slot's map, all at the call (`0x4abf90`): the host does that as the getter asks
+//! ([`super::battlefield_live`]), and with no host the VM's copy answers.
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::battlefield_live as live;
 use super::binding_abi::number_arg;
 use super::Model;
 
-/// One teammate: map-normalized position, `(0, 0)` off the displayed map, and name if known.
+/// One teammate: map-normalized position, `(0, 0)` off the displayed map, name if known, and the
+/// guid the getter's lookup keys a miss by (`0x4ac118`).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct BattlefieldPositionView {
     pub uv: (f32, f32),
     pub name: Option<String>,
+    pub guid: u64,
 }
 
 /// The flag carrier: the position and the token the viewer's faction picks, `"HordeFlag"` for an
@@ -24,7 +28,8 @@ pub struct BattlefieldFlagView {
 }
 
 impl super::UiScript {
-    /// Push the positions, the carrier and the active map's icon scale.
+    /// Set the VM's copy of the positions, the carrier and the active map's icon scale, which the
+    /// getters read with no host to ask.
     pub fn set_battlefield_positions(
         &mut self,
         players: Vec<BattlefieldPositionView>,
@@ -37,16 +42,10 @@ impl super::UiScript {
         model.battlefield_icon_scale = icon_scale;
     }
 
-    /// The 0-based rows `GetBattlefieldPosition` read with no name since the last drain, in call
-    /// order: each call's lookup passes a callback (`0x4ac118`), which the app makes.
-    pub fn take_battlefield_position_lookups(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.model_mut().battlefield_position_lookups)
-    }
-
-    /// `RequestBattlefieldPositions()` calls since the last drain; the app sends at most every
-    /// 5000 ms, and only with an active slot.
-    pub fn take_battlefield_position_requests(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().battlefield_position_requests)
+    /// The positions request's clear with no active slot (`0x4aa5df`): the teammate count
+    /// `[0xb6ebdc]` alone, the carrier kept until the next packet.
+    pub fn clear_battlefield_positions(&mut self) {
+        self.model_mut().battlefield_positions.clear();
     }
 }
 
@@ -68,7 +67,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetNumBattlefieldPositions",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.battlefield_positions.len() as i64)
+            Ok(live::position_count(lua, &model) as i64)
         })?,
     )?;
 
@@ -77,22 +76,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldPosition",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldPosition(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            let i = usize::try_from(index).ok().and_then(|i| i.checked_sub(1));
-            let row = i.and_then(|i| model.battlefield_positions.get(i)).cloned();
-            match (i, row) {
-                (Some(i), Some(r)) => {
-                    // A nameless row is the lookup's ask (callback `0x4ac190`), the app's to make.
-                    if r.name.is_none() {
-                        model.battlefield_position_lookups.push(i);
+            let row = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                live::position(lua, &model, index)
+            };
+            match row {
+                Some(r) => {
+                    // A nameless row is the lookup's ask with the callback `0x4ac190`, inside the
+                    // call (`0x4ac118`); a zero guid is no key (`0x55f080`).
+                    if r.name.is_none() && r.guid != 0 {
+                        super::calls::ask(lua, super::RecordAsk::BattlefieldName(r.guid))?;
                     }
-                    drop(model);
                     three(lua, r.uv, r.name.as_deref())
                 }
-                _ => {
-                    drop(model);
-                    three(lua, (0.0, 0.0), None)
-                }
+                None => three(lua, (0.0, 0.0), None),
             }
         })?,
     )?;
@@ -101,7 +98,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetNumBattlefieldFlagPositions",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(i64::from(model.battlefield_flag.is_some()))
+            Ok(i64::from(live::flag(lua, &model).is_some()))
         })?,
     )?;
 
@@ -110,7 +107,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldFlagPosition(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            match model.battlefield_flag.as_ref().filter(|_| index == 1) {
+            match live::flag(lua, &model).as_ref().filter(|_| index == 1) {
                 Some(f) => three(lua, f.uv, f.token.as_deref()),
                 None => three(lua, (0.0, 0.0), None),
             }
@@ -122,16 +119,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldMapIconScale",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(f64::from(model.battlefield_icon_scale))
+            Ok(f64::from(live::icon_scale(lua, &model)))
         })?,
     )?;
 
+    // `0x4abef0` is a call to `0x4aa5c0`, applied by the host inside the call.
     g.set(
         "RequestBattlefieldPositions",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.battlefield_position_requests += 1;
-            Ok(())
+            super::battlefield_queue::submit(lua, super::BattlefieldCall::Positions)
         })?,
     )?;
 
@@ -142,6 +138,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 mod tests {
     use super::*;
     use crate::script::UiScript;
+
+    /// The request's clear with no slot zeroes the count alone (`0x4aa5df`): the carrier stays.
+    #[test]
+    fn the_positions_clear_keeps_the_carrier() {
+        let mut s = UiScript::new().unwrap();
+        s.set_battlefield_positions(
+            vec![BattlefieldPositionView {
+                uv: (0.25, 0.5),
+                name: None,
+                ..Default::default()
+            }],
+            Some(BattlefieldFlagView {
+                uv: (0.375, 0.625),
+                token: None,
+            }),
+            1.0,
+        );
+        s.clear_battlefield_positions();
+        let counts: (i64, i64) = s
+            .eval("return GetNumBattlefieldPositions(), GetNumBattlefieldFlagPositions()")
+            .unwrap();
+        assert_eq!(counts, (0, 1));
+    }
 
     #[test]
     fn the_getters_answer_three_values_and_zero_off_the_list() {
@@ -157,10 +176,12 @@ mod tests {
                 BattlefieldPositionView {
                     uv: (0.25, 0.5),
                     name: Some("Probe-Realm".into()),
+                    ..Default::default()
                 },
                 BattlefieldPositionView {
                     uv: (0.75, 0.125),
                     name: None,
+                    ..Default::default()
                 },
             ],
             Some(BattlefieldFlagView {
@@ -240,9 +261,19 @@ mod tests {
                 .abs()
                 < 1e-6
         );
+        s.keep_calls();
         s.run("RequestBattlefieldPositions() RequestBattlefieldPositions()")
             .unwrap();
-        assert_eq!(s.take_battlefield_position_requests(), 2);
-        assert_eq!(s.take_battlefield_position_requests(), 0);
+        assert_eq!(
+            s.take_battlefield_calls(),
+            vec![crate::script::BattlefieldCall::Positions; 2],
+            "each call is the host's"
+        );
+        s.clear_battlefield_positions();
+        assert_eq!(
+            s.eval::<i64>("return GetNumBattlefieldPositions()")
+                .unwrap(),
+            0
+        );
     }
 }

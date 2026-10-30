@@ -331,10 +331,8 @@ fn target_unit_queues_the_token_for_the_app_to_resolve() {
     let mut s = UiScript::new().unwrap();
     s.keep_calls();
     assert!(s.take_selection_requests().is_empty());
-    // A nil token is not queued.
     s.eval::<()>(r#"TargetUnit("player")"#).unwrap();
     s.eval::<()>(r#"TargetUnit("target")"#).unwrap();
-    s.eval::<()>(r#"TargetUnit(nil)"#).unwrap();
     assert_eq!(
         s.take_selection_requests(),
         vec![
@@ -343,6 +341,36 @@ fn target_unit_queues_the_token_for_the_app_to_resolve() {
         ]
     );
     assert!(s.take_selection_requests().is_empty());
+}
+
+/// `TargetUnit` (`0x4899d0`) raises its usage for an argument `lua_isstring` refuses (`0x4899f1`,
+/// `0x4899f8` → `0x489a25`, the string at `0x842644`), nil and no argument included, and the
+/// resolver `0x515970` (`0x489a08`) raises `Unknown unit name` for a token it does not know, both
+/// before the select (`0x489a16`). A number passes `lua_isstring` and is read as its string.
+#[test]
+fn target_unit_raises_for_a_non_string_or_an_unknown_token() {
+    use crate::script::SelectionRequest;
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    for call in ["TargetUnit()", "TargetUnit(nil)", "TargetUnit({})"] {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(
+            err.contains(r#"Usage: TargetUnit("unit")"#),
+            "{call}: {err}"
+        );
+    }
+    let err = s
+        .run(r#"TargetUnit("bogus")"#)
+        .expect_err("an unknown token")
+        .to_string();
+    assert!(err.contains("Unknown unit name: bogus"), "{err}");
+    assert!(s.take_selection_requests().is_empty(), "nothing selects");
+    s.run(r#"TargetUnit("")"#)
+        .expect("an empty token names nobody");
+    assert_eq!(
+        s.take_selection_requests(),
+        vec![SelectionRequest::Unit(String::new())]
+    );
 }
 
 /// A nil `AssistUnit` argument raises its usage (`0x489c22`) and queues nothing.
@@ -776,6 +804,7 @@ fn faction_group_pair_and_the_pvp_toggle() {
         .eval::<bool>(r#"local a = UnitFactionGroup("party4") return a == nil"#)
         .unwrap());
 
+    s.keep_calls();
     assert_eq!(s.take_pvp_toggles(), 0, "nothing queued yet");
     s.run("TogglePVP() TogglePVP()").unwrap();
     assert_eq!(
@@ -783,7 +812,7 @@ fn faction_group_pair_and_the_pvp_toggle() {
         2,
         "one send per call, never collapsed"
     );
-    assert_eq!(s.take_pvp_toggles(), 0, "the drain empties the queue");
+    assert_eq!(s.take_pvp_toggles(), 0, "the take empties the kept calls");
 }
 
 /// The word table at `0x850424` by gated rank answers a string for every input: an absent token
@@ -969,14 +998,6 @@ fn a_seated_selection_carries_its_target_of_target() {
     }));
     assert_eq!(tot(&s).as_deref(), Some("Blue Whelp"), "a held hop");
 
-    s.seat_selection(Some(crate::script::SeatedSelection {
-        guid: 0x31,
-        held: true,
-        target: 0x22,
-        target_held: false,
-    }));
-    assert_eq!(tot(&s).as_deref(), Some("Bob"), "an unheld groupmate");
-
     s.seat_selection(Some(alone(0x32)));
     assert!(s
         .eval::<bool>("return UnitExists('targettarget') == nil")
@@ -990,7 +1011,7 @@ fn a_seated_selection_carries_its_target_of_target() {
 /// Every selecting verb commits through `SetSelection 0x493540` before it returns, and the host
 /// seats the selection it committed as `"target"` for the rest of the chunk: the unit's by-name
 /// snapshot, else a pushed snapshot of its guid, else the unit as its guid alone, and nothing for a
-/// deselect. Each seat tells the feed to re-push `"target"` from the committed selection.
+/// deselect.
 #[test]
 fn a_seated_selection_is_the_target_for_the_rest_of_the_chunk() {
     let mut s = UiScript::new().unwrap();
@@ -1005,7 +1026,6 @@ fn a_seated_selection_is_the_target_for_the_rest_of_the_chunk() {
     mate.health = 45;
     s.set_unit("party1", Some(mate));
     s.set_name_candidate(0x31, Some(candidate(0x31, "Red Affinity", 4.0)));
-    assert!(!s.take_target_view_moved());
     let health = |s: &UiScript| s.eval::<i64>("return UnitHealth('target')").unwrap();
 
     s.seat_selection(Some(alone(0x31)));
@@ -1019,7 +1039,6 @@ fn a_seated_selection_is_the_target_for_the_rest_of_the_chunk() {
         "the pick's whole snapshot, not only its name"
     );
     assert_eq!(s.model_ref().unit_guids.target, 0x31);
-    assert!(s.take_target_view_moved());
 
     s.seat_selection(Some(alone(0x22)));
     assert_eq!(
@@ -1031,7 +1050,7 @@ fn a_seated_selection_is_the_target_for_the_rest_of_the_chunk() {
     s.seat_selection(Some(alone(0x40)));
     assert!(s.eval::<bool>("return UnitExists('target') == 1").unwrap());
     assert_eq!(
-        s.model_ref().unit("target").map(|u| u.guid),
+        s.model_ref().snapshot_unit("target").map(|u| u.guid),
         Some(0x40),
         "neither: the unit as its guid alone"
     );
@@ -1041,11 +1060,10 @@ fn a_seated_selection_is_the_target_for_the_rest_of_the_chunk() {
         .eval::<bool>("return UnitExists('target') == nil")
         .unwrap());
     assert_eq!(s.model_ref().unit_guids.target, 0);
-    assert!(s.take_target_view_moved());
 }
 
-/// Seating the unit the feed's own `"target"` push already shows keeps that push (here, a health
-/// the candidate's does not share), and the view has not moved.
+/// Seating the unit the `"target"` copy already shows keeps that copy (here, a health the
+/// candidate's does not share).
 #[test]
 fn seating_the_shown_target_keeps_the_feeds_push() {
     let mut s = UiScript::new().unwrap();
@@ -1060,7 +1078,6 @@ fn seating_the_shown_target_keeps_the_feeds_push() {
     s.set_name_candidate(0x21, Some(candidate(0x21, "Old Mob", 1.0)));
     s.seat_selection(Some(alone(0x21)));
     assert_eq!(s.eval::<i64>("return UnitHealth('target')").unwrap(), 12);
-    assert!(!s.take_target_view_moved());
 }
 
 /// With no host to commit them, the selecting verbs move nothing: the VM never guesses a
@@ -1092,7 +1109,6 @@ fn a_selecting_verb_with_no_host_leaves_the_target_alone() {
         );
         assert_eq!(s.take_script_calls().len(), 1, "{lua}: kept for a host");
     }
-    assert!(!s.take_target_view_moved());
 }
 
 /// `0x516cf0` tests `UNIT_FIELD_CHARMEDBY` (fields 10-11) non-zero, not a `UNIT_FIELD_FLAGS` bit.
@@ -1351,6 +1367,62 @@ fn an_unrecognised_unit_token_raises_and_a_recognised_empty_one_does_not() {
     assert!(s.run(r#"UnitIsUnit("player", "bogus")"#).is_err());
     assert!(s.run(r#"UnitIsUnit("bogus", "player")"#).is_err());
     assert!(s.run(r#"UnitIsUnit("player", "party3")"#).is_ok());
+}
+
+/// The 13 ungated unit predicates (`tables/unit_gates.tsv`) read the token with `lua_tostring`
+/// (`0x6f3690`), NULL for a boolean or a table, which the resolver answers as GUID 0 (`0x515992`):
+/// quiet, and "normal" for `UnitClassification`. A number's text and an unknown token raise in the
+/// resolver (`0x515c14`), as they do through `UnitPlayerControlled` (`0x51641f`), `UnitIsCivilian`
+/// (`0x519e11`) and `UnitCreatureType` (`0x51a2b1`).
+#[test]
+fn ungated_predicates_take_any_value_and_every_resolver_raises_for_an_unknown_token() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+    let ungated = [
+        "UnitExists",
+        "UnitIsVisible",
+        "UnitIsPlayer",
+        "UnitIsCorpse",
+        "UnitIsPartyLeader",
+        "UnitInParty",
+        "UnitPlayerOrPetInParty",
+        "UnitInRaid",
+        "UnitPlayerOrPetInRaid",
+        "UnitPlayerControlled",
+        "UnitIsCharmed",
+        "UnitIsPlusMob",
+        "UnitClassification",
+    ];
+    for name in ungated {
+        for arg in ["true", "false", "{}", "print"] {
+            let call = format!("return {name}({arg})");
+            let answer = s
+                .eval::<Option<String>>(&call)
+                .unwrap_or_else(|e| panic!("{call}: {e}"));
+            let quiet = if name == "UnitClassification" {
+                Some("normal")
+            } else if name == "UnitIsPartyLeader" {
+                Some("1") // GUID 0 matches the ungrouped leader's zero
+            } else {
+                None
+            };
+            assert_eq!(answer.as_deref(), quiet, "{call}");
+        }
+        for arg in ["5", r#""foo""#] {
+            let call = format!("{name}({arg})");
+            let err = s.run(&call).expect_err(&call).to_string();
+            assert!(err.contains("Unknown unit name"), "{call}: {err}");
+        }
+    }
+    for call in [
+        r#"UnitIsCivilian("foo")"#,
+        "UnitIsCivilian(5)",
+        r#"UnitCreatureType("foo")"#,
+        "UnitCreatureType(5)",
+    ] {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains("Unknown unit name"), "{call}: {err}");
+    }
 }
 
 /// The resolver compares bytes with an ASCII fold, so a non-ASCII token matches no prefix and
@@ -1998,8 +2070,8 @@ fn the_equals_one_idiom_branches_correctly_on_a_live_and_a_dead_token() {
     );
 }
 
-/// `UnitOnTaxi` (`0x517a40`), registered with the taxi module's ride flag, has the family's shape
-/// and raises `Usage:` from its gate (`0x517a48`).
+/// `UnitOnTaxi` (`0x517a40`) has the family's shape: the number 1 or nil, and `Usage:` from its
+/// gate (`0x517a48`).
 #[test]
 fn unit_on_taxi_is_one_or_nil_and_raises_the_reference_usage() {
     let mut s = UiScript::new().unwrap();
@@ -2008,7 +2080,13 @@ fn unit_on_taxi_is_one_or_nil_and_raises_the_reference_usage() {
     assert!(s
         .eval::<bool>(r#"return UnitOnTaxi("player") == nil"#)
         .unwrap());
-    s.set_on_taxi(true);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            flags: TAXI_FLIGHT,
+            ..player()
+        }),
+    );
     assert_eq!(
         s.eval::<String>(r#"return type(UnitOnTaxi("player"))"#)
             .unwrap(),
@@ -2018,16 +2096,55 @@ fn unit_on_taxi_is_one_or_nil_and_raises_the_reference_usage() {
     assert!(!s
         .eval::<bool>(r#"return UnitOnTaxi("player") == true"#)
         .unwrap());
-    // Only the player's ride is tracked: any other token is nil.
-    assert!(s
-        .eval::<bool>(r#"return UnitOnTaxi("target") == nil"#)
-        .unwrap());
 
     let err = s.eval::<mlua::Value>("return UnitOnTaxi()").unwrap_err();
     assert!(
         err.to_string().contains(r#"Usage: UnitOnTaxi("unit")"#),
         "the gate's own message, not mlua's type error: {err}"
     );
+}
+
+/// `UNIT_FIELD_FLAGS` bit 20, `UNIT_FLAG_TAXI_FLIGHT` (`0x517a86`).
+const TAXI_FLIGHT: u32 = 1 << 20;
+
+/// `UnitOnTaxi` resolves the token and tests bit 20 of that unit's flags (`0x517a76`-`0x517a8c`),
+/// so a party member or the target answers, a neighbouring bit does not, and a token naming
+/// nothing is nil; an unrecognised token raises in the resolver (`0x515c14`).
+#[test]
+fn unit_on_taxi_reads_the_flag_of_any_resolved_unit() {
+    let mut s = UiScript::new().unwrap();
+    let with = |flags: u32| {
+        Some(UnitState {
+            exists: true,
+            flags,
+            ..Default::default()
+        })
+    };
+    s.set_unit("party1", with(TAXI_FLIGHT | 0x8));
+    s.set_unit("party2", with(!TAXI_FLIGHT));
+    s.set_unit("target", with(TAXI_FLIGHT));
+    for token in ["party1", "PARTY1", "target"] {
+        assert_eq!(
+            s.eval::<i64>(&format!("return UnitOnTaxi({token:?})"))
+                .unwrap(),
+            1,
+            "{token}"
+        );
+    }
+    assert!(
+        s.eval::<Option<i64>>(r#"return UnitOnTaxi("party2")"#)
+            .unwrap()
+            .is_none(),
+        "every other bit set"
+    );
+    assert!(
+        s.eval::<Option<i64>>(r#"return UnitOnTaxi("party3")"#)
+            .unwrap()
+            .is_none(),
+        "recognised but naming nothing"
+    );
+    let err = s.run(r#"UnitOnTaxi("bogus")"#).unwrap_err().to_string();
+    assert!(err.contains("Unknown unit name: bogus"), "{err}");
 }
 
 /// The reference's `"player"` arm reads the record (`0x51708c` reads `0xc27d88`), never the
@@ -2225,6 +2342,7 @@ fn the_unit_verbs_apply_in_the_call_with_a_host_lent() {
 #[test]
 fn unit_name_hands_a_no_object_miss_back_to_ask() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     let read = |s: &mut UiScript, unit: UnitState| {
         s.set_unit("target", Some(unit));
         s.eval::<String>(r#"return UnitName("target")"#).unwrap();

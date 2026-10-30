@@ -36,12 +36,42 @@ mod text;
 pub use text::{expand_target_tokens, validate_escapes, InvalidEscape, INVALID_ESCAPE};
 
 impl super::UiScript {
-    /// Push the name `GetDefaultLanguage()` answers. `None` is the reference's no-player state,
-    /// which returns zero values, not `nil`; the app resolves it per world entry from
-    /// `ChrRaces.BaseLanguage` and `Languages.dbc`.
+    /// Seat the name `GetDefaultLanguage()` answers with no host to ask, or while the host holds no
+    /// player ([`DefaultLanguageQuery`]). `None` is the reference's no-player state, which returns
+    /// zero values, not `nil`, and the one a VM starts with.
     pub fn set_default_language(&mut self, name: Option<String>) {
         self.model_mut().default_language = name;
     }
+}
+
+/// `GetDefaultLanguage`'s question of the lent host ([`super::live::ask`]): the `Languages.dbc`
+/// name of the active player's race's base language as of the call (`0x49fcd0` → `0x5ec890`, the
+/// race byte `[player+0x110]+0x78`), `None` for a race with no row or no name. The host declines
+/// it while it holds no player, where the seat answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultLanguageQuery;
+
+impl super::live::LiveQuery for DefaultLanguageQuery {
+    type Answer = Option<String>;
+}
+
+/// `GetNumLaguages` and `GetLanguageByIndex`'s question of the lent host: the names, in
+/// `Languages.dbc` row order, of the rows the active player understands as of the call, each row
+/// tested by `0x5ec720` (`0x49fb30`, `0x49fbe0`); `None` with no active player held (`0x49fb50`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnownLanguagesQuery;
+
+impl super::live::LiveQuery for KnownLanguagesQuery {
+    type Answer = Option<Vec<String>>;
+}
+
+/// The known languages at the call, `None` with no active player: the lent host's, else the
+/// VM's seat.
+fn known_languages(lua: &Lua) -> Option<Vec<String>> {
+    super::live::ask(lua, &KnownLanguagesQuery).unwrap_or_else(|| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        super::battlefield_queue::player_exists(lua, &model).then(|| model.known_languages.clone())
+    })
 }
 
 /// The chat types a string `chatType` names (the table `0x49f7a0` builds, tested at `0x49f276`),
@@ -93,6 +123,8 @@ pub struct ChatSend {
     pub target: Option<String>,
     /// The `Languages.dbc` id the third argument named; `None` is the speaker's default.
     pub language: Option<u32>,
+    /// The group as it stood at the call, which the gates the host applies read.
+    pub group: ChatGroup,
 }
 
 /// The empty-line gate (`0x49f28d`-`0x49f2a1`): a line whose first byte is NUL ends the call,
@@ -118,26 +150,30 @@ pub struct ChatGroup {
     pub leads_or_assists: bool,
 }
 
+/// The group facts `SendChatMessage`'s gates and leader promotion read, as the group stands at
+/// the call: through the lent host, else off the pushed roster.
+fn chat_group(lua: &Lua) -> ChatGroup {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let cells = super::roster_read::cells(lua, &model.party);
+    let own = cells.own_guid;
+    let leads = own != 0 && cells.is_raid_leader();
+    // `0x4bb080`: a zero GUID or one off the roster fails; a member above rank 0 passes, and one
+    // at rank 0 passes only as the group leader.
+    let leads_or_assists = super::roster_read::membership(lua, &model.party, own)
+        .rank
+        .is_some_and(|rank| rank > 0 || leads);
+    ChatGroup {
+        in_party: cells.party[0] != 0,
+        raid_members: cells.raid_count as usize,
+        leads,
+        leads_or_assists,
+    }
+}
+
 impl super::UiScript {
-    /// The group facts `SendChatMessage`'s gates and leader promotion read.
+    /// The group facts `SendChatMessage`'s gates and leader promotion read ([`chat_group`]).
     pub fn chat_group(&self) -> ChatGroup {
-        let model = self.model_ref();
-        let party = &model.party;
-        let own = party.own_guid;
-        let leads = own != 0 && own == party.leader_guid;
-        // `0x4bb080`: a zero GUID or one off the roster fails; a member above rank 0 passes, and
-        // one at rank 0 passes only as the group leader.
-        let leads_or_assists = party
-            .raid
-            .iter()
-            .find(|m| own != 0 && m.guid == own)
-            .is_some_and(|m| m.rank > 0 || leads);
-        ChatGroup {
-            in_party: party.members.first().is_some_and(|m| m.guid != 0),
-            raid_members: party.raid.len(),
-            leads,
-            leads_or_assists,
-        }
+        chat_group(self.lua())
     }
 }
 
@@ -159,33 +195,25 @@ fn language_id(table: &[(u32, String)], name: &str) -> Option<u32> {
 }
 
 impl super::UiScript {
-    /// The languages this character knows, in `Languages.dbc` row order: a language counts when a
-    /// known spell with `Effect_1 == 39` teaches it (`0x4b25b0`) and its skill line is in the skill
-    /// block (`0x5ec720`). A change fires `LANGUAGE_LIST_CHANGED` (`0x49b970`, event 0x102).
+    /// Seat the languages this character knows, in `Languages.dbc` row order, which the walk reads
+    /// with no host to ask ([`KnownLanguagesQuery`]). It fires nothing: `LANGUAGE_LIST_CHANGED` is
+    /// the spell registrar's, at each language spell it adds (`0x4b2641` → `0x49b970`).
     pub fn set_known_languages(&mut self, names: Vec<String>) {
-        let changed = {
-            let mut model = self.model_mut();
-            if model.known_languages == names {
-                false
-            } else {
-                model.known_languages = names;
-                true
-            }
-        };
-        if changed {
-            self.fire_event("LANGUAGE_LIST_CHANGED", vec![]);
-        }
+        self.model_mut().known_languages = names;
     }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
-    // GetNumLaguages(), `0x49fb30`: one number, the known languages. The misspelling is the
-    // reference's registered name (`0x843628`); the correct spelling is nowhere in the binary.
+    // GetNumLaguages(), `0x49fb30`: one number, the known languages, and no value with no active
+    // player (`0x49fb5e` → `0x49fb60`). The misspelling is the reference's registered name
+    // (`0x843628`); the correct spelling is nowhere in the binary.
     lua.globals().set(
         "GetNumLaguages",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.known_languages.len() as i64)
+            Ok(match known_languages(lua) {
+                Some(known) => MultiValue::from_vec(vec![Value::Integer(known.len() as i64)]),
+                None => MultiValue::new(),
+            })
         })?,
     )?;
     // GetLanguageByIndex(i), `0x49fbe0`: the `Name_lang` of the i-th known language, positional,
@@ -199,10 +227,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 index,
                 "Usage: GetLanguageByIndex(index)",
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let name = index
-                .checked_sub(1)
-                .and_then(|i| model.known_languages.get(i));
+            let known = known_languages(lua).unwrap_or_default();
+            let name = index.checked_sub(1).and_then(|i| known.get(i));
             Ok(match name {
                 Some(n) => MultiValue::from_vec(vec![Value::String(lua.create_string(n)?)]),
                 None => MultiValue::new(),
@@ -215,10 +241,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetDefaultLanguage",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let name = {
+            let name = super::live::ask(lua, &DefaultLanguageQuery).unwrap_or_else(|| {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.default_language.clone()
-            };
+            });
             Ok(match name {
                 Some(n) => MultiValue::from_vec(vec![Value::String(lua.create_string(&n)?)]),
                 None => MultiValue::new(),
@@ -233,6 +259,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // No local player ends the call quietly, ahead of every check (`0x49f219`-
                 // `0x49f223` to `0x49f78a`).
                 if !super::battlefield_queue::player_exists(
+                    lua,
                     &lua.app_data_ref::<Model>().expect("model app_data"),
                 ) {
                     return Ok(());
@@ -286,6 +313,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         chat_type,
                         target,
                         language,
+                        // Read before the send, as the binding reads it (`0x49f343`-`0x49f4b2`).
+                        group: chat_group(lua),
                     }),
                 )
             },
@@ -338,12 +367,14 @@ mod tests {
                     chat_type: "SAY".into(),
                     target: None,
                     language: None,
+                    group: ChatGroup::default(),
                 },
                 ChatSend {
                     text: "/dance".into(),
                     chat_type: "SAY".into(),
                     target: None,
                     language: None,
+                    group: ChatGroup::default(),
                 },
             ]
         );
@@ -599,6 +630,7 @@ mod tests {
                 chat_type: "GUILD".into(),
                 target: None,
                 language: None,
+                group: ChatGroup::default(),
             })]
         );
     }
@@ -702,6 +734,18 @@ mod language_tests {
     #[test]
     fn the_language_walk_is_positional_over_the_known_rows() {
         let mut s = UiScript::new().unwrap();
+        assert_eq!(
+            s.arity("GetNumLaguages()").unwrap(),
+            0,
+            "no player: no value, not 0 (`0x49fb60`)"
+        );
+        s.set_unit(
+            "player",
+            Some(crate::script::UnitState {
+                exists: true,
+                ..Default::default()
+            }),
+        );
         assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 0);
         assert_eq!(
             s.arity("GetLanguageByIndex(1)").unwrap(),
@@ -714,16 +758,15 @@ mod language_tests {
         )
         .unwrap();
         s.set_known_languages(vec!["Orcish".into(), "Common".into()]);
-        s.set_known_languages(vec!["Orcish".into(), "Common".into()]);
         assert_eq!(s.eval::<i64>("return GetNumLaguages()").unwrap(), 2);
         assert_eq!(
             s.eval::<String>("return GetLanguageByIndex(2)").unwrap(),
             "Common"
         );
         assert_eq!(
-            s.eval::<i64>("return FIRED").unwrap(),
-            1,
-            "the list changing fires once; the same list again is silent"
+            s.eval::<Option<i64>>("return FIRED").unwrap(),
+            None,
+            "a seat fires nothing: the event is the registrar's"
         );
     }
 }

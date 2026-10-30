@@ -114,9 +114,10 @@ pub(crate) use probe_vendor_swap::ProbeVendorSwapPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, DressCensusPlugin, EntityCensusPlugin, GroundCensusPlugin,
     JitterMeterPlugin, LiftCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin,
-    ProbeChatPlugin, ProbeClock, ProbeDragPlugin, ProbeExitPlugin, ProbeFocusPlugin,
-    ProbeGlueLuaPlugin, ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
-    RevealAuditPlugin, SchedCensusPlugin, StallPlugin, TrailCensusPlugin, UnitVisualsPlugin,
+    ProbeChatPlugin, ProbeClickPlugin, ProbeClock, ProbeDragPlugin, ProbeExitPlugin,
+    ProbeFocusPlugin, ProbeGlueLuaPlugin, ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin,
+    ProbeResizePlugin, RevealAuditPlugin, SchedCensusPlugin, StallPlugin, TrailCensusPlugin,
+    UnitVisualsPlugin,
 };
 pub(crate) use scenarios::ui_opted_in;
 use scenarios::{
@@ -336,6 +337,29 @@ enum Phase {
     Saving { frames: u32, seen: bool },
     /// Save done; a few grace frames, then `AppExit`.
     Done(u32),
+}
+
+/// A UI capture's stance bar, once: the demo's stances among the known spells, which the bar's
+/// getters read its list off (`crate::ui_shapeshift`), each entry off the VM copy the demo feed
+/// seeds while no player is held. The spellbook fixture's book is its own known spells, so it
+/// lists none.
+fn seed_demo_forms(
+    ctx: Res<CaptureCtx>,
+    actions: Option<ResMut<crate::ui_action::PlayerActions>>,
+    mut done: Local<bool>,
+) {
+    let Some(fixture) = ctx.scenario.and_then(|s| s.ui) else {
+        return;
+    };
+    let Some(mut actions) = actions.filter(|_| !*done) else {
+        return;
+    };
+    *done = true;
+    if fixture != UiFixture::SpellBook {
+        actions.spells.extend(crate::ui_script::DEMO_STANCES);
+        // The stored form list, as their learns leave it: the stances are in bar order already.
+        actions.forms.extend(crate::ui_script::DEMO_STANCES);
+    }
 }
 
 #[derive(Resource)]
@@ -669,7 +693,12 @@ impl Plugin for CapturePlugin {
             .add_systems(Update, pin_scene.in_set(WorldStage::Present))
             // Before `UnitFeed`: the seed stands in for wire data live play delivers on earlier
             // frames, so the same frame's feeds and the one-shot `MERCHANT_SHOW` paint must see it.
-            .add_systems(Update, seed_ui_fixture.before(crate::ui_unit::UnitFeed))
+            .add_systems(
+                Update,
+                (seed_demo_forms, seed_ui_fixture)
+                    .chain()
+                    .before(crate::ui_unit::UnitFeed),
+            )
             .add_systems(
                 Update,
                 (
@@ -1062,6 +1091,206 @@ fn drive_capture(
             (false, true) => clock.unpause(),
             (true, false) => clock.pause(),
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+    use bevy::prelude::*;
+
+    /// A capture run's systems initialize in the client's own world, so a parameter that overlaps
+    /// the VM turn's call host fails here and not at the first capture's schedule build.
+    #[test]
+    fn every_capture_system_initializes_in_the_client() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::set("WOW_CAPTURE", "ui-trainer");
+        let mut app = crate::game_plugins::schedule_tests::headless_client_with(|app| {
+            app.add_plugins(super::CapturePlugin);
+        });
+        let world = app.world_mut();
+        let labels: Vec<_> = world
+            .resource::<bevy::ecs::schedule::Schedules>()
+            .iter()
+            .map(|(_, s)| s.label())
+            .collect();
+        let mut seen = false;
+        for label in labels {
+            world.schedule_scope(label, |world, schedule| {
+                schedule.graph_mut().systems.initialize(world);
+                seen |=
+                    schedule.graph().systems.iter().any(|(_, system, _)| {
+                        system.name().to_string().contains("seed_ui_fixture")
+                    });
+            });
+        }
+        assert!(
+            seen,
+            "the census reads the capture seed among the client's systems"
+        );
+    }
+    /// The combo-points fixture's rogue banks its points on the wolf it selects, so the getter
+    /// the dots read answers four through the host, as in game (`0x51a1f3`-`0x51a20d`).
+    #[test]
+    fn the_combo_fixture_banks_its_points_on_its_target() {
+        use bevy::ecs::system::RunSystemOnce;
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::set("WOW_CAPTURE", "ui-combopoints");
+        let mut app = crate::game_plugins::schedule_tests::headless_client_with(|app| {
+            app.add_plugins(super::CapturePlugin);
+        });
+        let world = app.world_mut();
+        {
+            let mut progress = world.resource_mut::<super::WorldLoadProgress>();
+            progress.ready = 1;
+            progress.total = 1;
+        }
+        world.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        world.init_resource::<crate::player::Player>();
+        world.init_resource::<crate::loading_screen::LoadingScreen>();
+        world.init_resource::<crate::ui_quest::QuestGiver>();
+        world.init_resource::<crate::ui_loot::LootState>();
+        world.init_resource::<crate::net::HomeBind>();
+        world
+            .run_system_once(super::fixtures::seed_ui_fixture)
+            .unwrap();
+        world.flush();
+        let read = crate::script_calls::with_hosted_vm(world, |s| {
+            s.expect("a VM")
+                .eval::<(i64, Option<i64>)>("return GetComboPoints(), UnitExists('target')")
+                .unwrap()
+        });
+        assert_eq!(read, (4, Some(1)));
+    }
+    /// The character fixture's doll, by number: once its seed's spawns land, the worn slots'
+    /// texture getters answer through the host, and the window opened over them shows those
+    /// textures on the doll's buttons and the buffed stamina green.
+    #[test]
+    fn the_char_fixture_fills_the_doll() {
+        use bevy::ecs::system::RunSystemOnce;
+        let _data = benilla_formats::wow_data_or_skip!();
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = EnvGuard::set("WOW_CAPTURE", "ui-char");
+        let mut app = crate::game_plugins::schedule_tests::headless_client_with(|app| {
+            app.add_plugins(super::CapturePlugin);
+        });
+        let world = app.world_mut();
+        {
+            let mut progress = world.resource_mut::<super::WorldLoadProgress>();
+            progress.ready = 1;
+            progress.total = 1;
+        }
+        let script = benilla_ui::script::UiScript::new().unwrap();
+        for f in crate::ui_script::test_ui::CHARACTER_UI {
+            crate::ui_script::test_ui::load_ui_strict(&script, f);
+        }
+        world.insert_non_send_resource(script);
+        world.init_resource::<crate::player::Player>();
+        world.init_resource::<crate::loading_screen::LoadingScreen>();
+        world.init_resource::<crate::ui_quest::QuestGiver>();
+        world.init_resource::<crate::ui_loot::LootState>();
+        world.init_resource::<crate::net::HomeBind>();
+        // The level line's race and class names.
+        let tables = crate::ui_unit::TestNames::english();
+        world.insert_resource(crate::chr_classes::ChrRaceTable(tables.races));
+        world.insert_resource(crate::chr_classes::ChrClassTable(tables.classes));
+        // The fixture's displays (sword, shield, hearthstone), each with its own icon.
+        let icon = |name: &str| benilla_formats::ItemDisplay {
+            icon: Some(name.into()),
+            ..Default::default()
+        };
+        world.insert_resource(crate::entities::ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::from([
+                (1542, icon("SWORD")),
+                (18730, icon("SHIELD")),
+                (6418, icon("STONE")),
+            ])),
+        ));
+        world
+            .run_system_once(super::fixtures::seed_ui_fixture)
+            .unwrap();
+        world.flush();
+        // Chest, main hand, ranged and ammo: the getters, then the buttons the window drew.
+        let read = crate::script_calls::with_hosted_vm(world, |s| {
+            s.expect("a VM")
+                .eval::<Vec<String>>(
+                    r#"local t = {}
+                    for i, slot in ipairs({5, 16, 18, 0}) do
+                        t[i] = GetInventoryItemTexture("player", slot) or "none"
+                    end
+                    for i, name in ipairs({"Chest", "MainHand", "Ranged", "Ammo"}) do
+                        local tex = getglobal("Character" .. name .. "SlotIconTexture")
+                        t[4 + i] = tex:GetTexture() or "none"
+                    end
+                    t[9] = CharacterStatFrame3StatText:GetText() or "none"
+                    t[10] = CharacterFrame:IsVisible() and "shown" or "hidden"
+                    return t"#,
+                )
+                .unwrap()
+        });
+        let errors = world
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .errors();
+        assert!(errors.is_empty(), "the open runs clean: {errors:?}");
+        assert_eq!(read[9], "shown");
+        let icons = ["SHIELD", "SWORD", "STONE", "STONE"];
+        let shown = |t: &str, icon: &str| t.to_ascii_uppercase().ends_with(icon);
+        for (i, icon) in icons.iter().enumerate() {
+            assert!(shown(&read[i], icon), "the getter, slot {i}: {read:?}");
+            assert!(shown(&read[4 + i], icon), "the button, slot {i}: {read:?}");
+        }
+        assert!(
+            read[8].starts_with("|cff20ff20"),
+            "the stamina line: {read:?}"
+        );
+    }
+
+    /// The vendor and trainer fixtures open through the lists' own opens, so each queues its
+    /// window's `MERCHANT_SHOW` or `TRAINER_SHOW` as a list does.
+    #[test]
+    fn the_window_fixtures_queue_their_show() {
+        use bevy::ecs::system::RunSystemOnce;
+        for scenario in ["ui-merchant", "ui-trainer"] {
+            let _l = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _c = EnvGuard::set("WOW_CAPTURE", scenario);
+            let mut app = crate::game_plugins::schedule_tests::headless_client_with(|app| {
+                app.add_plugins(super::CapturePlugin);
+            });
+            let world = app.world_mut();
+            {
+                let mut progress = world.resource_mut::<super::WorldLoadProgress>();
+                progress.ready = 1;
+                progress.total = 1;
+            }
+            world.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+            world.init_resource::<crate::player::Player>();
+            world.init_resource::<crate::loading_screen::LoadingScreen>();
+            world.init_resource::<crate::ui_bank::BankOpen>();
+            world.init_resource::<crate::ui_quest::QuestGiver>();
+            world.init_resource::<crate::ui_loot::LootState>();
+            world.init_resource::<crate::net::HomeBind>();
+            world
+                .run_system_once(super::fixtures::seed_ui_fixture)
+                .unwrap();
+            world.flush();
+            let shows = world
+                .resource::<crate::ui_merchant::MerchantLane>()
+                .stamped()
+                .len()
+                + world
+                    .resource::<crate::ui_trainer::TrainerLane>()
+                    .stamped()
+                    .len();
+            assert_eq!(shows, 1, "{scenario}");
         }
     }
 }

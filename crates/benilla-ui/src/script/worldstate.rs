@@ -1,10 +1,32 @@
 //! `GetNumWorldStateUI` and `GetWorldStateUIInfo`, behind the always-up PvP readout, over rows the
-//! app resolves; the reference re-walks an array of DBC row ids (`0xb71e7c`) on demand. The info
-//! is ten values (`0x4c5a70`), with no `uiType` or `hidden`, which came later.
+//! app resolves at the call ([`WorldStateUiQuery`]); the reference re-walks an array of DBC row
+//! ids (`0xb71e7c`) and reads each row's world states as the getter runs (`0x4c5a70`). The info is
+//! ten values, with no `uiType` or `hidden`, which came later.
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
+
+/// The readout's rows as the getters read them at the call, through the lent host: the list the
+/// builder `0x4c56e0` keeps for the last init's scope and the defense flag, each row's values and
+/// text read from the world states as they stand (`0x4c5ad8`, `0x4c5b05`, `0x4c5bbc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldStateUiQuery;
+
+impl super::live::LiveQuery for WorldStateUiQuery {
+    type Answer = Vec<WorldStateUiView>;
+}
+
+/// The rows now: the lent host's, else what was pushed.
+fn rows(lua: &Lua) -> Vec<WorldStateUiView> {
+    super::live::ask(lua, &WorldStateUiQuery).unwrap_or_else(|| {
+        lua.app_data_ref::<Model>()
+            .expect("model app_data")
+            .worldstate
+            .rows
+            .clone()
+    })
+}
 
 /// One row of the readout: the ten values `GetWorldStateUIInfo` returns, in order.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -31,18 +53,11 @@ pub(crate) struct WorldStateUiState {
 }
 
 impl super::UiScript {
-    /// Push the readout's rows, queuing `UPDATE_WORLD_STATES` (event `0x20e`) on any change.
-    /// Deviation: the reference fires it only after an init rebuild (`0x48fa12`) or a zone-defense
-    /// channel flip (`0x49bdd6`); we fire on a value change too, because our rows are resolved
-    /// values its Lua would re-read live.
+    /// Push the readout's rows, which the getters read with no host to ask. The reference signals
+    /// `UPDATE_WORLD_STATES` on its triggers (a packet, the defense flip: `0x48fa12`, `0x49bdd6`),
+    /// not on a changed value; this signals nothing.
     pub fn set_world_state_ui(&mut self, rows: Vec<WorldStateUiView>) {
-        let mut model = self.model_mut();
-        if model.worldstate.rows != rows {
-            model.worldstate.rows = rows;
-            model
-                .pending_events
-                .push(("UPDATE_WORLD_STATES".to_string(), Vec::new()));
-        }
+        self.model_mut().worldstate.rows = rows;
     }
 }
 
@@ -52,10 +67,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `0x4c5a40`: the count, no validation, always one return.
     g.set(
         "GetNumWorldStateUI",
-        lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model.worldstate.rows.len() as i64)
-        })?,
+        lua.create_function(|lua, ()| Ok(rows(lua).len() as i64))?,
     )?;
 
     // A non-number raises (the `luaL_error` longjmps), an out-of-range index answers the single
@@ -63,24 +75,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetWorldStateUIInfo",
         lua.create_function(|lua, index: Value| {
-            let index = match index {
-                Value::Integer(i) => i as f64,
-                Value::Number(n) => n,
-                // A numeric string too, as `lua_isnumber` coerces.
-                Value::String(ref s) => match s.to_str().ok().and_then(|s| s.trim().parse().ok()) {
-                    Some(n) => n,
-                    None => return Err(mlua::Error::runtime("Usage: GetWorldStateUIInfo(index)")),
-                },
-                _ => return Err(mlua::Error::runtime("Usage: GetWorldStateUIInfo(index)")),
-            };
-            let row = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                // Truncated toward zero by `__ftol`, then 1-based.
-                usize::try_from(index.trunc() as i64)
-                    .ok()
-                    .and_then(|i| i.checked_sub(1))
-                    .and_then(|i| model.worldstate.rows.get(i).cloned())
-            };
+            // `lua_isnumber` (`0x6f34d0`), so a numeric string too; `_ftol` (`0x4c5aad`), then
+            // `dec` and an unsigned compare with the row count (`0x4c5ab8`, `0x4c5abb`).
+            let index =
+                super::binding_abi::number_arg(lua, index, "Usage: GetWorldStateUIInfo(index)")?;
+            let i = (index as u32).wrapping_sub(1) as usize;
+            let row = rows(lua).into_iter().nth(i);
             let Some(r) = row else {
                 return Ok(MultiValue::from_vec(vec![Value::Integer(0)]));
             };

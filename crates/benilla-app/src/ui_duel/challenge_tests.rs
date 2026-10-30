@@ -1,7 +1,6 @@
 //! `StartDuelUnit` on the whole client headless: the duel cast at whatever unit the token names,
 //! through the cast path.
 
-use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use crossbeam_channel::Receiver;
 
@@ -20,7 +19,7 @@ const DUEL: u32 = 7266;
 /// The whole client with us, a player party member and a creature 5 yards off, the duel spell
 /// known, and a VM whose resolver names the member as `party1`.
 fn client() -> (App, Receiver<ClientCommand>) {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     let world = app.world_mut();
@@ -81,6 +80,22 @@ fn client() -> (App, Receiver<ClientCommand>) {
         ..Default::default()
     });
     world.insert_non_send_resource(script);
+    // The party slot `party1` is read from at the call, as the list left it.
+    world
+        .resource_mut::<crate::ui_party::GroupState>()
+        .apply_list(
+            0,
+            0,
+            vec![benilla_protocol::messages::GroupMemberEntry {
+                name: "Member".into(),
+                guid: MEMBER,
+                status: 1,
+                flags: 0,
+            }],
+            ME,
+            None,
+            Some(ME),
+        );
     (app, rx)
 }
 
@@ -104,16 +119,10 @@ fn select(app: &mut App, guid: u64) {
     script.set_unit_guids(&guids);
 }
 
-/// `lua`, then the duel drain; the duel casts it sent, by target.
+/// `lua` with the host lent; the duel casts it sent inside its calls, by target.
 fn challenge(app: &mut App, rx: &Receiver<ClientCommand>, lua: &str) -> Vec<Option<u64>> {
-    let world = app.world_mut();
-    world
-        .non_send_resource_mut::<UiScript>()
-        .run(lua)
+    crate::script_calls::with_hosted_vm(app.world_mut(), |vm| vm.expect("a VM").run(lua))
         .expect("the challenge runs");
-    world
-        .run_system_once(super::drain_duel)
-        .expect("the duel drain runs");
     rx.try_iter()
         .filter_map(|c| match c {
             ClientCommand::CastSpell { spell_id, target } if spell_id == DUEL => Some(target),

@@ -1,4 +1,4 @@
-//! `SPELL_ACTIVE`, the reactive list's word (`0x4b31c0`), off the usable feed.
+//! `SPELL_ACTIVE`, the reactive list's word (`0x4b31c0`), off the usable refreshes.
 
 use bevy::prelude::*;
 
@@ -21,8 +21,8 @@ const AURA_STATE: u16 = 125;
 /// The player's guid.
 const ME: u64 = 0x10;
 
-/// The book holds the three, the bar nothing; the player alive, its aura state 0, the feed's
-/// first frame run.
+/// The book holds the three, registered in learn order, the bar nothing; the player alive, its
+/// aura state 0, its first frame run.
 fn app() -> App {
     let revenge = |id, rank: &str| {
         (
@@ -41,8 +41,10 @@ fn app() -> App {
     let mut app = App::new();
     let mut actions = PlayerActions::default();
     actions.spells.extend([REVENGE, REVENGE_2, FIREBALL]);
+    actions.initial = vec![REVENGE, REVENGE_2, FIREBALL];
     app.insert_resource(actions)
-        .insert_resource(crate::ui_macro::MacroBoundSpells::default())
+        .init_resource::<super::ReactiveSpells>()
+        .init_resource::<crate::ui_action::ActionSlots>()
         .insert_resource(Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(
                 [
@@ -82,23 +84,13 @@ fn app() -> App {
         .init_resource::<crate::ui_script::LeavingWorldArmed>()
         .init_resource::<crate::ui_script::SweptWorlds>()
         .insert_resource(NetCommands(tx))
-        // The usable refresh's callers and the cast targeting the walk reads.
-        .add_message::<crate::net::FieldChanged>()
-        .add_message::<crate::item_watch::ItemNotice>()
-        .add_message::<crate::net::WorldEnterCascadeMessage>()
+        // The enter cascade and the cast targeting the walk reads.
         .insert_resource(crate::net::SelfGuid(Some(ME)))
         .init_resource::<crate::spell::AutoSelfCast>()
-        .init_resource::<super::state::ActionEvents>();
+        .init_resource::<super::state::ActionStateMemory>();
     seat(&mut app);
+    arrive(&mut app);
     app.insert_non_send_resource(listener());
-    app.add_systems(
-        Update,
-        (
-            super::state::feed_action_state,
-            super::state::fire_action_events,
-        )
-            .chain(),
-    );
     // The VM's first frame, which meets the state as it stands and hears no refresh.
     app.update();
     app
@@ -114,6 +106,20 @@ fn seat(app: &mut App) {
     app.world_mut()
         .resource_mut::<crate::ui_script::LeavingWorldArmed>()
         .arm();
+}
+
+/// Our player's arrival's reset of the list and its registrar run over the initial spells
+/// (`0x5dea86`, `0x5dea96`-`0x5deab9`), as [`crate::net::objects`] runs it.
+fn arrive(app: &mut App) {
+    let world = app.world_mut();
+    let initial = world.resource::<PlayerActions>().initial.clone();
+    world.resource_scope(|world, mut reactive: Mut<super::ReactiveSpells>| {
+        let catalog = &world.resource::<Spells>().catalog;
+        reactive.0.reset();
+        for id in initial {
+            reactive.0.learned(id, catalog);
+        }
+    });
 }
 
 /// A VM that records the reactive word and the spells' usable event.
@@ -139,27 +145,19 @@ fn listener() -> UiScript {
     script
 }
 
-/// Set the player's aura state, its watch's edge (`0x6048b6`, a caller of the usable refresh) on a
-/// change, and run the feed once: what the VM heard.
+/// Set the player's aura state, run a frame, and on a change its watch's usable refresh
+/// (`0x6048b6`), as the drain runs it: what the VM heard.
 fn step(app: &mut App, aura_state: u32) -> Vec<String> {
     let mut q = app
         .world_mut()
-        .query_filtered::<(Entity, &mut ObjectStore), With<SelfPlayer>>();
-    let (entity, mut store) = q.single_mut(app.world_mut()).unwrap();
+        .query_filtered::<&mut ObjectStore, With<SelfPlayer>>();
+    let mut store = q.single_mut(app.world_mut()).unwrap();
     let old = store.0.unit_aura_state();
     store.0 = ObjectFields::from_pairs(&[(22, 100), (23, 500), (AURA_STATE, aura_state)]);
-    if old != aura_state {
-        app.world_mut().write_message(crate::net::FieldChanged {
-            at: crate::lanes::stamp(),
-            entity,
-            guid: ME,
-            kind: benilla_protocol::messages::ObjectType::Player,
-            index: AURA_STATE,
-            old,
-            new: aura_state,
-        });
-    }
     app.update();
+    if old != aura_state {
+        super::run_watcher_refresh_once(app.world_mut());
+    }
     let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
     s.resolve();
     s.eval::<Vec<String>>("local h = HEARD; HEARD = {}; return h")
@@ -210,9 +208,8 @@ fn a_reload_keeps_the_reactive_list_and_an_arrival_empties_it() {
     assert!(crate::ui_script::run_leave_world_sweep(app.world_mut()));
     app.insert_non_send_resource(listener());
     assert!(step(&mut app, 0x1).is_empty(), "the new VM's first frame");
-    select(&mut app, 0x20);
     assert_eq!(
-        step(&mut app, 0x1),
+        select_step(&mut app, 0x20, 0x1),
         ["SPELL_UPDATE_USABLE"],
         "a refresh: the list kept its answer, no second word"
     );
@@ -227,6 +224,7 @@ fn a_reload_keeps_the_reactive_list_and_an_arrival_empties_it() {
     let me = me.single(app.world()).unwrap();
     app.world_mut().despawn(me);
     seat(&mut app);
+    arrive(&mut app);
     assert_eq!(
         step(&mut app, 0x1),
         ["SPELL_ACTIVE Revenge", "SPELL_UPDATE_USABLE"],
@@ -268,10 +266,9 @@ fn relearning_a_lower_rank_keeps_the_entrys_answer() {
     );
     book(&mut app).spells.retain(|id| *id == FIREBALL);
     assert!(step(&mut app, 0x1).is_empty(), "both ranks unlearned");
-    book(&mut app).spells.insert(REVENGE);
-    select(&mut app, 0x20);
+    learn(&mut app, REVENGE);
     assert_eq!(
-        step(&mut app, 0x1),
+        select_step(&mut app, 0x20, 0x1),
         ["SPELL_UPDATE_USABLE"],
         "rank 1 relearned: a refresh, the entry kept its answer, no second word"
     );
@@ -282,14 +279,33 @@ fn book(app: &mut App) -> Mut<'_, PlayerActions> {
     app.world_mut().resource_mut::<PlayerActions>()
 }
 
-/// Select `guid`, a caller of the usable refresh (`0x493892`).
-fn select(app: &mut App, guid: u64) {
+/// A learn of `id`: into the book, and through the registrar's reactive leg (`0x4b2705`).
+fn learn(app: &mut App, id: u32) {
+    let world = app.world_mut();
+    world.resource_mut::<PlayerActions>().spells.insert(id);
+    world.resource_scope(|world, mut reactive: Mut<super::ReactiveSpells>| {
+        reactive.0.learned(id, &world.resource::<Spells>().catalog);
+    });
+}
+
+/// Select `guid` in the frame [`step`] runs at `aura_state`: its usable refresh runs inside the
+/// select (`0x493892`).
+fn select_step(app: &mut App, guid: u64, aura_state: u32) -> Vec<String> {
     app.insert_resource(crate::target::Selection {
         target: None,
         guid: Some(guid),
         last: None,
         lit: None,
     });
+    let mut heard = step(app, aura_state);
+    super::run_watcher_refresh_once(app.world_mut());
+    let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+    s.resolve();
+    heard.extend(
+        s.eval::<Vec<String>>("local h = HEARD; HEARD = {}; return h")
+            .unwrap(),
+    );
+    heard
 }
 
 /// The re-check is `0x4b31c0`'s own loop (`0x4b31d7`-`0x4b323d`), so it runs inside each of the
@@ -305,9 +321,8 @@ fn the_reactive_re_check_runs_inside_each_usable_refresh_alone() {
     q.single_mut(app.world_mut()).unwrap().0 =
         ObjectFields::from_pairs(&[(22, 100), (23, 500), (AURA_STATE, 0x1)]);
     assert!(step(&mut app, 0x1).is_empty(), "no caller: no re-check");
-    select(&mut app, 0x20);
     assert_eq!(
-        step(&mut app, 0x1),
+        select_step(&mut app, 0x20, 0x1),
         ["SPELL_ACTIVE Revenge", "SPELL_UPDATE_USABLE"],
         "the select's refresh re-checks the list"
     );
@@ -320,8 +335,10 @@ fn the_reactive_re_check_runs_inside_each_usable_refresh_alone() {
 fn the_bars_usable_event_comes_before_the_reactive_word() {
     let mut app = app();
     {
-        let mut actions = app.world_mut().resource_mut::<PlayerActions>();
-        actions.buttons.insert(
+        let mut slots = app
+            .world_mut()
+            .resource_mut::<crate::ui_action::ActionSlots>();
+        slots.buttons.insert(
             0,
             benilla_protocol::messages::ActionButton {
                 slot: 0,
@@ -329,7 +346,6 @@ fn the_bars_usable_event_comes_before_the_reactive_word() {
                 kind: benilla_protocol::messages::ACTION_KIND_SPELL,
             },
         );
-        actions.dirty = true;
     }
     app.world_mut()
         .non_send_resource_mut::<UiScript>()

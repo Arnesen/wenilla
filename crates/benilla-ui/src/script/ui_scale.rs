@@ -46,13 +46,13 @@ pub(crate) fn effective_ui_scale(ui_scale: f32, aspect: f32) -> f32 {
     floored_ui_scale(capped_ui_scale(ui_scale, aspect))
 }
 
-/// The automatic scale `0x492f70` computes for a `w`×`h` display: 1.0, or `768/h` above 768 tall
-/// (`0x492fbc cmp esi,0x300`), under the same narrow-aspect cap, then raised to 0.9 unless above it
-/// (`0x493005`–`0x493012`).
-pub(crate) fn auto_ui_scale(w: u32, h: u32) -> f32 {
+/// The automatic scale `0x492f70` computes for a display `h` tall at the display aspect `aspect`
+/// (`0x4901e0`, read at `0x492fb4`): 1.0, or `768/h` above 768 tall (`0x492fbc cmp esi,0x300`),
+/// under the same narrow-aspect cap, then raised to 0.9 unless above it (`0x493005`–`0x493012`).
+pub(crate) fn auto_ui_scale(h: u32, aspect: f32) -> f32 {
     let mut v = if h > 768 { 768.0 / h as f32 } else { 1.0 };
     if h > 0 {
-        v = capped_ui_scale(v, w as f32 / h as f32);
+        v = capped_ui_scale(v, aspect);
     }
     if v > 0.9 {
         v
@@ -104,37 +104,43 @@ impl UiScript {
     /// (`0x492efd fcomp [0x804584]; test ah,1; jne 0x492f4a`); below, it falls to the automatic
     /// scale `0x492f70(w, h, force = 0)` ([`auto_ui_scale`]), which does nothing at all when the
     /// display is the one it last ran for (`auto_cache`, the reference's `[0xb4e304]`/`[0xb4e308]`,
-    /// which outlive the UI). `display` is the window in logical px, the host's unit for the
+    /// which outlive the UI), and then signals `DISPLAY_SIZE_CHANGED` (`0x492f57`/`0x492f5c`, event
+    /// `0x1ff`), cache hit or not. `display` is the window in logical px, the host's unit for the
     /// reference's device size. `true` when a scale reached `UIParent`.
     pub fn apply_ui_scale(
         &mut self,
         display: (u32, u32),
         auto_cache: &mut Option<(u32, u32)>,
     ) -> bool {
-        let applied = {
+        let (target, signal) = {
             let model = self.model_ref();
             let Some(ui_scale) = model.ui_scale_request else {
                 return false;
             };
             let aspect = model.screen_aspect();
             let v = capped_ui_scale(ui_scale, aspect);
-            let v = if v >= UI_SCALE_FLOOR {
-                v
+            let parent = |v| model.arena.lookup("UIParent").map(|h| (h, v));
+            if v >= UI_SCALE_FLOOR {
+                (parent(v), false)
             } else {
                 let (w, h) = display;
                 if w > 0 && h > 0 && *auto_cache == Some(display) {
-                    return false;
+                    (None, true)
+                } else {
+                    *auto_cache = Some(display);
+                    // The aspect is the cells' (`0x4901e0`), never the display's own `w/h`.
+                    (parent(floored_ui_scale(auto_ui_scale(h, aspect))), true)
                 }
-                *auto_cache = Some(display);
-                floored_ui_scale(auto_ui_scale(w, h))
-            };
-            model.arena.lookup("UIParent").map(|h| (h, v))
+            }
         };
-        let Some((ui_parent, v)) = applied else {
-            return false;
-        };
-        self.model_mut().set_frame_scale(ui_parent, v, true);
-        true
+        let scaled = target.is_some_and(|(ui_parent, v)| {
+            self.model_mut().set_frame_scale(ui_parent, v, true);
+            true
+        });
+        if signal {
+            self.fire_event("DISPLAY_SIZE_CHANGED", Vec::new());
+        }
+        scaled
     }
 }
 
@@ -184,11 +190,13 @@ mod tests {
     /// The automatic scale (`0x492f70`): 1.0 up to 768 tall, `768/h` above it, never under 0.9.
     #[test]
     fn the_auto_scale_follows_the_height_and_stops_at_nine_tenths() {
-        assert_eq!(auto_ui_scale(1024, 768), 1.0);
-        assert_eq!(auto_ui_scale(1280, 800), 0.96);
-        assert_eq!(auto_ui_scale(1920, 1080), 0.9);
+        assert_eq!(auto_ui_scale(768, 4.0 / 3.0), 1.0);
+        assert_eq!(auto_ui_scale(800, 1.6), 0.96);
+        assert_eq!(auto_ui_scale(1080, 16.0 / 9.0), 0.9);
         // A tall narrow display: capped, then raised to 0.9.
-        assert_eq!(auto_ui_scale(600, 700), 0.9);
+        assert_eq!(auto_ui_scale(700, 600.0 / 700.0), 0.9);
+        // 4/3 itself is never capped.
+        assert_eq!(auto_ui_scale(700, 4.0 / 3.0), 1.0);
     }
 
     /// The display handler (`0x492e90`) never floors: a dial capped below 0.64 falls to the
@@ -198,24 +206,37 @@ mod tests {
     fn below_the_floor_the_display_handler_falls_to_the_auto_scale() {
         let mut s = UiScript::new().unwrap();
         s.set_screen_size(1024.0, 768.0);
-        s.run(r#"CreateFrame("Frame", "UIParent")"#).unwrap();
+        s.run(
+            r#"CreateFrame("Frame", "UIParent")
+            sizes = 0
+            local f = CreateFrame("Frame", "SizeWatcher")
+            f:RegisterEvent("DISPLAY_SIZE_CHANGED")
+            f:SetScript("OnEvent", function() sizes = sizes + 1 end)"#,
+        )
+        .unwrap();
         let scale = |s: &UiScript| s.eval::<f32>("return UIParent:GetScale()").unwrap();
+        let size_events = |s: &UiScript| s.eval::<i64>("return sizes").unwrap();
         let mut cache = None;
         assert!(s.seat_ui_scale(0.5, (1280, 800), &mut cache));
         assert_eq!(scale(&s), 0.96, "the load took the auto scale for 1280×800");
         assert_eq!(cache, Some((1280, 800)));
-        // The same display again: the auto path does nothing at all.
+        assert_eq!(size_events(&s), 1);
+        // The same display again: the auto scale does nothing, but the event still fires.
         s.run("UIParent:SetScale(0.7)").unwrap();
         assert!(!s.apply_ui_scale((1280, 800), &mut cache));
         assert_eq!(scale(&s), 0.7);
+        assert_eq!(size_events(&s), 2, "the load's and the cache hit's");
         // A new display runs it.
         assert!(s.apply_ui_scale((1920, 1080), &mut cache));
         assert_eq!(scale(&s), 0.9);
         // The CVar callback floors.
         assert!(s.set_ui_scale(0.55));
         assert_eq!(scale(&s), UI_SCALE_FLOOR);
-        // At the floor or above, the display handler hands the value to the sink.
+        assert_eq!(size_events(&s), 3, "the new display's");
+        // At the floor or above, the display handler hands the value to the sink and signals
+        // nothing (`0x492f0a` onward).
         assert!(s.seat_ui_scale(0.8, (1920, 1080), &mut cache));
         assert_eq!(scale(&s), 0.8);
+        assert_eq!(size_events(&s), 3);
     }
 }

@@ -91,6 +91,7 @@ fn row(sender: &str, subject: &str, was_read: bool, item_id: u32, cod: u32) -> M
         item_name: (item_id != 0).then(|| "Linen Cloth".to_string()),
         item_texture: (item_id != 0).then(|| "Interface\\Icons\\INV_Fabric_Linen_01".to_string()),
         item_quality: (item_id != 0).then_some(1),
+        item_inventory_type: 0,
         item_random_property_id: 0,
         item_charges: 0,
         item_durability: (0, 0),
@@ -883,6 +884,15 @@ fn the_compose_reset_clears_the_subject_and_the_attachment_together() {
     s.set_screen_size(1024.0, 768.0);
     load_ui(&s);
     s.set_container(0, Some(one_linen_backpack()));
+    // `GetSendMailItem` reads the attachment's template (`0x4ae604`).
+    s.set_item_template(
+        2589,
+        benilla_ui::script::ItemTemplateView {
+            name: "Linen Cloth".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
     s.fire_event("MAIL_SHOW", vec![]);
     // The list answer to `MAIL_SHOW`'s `CheckInbox` lifts the request lock (`0x4ad5d0`).
     s.mail_request_resolved();

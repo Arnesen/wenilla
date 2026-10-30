@@ -616,6 +616,64 @@ mod loader_tests {
         );
     }
 
+    /// A `<Script file>`'s body runs after the file (`0x6ee0d4`, then `0x6ee0ff`-`0x6ee10f`).
+    #[test]
+    fn a_script_file_body_runs_after_the_file() {
+        let s = UiScript::new().unwrap();
+        let provider = |path: &str| -> Option<Vec<u8>> {
+            (path == "A.lua").then(|| b"Order = 'file'".to_vec())
+        };
+        let doc = parse(r#"<Ui><Script file="A.lua">Order = Order .. ',body'</Script></Ui>"#);
+        let report = load(&s, &doc, &provider);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(s.eval::<String>("return Order").unwrap(), "file,body");
+    }
+
+    /// A `<Script file>` runs with the document's status (`0x704bc0`): a compile failure logs the
+    /// compiler's message (`0x704b31`) and a run failure what the error function answered
+    /// (`0x704b8d`), each alone at severity 2; an inline body's failure logs nothing.
+    #[test]
+    fn a_script_file_failure_is_a_load_status_line() {
+        let s = UiScript::new().unwrap();
+        s.run(r#"seterrorhandler(function(m) Heard = (Heard or "") .. m .. "|" return "ret:" .. m end)"#)
+            .unwrap();
+        let provider = |path: &str| -> Option<Vec<u8>> {
+            match path {
+                "Bad.lua" => Some(b"this is not lua".to_vec()),
+                "Boom.lua" => Some(b"error(\"boom\")".to_vec()),
+                _ => None,
+            }
+        };
+        let doc = parse(
+            r#"<Ui><Script file="Bad.lua"/><Script file="Boom.lua"/><Script>error("inline")</Script></Ui>"#,
+        );
+        let report = load(&s, &doc, &provider);
+        let heard = s.eval::<String>("return Heard").unwrap();
+        let heard: Vec<&str> = heard.split('|').collect();
+        assert_eq!(heard.len(), 4, "{heard:?}");
+        assert_eq!(
+            report.status.lines(),
+            [heard[0].to_string(), format!("ret:{}", heard[1])]
+        );
+        assert!(heard[1].ends_with("boom"), "{heard:?}");
+    }
+
+    /// An inline `<Script>` body runs with no status (`0x704cd1` passes 0), so its compile or run
+    /// error reaches only the Lua error handler, never the load status FrameXML.log prints.
+    #[test]
+    fn an_inline_script_error_writes_no_load_status_line() {
+        let s = UiScript::new().unwrap();
+        let doc =
+            parse(r#"<Ui><Script>error("inline boom")</Script><Script>if then</Script></Ui>"#);
+        let report = load(&s, &doc, &no_files);
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(
+            report.status.lines().is_empty(),
+            "{:?}",
+            report.status.lines()
+        );
+    }
+
     #[test]
     fn include_resolves_through_provider() {
         let s = UiScript::new().unwrap();
@@ -708,6 +766,78 @@ mod loader_tests {
             (Some([1.0; 4]), Some([red, none, none, red])),
             "HORIZONTAL, the missing MaxColor transparent black"
         );
+    }
+
+    /// An empty `name=` leaves a region unnamed: the region loader skips it (`0x76fe07`) and
+    /// `SetName 0x76c650` refuses `""` (`0x76c664`), which the Lua constructors reach too.
+    #[test]
+    fn an_empty_region_name_leaves_it_unnamed() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="EmptyNames">
+                   <Layers><Layer level="ARTWORK">
+                     <FontString name="" inherits="GameFontNormal"/>
+                     <Texture name=""/>
+                   </Layer></Layers>
+                 </Frame>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let names: String = s
+            .eval(
+                r#"local out = {}
+                   for _, r in ipairs({ EmptyNames:GetRegions() }) do
+                     table.insert(out, tostring(r:GetName()))
+                   end
+                   table.insert(out, tostring(EmptyNames:CreateTexture(""):GetName()))
+                   table.insert(out, tostring(EmptyNames:CreateFontString(""):GetName()))
+                   table.insert(out, tostring(getglobal("")))
+                   return table.concat(out, ",")"#,
+            )
+            .unwrap();
+        assert_eq!(names, "nil,nil,nil,nil,nil");
+    }
+
+    /// `0x6f2630` rewrites a stop on every matching child (`0x6f2690`-`0x6f26d8`): the last
+    /// `MinColor` and the last `MaxColor` win.
+    #[test]
+    fn an_xml_gradient_takes_its_last_min_and_max_color() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                 <Frame name="Fades">
+                   <Size><AbsDimension x="100" y="100"/></Size>
+                   <Anchors><Anchor point="CENTER"/></Anchors>
+                   <Layers><Layer level="ARTWORK">
+                     <Texture name="Twice" setAllPoints="true">
+                       <Color r="1" g="1" b="1"/>
+                       <Gradient>
+                         <MinColor r="1" g="0" b="0"/>
+                         <MaxColor r="0" g="1" b="0"/>
+                         <MinColor r="0" g="0" b="1"/>
+                         <MaxColor r="1" g="1" b="0"/>
+                       </Gradient>
+                     </Texture>
+                   </Layer></Layers>
+                 </Frame>
+               </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+        let gradient = s
+            .extract()
+            .iter()
+            .find_map(|q| match &q.content {
+                QuadContent::Texture { gradient, .. } => *gradient,
+                _ => None,
+            })
+            .expect("the gradient extracts");
+        let (blue, yellow) = ([0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(gradient, [blue, yellow, yellow, blue]);
     }
 
     /// `CSimpleFrame::LoadXML 0x769820`: a strata `0x6f17d0` does not know logs at severity 1
@@ -962,14 +1092,28 @@ mod loader_tests {
         );
     }
 
+    /// A handler that fails to compile reports nothing at load (`0x704c87`-`0x704c9f`) and fills
+    /// its slot with -1 (`0x702642`): it replaces the template's, `GetScript` answers nil
+    /// (`0x7748b9`), each fire calls nil, the enables still run (`0x70264c`, `0x769f6b`), and the
+    /// broken `OnLoad` errors when it fires in the template's place.
     #[test]
-    fn bad_handler_is_an_error_and_load_continues() {
+    fn a_handler_that_fails_to_compile_fills_its_slot_with_a_nil_call() {
         let s = UiScript::new().unwrap();
         let doc = parse(
             r#"<Ui>
-                <Frame name="Broken">
-                    <Scripts><OnLoad>this that syntax error(((</OnLoad></Scripts>
-                </Frame>
+                <Button name="ClickTemplate" virtual="true">
+                    <Scripts>
+                        <OnLoad>TemplateLoaded = true</OnLoad>
+                        <OnClick>TemplateClicks = (TemplateClicks or 0) + 1</OnClick>
+                    </Scripts>
+                </Button>
+                <Button name="Broken" inherits="ClickTemplate">
+                    <Scripts>
+                        <OnLoad>this that syntax error(((</OnLoad>
+                        <OnClick>if then</OnClick>
+                        <OnEnter>(((</OnEnter>
+                    </Scripts>
+                </Button>
                 <Frame name="Fine">
                     <Scripts><OnLoad>FineRan = true</OnLoad></Scripts>
                 </Frame>
@@ -977,16 +1121,34 @@ mod loader_tests {
         );
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 2, "both frames still created");
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert!(
-            report.errors.iter().any(|e| e.contains("compiling")),
-            "expected a compile error, got {:?}",
+            report.errors[0].ends_with("OnLoad: runtime error: attempt to call a nil value"),
+            "{:?}",
             report.errors
         );
-        assert!(s.eval::<bool>("return Broken ~= nil").unwrap());
-        assert!(s.eval::<bool>("return FineRan == true").unwrap());
+        assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+        assert!(s
+            .eval::<bool>(
+                r#"return TemplateLoaded == nil and FineRan == true
+                    and Broken:GetScript("OnClick") == nil and Broken:GetScript("OnLoad") == nil
+                    and Broken:IsMouseEnabled() == 1"#
+            )
+            .unwrap());
+        s.run(
+            r#"seterrorhandler(function(m) Seen = (Seen or "") .. m .. ";" end)
+               Broken:Click() Broken:Click()"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<String>("return Seen").unwrap(),
+            "attempt to call a nil value;attempt to call a nil value;"
+        );
+        assert!(s.eval::<bool>("return TemplateClicks == nil").unwrap());
     }
 
-    /// `OnAttributeChanged` is 2.0's; no 1.12 handler resolver has a slot for it.
+    /// `OnAttributeChanged` is 2.0's; no 1.12 handler resolver has a slot for it, so the frame
+    /// reports `Frame %s: Unknown script element %s` (`0x878778`, `0x769f44`).
     #[test]
     fn unsupported_script_name_is_a_warning() {
         let s = UiScript::new().unwrap();
@@ -996,10 +1158,30 @@ mod loader_tests {
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 1);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.contains("OnAttributeChanged")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Frame Keyed: Unknown script element OnAttributeChanged"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    /// The name is looked up before the body compiles (`0x7025d5`, `0x70263a`): an unknown tag
+    /// whose body is a syntax error reports the unknown element, not a compile error.
+    #[test]
+    fn an_unknown_script_tag_is_reported_before_its_body_compiles() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui><Frame name="Early"><Scripts><OnClick>this is ((( broken</OnClick></Scripts></Frame></Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            report.warnings,
+            ["Frame Early: Unknown script element OnClick"]
+        );
     }
 
     /// `Instantiate 0x6ee280` logs `"Unknown frame type: %s"` (`0x871124`) and builds nothing for

@@ -16,7 +16,9 @@ use crate::names::NameCache;
 use crate::net::{GuidIndex, NetEntity, ObjectStore};
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 
-use super::{party_member_pos, BlipCtx, MinimapBlipHover, TrackedCandidates, BLIP_BASIS_PX};
+use super::{
+    group_records, BlipBlock, BlipCtx, BlipName, MinimapBlipHover, TrackedCandidates, BLIP_BASIS_PX,
+};
 
 /// The quest dot's quad, 8 px (`0xbc82a8`, frozen by the ctor); the per-cell scale table
 /// `{1,1,1,1,1.3}` scales only the party cell 4.
@@ -62,7 +64,7 @@ fn unit_dot_eligible(store: Option<&ObjectStore>, me: Option<u64>) -> bool {
 }
 
 /// Draw a gold dot per quest giver at status 7, culled at the view radius in 3-D distance with
-/// no rim arrow. Runs after the player arrow, so the dots draw on top.
+/// no rim arrow, in the map's own layer, under the arrow children.
 pub(in crate::minimap) fn emit_quest_dots(
     ctx: &BlipCtx,
     statuses: &HashMap<u64, u32>,
@@ -109,7 +111,7 @@ pub(in crate::minimap) fn emit_quest_dots(
         });
         if let Some(c) = ctx.cursor {
             if rect.contains(c) {
-                *hover = MinimapBlipHover::Npc(npc, grey);
+                hover.push(BlipBlock::Dot(3), BlipName::Unit(npc), grey);
             }
         }
     }
@@ -179,7 +181,7 @@ pub(in crate::minimap) fn emit_tracking_dots(
     hover: &mut MinimapBlipHover,
 ) {
     // The unit pass runs even with an empty creature mask: the always-show clauses need none.
-    let mut dot = |guid: u64, tf: &GlobalTransform, cell: [f32; 4], name: DotName| {
+    let mut dot = |guid: u64, tf: &GlobalTransform, cell: [f32; 4], category: u8, name: DotName| {
         let w = bevy_to_wow(tf.translation());
         let d3 =
             ((w[0] - ctx.wx).powi(2) + (w[1] - ctx.wy).powi(2) + (w[2] - ctx.wz).powi(2)).sqrt();
@@ -202,10 +204,11 @@ pub(in crate::minimap) fn emit_tracking_dots(
         });
         if let Some(c) = ctx.cursor {
             if rect.contains(c) {
-                *hover = match name {
-                    DotName::Guid => MinimapBlipHover::Npc(guid, grey),
-                    DotName::Known(n) => MinimapBlipHover::TrackedGo(n, grey),
+                let name = match name {
+                    DotName::Guid => BlipName::Unit(guid),
+                    DotName::Known(n) => BlipName::Known(n),
                 };
+                hover.push(BlipBlock::Dot(category), name, grey);
             }
         }
     };
@@ -221,7 +224,13 @@ pub(in crate::minimap) fn emit_tracking_dots(
                     continue; // template not answered yet
                 };
                 if tracked_resource(tracking.resources, t.lock_id, locks) {
-                    dot(guid.0, tf, TRACKED_GO_CELL, DotName::Known(t.name.clone()));
+                    dot(
+                        guid.0,
+                        tf,
+                        TRACKED_GO_CELL,
+                        0,
+                        DotName::Known(t.name.clone()),
+                    );
                 }
             }
         }
@@ -247,7 +256,7 @@ pub(in crate::minimap) fn emit_tracking_dots(
             .unwrap_or((0, false));
         let creature_type = store.map(|s| types.of(s));
         if tracked_creature(tracking, creature_type, dyn_flags, creeping) {
-            dot(guid.0, tf, TRACKED_UNIT_CELL, DotName::Guid);
+            dot(guid.0, tf, TRACKED_UNIT_CELL, 1, DotName::Guid);
         }
     }
 }
@@ -259,35 +268,53 @@ enum DotName {
     Known(String),
 }
 
-/// The party dots, the in-range half of the party placement `0x6dad10`: blue cell 4 at 1.3×,
-/// drawn last with the object dots, above every arrow (`0x4ed7b7`).
+/// The party and pet dots, the in-range half of the party placement `0x6dad10`: blue cell 4 at
+/// 1.3× for each of the five [`group_records`] records within 0.8 of the radius
+/// (`0x4ed6b0`-`0x4ed7a7`), drawn last in the map's own layer (`0x4ed7b7`), under every arrow
+/// child. The probe names each record under the cursor by its guid, never grey (the dot's
+/// `+0x10` is 0, `0x4ed740`): its dot in category 4 (`0x4eb2fa`-`0x4eb33c`), else its arrow frame
+/// (`0x4eb42d`-`0x4eb4a9`), whose name is the member's cache entry or the pet's unit name
+/// (`0x6daeee`-`0x6daf26`).
+#[allow(clippy::too_many_arguments)] // the shared blip inputs plus the hover out
 pub(in crate::minimap) fn emit_party_dots(
     ctx: &BlipCtx,
     group: &crate::ui_party::GroupState,
     guids: &GuidIndex,
     unit_pos: &Query<&GlobalTransform, With<NetEntity>>,
+    pet: Option<u64>,
     icons: &Handle<Image>,
     quads: &mut UiQuads,
+    hover: &mut MinimapBlipHover,
 ) {
-    for m in group.party_slots() {
-        let Some((x, y)) = party_member_pos(m, group, guids, unit_pos) else {
-            continue;
-        };
+    for (guid, (x, y)) in group_records(group, guids, unit_pos, pet)
+        .into_iter()
+        .flatten()
+    {
         let d = ((x - ctx.wx).powi(2) + (y - ctx.wy).powi(2)).sqrt();
-        if d / ctx.radius_yd > super::BLIP_EDGE_RATIO {
-            continue; // out of range: the arrow pass drew it
-        }
-        quads.overlays.push(UiQuad {
-            rect: Rect::from_center_size(
+        let (rect, block) = if d / ctx.radius_yd > super::BLIP_EDGE_RATIO {
+            // Out of range: the arrow child draws it; only its frame is hit-tested here.
+            (
+                super::rim_arrow_rect(ctx, [x, y, 0.0]),
+                BlipBlock::GroupArrow,
+            )
+        } else {
+            let rect = Rect::from_center_size(
                 ctx.center + ctx.offset([x, y, 0.0]),
                 Vec2::splat(ctx.side * (PARTY_DOT_PX / BLIP_BASIS_PX)),
-            ),
-            z_key: ctx.z,
-            texture: Some(icons.clone()),
-            uv: UvRect::from_tex_coords(PARTY_DOT_CELL),
-            color: [1.0, 1.0, 1.0, ctx.alpha],
-            ..default()
-        });
+            );
+            quads.overlays.push(UiQuad {
+                rect,
+                z_key: ctx.z,
+                texture: Some(icons.clone()),
+                uv: UvRect::from_tex_coords(PARTY_DOT_CELL),
+                color: [1.0, 1.0, 1.0, ctx.alpha],
+                ..default()
+            });
+            (rect, BlipBlock::Dot(4))
+        };
+        if ctx.cursor.is_some_and(|c| rect.contains(c)) {
+            hover.push(block, BlipName::Unit(guid), false);
+        }
     }
 }
 
@@ -371,6 +398,183 @@ mod tests {
         assert!(
             !unit_dot_eligible(Some(&with(&[(FIELD_BYTES_1, UNTRACKABLE)])), Some(ME)),
             "and the untrackable bit blanks it outright"
+        );
+    }
+
+    /// The dot loop draws all five group records' dots (`0x4ed6b0`-`0x4ed7a7`, stride `0x50` to
+    /// `0x190`), the pet's record (slot 4, `0x6dad8c`) among them: our pet in range draws the
+    /// party's blue dot, and beyond 0.8 of the radius none, where its rim arrow is
+    /// (`0x6daf5c`).
+    #[test]
+    fn the_pet_draws_the_party_dot_in_range() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let unit = |w: [f32; 3]| {
+            (
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                GlobalTransform::from_translation(benilla_assets::coords::wow_to_bevy(w)),
+            )
+        };
+        let near = world.spawn(unit([50.0, 0.0, 0.0])).id();
+        let far = world.spawn(unit([120.0, 0.0, 0.0])).id();
+        let mut guids = GuidIndex::default();
+        guids.0.extend([(0xF140, near), (0xF141, far)]);
+        world.insert_resource(guids);
+        world.init_resource::<crate::ui_party::GroupState>();
+        let dots = |world: &mut World, pet: Option<u64>| {
+            world
+                .run_system_once(
+                    move |q: Query<&GlobalTransform, With<NetEntity>>,
+                          guids: Res<GuidIndex>,
+                          group: Res<crate::ui_party::GroupState>| {
+                        let ctx = BlipCtx {
+                            center: Vec2::ZERO,
+                            side: BLIP_BASIS_PX,
+                            px_per_yd: BLIP_BASIS_PX * 0.5 / 133.0,
+                            radius_yd: 133.0,
+                            z: 0,
+                            alpha: 1.0,
+                            wx: 0.0,
+                            wy: 0.0,
+                            wz: 0.0,
+                            cursor: None,
+                        };
+                        let mut quads = UiQuads::default();
+                        emit_party_dots(
+                            &ctx,
+                            &group,
+                            &guids,
+                            &q,
+                            pet,
+                            &Handle::default(),
+                            &mut quads,
+                            &mut MinimapBlipHover::default(),
+                        );
+                        quads
+                            .overlays
+                            .iter()
+                            .map(|q| (q.rect.center(), q.uv))
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .unwrap()
+        };
+        let got = dots(&mut world, Some(0xF140));
+        assert_eq!(got.len(), 1, "the pet in range: one dot");
+        assert!(
+            got[0].1 == UvRect::from_tex_coords(PARTY_DOT_CELL),
+            "the party's cell"
+        );
+        assert!(
+            got[0].0.y < 0.0 && got[0].0.x.abs() < 1e-3,
+            "north of us, up: {:?}",
+            got[0].0
+        );
+        assert!(
+            dots(&mut world, Some(0xF141)).is_empty(),
+            "past 0.8 of 133: the arrow's"
+        );
+        assert!(
+            dots(&mut world, Some(0xF142)).is_empty(),
+            "not streamed: nothing"
+        );
+        assert!(dots(&mut world, None).is_empty(), "no pet");
+    }
+
+    /// The probe names the party and pet blips under the cursor: an in-range dot of category 4
+    /// by its guid (`0x4eb2fa`-`0x4eb33c`), through the object's name method else the name cache,
+    /// and a rim arrow through the five group arrow frames (`0x4eb42d`-`0x4eb4a9`), by its
+    /// record's name, the member's cache entry or the pet's unit name (`0x6daeee`-`0x6daf26`).
+    /// Neither draws grey (the dot record's `+0x10` is 0, `0x4ed740`).
+    #[test]
+    fn party_and_pet_dots_and_arrows_hover_by_guid() {
+        use bevy::ecs::system::RunSystemOnce;
+        const MEMBER: u64 = 0x51;
+        const PET: u64 = 0xF140;
+        let mut world = World::new();
+        let unit = |w: [f32; 3]| {
+            (
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                GlobalTransform::from_translation(benilla_assets::coords::wow_to_bevy(w)),
+            )
+        };
+        // The member 50 yd north, in range; the pet 120 yd west, past 0.8 of 133.
+        let member = world.spawn(unit([50.0, 0.0, 0.0])).id();
+        let pet = world.spawn(unit([0.0, 120.0, 0.0])).id();
+        let mut guids = GuidIndex::default();
+        guids.0.extend([(MEMBER, member), (PET, pet)]);
+        world.insert_resource(guids);
+        let mut group = crate::ui_party::GroupState::default();
+        let entry = |guid: u64, name: &str| benilla_protocol::messages::GroupMemberEntry {
+            name: name.into(),
+            guid,
+            status: 1,
+            flags: 0,
+        };
+        group.apply_list(0, 0, vec![entry(MEMBER, "Aldwyn")], MEMBER, None, None);
+        world.insert_resource(group);
+        let ctx = |cursor: Vec2| BlipCtx {
+            center: Vec2::ZERO,
+            side: BLIP_BASIS_PX,
+            px_per_yd: BLIP_BASIS_PX * 0.5 / 133.0,
+            radius_yd: 133.0,
+            z: 0,
+            alpha: 1.0,
+            wx: 0.0,
+            wy: 0.0,
+            wz: 0.0,
+            cursor: Some(cursor),
+        };
+        let hover = |world: &mut World, cursor: Vec2| {
+            world
+                .run_system_once(
+                    move |q: Query<&GlobalTransform, With<NetEntity>>,
+                          guids: Res<GuidIndex>,
+                          group: Res<crate::ui_party::GroupState>| {
+                        let ctx = ctx(cursor);
+                        let mut quads = UiQuads::default();
+                        let mut hover = MinimapBlipHover::default();
+                        emit_party_dots(
+                            &ctx,
+                            &group,
+                            &guids,
+                            &q,
+                            Some(PET),
+                            &Handle::default(),
+                            &mut quads,
+                            &mut hover,
+                        );
+                        hover.lines().first().map(|l| (l.name.clone(), l.block))
+                    },
+                )
+                .unwrap()
+        };
+        // The member's dot, north (up): offset (0, -50 · px_per_yd).
+        let dot = Vec2::new(0.0, -50.0 * BLIP_BASIS_PX * 0.5 / 133.0);
+        assert_eq!(
+            hover(&mut world, dot),
+            Some((BlipName::Unit(MEMBER), BlipBlock::Dot(4))),
+            "the dot"
+        );
+        // The pet's arrow on the 0.8 rim toward the west (left).
+        let arrow = Vec2::new(-BLIP_BASIS_PX * 0.5 * super::super::BLIP_EDGE_RATIO, 0.0);
+        assert_eq!(
+            hover(&mut world, arrow),
+            Some((BlipName::Unit(PET), BlipBlock::GroupArrow)),
+            "the arrow"
+        );
+        assert_eq!(
+            hover(&mut world, Vec2::new(0.0, 30.0)),
+            None,
+            "south of us: neither"
         );
     }
 

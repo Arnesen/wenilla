@@ -9,7 +9,9 @@
 //! ([`UiScript::host_out`]) and a call's apply ([`CallHost::apply`]). The handlers either fires
 //! (an event's listeners, a widget's script) are held ([`holding`]) and run as soon as the host
 //! is back, in the order fired, so a call a handler makes applies in place, inside its verb, as
-//! the reference's does: they read the state the step left, not the state at the signal.
+//! the reference's does: they read the state the step left, not the state at the signal. An apply
+//! that goes on after a signal, as the reference's verb does, lends the host back there
+//! ([`UiScript::signal_point`]), so what it held runs before its next step.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -22,9 +24,113 @@ use super::{ScriptCall, UiScript};
 pub trait CallHost {
     /// Apply `call`, with the input events it was made under raised. The host is out of the VM
     /// while this runs, so a call a handler makes meanwhile waits, and applies next, ahead of any
-    /// made after this one. Whatever must run Lua with the host back in place (an event this call
-    /// signals, a macro's lines) is returned as the tail.
+    /// made after this one, or at a signal point the apply reaches ([`UiScript::signal_point`]).
+    /// Whatever must run Lua with the host back in place (an event this call signals, a macro's
+    /// lines) is returned as the tail.
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail>;
+
+    /// Hand `read` the item `key` names, as a getter reads it now: its record off the item cache
+    /// and, for an object, its descriptor, each field derived as it is asked for. Whether there was
+    /// one to hand: `false` for an object the engine does not hold, and from a host that reads
+    /// none. `read` runs no Lua.
+    fn read_item(
+        &mut self,
+        key: super::ItemKey,
+        read: &mut dyn FnMut(&dyn super::ItemRead),
+    ) -> bool {
+        let _ = (key, read);
+        false
+    }
+
+    /// Hand `read` the unit object the engine holds under `guid`, as a getter reads it now: its
+    /// descriptor's own fields, each derived as it is asked for, as of the place the getter runs
+    /// (`UnitHealth` reads the object, `0x5174d0`). Whether there was one to hand: `false` when it
+    /// holds no object there, and from a host that reads none. `read` runs no Lua.
+    fn read_unit_object(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(&dyn super::UnitObjectRead),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Hand `read` what the unit-token resolver reads off the objects as it resolves now
+    /// (`0x515970`): the active player's object, a player's pet off its descriptor and a unit's
+    /// `UNIT_FIELD_TARGET`, as of the place the getter runs. Whether it read: `false` from a host
+    /// that reads none. `read` runs no Lua.
+    fn read_unit_tokens(&mut self, read: &mut dyn FnMut(&dyn super::UnitTokenObjects)) -> bool {
+        let _ = read;
+        false
+    }
+
+    /// Hand `read` what names the unit object the engine holds under `guid`, as a getter reads it
+    /// now: its name off the name caches (`0x609210`) and its race and class bytes through the
+    /// tables, as of the place the getter runs. Whether there was one to hand: `false` when it
+    /// holds no object there, and from a host that reads none. `read` runs no Lua.
+    fn read_unit_identity(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(&dyn super::UnitIdentityRead),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Hand `read` the unit object the engine holds under `guid` and its combat stats, as a stat
+    /// getter reads them now, each field derived as it is asked for, as of the place the getter
+    /// runs (`UnitStat` reads the object it resolved, `0x518600`): the active player's with what
+    /// its equipment and skills answer, any other unit's with their defaults. Whether there was
+    /// one to hand: `false` when it holds no object there, and from a host that reads none.
+    /// `read` runs no Lua.
+    fn read_unit_stats(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(&dyn super::UnitObjectRead, &dyn super::CombatRead),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Hand `read` the active player's combat stats as a getter with no unit argument reads them
+    /// now, with what its equipment and skills answer, as of the place it runs
+    /// (`GetDodgeChance`, `0x516f00`); `None` while it holds no player (0 at `0x516f42`). Whether
+    /// it read: `false` from a host that reads none. `read` runs no Lua.
+    fn read_own_stats(&mut self, read: &mut dyn FnMut(Option<&dyn super::CombatRead>)) -> bool {
+        let _ = read;
+        false
+    }
+
+    /// Hand `read` the active player's own fields as a getter reads them now (`GetMoney` reads
+    /// the coinage, `0x518160`), as of the place it runs; [`super::NoPlayer`] while it holds no
+    /// player (`0x5181db`). Whether it read: `false` from a host that reads none. `read` runs no
+    /// Lua.
+    fn read_self(&mut self, read: &mut dyn FnMut(&dyn super::SelfRead)) -> bool {
+        let _ = read;
+        false
+    }
+
+    /// Hand `read` the aura list of the unit held under `guid` as the aura walks read it now: the
+    /// object's slots with `UnitBuff`'s gate on the active player as it stands (`0x519617`,
+    /// `0x5195be`), else the roster record of a member with no object (`0x519735`), as of the
+    /// place the getter runs; `None` for neither. Whether it read: `false` from a host that reads
+    /// none. `read` runs no Lua.
+    fn read_unit_auras(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(Option<&dyn super::AuraListRead>),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Answer a getter's question of the live state ([`super::live::ask`]), as of the place it
+    /// runs, by the family its type names: whether one of the host's families took it. A host
+    /// that reads none takes none.
+    fn read_live(&mut self, ask: &mut super::live::LiveAsk<'_>) -> bool {
+        let _ = ask;
+        false
+    }
 }
 
 /// What a call leaves for the VM to run once its host is back in the VM.
@@ -47,6 +153,45 @@ struct HostSlot {
     /// An engine step that cannot lend the host is running (an engine turn, or a call's apply) and
     /// no Lua it ran since: a handler fired now is held for the host ([`holding`]).
     hold: Cell<bool>,
+    /// The deferred stretches running now ([`UiScript::defer`]): while any is, every handler fired
+    /// is held and nothing that waits runs, a lend's included.
+    defer: Cell<u32>,
+    /// A deferred stretch split as a close's engine and interface halves ([`UiScript::defer_split`]):
+    /// its own calls apply at once while its signals and writes wait.
+    split: Cell<bool>,
+    /// The live reads a host's apply lends while it calls into the VM's own steps with the host
+    /// out ([`UiScript::reading`]): what a getter's question asks when no host is in the slot.
+    /// The same invariant as `host`: valid and unaliased while set.
+    reader: Cell<Option<NonNull<dyn LiveReader + 'static>>>,
+}
+
+/// What answers the getters' live questions ([`super::live::ask`]) for a step the host's apply
+/// runs on the VM with the host out ([`UiScript::reading`]).
+pub trait LiveReader {
+    /// Answer `ask` if it is one of the reader's questions; whether it was.
+    fn read_live(&mut self, ask: &mut super::live::LiveAsk<'_>) -> bool;
+}
+
+/// Hand `f` the lent reader ([`UiScript::reading`]), if one is lent and free.
+pub(crate) fn read_reader<R>(lua: &Lua, f: impl FnOnce(&mut dyn LiveReader) -> R) -> Option<R> {
+    struct PutBack<'a> {
+        slot: &'a HostSlot,
+        reader: NonNull<dyn LiveReader + 'static>,
+    }
+    impl Drop for PutBack<'_> {
+        fn drop(&mut self) {
+            self.slot.reader.set(Some(self.reader));
+        }
+    }
+    let slot = slot(lua);
+    let reader = slot.reader.take()?;
+    let _back = PutBack {
+        slot: &slot,
+        reader,
+    };
+    // SAFETY: the pointer came out of the slot, so by its invariant it is valid, and this is the
+    // only `&mut` made from it until it goes back.
+    Some(f(unsafe { &mut *reader.as_ptr() }))
 }
 
 /// Install the empty slot at the VM's birth, a fork's included: every verb asks it
@@ -104,6 +249,17 @@ impl Drop for Hold<'_> {
 /// with no handler held meanwhile: the handlers it fires run inside it, as its own lines read
 /// what they did. Only an engine step's own signals are held.
 pub(crate) fn unheld<R>(lua: &Lua, f: impl FnOnce() -> R) -> R {
+    // Lua run in place ahead of a held handler would run before it, out of the order made: such
+    // Lua runs between turns, or in a turn before it signals ([`UiScript::host_out`]).
+    debug_assert!(
+        !super::calls::signal_waiting(lua),
+        "Lua runs in place only with no held signal waiting"
+    );
+    in_place(lua, f)
+}
+
+/// [`unheld`] without its check, for the settle that runs what waits ([`UiScript::signal_point`]).
+fn in_place<R>(lua: &Lua, f: impl FnOnce() -> R) -> R {
     let _hold = Hold::new(slot(lua), false);
     f()
 }
@@ -162,9 +318,30 @@ pub(crate) fn with_host<R>(lua: &Lua, f: impl FnOnce(&mut dyn CallHost) -> R) ->
     Some(f(unsafe { &mut *host.as_ptr() }))
 }
 
+/// [`with_host`] for a read that runs no Lua and signals nothing, so no handler can fire to be
+/// held: the host comes out of the slot and goes back under the one borrow of it.
+pub(crate) fn read_host<R>(lua: &Lua, f: impl FnOnce(&mut dyn CallHost) -> R) -> Option<R> {
+    struct PutBack<'a> {
+        slot: &'a HostSlot,
+        host: NonNull<dyn CallHost + 'static>,
+    }
+    impl Drop for PutBack<'_> {
+        fn drop(&mut self) {
+            self.slot.host.set(Some(self.host));
+        }
+    }
+    let slot = slot(lua);
+    let host = slot.host.take()?;
+    let _back = PutBack { slot: &slot, host };
+    // SAFETY: the pointer came out of the slot, so by its invariant it is valid, and this is the
+    // only `&mut` made from it until it goes back.
+    Some(f(unsafe { &mut *host.as_ptr() }))
+}
+
 /// Whether a host is lent and in the slot, so a call submitted now applies at once.
 pub(crate) fn free(lua: &Lua) -> bool {
-    slot(lua).host.get().is_some()
+    let slot = slot(lua);
+    slot.host.get().is_some() && slot.defer.get() == 0
 }
 
 /// Whether a call made now is the host's: a lend or an engine turn is running.
@@ -177,10 +354,57 @@ pub(crate) fn open(lua: &Lua) -> bool {
 /// make its calls wait past the verb that made them, where the reference applies them inside it.
 pub(crate) fn holding(lua: &Lua) -> bool {
     let slot = slot(lua);
-    slot.hold.get() && slot.host.get().is_none()
+    (slot.hold.get() && slot.host.get().is_none()) || slot.defer.get() > 0
+}
+
+/// Whether a call made now applies at once through the lent host inside a split stretch
+/// ([`UiScript::defer_split`]): the host is in the slot, not out applying another call.
+pub(crate) fn splitting(lua: &Lua) -> bool {
+    let slot = slot(lua);
+    slot.host.get().is_some() && slot.split.get()
+}
+
+/// A deferred stretch, while it lives ([`UiScript::defer`]), with whether the stretch around it
+/// was split, put back as it ends.
+pub struct Deferring(Lua, bool);
+
+impl Drop for Deferring {
+    fn drop(&mut self) {
+        let slot = slot(&self.0);
+        slot.defer.set(slot.defer.get() - 1);
+        slot.open.set(slot.open.get() - 1);
+        slot.split.set(self.1);
+    }
 }
 
 impl UiScript {
+    /// Defer what fires while the guard lives: an engine step that does its work in place but
+    /// whose signals the app runs later, in their packet's place among the other packets' events
+    /// ([`Self::park_since`]). Every handler fired meanwhile is held, a lend runs nothing that
+    /// waits, and the host counts as open, so a call made meanwhile waits too.
+    pub fn defer(&self) -> Deferring {
+        let lua = self.lua().clone();
+        let outer = {
+            let slot = slot(&lua);
+            slot.defer.set(slot.defer.get() + 1);
+            slot.open.set(slot.open.get() + 1);
+            // A stretch nested in a split one parks its calls with the rest.
+            slot.split.replace(false)
+        };
+        Deferring(lua, outer)
+    }
+
+    /// [`Self::defer`] split as a close's engine and interface halves: every call the stretch's own
+    /// Lua and verbs make applies at once through the lent host, as the reference's engine
+    /// callback sends inside its handler (`AutoEquipCursorItem` from `0x5e17a0`, `0x5e1757`; a
+    /// swap's `0x5e0fdb` ahead of its clear `0x5e0fe7`), while every signal and write waits, to be
+    /// parked ([`Self::park_since`]). What a call's apply signals waits with the rest.
+    pub fn defer_split(&self) -> Deferring {
+        let guard = self.defer();
+        slot(&guard.0).split.set(true);
+        guard
+    }
+
     /// Run `f` with `host` lent to the VM: each script call a verb makes meanwhile applies before
     /// the verb returns, in call order, through [`CallHost::apply`], as the reference's verbs do.
     /// What an engine turn of this entry left ([`Self::host_out`]) applies first, each call under
@@ -202,11 +426,44 @@ impl UiScript {
     /// and signals fire are held, and a call Lua `f` runs in place makes (a chunk) waits; the
     /// entry lends the host when the turn ends ([`Self::hosted`]), which runs and applies them in
     /// the order made, or runs the handlers and drops the calls with [`Self::refuse_waiting`] when
-    /// it has none to lend.
+    /// it has none to lend. A test build counts what it sends while a handler waits under its
+    /// caller ([`super::census`]).
+    #[track_caller]
     pub fn host_out<R>(&mut self, f: impl FnOnce(&mut UiScript) -> R) -> R {
         let lua = self.lua().clone();
         let _open = Open::new(slot(&lua));
         let _hold = Hold::new(slot(&lua), true);
+        #[cfg(any(test, feature = "test-support"))]
+        let _census = super::census::Applying::turn(std::panic::Location::caller());
+        f(self)
+    }
+
+    /// Run `f`, a step of the VM's own that a host's apply calls with the host out (the accept of a
+    /// bind question re-issuing its equip), with `reader` answering the getters' live questions
+    /// meanwhile: the apply's own reads stand in for the host's. `f` runs no Lua that waits on the
+    /// reader past its return.
+    pub fn reading<R>(
+        &mut self,
+        reader: &mut dyn LiveReader,
+        f: impl FnOnce(&mut UiScript) -> R,
+    ) -> R {
+        struct Restore<'a> {
+            slot: mlua::AppDataRef<'a, HostSlot>,
+            before: Option<NonNull<dyn LiveReader + 'static>>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.slot.reader.set(self.before);
+            }
+        }
+        let lua = self.lua().clone();
+        // SAFETY: the reader is borrowed for this call; the pointer leaves the slot before the
+        // borrow ends, unwinding included ([`Restore`]), so it never outlives it.
+        let ptr: NonNull<dyn LiveReader + '_> = NonNull::from(reader);
+        let ptr: NonNull<dyn LiveReader + 'static> = unsafe { std::mem::transmute(ptr) };
+        let slot = slot(&lua);
+        let before = slot.reader.replace(Some(ptr));
+        let _restore = Restore { slot, before };
         f(self)
     }
 
@@ -224,6 +481,26 @@ impl UiScript {
     /// theirs, for a harness without the engine's half; the count of calls dropped.
     pub fn refuse_waiting(&mut self) -> usize {
         super::calls::refuse_waiting(self.lua())
+    }
+
+    /// A signal point inside a call's apply, where the reference goes on after a signal:
+    /// `SignalEvent` (`0x703e50`) walks every listener before it returns. `host`, the host out
+    /// applying the call, is lent back and nothing is held while what the apply held so far runs,
+    /// in the order made, so the calls its handlers make apply here, nested, before the apply's
+    /// next step. Then the host is out and holding again, unwinding included. The caller carries
+    /// nothing borrowed from the host across the point.
+    pub fn signal_point(&mut self, host: &mut dyn CallHost) {
+        let lua = self.lua().clone();
+        // Inside an apply the host is out of the slot and handlers are held ([`with_host`]).
+        debug_assert!(
+            !free(&lua) && slot(&lua).hold.get(),
+            "a signal point is only inside a call's apply"
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        super::census::point();
+        lend(&lua, host, || {
+            in_place(&lua, || super::calls::settle(&lua, self));
+        });
     }
 
     /// Whether a host is lent and free to apply a call now.
@@ -342,6 +619,16 @@ mod tests {
             assert!(free(&lua));
         });
         assert!(!s.host_free());
+    }
+
+    /// A signal point is a step of a call's apply; reached outside one, it is refused.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "only inside a call's apply")]
+    fn a_signal_point_outside_an_apply_is_refused() {
+        let mut s = UiScript::new().unwrap();
+        let mut host = Count(0);
+        s.signal_point(&mut host);
     }
 
     #[test]

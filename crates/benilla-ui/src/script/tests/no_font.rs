@@ -316,3 +316,67 @@ fn a_button_text_font_file_without_a_height_reports_and_stays_fontless() {
     );
     assert!(s.run(r#"PlainText:SetText("x")"#).is_err());
 }
+
+/// The shared SetFont (`0x79f210`) hands the height in layout units to `0x44d040` (`0x79f30a`),
+/// which refuses a size of a screen or more (`0x44d07b`-`0x44d088`, `0x5c1afe`): SetFont answers
+/// nil and keeps the font there was. The XML `<Font>` leg makes the same load (`0x783e7c`), so
+/// such a height logs `Unable to load font file` and sets nothing.
+#[test]
+fn set_font_and_an_xml_font_refuse_a_height_of_a_screen_or_more() {
+    let s = vm();
+    s.run(
+        r#"Big = CreateFont("BigFont")
+           Big:SetFont("Fonts\\FRIZQT__.TTF", 12)
+           Box = CreateFrame("EditBox", "BigBox", Host)
+           Box:SetFont("Fonts\\FRIZQT__.TTF", 12)"#,
+    )
+    .unwrap();
+    for who in ["Big", "Box"] {
+        assert_eq!(
+            s.eval::<String>(&format!(
+                r#"return tostring({who}:SetFont("Fonts\\ARIALN.TTF", 800))"#
+            ))
+            .unwrap(),
+            "nil",
+            "{who} refuses 800"
+        );
+        assert_eq!(
+            s.eval::<(String, f32)>(&format!("return {who}:GetFont()"))
+                .unwrap(),
+            ("Fonts\\FRIZQT__.TTF".to_string(), 12.0),
+            "{who} keeps its font"
+        );
+    }
+
+    let doc = crate::framexml::parse(
+        r#"<Ui><Font name="ScreenTallFont" font="Fonts\FRIZQT__.TTF">
+            <FontHeight><AbsValue val="800"/></FontHeight>
+        </Font></Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    let line = r"Font ScreenTallFont: Unable to load font file Fonts\FRIZQT__.TTF";
+    assert!(
+        report.status.lines().contains(&line.to_string()),
+        "{:?}",
+        report.status.lines()
+    );
+    assert!(s
+        .eval::<bool>("return (ScreenTallFont:GetFont()) == nil")
+        .unwrap());
+}
+
+/// The load's size test reads the quotient as the float `0x44d040` stores (`0x44d078`, tested at
+/// `0x5c1af3`): a height of `K2` layout units, a whole screen, is refused, the float below it
+/// loads, and NaN and 0 never do.
+#[test]
+fn the_font_size_test_is_on_the_float_quotient() {
+    let units = crate::screencoord::LayoutUnits::from_aspect(4.0 / 3.0);
+    let k2 = units.k2();
+    let below = f32::from_bits(k2.to_bits() - 1);
+    assert!(!crate::script::font_size_loads(units, k2));
+    assert!(crate::script::font_size_loads(units, below));
+    assert!(crate::script::font_size_loads(units, f32::from_bits(1)));
+    assert!(!crate::script::font_size_loads(units, 0.0));
+    assert!(!crate::script::font_size_loads(units, f32::NAN));
+}

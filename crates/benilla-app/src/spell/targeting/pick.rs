@@ -5,11 +5,13 @@
 //!
 //! - [`PickFlags`]: the unit-shaped bits of the flags, [`PickFlags::of`], and the legs of
 //!   `0x480610` they switch on, [`PickFlags::admits`].
-//! - [`UnitPick`]: the flags as the frame began, [`publish_unit_pick`], beside
+//! - [`UnitPick`]: the flags as the feed published it, [`publish_unit_pick`], beside
 //!   [`super::PicksSelf`] (flag `0x20`) and [`super::CorpsePick`] (flag `0x40`), which own the
 //!   other two bits the flags carry for these arms.
 //! - [`PickChecks`]: what the hover reads per candidate, the relation checks the bind runs
 //!   ([`crate::spell::cast_target::TargetRelations`]), the party leg `0x606c20` among them.
+//! - [`GoPick`] and [`GoPickChecks`]: the GameObject arm's flag `0x4` and `0x6e62e0`, which the
+//!   GameObject pick reads per candidate.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -118,7 +120,7 @@ impl PickFlags {
     }
 }
 
-/// The unit pick's flags as the frame began, which [`crate::target`]'s hover reads: `None`
+/// The unit pick's flags as the feed published it, which [`crate::target`]'s hover reads: `None`
 /// outside targeting, where they carry `0x5c` and the filter's three legs never run. The press
 /// latches the hover's pick, so both read this.
 #[derive(Resource, Default)]
@@ -126,16 +128,142 @@ pub(crate) struct UnitPick {
     pub(crate) flags: Option<PickFlags>,
 }
 
-/// Publish [`UnitPick`] before the input pass, beside [`super::PicksSelf`].
+/// Publish [`UnitPick`] in the feed, after the packets and the clicks, beside
+/// [`super::PicksSelf`].
 pub(crate) fn publish_unit_pick(targeting: Res<SpellTargeting>, mut pick: ResMut<UnitPick>) {
-    let flags = targeting
-        .0
-        .as_ref()
-        .map(|targeting| PickFlags::of(targeting.word));
-    if pick.flags != flags {
-        pick.flags = flags;
+    pick.publish(&targeting);
+}
+
+impl UnitPick {
+    /// The flags of the word `targeting` stands at.
+    pub(crate) fn publish(&mut self, targeting: &SpellTargeting) {
+        let flags = targeting
+            .0
+            .as_ref()
+            .map(|targeting| PickFlags::of(targeting.word));
+        if self.flags != flags {
+            self.flags = flags;
+        }
     }
 }
+
+/// The world pick's GameObject admission as the feed published it, `0x480780`'s GameObject arm
+/// (`0x4807f4`-`0x48080c`): `None` outside targeting, where the flags carry `0x5c` and so `0x4`,
+/// and every GameObject is a candidate; while targeting, the standing word, its spell and the cast
+/// item's guid, which [`GoPickChecks::admits`] asks of each.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct GoPick(pub(crate) Option<GoPickWord>);
+
+/// What [`GoPick`] holds while a word stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct GoPickWord {
+    /// The flag word `0xcecac0`.
+    word: u16,
+    /// The pending spell (`[0xceac58]`).
+    spell_id: u32,
+    /// The cast item's guid (`0xceac48`), which the lock test's key arm resolves.
+    item: Option<u64>,
+}
+
+/// Publish [`GoPick`] in the feed, beside [`UnitPick`].
+pub(crate) fn publish_go_pick(targeting: Res<SpellTargeting>, mut pick: ResMut<GoPick>) {
+    pick.publish(&targeting);
+}
+
+impl GoPick {
+    /// The word `targeting` stands at, its spell and its cast item.
+    pub(crate) fn publish(&mut self, targeting: &SpellTargeting) {
+        let now = targeting.0.as_ref().map(|t| GoPickWord {
+            word: t.word,
+            spell_id: t.spell_id,
+            item: t.commit.item_guid(),
+        });
+        if self.0 != now {
+            self.0 = now;
+        }
+    }
+}
+
+/// `0x5f8260` as `0x6e62e0` asks it (`0x6e62f8`-`0x6e630a`): the template, its `Lock.dbc` row,
+/// and the spell's effects against the row's slots ([`crate::target::lock::spell_opens_lock`]),
+/// `item` the cast item's guid, looked up as an item (`0x5f833a`, mask 2) for its entry. A
+/// template in flight, no row or an unknown spell is false.
+pub(crate) fn spell_opens_go(
+    spell_id: u32,
+    item: Option<u64>,
+    store: &ObjectStore,
+    anim: Option<&crate::go_anim::GoAnim>,
+    lock_inputs: &crate::target::lock::GoLockInputs,
+) -> bool {
+    let Some(tmpl) = lock_inputs.templates.of(&store.0) else {
+        return false;
+    };
+    let lock_id = tmpl.lock_id;
+    let Some(slots) = lock_inputs
+        .locks
+        .as_deref()
+        .and_then(|locks| locks.0.slots(lock_id))
+        .filter(|_| lock_id != 0)
+    else {
+        return false;
+    };
+    let Some(spell) = lock_inputs
+        .spells
+        .as_deref()
+        .and_then(|spells| spells.catalog.get(spell_id))
+    else {
+        return false;
+    };
+    let facts = crate::target::lock::go_facts(Some((store, crate::go_anim::go_state(anim, store))));
+    let cast_item = item
+        .and_then(|guid| lock_inputs.objects.object(guid))
+        .filter(|f| f.is_item())
+        .and_then(|f| f.object_entry());
+    crate::target::lock::spell_opens_lock(slots, spell, facts, cast_item)
+}
+
+/// What the GameObject pick asks of each candidate while a word stands ([`GoPick`]).
+#[derive(SystemParam)]
+pub(crate) struct GoPickChecks<'w, 's> {
+    pick: Res<'w, GoPick>,
+    stores: Query<
+        'w,
+        's,
+        (
+            &'static ObjectStore,
+            Option<&'static crate::go_anim::GoAnim>,
+        ),
+    >,
+    lock_inputs: crate::target::lock::GoLockInputs<'w, 's>,
+}
+
+impl GoPickChecks<'_, '_> {
+    /// Whether a word stands as the feed published it (`IsTargeting 0x6e48a0`).
+    pub(crate) fn targeting(&self) -> bool {
+        self.pick.0.is_some()
+    }
+
+    /// `0x480780`'s GameObject arm over `entity`: outside targeting every GameObject; while
+    /// targeting, flag `0x4` only for a word in `0x4800` (`0x6e62d0`, `0x481101`-`0x48110a`), then
+    /// `0x6e62e0`: the word again and the spell passing the object's lock test.
+    pub(crate) fn admits(&self, entity: Entity) -> bool {
+        let Some(GoPickWord {
+            word,
+            spell_id,
+            item,
+        }) = self.pick.0
+        else {
+            return true;
+        };
+        word & GAMEOBJECT_WORD != 0
+            && self.stores.get(entity).is_ok_and(|(store, anim)| {
+                spell_opens_go(spell_id, item, store, anim, &self.lock_inputs)
+            })
+    }
+}
+
+/// The word bits `0x6e62d0` and `0x6e62e0` test (`test ch,0x48`, `test ah,0x48`).
+const GAMEOBJECT_WORD: u16 = 0x4800;
 
 /// What the hover asks of a unit or player candidate while a word stands: the bind's relation
 /// checks over the same inputs, and the party leg.
@@ -149,11 +277,17 @@ pub(crate) struct PickChecks<'w, 's> {
     reputations: Res<'w, Reputations>,
     self_guid: Res<'w, SelfGuid>,
     guids: Query<'w, 's, &'static Guid>,
-    /// The party slots and raid roster as the frame began; a harness without them has no group.
+    /// The party slots and raid roster as the feed published it; a harness without them has no group.
     roster: Option<Res<'w, GroupRoster>>,
 }
 
 impl PickChecks<'_, '_> {
+    /// Whether a word stands as the feed published it (`IsTargeting 0x6e48a0`), which forks the hover
+    /// grader (`0x4828f4`).
+    pub(crate) fn targeting(&self) -> bool {
+        self.pick.flags.is_some()
+    }
+
     /// Whether this unit or player is a candidate of the pick: always outside targeting,
     /// otherwise [`PickFlags::admits`]. `store` is its descriptor, if streamed.
     pub(crate) fn admits_unit(&self, entity: Entity, store: Option<&ObjectStore>) -> bool {
@@ -190,7 +324,7 @@ impl PickChecks<'_, '_> {
 mod tests {
     use super::*;
     use crate::net::{GuidIndex, Reputations};
-    use crate::spell::group_relation::publish_group_roster;
+    use crate::spell::group_relation::publish_in;
     use crate::spell::targeting::corpse_fixture as fx;
     use benilla_protocol::messages::GroupMemberEntry;
     use benilla_protocol::ObjectFields;
@@ -490,7 +624,7 @@ mod tests {
             });
     }
 
-    /// The pick under `word` and the roster as it stands, published as a frame does.
+    /// The pick under `word` and the roster as it stands, published as a group packet does.
     fn asked(world: &mut World, word: u16, entity: Entity) -> bool {
         world.resource_mut::<SpellTargeting>().enter(
             fx::RESURRECTION,
@@ -500,9 +634,7 @@ mod tests {
         world
             .run_system_once(publish_unit_pick)
             .expect("the word publishes");
-        world
-            .run_system_once(publish_group_roster)
-            .expect("the roster publishes");
+        publish_in(world);
         world
             .run_system_once(move |checks: PickChecks, stores: Query<&ObjectStore>| {
                 checks.admits_unit(entity, stores.get(entity).ok())

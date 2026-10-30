@@ -1,5 +1,5 @@
-//! The innkeeper bind confirm, the stock `CONFIRM_BINDER` popup, driven as `ui_binder`'s feed
-//! and the app's NPC range guard drive it.
+//! The innkeeper bind confirm, the stock `CONFIRM_BINDER` popup, driven as `ui_binder`'s event
+//! and its `CheckBinderDist()` range poll drive it.
 
 use benilla_ui::script::{ScriptValue, UiScript};
 
@@ -8,6 +8,7 @@ use super::test_ui::load_ui as load_xml;
 /// A bind question pending and in range, so `CheckBinderDist()` holds.
 fn setup() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, "Interface\\FrameXML\\Fonts.xml");

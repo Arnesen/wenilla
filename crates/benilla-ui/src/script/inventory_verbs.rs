@@ -5,7 +5,7 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::number_arg;
-use super::char_stats::{inventory_slot_reader_accepts, recompute_inventory_alerts};
+use super::char_stats::{inventory_slot_reader_accepts, recompute_inventory_alerts_in_verb};
 use super::container::UiCursorMode;
 use super::region::{clear_texture, this_texture};
 use super::Model;
@@ -43,12 +43,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ShowInventorySellCursor",
         lua.create_function(|lua, slot: Value| {
-            {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                // `[0xbe2c4c] == 1`: repair mode (`0x4fbce3`) and the targeting arm move the base.
-                if model.spell_targeting || model.repair_mode {
-                    return Ok(());
-                }
+            if super::merchant::sell_cursor_shut(lua) {
+                return Ok(());
             }
             let slot0 = inventory_slot_arg(
                 lua,
@@ -61,7 +57,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let sellable = usize::try_from(slot0 + 1)
                 .ok()
-                .and_then(|slot| model.inv_slot("player", slot))
+                .and_then(|slot| crate::script::char_stats::own_inv_view(lua, &model, slot))
                 .is_some_and(|v| v.item_id != 0 && !super::cursor::item_locked(&model, v.guid));
             if sellable {
                 model.ui_cursor = Some(UiCursorMode::Buy);
@@ -102,15 +98,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // UpdateInventoryAlertStatus() (`0x4c9560`): the alert recompute (`0x4c7ee0`), which fires
-    // UPDATE_INVENTORY_ALERTS (`0x4c8085`) in place, after every write; zero returns. Stock calls it when the durability
-    // figure's enchant timer runs out (`DurabilityFrame.lua:81`).
+    // UPDATE_INVENTORY_ALERTS (`0x4c8085`) in place, after every write; zero returns. Stock calls
+    // it when the durability figure's enchant timer runs out (`DurabilityFrame.lua:81`).
     g.set(
         "UpdateInventoryAlertStatus",
         lua.create_function(|lua, ()| {
-            super::tick::verb(lua, |model| {
-                recompute_inventory_alerts(model);
-                model.raise("UPDATE_INVENTORY_ALERTS", Vec::new());
-            });
+            recompute_inventory_alerts_in_verb(lua);
             Ok(MultiValue::new())
         })?,
     )?;

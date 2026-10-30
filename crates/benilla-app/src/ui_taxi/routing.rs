@@ -69,7 +69,7 @@ const NO_POINTS: f32 = 99_999_997_952.0;
 
 impl TaxiCatalogs {
     /// The four tables off the patch chain.
-    pub(super) fn load(chain: &mut benilla_formats::Chain) -> anyhow::Result<Self> {
+    pub(crate) fn load(chain: &mut benilla_formats::Chain) -> anyhow::Result<Self> {
         Ok(Self::from_parts(
             load_taxi_nodes(chain)?,
             load_taxi_paths(chain)?,
@@ -96,6 +96,11 @@ impl TaxiCatalogs {
         }
     }
 
+    /// The `TaxiNodes.dbc` name of node `id`, `None` with no row.
+    pub(super) fn node_name(&self, id: u32) -> Option<&str> {
+        self.nodes.get(id).map(|n| n.name.as_str())
+    }
+
     /// `0x4dbbd0(to, from)`: the length of the path from `to` back to `from` (`0x4dbbf2` reads
     /// `to * 256 + from`), [`NO_POINTS`] when it has no points. The reference reads that row with
     /// no null test (`0x4dbc02`) and faults on a pair with only the forward row; here such a pair
@@ -112,8 +117,7 @@ impl TaxiCatalogs {
 /// A path's length (`0x4dbc68`-`0x4dbccd`): the straight 3-D distance between consecutive points,
 /// added to an f32 sum. The x87 runs at 53 bits, so f64 is its arithmetic: x's difference is
 /// stored as an f32 (`0x4dbc97`), y's and z's are not, and the squares add z, x, then y. The
-/// reference walks the points in file order; the shipped file keeps each path's points
-/// consecutive and in `NodeIndex` order, the order [`TaxiPathNodes`] gives.
+/// reference walks the path's run of points in file order, the order [`TaxiPathNodes`] gives.
 fn path_length(points: &[TaxiPathNode]) -> f32 {
     let mut sum = 0.0f32;
     for pair in points.windows(2) {
@@ -266,7 +270,7 @@ fn skips(group: Option<u32>, node: &TaxiNode) -> bool {
 /// `TaxiNodeCost`'s fare (`0x4dc3d0`): the price times `1 - discount`, both in f64 with nothing
 /// stored (`fsubr`, `fmul st,st(1)`), the product stored as an f32 and rounded half to even
 /// (`fstp dword`, `fistp dword`).
-fn shown_fare(price: u32, discount: f64) -> u32 {
+pub(super) fn shown_fare(price: u32, discount: f64) -> u32 {
     let product = (f64::from(price) * (1.0 - discount)) as f32;
     f64::from(product).round_ties_even() as u32
 }
@@ -278,14 +282,21 @@ pub(super) struct ResolvedTaxiNode {
     pub(super) node: u32,
     pub(super) chain: Vec<u32>,
     pub(super) cost: u32,
+    /// The price the shown fare takes the discount off at the call: the direct path's, else the
+    /// route's sum (`0x4dc44f`).
+    pub(super) price: u32,
+    /// The slot as the getters read it, its fare taken at the call.
+    pub(super) view: TaxiUiNode,
 }
 
-/// The pushed node list's slots, index for index, so `TakeTaxiNode(i)` finds its own, and the
-/// current node (`[0xbb4a80]`).
+/// The open's slots, index for index, so `TakeTaxiNode(i)` finds its own, the current node
+/// (`[0xbb4a80]`), and the map art (`0xbb4a78`), which an open's reset keeps and the leave-world
+/// free drops (`0x4db6d0`).
 #[derive(Resource, Default)]
 pub(super) struct TaxiRouteCache {
     pub(super) current: u32,
     pub(super) slots: Vec<ResolvedTaxiNode>,
+    pub(super) art: Option<String>,
 }
 
 /// The listed nodes, as the builder `0x4db710` makes its slots: every known id from 1 to 256
@@ -371,18 +382,21 @@ pub(super) fn build_nodes_for(
                 .filter_map(|hop| Some(line(cont, cat.nodes.get(hop[0])?, cat.nodes.get(hop[1])?)))
                 .collect(),
         };
-        ui.push(TaxiUiNode {
+        let view = TaxiUiNode {
             name: n.name.clone(),
             node_type,
             pos: project(cont, n.pos[0], n.pos[1]),
             cost: discount.map_or(0, |d| shown_fare(price, d)),
             routes,
             num_routes,
-        });
+        };
+        ui.push(view.clone());
         resolved.push(ResolvedTaxiNode {
             node: n.id,
             chain: route.map_or_else(Vec::new, |route| route.chain),
             cost: fare,
+            price,
+            view: TaxiUiNode { cost: 0, ..view },
         });
     }
     Some((current.map_id, ui, resolved))

@@ -42,23 +42,30 @@ impl super::UiScript {
         })
     }
 
-    /// `ConsoleExec` lines its own CVar commands did not run ([`super::console_exec`]): the app's
-    /// console commands (`reloadui`, …), a bare CVar name, an unknown word.
+    /// `ConsoleExec` lines its own CVar commands did not run ([`super::console_exec`]), which a
+    /// harness's VM kept ([`Self::keep_calls`]): the app's console commands (`reloadui`, …), a
+    /// bare CVar name, an unknown word.
     pub fn take_console_lines(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().console_lines)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Console(line) => Some(line.clone()),
+            _ => None,
+        })
     }
 
     /// `(chat, combat)`, as `LoggingChat` and `LoggingCombat` last set them.
     pub fn logging_flags(&self) -> (bool, bool) {
         let model = self.model_mut();
-        (model.logging_chat, model.logging_combat)
+        (model.logging(false), model.logging(true))
     }
 
-    /// Whether a logging flag moved since the last drain: the app's cue to open or close its logs.
-    pub fn take_logging_changes(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().logging_changed)
+    /// Set a logging flag from the host: a failed log open clears it (`0x49feab`).
+    pub fn set_logging(&mut self, combat: bool, on: bool) {
+        self.model_mut().set_logging(combat, on);
     }
 }
+
+/// `Usage: DoEmote("emote"[, "target"])`, `0x844bc0`.
+const USAGE_DO_EMOTE: &str = r#"Usage: DoEmote("emote"[, "target"])"#;
 
 /// `Usage: RandomRoll("max") or RandomRoll("min", "max")`, `0x842a94`.
 const USAGE_RANDOM_ROLL: &str = r#"Usage: RandomRoll("max") or RandomRoll("min", "max")"#;
@@ -71,10 +78,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "DoEmote",
-        lua.create_function(|lua, (token, target): (Option<String>, Value)| {
-            let Some(token) = token.filter(|t| !t.is_empty()) else {
+        lua.create_function(|lua, (token, target): (Value, Value)| {
+            // `is-number-or-string` else `Usage: DoEmote("emote"[, "target"])` (`0x844bc0`,
+            // `0x49fd4a` → `0x49fe24`); "" names no emote and returns (`0x49fda8`).
+            let token = super::binding_abi::string_arg(lua, token, USAGE_DO_EMOTE)?;
+            if token.is_empty() {
                 return Ok(());
-            };
+            }
             let request = EmoteRequest {
                 token: token.to_ascii_uppercase(),
                 // `lua_tostring(2)` (`0x49fdc5`): a number is its `%.14g` text.
@@ -142,33 +152,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    for (name, chat) in [("LoggingChat", true), ("LoggingCombat", false)] {
+    for (name, combat) in [("LoggingChat", false), ("LoggingCombat", true)] {
         g.set(
             name,
             lua.create_function(move |lua, args: MultiValue| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 // With an argument (`lua_gettop > 0`, `0x49fe57`) the flag is set from
-                // `GetBoolOrDefault` (`0x49fe69`, default 1), so an explicit nil clears it. Both
-                // paths then answer the flag as it stands, 1 or nil, one value (`0x49feb2`-`0x49fee1`):
-                // the reference re-reads it after the log-open attempt, which can clear it
-                // (`0x49feab`); the app owns that attempt here.
+                // `GetBoolOrDefault` (`0x49fe69`, default 1), so an explicit nil clears it. A flag
+                // now on with no log open opens the log inside the call (`0x49fe79`-`0x49fea2`),
+                // and a failed open clears the flag (`0x49feab`); the host does that
+                // ([`super::ScriptCall::Logging`]). Both paths then answer the flag as it stands,
+                // 1 or nil, one value (`0x49feb2`-`0x49fee1`).
                 if let Some(on) = args.front().map(|v| bool_or_default(Some(v), true)) {
-                    let slot = if chat {
-                        &mut model.logging_chat
-                    } else {
-                        &mut model.logging_combat
-                    };
-                    if *slot != on {
-                        *slot = on;
-                        model.logging_changed = true;
-                    }
+                    lua.app_data_mut::<Model>()
+                        .expect("model app_data")
+                        .set_logging(combat, on);
+                    super::calls::submit(lua, super::ScriptCall::Logging { combat })?;
                 }
-                let now = if chat {
-                    model.logging_chat
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                Ok(if model.logging(combat) {
+                    Value::Integer(1)
                 } else {
-                    model.logging_combat
-                };
-                Ok(if now { Value::Integer(1) } else { Value::Nil })
+                    Value::Nil
+                })
             })?,
         )?;
     }
@@ -185,7 +190,7 @@ mod tests {
     fn do_emote_queues_the_uppercased_token_and_a_non_empty_target() {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
-        s.run("DoEmote('wave', 'Bob') DoEmote('DANCE', '') DoEmote('') DoEmote()")
+        s.run("DoEmote('wave', 'Bob') DoEmote('DANCE', '') DoEmote('')")
             .unwrap();
         assert_eq!(
             s.take_emote_requests(),
@@ -317,6 +322,7 @@ mod tests {
     #[test]
     fn the_logging_flags_read_as_one_or_nil_and_set_from_any_truthy_arg() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert!(s.eval::<bool>("return LoggingChat() == nil").unwrap());
         assert!(s.eval::<bool>("return LoggingCombat() == nil").unwrap());
         assert_eq!(
@@ -326,15 +332,9 @@ mod tests {
         );
         assert_eq!(s.eval::<i64>("return LoggingChat()").unwrap(), 1);
         assert_eq!(s.logging_flags(), (true, false));
-        assert!(s.take_logging_changes());
         s.run("LoggingCombat(1) LoggingChat(false)").unwrap();
         assert_eq!(s.logging_flags(), (false, true));
-        assert!(s.take_logging_changes());
         s.run("LoggingCombat(true)").unwrap();
-        assert!(
-            !s.take_logging_changes(),
-            "a write that moves nothing cues nothing"
-        );
         // The setter answers the flag it leaves: 1 or nil, one value either way.
         assert_eq!(s.eval::<i64>("return LoggingChat(true)").unwrap(), 1);
         assert_eq!(s.arity("LoggingChat(nil)").unwrap(), 1);

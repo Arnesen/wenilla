@@ -67,9 +67,22 @@ impl MoveSpeeds {
 pub enum LoginStage {
     /// Dialing the auth server (`LOGIN_STATE_CONNECTING`).
     Connecting,
-    /// SRP6 challenge/proof in flight (`LOGIN_STATE_AUTHENTICATING`).
+    /// The dial connected and the challenge goes out (`LOGIN_STATE_AUTHENTICATING`, logon state 3,
+    /// `0x5b2196`).
     Authenticating,
-    /// Realm picked; the world-socket handshake and char enum (`LOGIN_STATE_HANDSHAKING`).
+    /// The challenge's reply came and asked for no PIN (`LOGIN_STATE_CHECKINGVERSIONS`, logon
+    /// state 9, `0x5b1cd7`). With a PIN the reply's state is [`Self::Pin`]'s 7, and the 9 comes
+    /// when the keys are in (`0x5b31cc`), which the glue's `PINEntered` reports itself.
+    CheckingVersions,
+    /// The proof went out (`LOGIN_STATE_HANDSHAKING`, logon state 2, `0x5b1f93`): the reference's
+    /// name for the wait on the proof's reply, not the world's handshake ([`Self::Handshaking`]).
+    ProofSent,
+    /// The challenge asked for a PIN (`LOGIN_STATE_PIN`, logon state 7, `0x5b1cd7`): the logon
+    /// waits for the keys pressed on the keypad this grid lays out ([`crate::auth::pin::grid`]),
+    /// taking only keys that answer `prompt`, this prompt's number.
+    Pin { grid: [u8; 10], prompt: u64 },
+    /// Realm picked: the world dial begins, which ends the logon on the screen (the glue's
+    /// `LOGIN_STATE_AUTHENTICATED`, logon state 4).
     Handshaking,
     /// The world socket connected, before its authentication (`RESPONSE_CONNECTED`, `0x5aaa90`).
     WorldConnected,
@@ -110,15 +123,32 @@ pub enum LoginRefusal {
     LogonProof(u8),
     /// The world server's `SMSG_AUTH_RESPONSE` code (`crate::WorldAuthReject`).
     World(u8),
+    /// The challenge asked for a PIN and no screen stood to enter it: refused here, before any
+    /// proof, so no server counts it.
+    NoPinEntry,
 }
 
 impl LoginRefusal {
-    /// The raw byte, for logging only: without its server it is ambiguous.
-    pub fn byte(self) -> u8 {
+    /// The raw byte, for logging only: without its server it is ambiguous. The client's own
+    /// refusal has none.
+    pub fn byte(self) -> Option<u8> {
         match self {
-            LoginRefusal::Logon(b) | LoginRefusal::LogonProof(b) | LoginRefusal::World(b) => b,
+            LoginRefusal::Logon(b) | LoginRefusal::LogonProof(b) | LoginRefusal::World(b) => {
+                Some(b)
+            }
+            LoginRefusal::NoPinEntry => None,
         }
     }
+}
+
+/// A transport create's clock: `UPDATE_FLAG_TRANSPORT`'s u32, the path progress in ms, and when
+/// its packet arrived, the time the reference's create runs with (the queue node's stamp
+/// `0x538851`, which `0x5f7080` subtracts).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransportClock {
+    pub progress_ms: u32,
+    /// Stamped by [`crate::WorldReader::poll`] as it reads the packet; `None` from a bare decode.
+    pub arrived: Option<crate::Instant>,
 }
 
 /// The block an [`SessionEvent::ObjectNotify`] stands for in the notify pass.
@@ -224,9 +254,16 @@ pub enum SessionEvent {
     LogoutResponse { reason: u32, instant: bool },
     /// The server dropped a pending logout at our `CMSG_LOGOUT_CANCEL` (`SMSG_LOGOUT_CANCEL_ACK`).
     LogoutCancelled,
+    /// `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE`: end far sight now (`0x5e43f8` runs `EndFarSight`
+    /// `0x5ee590` on the active player).
+    FarSightCleared,
     /// The world session ended, and with [`SessionEnd::Lost`] the link with it; `reason` is
     /// human-readable.
     Disconnected { reason: String, end: SessionEnd },
+    /// The body of an answer whose record the 1.12 client saves to disk, as it came off the wire,
+    /// its key the first dword (`0x556e5b`): emitted by the IO thread ahead of the answer's
+    /// decoded events, never wire-decoded, for the app's on-disk template caches.
+    SavedAnswer { opcode: u16, body: Vec<u8> },
     /// A placed object entered view, its spawn identity decoded per object type.
     ObjectCreate {
         guid: u64,
@@ -242,9 +279,10 @@ pub enum SessionEvent {
         /// Flags and swim pitch the unit streams in with, applied by the reference before its model
         /// exists: the flags via the relay's `0x75a07dff` merge, the pitch via `0x7c6420`.
         mover: Option<MoverState>,
-        /// `UPDATE_FLAG_TRANSPORT`'s path progress in ms, only on a type-11/15 transport create;
-        /// progress is this plus elapsed ms; position is `timetable(progress % period)`.
-        transport_progress: Option<u32>,
+        /// `UPDATE_FLAG_TRANSPORT`'s path progress and its packet's arrival, only on a type-11/15
+        /// transport create; progress is this plus the ms since; position is
+        /// `timetable(progress % period)`.
+        transport_progress: Option<TransportClock>,
         /// Its rider pose, local to the transport, when created with `MOVEFLAG_ON_TRANSPORT`.
         transport: Option<TransportPose>,
         /// The path it was already walking (`MOVEFLAG_SPLINE_ENABLED`), with the ms already ridden.
@@ -348,9 +386,12 @@ pub enum SessionEvent {
         needs_ack: bool,
     },
     /// `SMSG_TRANSFER_PENDING`: a worldport follows, boat-local when `transport_entry` is set.
+    /// `from_map` is the map left, sent with the entry; the screen draws that leg's route
+    /// (`0x401900`, `0x4072c0`).
     TransferPending {
         map_id: u32,
         transport_entry: Option<u32>,
+        from_map: Option<u32>,
     },
     /// `SMSG_TRANSFER_ABORTED`: the announced transfer is off (map full, no instance).
     TransferAborted { reason: u8 },
@@ -368,9 +409,13 @@ pub enum SessionEvent {
     ServerUnixTime { unix_time: u32 },
     /// The hearthstone bind (`SMSG_BINDPOINTUPDATE`): the AreaTable id the `$z` token names.
     BindPoint { area: u32 },
-    /// `SMSG_GMTICKET_GETTICKET`, `None` for no ticket. The Help window re-polls every 10 minutes
-    /// and fires `UPDATE_TICKET` on each answer, changed or not: count these, never diff them.
-    GmTicket { ticket: Option<Box<GmTicket>> },
+    /// `SMSG_GMTICKET_GETTICKET`: the wire status, and the ticket (`None` for no ticket). The Help
+    /// window re-polls every 10 minutes and fires `UPDATE_TICKET` on each answer, changed or not:
+    /// count these, never diff them.
+    GmTicket {
+        status: u32,
+        ticket: Option<Box<GmTicket>>,
+    },
     /// `SMSG_GMTICKET_CREATE`: 2 created, 3 refused, 1 already exists (vmangos never sends 1, and
     /// sometimes sends nothing at all).
     GmTicketCreated { response: u32 },
@@ -422,6 +467,11 @@ pub enum SessionEvent {
     MeetingStoneSetQueue { area: u32, status: u8 },
     /// One of the meeting stone's four chat-line-only replies (`0x297/0x298/0x299/0x2BB`).
     MeetingStoneNotice(crate::messages::MeetingStoneNotice),
+    /// The server's digest of each account-data section (`SMSG_ACCOUNT_DATA_MD5`), in section
+    /// order.
+    AccountDataMd5([crate::messages::AccountDataDigest; crate::messages::ACCOUNT_DATA_SECTIONS]),
+    /// One account-data section's file from the server (`SMSG_UPDATE_ACCOUNT_DATA`).
+    UpdateAccountData(crate::messages::UpdateAccountData),
     /// The tutorial bank bytes (`SMSG_TUTORIAL_FLAGS`); the client copies both its banks from them.
     TutorialFlags(Vec<u8>),
     /// The bind took (`SMSG_PLAYERBOUND`); `area` matches the [`Self::BindPoint`] sent beside it.
@@ -438,6 +488,8 @@ pub enum SessionEvent {
     ForcedReactions { reactions: Vec<(u32, u32)> },
     /// `SMSG_SET_FACTION_VISIBLE`: sets the slot's visible flag, which decides if it is listed.
     ReputationVisible { list_id: u32 },
+    /// `SMSG_SET_FACTION_ATWAR`: the slot's at-war bit becomes bit `0x02` of `flags`.
+    ReputationAtWar { list_id: u32, flags: u8 },
     /// `SMSG_NAME_QUERY_RESPONSE`: names are never descriptor fields in 1.12, only query answers.
     /// An unknown guid answers with an empty `name`.
     PlayerName {
@@ -491,6 +543,20 @@ pub enum SessionEvent {
     /// `SMSG_GAMEOBJECT_DESPAWN_ANIM`: the reference arms substate 12 (AnimationData 157 Despawn)
     /// and keeps the object alive through the same-tick `SMSG_DESTROY_OBJECT` while it plays.
     GameObjectDespawnAnim { guid: u64 },
+    /// `SMSG_GAMEOBJECT_PAGETEXT`: the reference resolves the GameObject and opens the item-text
+    /// reader on it (`0x5f88c0` → `0x4e32e0(guid, 0)`), as a right-click on a TEXT object does.
+    GameObjectPageText { guid: u64 },
+    /// `SMSG_READ_ITEM_OK` (`0x5ec600`): the book may be read; the reference marks the item read
+    /// and shows its page.
+    ReadItemOk { guid: u64 },
+    /// `SMSG_READ_ITEM_FAILED` (`0x5ec600`): reason 0 shows the page, 1 shows it untranslated and
+    /// signals `ITEM_TEXT_TRANSLATION` with `milliseconds`, any other closes the reader when the
+    /// guid is its item.
+    ReadItemFailed {
+        guid: u64,
+        reason: u8,
+        milliseconds: i32,
+    },
     /// `SMSG_OPEN_CONTAINER`: the reference fires `BAG_OPEN` with 0 for our own guid (the
     /// backpack), 1..10 for a bag-cache slot, and nothing for a miss.
     OpenContainer { item: u64 },
@@ -565,6 +631,8 @@ pub enum SessionEvent {
     PetActionSound { pet_guid: u64, talk: u32 },
     /// A dismissed pet's sound (`SMSG_PET_DISMISS_SOUND`): the `CreatureModelData` column-29 kit.
     PetDismissSound { model_id: u32, position: [f32; 3] },
+    /// `SMSG_ITEM_NAME_QUERY_RESPONSE`, by entry; `None` is unknown.
+    ItemName { entry: u32, name: Option<String> },
     /// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, by entry; `None` is unknown. Boxed, being wide.
     ItemTemplate {
         entry: u32,
@@ -656,6 +724,10 @@ pub enum SessionEvent {
         target: Option<u64>,
         /// The GameObject an open-lock cast targets (`TARGET_FLAG_GAMEOBJECT`), a chest or door.
         go_target: Option<u64>,
+        /// The target block's mask (`SpellCastTargets::mask`), which the missile launcher gates on.
+        target_mask: u16,
+        /// The `TARGET_FLAG_SOURCE_LOCATION` point, raw WoW.
+        source: Option<[f32; 3]>,
         /// The ground point (`TARGET_FLAG_DEST_LOCATION`, raw WoW); the lasting effect is a
         /// DynamicObject.
         dest: Option<[f32; 3]>,
@@ -1121,6 +1193,9 @@ pub enum SessionEvent {
         nearest_node: u32,
         known_mask: TaxiMask,
     },
+    /// `SMSG_SHOWTAXINODES` in mode 0, which names no flight master: the known nodes for the
+    /// console, and no map (`0x5ecf7f`).
+    TaxiNodesListed { known_mask: TaxiMask },
     /// Whether the flight master's nearest node is known (`SMSG_TAXINODE_STATUS`); also sent with
     /// [`Self::NewTaxiPath`] on a first visit (vmangos `SendLearnNewTaxiNode`).
     TaxiNodeStatus { guid: u64, known: bool },

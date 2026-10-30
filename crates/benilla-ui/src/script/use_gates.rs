@@ -19,6 +19,7 @@ use super::Model;
 /// `0x5d8ee7`). `known` is whether the template is cached; the reference returns silently without
 /// it.
 pub(crate) fn item_use_refusal(
+    lua: &mlua::Lua,
     model: &Model,
     fork: UseFork,
     item_id: u32,
@@ -34,27 +35,66 @@ pub(crate) fn item_use_refusal(
     ) {
         return None;
     }
-    if let Some(key) = super::item_stats::item_refusal_by_id(model, item_id) {
+    if let Some(key) = super::item_stats::item_refusal_by_id(lua, model, item_id) {
         return Some(key);
     }
     if matches!(fork, UseFork::Read | UseFork::Letter) {
         return None;
     }
-    (!model.player_control && !model.control_bypass.contains(&use_spell))
+    (!model.player_control && !control_bypass(lua, model, use_spell))
         .then_some("ERR_CLIENT_LOCKED_OUT")
+}
+
+/// The control gate's exemption's question of the lent host ([`super::live::ask`]): whether the
+/// on-use spell passes it for the caster as of the call, its flags and auras read there
+/// (`0x5d8ef9`-`0x5d8f66`); `false` for a spell with no record (`0x5d8ec7`, `0x5d8ee7`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlBypassQuery(pub u32);
+
+impl super::live::LiveQuery for ControlBypassQuery {
+    type Answer = bool;
+}
+
+/// The active player's far-sight bit (`+0x1c70` bit 0), which `HasFullControl` refuses on
+/// (`0x51a142`), read where the getter runs: the buff cancel's `UpdateFarSight` (`0x6e70ad` →
+/// `0x5ee290`) and the clear's handler (`0x5e441d`) move it inside their call and packet.
+/// Declined with no far-sight machine, where the seat answers
+/// ([`super::UiScript::set_far_sight_on`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FarSightOnQuery;
+
+impl super::live::LiveQuery for FarSightOnQuery {
+    type Answer = bool;
+}
+
+/// Whether `use_spell` passes the lost-control gate now: the lent host's answer, else the seat
+/// ([`super::UiScript::set_control_bypass`]).
+fn control_bypass(lua: &mlua::Lua, model: &Model, use_spell: u32) -> bool {
+    super::live::ask(lua, &ControlBypassQuery(use_spell))
+        .unwrap_or_else(|| model.control_bypass.contains(&use_spell))
 }
 
 impl super::UiScript {
     /// The dispatcher's requirement and control gates for a use the app sends itself, the bar's
     /// item (`0x4e607b`), the soulstone (`0x48ae7d`) and a confirmed bind-on-use (`0x5d92c1`), all
     /// of which call `0x5d8d00` past its quest-starter arm: the plain fork with a cached template.
-    /// `item_id` 0 passes.
-    pub fn item_use_refusal(&self, item_id: u32, use_spell: u32) -> Option<&'static str> {
-        item_use_refusal(&self.model_ref(), UseFork::Plain, item_id, use_spell, true)
+    /// `exempt` is the control gate's exemption for `use_spell` as the app judged it off the
+    /// caster now, as no host is lent to ask. `item_id` 0 passes.
+    pub fn item_use_refusal(
+        &self,
+        item_id: u32,
+        use_spell: u32,
+        exempt: bool,
+    ) -> Option<&'static str> {
+        let model = self.model_ref();
+        match item_use_refusal(&self.lua, &model, UseFork::Plain, item_id, use_spell, true) {
+            Some("ERR_CLIENT_LOCKED_OUT") if exempt => None,
+            refusal => refusal,
+        }
     }
 
-    /// The on-use spells that pass the control gate right now (`0x5d8ec0`-`0x5d8f6a`), computed by
-    /// the app off the caster's flags and auras; empty with control.
+    /// Seat the on-use spells that pass the control gate (`0x5d8ec0`-`0x5d8f6a`), which the gate
+    /// reads with no host to ask ([`ControlBypassQuery`]).
     pub fn set_control_bypass(&mut self, spells: std::collections::HashSet<u32>) {
         self.model_mut().control_bypass = spells;
     }

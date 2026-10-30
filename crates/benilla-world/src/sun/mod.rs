@@ -62,6 +62,35 @@ struct StarDome {
     weight: f32,
 }
 
+/// Both glares' enabled word (`+0x8` of the sun's `0xce97a8` and the moon's `0xce96f8`), which
+/// the console command `SkySunGlare` (`0x6d1dc0`) sets or clears together. A disabled glare is not
+/// drawn (`0x7e57fe`) and its visibility term answers 0 (`0x7e578e`), so its envelope slews to 0.
+/// Every map load re-runs `InitSky` (`0x6d1ba0` from `0x694475`), whose glare setup stores 1 again
+/// (`0x6d1e8a`, `0x6d1f8a`).
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SunGlare {
+    pub enabled: bool,
+}
+
+impl Default for SunGlare {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// A map load re-arms both glares, as `InitSky`'s glare setup does (`0x6d1e8a`, `0x6d1f8a`).
+fn rearm_glare_on_map_load(
+    changes: &mut MessageReader<crate::world_map::MapChange>,
+    glare: Option<&mut ResMut<SunGlare>>,
+) {
+    if changes.read().count() == 0 {
+        return;
+    }
+    if let Some(glare) = glare.filter(|g| !g.enabled) {
+        glare.enabled = true;
+    }
+}
+
 /// The celestial layer: spawns the sun, moons and stars at startup and places them each frame.
 pub(crate) struct SunPlugin;
 
@@ -69,6 +98,8 @@ impl Plugin for SunPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<CelestialMaterial>::default())
             .add_plugins(MaterialPlugin::<StarMaterial>::default())
+            .init_resource::<SunGlare>()
+            .add_message::<crate::world_map::MapChange>()
             .add_systems(Startup, setup_sun.after(AssetSet::Open))
             // After propagation, so the follows place from this frame's camera: a frame of lag is
             // ~1% of the glare's 12-unit distance, a visible swim.
@@ -81,7 +112,8 @@ impl Plugin for SunPlugin {
                 Update,
                 apply_celestial_visibility
                     .after(crate::skybox::SkyboxResolve)
-                    .after(crate::liquid::SubmersionVerdict),
+                    .after(crate::liquid::SubmersionVerdict)
+                    .after(crate::world_map::announce_map_change),
             );
     }
 }
@@ -94,14 +126,18 @@ impl Plugin for SunPlugin {
 /// would draw black under the murk. The glares draw on their own path
 /// (`0x483740 → 0x6d48c0 → 0x7e57e0`), which neither gate reaches, and fade underwater
 /// themselves; the gradient and cloud domes ([`crate::sky`], [`crate::clouds`]) gate themselves.
+/// A map load first re-arms the glares ([`rearm_glare_on_map_load`]).
 #[allow(clippy::type_complexity)]
 fn apply_celestial_visibility(
+    mut map_loads: MessageReader<crate::world_map::MapChange>,
+    mut glare: Option<ResMut<SunGlare>>,
     skybox: Res<crate::skybox::SkyboxWeight>,
     underwater: Res<crate::liquid::Underwater>,
     mut suns: Query<(&SunSprite, &mut Visibility), Without<MoonSprite>>,
     mut moons: Query<(&MoonSprite, &mut Visibility), Without<SunSprite>>,
     mut stars: Query<&mut Visibility, (With<StarDome>, Without<SunSprite>, Without<MoonSprite>)>,
 ) {
+    rearm_glare_on_map_load(&mut map_loads, glare.as_mut());
     let suppressed = skybox.replaces_celestial() || underwater.0.any();
     // Lifting the gate restores the spawn default, `Inherited`, never `Visible`.
     let want = |in_sky_pass: bool| {
@@ -127,5 +163,34 @@ fn apply_celestial_visibility(
     }
     for mut vis in &mut stars {
         set(&mut vis, want(true));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A map load re-runs `InitSky` (`0x6d1ba0`, called from `CMap::Load` at `0x694475`), whose
+    /// glare setup stores 1 in both enabled words (`0x6d1e8a`, `0x6d1f8a`).
+    #[test]
+    fn a_map_load_rearms_the_glares() {
+        let mut app = App::new();
+        app.add_message::<crate::world_map::MapChange>()
+            .insert_resource(SunGlare { enabled: false })
+            .add_systems(
+                Update,
+                |mut changes: MessageReader<crate::world_map::MapChange>,
+                 mut glare: Option<ResMut<SunGlare>>| {
+                    rearm_glare_on_map_load(&mut changes, glare.as_mut())
+                },
+            );
+        app.update();
+        assert!(
+            !app.world().resource::<SunGlare>().enabled,
+            "no load, no change"
+        );
+        app.world_mut().write_message(crate::world_map::MapChange);
+        app.update();
+        assert!(app.world().resource::<SunGlare>().enabled);
     }
 }

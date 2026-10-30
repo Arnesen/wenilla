@@ -389,13 +389,15 @@ pub(super) fn inspect_ui(
                     Some(t) => format!("{:?}", t.name),
                 }
             );
-            // TEXT (type 9) only, the template's page: `page —` means none, so no window opens;
-            // `page ?` means the query has not answered yet.
-            let page_text = if s.0.gameobject_type_id() == crate::target::cursor_mode::GO_TYPE_TEXT
-            {
+            // A type with a pageID column (TEXT, GOOBER), the template's page: `page —` means
+            // none, so no window opens; `page ?` means the query has not answered yet.
+            let page_text = if crate::go_templates::has_column(
+                &s.0,
+                crate::go_templates::GoColumn::PageId,
+            ) {
                 match go_templates
                     .of(&s.0)
-                    .map(|t| t.text_page.map_or(0, |p| p.page_id))
+                    .map(|t| t.page_id(&s.0))
                 {
                     None => " · page ?".to_string(),
                     Some(0) => " · page —".to_string(),

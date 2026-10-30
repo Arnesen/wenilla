@@ -39,6 +39,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
 fn shipped_merchant_frame_drives_end_to_end() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The census: every row is a container plus an `ItemButtonTemplate` button, and every price a
     // `SmallMoneyFrameTemplate` (`MerchantFrame.xml:4-115`).
@@ -305,6 +306,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
 fn merchant_show_hide_plays_open_and_close_kits() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -346,6 +348,7 @@ fn merchant_show_hide_plays_open_and_close_kits() {
 fn vendor_open_opens_the_backpack_and_layers_the_sound() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -393,6 +396,7 @@ fn vendor_open_opens_the_backpack_and_layers_the_sound() {
 fn vendor_leaves_an_already_open_backpack_alone() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -438,6 +442,7 @@ fn vendor_leaves_an_already_open_backpack_alone() {
 fn a_centre_panel_over_a_vendor_keeps_the_backpack_the_player_had_open() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -497,6 +502,7 @@ fn a_centre_panel_over_a_vendor_keeps_the_backpack_the_player_had_open() {
 fn vendor_opens_and_closes_all_equipped_bags() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for file in crate::ui_script::test_ui::production_order(&[
         BAG_UI,
@@ -537,6 +543,7 @@ fn vendor_opens_and_closes_all_equipped_bags() {
 fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -552,7 +559,9 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_SHOW", vec![]);
     let _ = s.take_sounds();
-    let _ = s.take_merchant_close();
+    let _ = s.take_calls_like(&benilla_ui::script::ScriptCall::Merchant(
+        benilla_ui::script::MerchantCall::Close,
+    ));
 
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_CLOSED", vec![]);
@@ -567,7 +576,9 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
         "switching vendors plays the close then the open kit"
     );
     assert!(
-        s.take_merchant_close(),
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Merchant(
+            benilla_ui::script::MerchantCall::Close
+        )) > 0,
         "the switch's MERCHANT_CLOSED queued a CloseMerchant intent — the feed must consume it so \
          the re-opened vendor is not cleared by the drain"
     );
@@ -579,6 +590,7 @@ fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
 fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The stock tooltip sizes from its lines, so the harness needs a measurer.
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
@@ -782,12 +794,30 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// A host answering `GetRepairAllCost` with damage to pay for, 76 copper.
+struct RepairHost;
+
+impl benilla_ui::script::CallHost for RepairHost {
+    fn apply(
+        &mut self,
+        _: &mut UiScript,
+        _: benilla_ui::script::ScriptCall,
+    ) -> Option<benilla_ui::script::CallTail> {
+        None
+    }
+
+    fn read_live(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+        ask.answer(|_: &benilla_ui::script::RepairAllCostQuery| Some(Some((76, true))))
+    }
+}
+
 /// The two tabs (`MerchantFrame.lua:57-64`): the merchant page has the buyback slot and repair
 /// pair; the buyback page retitles the window and fills the rows from `GetBuybackItemInfo`.
 #[test]
 fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -829,8 +859,8 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
         ],
         can_repair: true,
     }));
-    s.set_repair_all_cost(76);
-    s.fire_event("MERCHANT_SHOW", vec![]);
+    // The show reads the total through the host, as every production entry lends it.
+    s.hosted(&mut RepairHost, |s| s.fire_event("MERCHANT_SHOW", vec![]));
     assert!(s.errors().is_empty(), "show errors: {:?}", s.errors());
 
     // Merchant page: the latest sale in the buyback slot (`MerchantFrame.lua:133`), repair up.
@@ -905,6 +935,7 @@ fn merchant_tabs_fit_their_labels() {
     /// `2 * $parentLeft:GetWidth()` (`UIPanelTemplates.lua:41`): the two 20-unit end slices.
     const SIDES: f64 = 40.0;
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
     for f in crate::ui_script::test_ui::production_order(&[
@@ -943,6 +974,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     use benilla_ui::script::UiCursorMode;
 
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -1034,6 +1066,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
 fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     // No host: the trade calls are kept.
     s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
@@ -1092,6 +1125,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
 fn a_trade_slot_click_repaints_the_slot_in_place() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     // No host: the trade calls are kept.
     s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
@@ -1144,6 +1178,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
     benilla_formats::wow_data_or_skip!();
     const WATER_LINK: &str = "|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r";
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,
@@ -1252,6 +1287,7 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
 fn shift_click_takes_one_bundle_and_splits_a_single() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         super::test_ui::MERCHANT_UI,

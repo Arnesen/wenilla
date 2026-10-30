@@ -9,7 +9,8 @@ description = "Engine-free WoW UI engine core: TOC and FrameXML parsing, templat
 workspace = true
 
 [features]
-# `test_support`: the geometry comparisons other crates' tests check the UI with.
+# `test_support`: the geometry comparisons and the zone guard (`civil::ZoneGuard`) other crates'
+# tests check the UI with. Only their dev-dependencies enable it: the player build has neither.
 test-support = []
 
 [dependencies]
@@ -20,3 +21,18 @@ roxmltree = "0.20"
 # The script host's Lua: benilla's own interpreter, through a crate that answers to the name
 # `mlua` (`src/lib.rs`).
 benilla-mlua = { path = "../benilla-mlua" }
+# The intro movies' reader and decoder, which `MovieFrame:StartMovie` opens.
+benilla-movie = { path = "../benilla-movie" }
+# `date` and `time`'s local zone: `localtime_r`, `mktime` and `tzname` on unix, the CRT's
+# `localtime_s` and zone globals on Windows (`civil`).
+libc = "0.2"
+
+# wenilla: the page's zone for `date` and `time`, the browser's `Date` (`civil_web.rs`).
+# wasm-bindgen is pinned exact, as everywhere: a newer crate against the installed CLI emits broken glue.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.99"
+wasm-bindgen = "=0.2.122"
+
+[dev-dependencies]
+# The synthetic movie the movie frame's tests open.
+benilla-movie = { path = "../benilla-movie", features = ["test-support"] }

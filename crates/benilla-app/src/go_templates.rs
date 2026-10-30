@@ -2,6 +2,7 @@
 //! streams in. The template's lockId decides a right-click: a locked object is opened by an
 //! `OPEN_LOCK` cast, an unlocked one by `CMSG_GAMEOBJ_USE`.
 
+use benilla_assets::LockRecover;
 use benilla_formats::{LockCatalog, LockTypeCatalog};
 use benilla_protocol::messages::{ObjectFields, ObjectType};
 use bevy::prelude::*;
@@ -37,11 +38,97 @@ pub(crate) struct GoTemplate {
     pub(crate) meeting_stone: Option<MeetingStoneTemplate>,
     /// MO_TRANSPORT (type 15) only: the transport timetable's inputs.
     pub(crate) mo_transport: Option<MoTransport>,
-    /// TEXT (type 9) only; a right-click reads it only when `page_id` is nonzero.
-    pub(crate) text_page: Option<TextPage>,
-    /// The `PageTextMaterial.dbc` id `GetQuestBackgroundMaterial` answers for a quest from this
-    /// object (`0x5f5950`): QUESTGIVER (2) and TEXT (9) read `data[2]`, GOOBER (10) `data[9]`.
-    pub(crate) quest_material: Option<u32>,
+    /// The 24 data dwords (`[rec+0x1c]`), read by semantic through [`GoTemplate::column`].
+    data: [i32; 24],
+}
+
+impl GoTemplate {
+    /// `0x5f8150(0x621b00(type, id))` for the object `go` of this template: the data column its
+    /// own `GAMEOBJECT_TYPE_ID` names `id` by (`[go+0x110]+0x3c`, as `0x5f5900`, `0x5f5970` and
+    /// `0x5f59a0` read it), 0 for a type without one (`0x5f8150` refuses the −1 as past 23).
+    pub(crate) fn column(&self, go: &ObjectFields, id: GoColumn) -> i32 {
+        u32::try_from(go.gameobject_type_id())
+            .ok()
+            .and_then(|t| data_column(t, id))
+            .map_or(0, |c| self.data[c])
+    }
+
+    /// The first `PageText` id the reader opens on, the pageID column (`GetPageTextId 0x5f5900`):
+    /// TEXT's `data[0]`, GOOBER's `data[7]`; 0 is nothing to read.
+    pub(crate) fn page_id(&self, go: &ObjectFields) -> u32 {
+        self.column(go, GoColumn::PageId).max(0) as u32
+    }
+
+    /// The `Languages.dbc` id its page text is written in, the language column (`0x4e37fc` →
+    /// `0x5f5930`, `0x621b00` id `0x10`): TEXT's `data[1]`, GOOBER's `data[8]`; 0 for a type
+    /// without one.
+    pub(crate) fn language(&self, go: &ObjectFields) -> u32 {
+        self.column(go, GoColumn::Language).max(0) as u32
+    }
+
+    /// The `PageTextMaterial.dbc` id, the pageMaterial column (`0x5f5950`), which the reader and
+    /// `GetQuestBackgroundMaterial` paint on: QUESTGIVER's and TEXT's `data[2]`, GOOBER's
+    /// `data[9]`; 0 for a type without one.
+    pub(crate) fn page_material(&self, go: &ObjectFields) -> u32 {
+        self.column(go, GoColumn::PageMaterial).max(0) as u32
+    }
+}
+
+/// The data-column semantic ids benilla reads, by their names in the record table at `0x80c9fc`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GoColumn {
+    /// `startOpen` (1).
+    StartOpen,
+    /// `autoClose` (3).
+    AutoClose,
+    /// `pageID` (0xf).
+    PageId,
+    /// `language` (0x10).
+    Language,
+    /// `pageMaterial` (0x11).
+    PageMaterial,
+    /// `noDamageImmune` (0x39).
+    NoDamageImmune,
+    /// `notInCombat` (0x3e).
+    NotInCombat,
+}
+
+/// Whether the object's own type has an `id` column at all (`0x621b00` gives no −1).
+pub(crate) fn has_column(go: &ObjectFields, id: GoColumn) -> bool {
+    u32::try_from(go.gameobject_type_id())
+        .ok()
+        .and_then(|t| data_column(t, id))
+        .is_some()
+}
+
+/// `0x621b00(type, id)` for the ids of [`GoColumn`]: the index of `id` in the type's id array
+/// (`[0x80d7a4 + 20·type]`, counted by `[0x80d7a0 + 20·type]`), or `None` where the type has no
+/// such column.
+fn data_column(type_id: u32, id: GoColumn) -> Option<usize> {
+    use GoColumn::*;
+    match (type_id, id) {
+        (0 | 1, StartOpen) => Some(0),
+        (0 | 1, AutoClose) => Some(2),
+        (0, NoDamageImmune) => Some(3),
+        (1, NoDamageImmune) => Some(4),
+        (2, PageMaterial) => Some(2),
+        (2, NoDamageImmune) => Some(5),
+        (3, NotInCombat) => Some(12),
+        (6, AutoClose) => Some(6),
+        (9, PageId) => Some(0),
+        (9, Language) => Some(1),
+        (9, PageMaterial) => Some(2),
+        (10, AutoClose) => Some(3),
+        (10, PageId) => Some(7),
+        (10, Language) => Some(8),
+        (10, PageMaterial) => Some(9),
+        (10, NoDamageImmune) => Some(11),
+        (12, AutoClose) => Some(5),
+        (24, NoDamageImmune) => Some(5),
+        (26, NoDamageImmune) => Some(3),
+        (30, StartOpen) => Some(0),
+        _ => None,
+    }
 }
 
 /// A MEETINGSTONE template's slots, read through `0x621b00` keys `0x33` to `0x35` (vmangos
@@ -61,30 +148,19 @@ pub(crate) struct MeetingStoneTemplate {
 #[derive(Clone, Copy)]
 pub(crate) struct MoTransport {
     pub(crate) taxi_path_id: u32,
-    pub(crate) move_speed: f32,
-    pub(crate) accel_rate: f32,
-}
-
-/// A TEXT template's readable head (vmangos `GameObjectInfo::text`; the client's `0x621b00` key
-/// `0x11` is the same material slot).
-#[derive(Clone, Copy)]
-pub(crate) struct TextPage {
-    /// `data[0]`, the first `PageText` id; `0` is nothing to read.
-    pub(crate) page_id: u32,
-    /// `data[2]`, a `PageTextMaterial.dbc` id.
-    pub(crate) material: u32,
+    /// `data[1]` and `data[2]` as the dwords the client makes floats (`0x5f4cc0`).
+    pub(crate) move_speed: u32,
+    pub(crate) accel_rate: u32,
 }
 
 /// Entry to template, asked once while in flight.
 #[derive(Resource, Default)]
 pub(crate) struct GameObjectTemplates {
     templates: QueryCache<u32, GoTemplate>,
-}
-
-impl crate::query_cache::AskOnce for GameObjectTemplates {
-    fn clear_pending(&mut self) {
-        self.templates.clear_pending();
-    }
+    /// The entries the quest log's leaderboard missed, each waiting with the callback `0x4e0800`
+    /// (`0x4e0387`). Deviation: one per entry, where the reference keeps one per call, as the
+    /// creature arm's waits are kept (`benilla_ui::script::quest_log`).
+    quest_waits: std::sync::Mutex<Vec<u32>>,
 }
 
 impl GameObjectTemplates {
@@ -115,6 +191,15 @@ impl GameObjectTemplates {
         let _ = commands
             .0
             .send(ClientCommand::GameObjectQuery { entry, guid });
+    }
+
+    /// The template store, the one [`crate::wdb`] saves.
+    pub(crate) fn template_store(&self) -> &QueryCache<u32, GoTemplate> {
+        &self.templates
+    }
+
+    pub(crate) fn template_store_mut(&mut self) -> &mut QueryCache<u32, GoTemplate> {
+        &mut self.templates
     }
 
     /// A refused entry (`SMSG_GAMEOBJECT_QUERY_RESPONSE` with the top bit set, `0x5588e0`): no
@@ -151,18 +236,9 @@ impl GameObjectTemplates {
         // vmangos `GameObjectInfo::moTransport`.
         let mo_transport = (type_id == 15).then(|| MoTransport {
             taxi_path_id: data[0].max(0) as u32,
-            move_speed: data[1].max(0) as f32,
-            accel_rate: data[2].max(0) as f32,
+            move_speed: data[1] as u32,
+            accel_rate: data[2] as u32,
         });
-        let text_page = (type_id == 9).then(|| TextPage {
-            page_id: data[0].max(0) as u32,
-            material: data[2].max(0) as u32,
-        });
-        let quest_material = match type_id {
-            2 | 9 => Some(data[2].max(0) as u32),
-            10 => Some(data[9].max(0) as u32),
-            _ => None,
-        };
         self.templates.insert(
             entry,
             GoTemplate {
@@ -172,10 +248,35 @@ impl GameObjectTemplates {
                 floating_tooltip,
                 meeting_stone,
                 mo_transport,
-                text_page,
-                quest_material,
+                data: *data,
             },
         );
+    }
+
+    /// The leaderboard's lookup of `entry` inside its call: a miss asks, a refused entry again, and
+    /// waits with the callback `0x4e0800` (`0x4e0387`-`0x4e039c`).
+    pub(crate) fn ask_for_quest(&self, entry: u32, commands: &NetCommands) {
+        if self
+            .resolve_name(entry, crate::query_cache::Ask::Event(commands))
+            .is_none()
+        {
+            let mut waits = self.quest_waits.lock_recover();
+            if !waits.contains(&entry) {
+                waits.push(entry);
+            }
+        }
+    }
+
+    /// The answer for `entry` landed, or was refused: whether the leaderboard waited on it, the
+    /// wait spent either way.
+    pub(crate) fn take_quest_wait(&mut self, entry: u32) -> bool {
+        let waits = self
+            .quest_waits
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = waits.len();
+        waits.retain(|&e| e != entry);
+        waits.len() != before
     }
 
     /// A template's name by entry, read without a callback (the cache `0xc0e318`).
@@ -233,9 +334,56 @@ pub(crate) fn test_fields(entry: u32) -> ObjectFields {
     ObjectFields::from_pairs(&[(2, 0x21), (FIELD_OBJECT_ENTRY, entry)])
 }
 
+/// [`test_fields`] with `GAMEOBJECT_TYPE_ID` (field 21), which names the object's data columns.
+#[cfg(test)]
+pub(crate) fn test_typed_fields(entry: u32, type_id: u32) -> ObjectFields {
+    use benilla_protocol::field::FIELD_OBJECT_ENTRY;
+    ObjectFields::from_pairs(&[(2, 0x21), (FIELD_OBJECT_ENTRY, entry), (21, type_id)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GameObject's descriptor of `GAMEOBJECT_TYPE_ID` (field 21) `type_id`.
+    fn go(type_id: u32) -> ObjectFields {
+        ObjectFields::from_pairs(&[(2, 0x21), (21, type_id)])
+    }
+
+    /// `0x621b00`'s arrays name the door's columns `startOpen`, `open`, `autoClose`,
+    /// `noDamageImmune` (0 to 3), the chest's `notInCombat` 12 and the goober's `noDamageImmune`
+    /// 11; a type without the id reads 0.
+    #[test]
+    fn columns_are_read_by_the_types_semantic_ids() {
+        let mut t = GameObjectTemplates::default();
+        let data: [i32; 24] = std::array::from_fn(|i| 100 + i as i32);
+        t.insert(1, 0, "Door".into(), &data);
+        t.insert(2, 3, "Chest".into(), &data);
+        t.insert(3, 10, "Goober".into(), &data);
+        let col = |entry, id| {
+            let ty = [0, 0, 3, 10][entry as usize];
+            t.templates.get(entry).unwrap().column(&go(ty), id)
+        };
+        assert_eq!(col(1, GoColumn::StartOpen), 100);
+        assert_eq!(col(1, GoColumn::AutoClose), 102);
+        assert_eq!(col(1, GoColumn::NoDamageImmune), 103);
+        assert_eq!(col(2, GoColumn::NotInCombat), 112);
+        assert_eq!(
+            col(2, GoColumn::NoDamageImmune),
+            0,
+            "a chest has no such column"
+        );
+        assert_eq!(col(3, GoColumn::NoDamageImmune), 111);
+        assert_eq!(col(3, GoColumn::AutoClose), 103);
+    }
+
+    /// TEXT (9) and GOOBER (10) carry a pageID column; a door has none.
+    #[test]
+    fn the_page_column_is_texts_and_goobers() {
+        assert!(has_column(&go(9), GoColumn::PageId));
+        assert!(has_column(&go(10), GoColumn::PageId));
+        assert!(!has_column(&go(0), GoColumn::PageId));
+    }
 
     #[test]
     fn lock_slot_by_type_matches_getlockid() {
@@ -258,14 +406,31 @@ mod tests {
         t.insert(101, 9, "Book".into(), &data);
         t.insert(102, 10, "Goober".into(), &data);
         t.insert(103, 15, "Boat".into(), &data);
-        assert_eq!(t.templates.get(100).unwrap().quest_material, Some(2));
-        assert_eq!(t.templates.get(101).unwrap().quest_material, Some(2));
+        assert_eq!(t.templates.get(100).unwrap().page_material(&go(2)), 2);
+        assert_eq!(t.templates.get(101).unwrap().page_material(&go(9)), 2);
         assert_eq!(
-            t.templates.get(102).unwrap().quest_material,
-            Some(3),
+            t.templates.get(102).unwrap().page_material(&go(10)),
+            3,
             "a GOOBER (type 10) reads data[9]"
         );
-        assert_eq!(t.templates.get(103).unwrap().quest_material, None);
+        assert_eq!(t.templates.get(103).unwrap().page_material(&go(15)), 0);
+    }
+
+    /// The language column (`0x621b00` id `0x10`): TEXT (9) reads `data[1]`, GOOBER (10)
+    /// `data[8]`, every other type has none.
+    #[test]
+    fn the_language_column_is_text_data1_and_goober_data8() {
+        let mut t = GameObjectTemplates::default();
+        let mut data = [0i32; 24];
+        data[1] = 7;
+        data[8] = 33;
+        for (entry, ty) in [(1, 9), (2, 10), (3, 2), (4, 15)] {
+            t.insert(entry, ty, "Object".into(), &data);
+        }
+        let language = |entry, ty| t.templates.get(entry).unwrap().language(&go(ty));
+        assert_eq!(language(1, 9), 7);
+        assert_eq!(language(2, 10), 33);
+        assert_eq!((language(3, 2), language(4, 15)), (0, 0));
     }
 
     #[test]
@@ -284,8 +449,8 @@ mod tests {
             .mo_transport
             .expect("type 15 captures");
         assert_eq!(mo.taxi_path_id, 292);
-        assert_eq!(mo.move_speed, 30.0);
-        assert_eq!(mo.accel_rate, 1.0);
+        assert_eq!(mo.move_speed, 30);
+        assert_eq!(mo.accel_rate, 1);
         // A chest doesn't.
         t.insert(2, 3, "Chest".into(), &data);
         assert!(t.templates.get(2).unwrap().mo_transport.is_none());
@@ -299,17 +464,12 @@ mod tests {
         data[1] = 0; // language
         data[2] = 2; // pageMaterial (Stone)
         t.insert(2036, 9, "Book".into(), &data);
-        let page = t
-            .templates
-            .get(2036)
-            .unwrap()
-            .text_page
-            .expect("type 9 captures");
-        assert_eq!(page.page_id, 1416);
-        assert_eq!(page.material, 2);
-        // A goober's data[0] is a lockId.
+        let book = t.templates.get(2036).unwrap();
+        assert_eq!(book.page_id(&go(9)), 1416);
+        assert_eq!(book.page_material(&go(9)), 2);
+        // A goober's data[0] is a lockId; its page is data[7].
         t.insert(2037, 10, "Lever".into(), &data);
-        assert!(t.templates.get(2037).unwrap().text_page.is_none());
+        assert_eq!(t.templates.get(2037).unwrap().page_id(&go(10)), 0);
     }
 
     #[test]

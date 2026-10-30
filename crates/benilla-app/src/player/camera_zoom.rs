@@ -1,5 +1,6 @@
 //! The zoom: the orbit distance's range, from `cameraDistanceMax` × `cameraDistanceMaxFactor`
-//! under the reference's 0 and 50 yd bounds, and the wheel's glide to the chosen distance.
+//! under the reference's 0 and 50 yd bounds, and the distance's glide to its target. The zoom
+//! verbs themselves run the distance axis ([`super::camera_axes`]).
 
 use bevy::prelude::*;
 
@@ -7,7 +8,9 @@ use super::camera::CameraControl;
 
 /// The zoom floor, yd (`ds:0x8089a8` = 0.0): at 0 the eye sits at the framing pivot, inside the
 /// head, and the avatar fades out. Deviation: the starting zoom, [`CAM_DIST_DEFAULT`], is 15 yd
-/// where the reference's `cameraDistance` is 5.55 (`0x84f488`), for a wider view.
+/// where the reference starts at 5.55, the third-person-A row of its default table `0x84f488`
+/// that `cameraView` 1 picks (`0x50c17a`, `0x50c18b`; the `cameraDistance` CVar itself registers
+/// "0.0"), for a wider view.
 pub(super) const CAM_DIST_MIN: f32 = 0.0;
 /// The zoom ceiling, yd (`ds:0x8089a4` = 50.0): the cap on [`ZoomLimit`] (`0x511309`) and the top
 /// of the distance validator `0x50b310`; also the clamp for a distance read back off disk.
@@ -22,10 +25,8 @@ const CAM_DISTANCE_MAX_FACTOR_DEFAULT: f32 = 1.0;
 /// anything else, NaN included (`fcom` unordered sets C0), is refused and the old value stands.
 pub(crate) const CAM_DISTANCE_MAX_RANGE: std::ops::RangeInclusive<f32> =
     CAM_DIST_MIN..=CAM_DIST_MAX;
-/// Yards per wheel notch, the stock bindings' `CameraZoomIn(1.0)` (`Bindings.xml:707`).
-const CAM_ZOOM_STEP: f32 = 1.0;
-/// Zoom speed in yd/s, `cameraDistanceMoveSpeed`'s default: the reference glides the distance to
-/// the wheel target at this constant speed (`0x5112d0`), not an ease.
+/// Zoom speed in yd/s, `cameraDistanceMoveSpeed`'s default "8.33" (`0x50b7f3`): the reference runs
+/// the distance axis at this constant speed (`0x5112d0`), not an ease.
 const CAM_MOVE_SPEED: f32 = 8.33;
 
 /// The max orbit distance, yd, from `cameraDistanceMax` and `cameraDistanceMaxFactor`: 15 at the
@@ -36,6 +37,9 @@ pub(crate) struct ZoomLimit {
     pub(crate) max: f32,
     distance_max: f32,
     factor: f32,
+    /// `cameraDistanceMoveSpeed`, yd/s: the distance axis's rate (`[0xbe0fbc]`, `0x5113d9`), the
+    /// wheel's and `MoveViewIn`/`Out`'s alike. Its validator `0x50c040` has refused a bad value.
+    pub(crate) move_speed: f32,
 }
 
 impl Default for ZoomLimit {
@@ -45,6 +49,7 @@ impl Default for ZoomLimit {
             max: orbit_limit(distance_max, factor),
             distance_max,
             factor,
+            move_speed: CAM_MOVE_SPEED,
         }
     }
 }
@@ -93,19 +98,14 @@ fn orbit_limit(distance_max: f32, factor: f32) -> f32 {
     }
 }
 
-/// Wheel zoom, run every frame: `CAMERAZOOMIN`/`OUT` move the target, and the distance glides to it
-/// at a constant `cameraDistanceMoveSpeed`, as the reference's does. `scroll` is this frame's net
-/// zoom-in in notches (positive is closer). `max` is [`ZoomLimit::max`], CVar-fed, so it bounds by
+/// The distance's glide, run every frame after the axes (`0x5112d0`, which move the target, the
+/// zoom's among them): the target held to the limit, so lowering the max-distance slider pulls
+/// the camera in, and the distance easing to it at a constant `cameraDistanceMoveSpeed`
+/// (`speed`), as after a view's seat. `max` is [`ZoomLimit::max`], CVar-fed, so it bounds by
 /// `max`/`min`, never `f32::clamp`, which panics on a NaN or inverted bound.
-pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, max: f32) {
-    if scroll != 0.0 {
-        rig.target_distance = (rig.target_distance - scroll * CAM_ZOOM_STEP)
-            .max(CAM_DIST_MIN)
-            .min(max);
-    }
-    // Re-clamp every frame, so lowering the max-distance slider pulls the camera in.
+pub(super) fn glide_zoom(dt: f32, rig: &mut CameraControl, max: f32, speed: f32) {
     rig.target_distance = rig.target_distance.min(max);
-    let max_step = CAM_MOVE_SPEED * dt;
+    let max_step = speed * dt;
     rig.distance += (rig.target_distance - rig.distance).clamp(-max_step, max_step);
 }
 
@@ -166,6 +166,21 @@ mod tests {
         assert!(z.set_distance_max(50.0) && z.max == 50.0);
     }
 
+    /// The zoom through the distance axis it queues (`0x50fc60`, `0x50fcd0`), ticked whole.
+    fn zoom(rig: &mut CameraControl, out: bool, yards: f32, max: f32) {
+        rig.view_axes.zoom(out, yards, CAM_MOVE_SPEED);
+        let mut cam = super::super::camera::FlyCam {
+            yaw: 0.0,
+            pitch: 0.0,
+            speed: 0.0,
+        };
+        let look = super::super::LookConfig::default();
+        for _ in 0..200 {
+            super::super::camera_axes::tick(rig, &mut cam, 0.1, look, CAM_MOVE_SPEED, max);
+            glide_zoom(0.1, rig, max, CAM_MOVE_SPEED);
+        }
+    }
+
     #[test]
     fn a_nan_factor_zooms_without_panicking() {
         let mut z = ZoomLimit::default();
@@ -175,22 +190,23 @@ mod tests {
             distance: 10.0,
             ..default()
         };
-        apply_zoom_scroll(-1.0, 0.1, &mut rig, z.max);
-        assert_eq!(rig.target_distance, 11.0);
+        zoom(&mut rig, true, 1.0, z.max);
+        assert!(rig.target_distance > 10.0, "{}", rig.target_distance);
         // Even a NaN bound handed straight in bounds nothing and panics nowhere.
-        apply_zoom_scroll(-1.0, 0.1, &mut rig, f32::NAN);
-        assert_eq!(rig.target_distance, 12.0);
+        zoom(&mut rig, true, 1.0, f32::NAN);
+        assert!(rig.target_distance > 11.0, "{}", rig.target_distance);
     }
 
     #[test]
     fn the_wheel_stops_at_the_limit() {
         let mut rig = CameraControl {
             target_distance: 44.5,
+            distance: 44.5,
             ..default()
         };
-        apply_zoom_scroll(-1.0, 0.1, &mut rig, limit(15.0, 3.0));
+        zoom(&mut rig, true, 1.0, limit(15.0, 3.0));
         assert_eq!(rig.target_distance, 45.0);
-        apply_zoom_scroll(1000.0, 0.1, &mut rig, 45.0);
+        zoom(&mut rig, false, 1000.0, 45.0);
         assert_eq!(rig.target_distance, CAM_DIST_MIN);
     }
 }

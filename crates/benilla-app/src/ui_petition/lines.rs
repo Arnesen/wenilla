@@ -12,6 +12,15 @@ use crate::ui_action::UiError;
 /// because the sink reads the row's sound too.
 pub(super) type Line = UiError;
 
+/// A composed line resolved against the VM's strings.
+pub(super) fn shown(
+    script: &benilla_ui::script::UiScript,
+    e: &Line,
+) -> Option<crate::ui_action::Shown> {
+    crate::ui_action::ui_error_text(e, &|key| script.lua().globals().get::<String>(key).ok())
+        .map(|text| crate::ui_action::Shown::keyed(e.key, text))
+}
+
 /// The line `SMSG_PETITION_SIGN_RESULTS` prints when we signed (the switch at `0x5eeff5`); the
 /// owner's copy never reads the result ([`signed_by_other`]).
 pub(super) fn my_sign_line(result: u32) -> Option<Line> {
@@ -57,6 +66,22 @@ pub(super) fn offered_line(name: &str) -> Line {
 /// line signing your own charter gets.
 pub(super) fn self_offer_line() -> Line {
     UiError::key("ERR_PETITION_CREATOR")
+}
+
+/// `OfferPetition`'s target does not resolve as a unit (`0x4f4810`, id `0x7d`).
+pub(super) fn out_of_range_line() -> Line {
+    UiError::key("ERR_OUT_OF_RANGE")
+}
+
+/// `OfferPetition`'s target is not one `CanCooperate` allows (`0x4f485b`, id `0x6d`).
+pub(super) fn not_allied_line() -> Line {
+    UiError::key("ERR_GUILD_NOT_ALLIED")
+}
+
+/// `OfferPetition`'s target is in a guild already (`0x4f4886`, id `0x50`), named as the offer's
+/// echo names it.
+pub(super) fn already_in_guild_line(name: &str) -> Line {
+    UiError::s("ERR_ALREADY_IN_GUILD_S", name)
 }
 
 /// `TurnInGuildCharter()` found no charter in the bags: a red line and no packet (`0x5ef49a`

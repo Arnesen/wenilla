@@ -134,7 +134,8 @@ pub(super) fn fonts(model: &mut Model, h: FrameHandle) -> Option<ButtonFonts> {
 fn fonts_of(lua: &Lua, this: &Table) -> mlua::Result<(FrameHandle, ButtonFonts)> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let f = fonts(&mut model, h).ok_or_else(|| mlua::Error::runtime("not a Button"))?;
+    let f = fonts(&mut model, h)
+        .ok_or_else(|| mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE))?;
     Ok((h, f))
 }
 
@@ -293,7 +294,7 @@ fn state_color(lua: &Lua, this: &Table, which: LabelFont) -> mlua::Result<mlua::
 
 /// Run `f` over a frame's Button state under one short write borrow. It moves no state, only an
 /// edge does: re-registering a held button's clicks does not un-press it, as in the reference.
-fn with_button<T>(
+pub(super) fn with_button<T>(
     lua: &Lua,
     this: &Table,
     f: impl FnOnce(&mut ButtonState) -> T,
@@ -306,7 +307,7 @@ fn with_button<T>(
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
     match &mut frame.kind_state {
         KindState::Button(bs) => Ok(f(bs)),
-        _ => Err(mlua::Error::runtime("not a Button")),
+        _ => Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     }
 }
 
@@ -330,8 +331,44 @@ fn with_button_shown(
 /// region in that layer goes dark, not only the HighlightTexture. `Enable()` here turns it back
 /// on; the reference restores it only on a hovered button, by re-running its `<OnEnter>`
 /// (`0x779183`), and never while `LockHighlight` holds (`[frame+0xf8]`).
+///
+/// On the hovered frame (`[[this+0xa0]+0x7c]`, `0x7791a3`, `0x779189`) a change runs the leave
+/// notify with 1 (`0x7791b4`) first, while the state still enables it, and the enter notify
+/// (`0x779192`) after the state is set, so the button's `OnLeave` and `OnEnter` fire for it; the
+/// hover itself does not move. A call that changes nothing returns at once (`0x779175`,
+/// `0x77919c`).
 fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
+    let hovered_change = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let frame = model
+            .arena
+            .frame(h)
+            .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+        match &frame.kind_state {
+            KindState::Button(bs) => (bs.enabled() != on && model.mouseover == Some(h))
+                .then(|| model.frame_to_id.get(&h).copied())
+                .flatten(),
+            _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
+        }
+    };
+    if let (Some(id), false) = (hovered_change, on) {
+        super::mouseover::leave(lua, h, Some(id));
+        // The notify's argument 1 clears the drag arm (`0x76b725`).
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        if model.drag.as_ref().is_some_and(|d| d.source == h) {
+            model.drag = None;
+        }
+    }
+    apply_enabled(lua, h, on)?;
+    if let (Some(id), true) = (hovered_change, on) {
+        super::mouseover::enter(lua, h, id);
+    }
+    Ok(())
+}
+
+/// [`set_enabled`]'s state and layer write, under one borrow.
+fn apply_enabled(lua: &Lua, h: FrameHandle, on: bool) -> mlua::Result<()> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let frame = model
         .arena
@@ -339,7 +376,7 @@ fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
         .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
     let writes = match &mut frame.kind_state {
         KindState::Button(bs) => bs.set_enabled(on),
-        _ => return Err(mlua::Error::runtime("not a Button")),
+        _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     };
     let bit = 1u8 << DrawLayer::Highlight.index();
     if on {
@@ -370,7 +407,9 @@ pub(super) fn edge(
 
 /// Whether a hover edge on `h` reaches the base notify, the HIGHLIGHT layer and the Lua
 /// `<OnEnter>`/`<OnLeave>`: `OnEnter`/`OnLeave` (`0x779490`/`0x7794e0`) skip it on a DISABLED
-/// Button, leaving only the hover sound (`0x7794b0`). Every hover path goes through that pair
+/// Button. The tail they still run (`0x7794b0`) calls a C++ listener at `+0x31c`, which the constructor
+/// zeroes (`0x7786be`) and whose only setter `0x779760` nothing references, so no hover sound plays.
+/// Every hover path goes through that pair
 /// (the hover walk `0x766218`, `SetMouseFocus` `0x764dc0`, the hide tail `0x764cce`), and the
 /// Hyperlink and NamePlate overrides chain back (`0x7cb8a5`). The hover target still moves, so
 /// `GetMouseFocus()` answers a disabled button.
@@ -417,7 +456,7 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
         .kind_state
     {
         KindState::Button(bs) => slot.get(bs),
-        _ => return Err(mlua::Error::runtime("not a Button")),
+        _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     };
     let rh = match existing {
         Some(rh) => rh,
@@ -504,7 +543,7 @@ fn install_slot_model(
         model.arena.frame(h).map(|f| &f.kind_state),
         Some(KindState::Button(_))
     ) {
-        return Err(mlua::Error::runtime("not a Button"));
+        return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE));
     }
     let writes = std::cell::RefCell::new(crate::widget::ShownWrites::default());
     let changed = super::region::install_into_slot(
@@ -664,17 +703,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     texture_pair(lua, &m, "Highlight", Slot::Highlight)?;
 
     // SetText/GetText go to the ButtonText fontstring, as the `text` attribute does (`0x778dc0`).
+    // SetText (`0x780d20`) gates on `lua_isstring` (`0x780dac`): nil, a boolean or a table raises
+    // `Usage: %s:SetText("text")` (`0x87a198`) naming the button, so the worker's own NULL guard
+    // (`0x778dcc`) is unreachable from Lua.
     m.set(
         "SetText",
-        lua.create_function(|lua, (this, text): (Table, Option<Value>)| {
-            let text = super::binding_abi::text_arg(lua, text)?;
-            // A nil returns at once (`0x778dcc`): no clear, no label created. The guard is the
-            // button's own; `FontString:SetText(nil)` clears (`0x771d80`).
-            let Some(text) = text else { return Ok(()) };
+        lua.create_function(|lua, (this, text): (Table, Value)| {
+            with_button(lua, &this, |_| ())?;
+            let text = super::binding_abi::method_string(lua, &this, text, r#"SetText("text")"#)?;
             let id = ensure_slot(lua, &this, Slot::Text)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let rh = *model.id_to_region.get(&id).expect("text region id");
-            // The label's `SetText` (`0x778e10` into `0x771d80`) runs the separator pass.
+            // The label's `SetText` (`0x778e10` into `0x771d80`) runs the grammar rewrite and the
+            // separator pass.
             let text = model.localized_text(text);
             let data = model.region_data.entry(rh).or_default();
             let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
@@ -970,14 +1011,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // RegisterForClicks(...) (`0x782490`) replaces the registered set rather than adding to it
     // (`0x779730` stores the mask), matching the names in any case (`0x64a4c0`); [`wants_click`]
-    // reads it.
+    // reads it. The list runs only while `lua_isstring` holds (`0x78268f`-`0x782696`): the first
+    // nil, boolean or table ends it, and a number reads as its text, which names no click.
     m.set(
         "RegisterForClicks",
         lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let mut set = std::collections::HashSet::new();
             for v in args.iter() {
-                if let Value::String(s) = v {
-                    set.insert(s.to_str()?.to_string());
+                match v {
+                    Value::String(s) => {
+                        set.insert(s.to_str()?.to_string());
+                    }
+                    Value::Integer(_) | Value::Number(_) => {}
+                    _ => break,
                 }
             }
             with_button(lua, &this, |bs| bs.registered_clicks = set)
@@ -985,12 +1031,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // SetButtonState(state [, lock]) (`0x780270`): DISABLED, NORMAL or PUSHED in any case
-    // (`0x780390`), else a usage error; `lock` is `GetBoolOrDefault` with default 0 (`0x78032c`),
-    // so the `1` of `MainMenuBarMicroButtons.lua:22` sets it. While locked, presses and releases
-    // leave the state alone; unlocked, the next release un-pushes a scripted push.
+    // (`0x780390`); a non-string (`0x780307`) or another token raises
+    // `Usage: %s:SetButtonState("state", lock)` (`0x87a0d8`) naming the button. `lock` is
+    // `GetBoolOrDefault` with default 0 (`0x78032c`), so the `1` of `MainMenuBarMicroButtons.lua:22`
+    // sets it. While locked, presses and releases leave the state alone; unlocked, the next release
+    // un-pushes a scripted push.
     m.set(
         "SetButtonState",
-        lua.create_function(|lua, (this, state, lock): (Table, String, MultiValue)| {
+        lua.create_function(|lua, (this, state, lock): (Table, Value, MultiValue)| {
+            with_button(lua, &this, |_| ())?;
+            let line = r#"SetButtonState("state", lock)"#;
+            let state = super::binding_abi::method_string(lua, &this, state, line)?;
             let new = if state.eq_ignore_ascii_case("PUSHED") {
                 ButtonVisualState::Pushed
             } else if state.eq_ignore_ascii_case("NORMAL") {
@@ -998,9 +1049,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             } else if state.eq_ignore_ascii_case("DISABLED") {
                 ButtonVisualState::Disabled
             } else {
-                return Err(mlua::Error::runtime(format!(
-                    "Usage: SetButtonState(\"state\", lock) — unknown state '{state}'"
-                )));
+                return Err(super::binding_abi::usage(lua, &this, line));
             };
             let first = lock.into_iter().next();
             let locked = super::binding_abi::bool_or_default(first.as_ref(), false);
@@ -1030,8 +1079,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 model.frame_id(h)
             };
-            // A released click, flagged as scripted, which only a LootButton reads.
-            click_button(lua, id, click_arg_name(&button), false, true);
+            // A released click, flagged as scripted, which a LootButton and a nameplate read.
+            click_button(lua, id, click_arg_name(&button), true);
             Ok(())
         })?,
     )?;
@@ -1123,15 +1172,14 @@ pub(super) fn wants_press_visual(model: &Model, h: FrameHandle, button: &str) ->
     }
 }
 
-/// The click shared by the input path and `Click()`: a CheckButton toggles first, enabled or not
-/// (`0x785550`), a disabled Button fires nothing more, then `OnClick` gets the button name alone
-/// as `arg1` (`0x779540` fires it with the format `"%s"`); `down`, true only for a click a
-/// `…ButtonDown` registration fired, reaches the nameplate's select alone. The mouse never gets
-/// here for a disabled button: its press slot returns first (`0x77922e`), its release is gated on
-/// PUSHED. `scripted` marks a Lua `Click()`
-/// (`0x7826c0` passes 1, the mouse `0x779280`/`0x7793a4` pass 0): a LootButton then does nothing at
-/// all, not even its `OnClick` (`0x4c182b`); every other kind ignores it.
-pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripted: bool) {
+/// The click shared by the input path and `Click()`: a nameplate's slot runs its unit's select or
+/// interact ahead of the rest (`0x7cb910`), a CheckButton toggles, enabled or not (`0x785550`), a
+/// disabled Button fires nothing more, then `OnClick` gets the button name alone as `arg1`
+/// (`0x779540` fires it with the format `"%s"`). The mouse never gets here for a disabled button:
+/// its press slot returns first (`0x77922e`), its release is gated on PUSHED. `scripted` marks a
+/// Lua `Click()` (`0x7826c0` passes 1, the mouse `0x779280`/`0x7793a4` pass 0): a LootButton then
+/// does nothing at all, not even its `OnClick` (`0x4c182b`), and a nameplate's call carries it.
+pub(super) fn click_button(lua: &Lua, id: u32, button: &str, scripted: bool) {
     // A hyperlink button's click slot (`+0x94`, `0x7a3510`) is its text frame's
     // `OnHyperlinkClick`, in place of the Button's `OnClick` firer.
     let target = lua
@@ -1142,6 +1190,11 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
         .copied();
     if target.is_some_and(|h| super::hyperlink::click(lua, h, button)) {
         return;
+    }
+    // A nameplate's slot calls `0x4949f0` on its unit (`0x7cb92a`) before the button's click
+    // (`0x7cb936` → `0x779540`), so its `OnClick` reads the unit it selected.
+    if let Some(h) = target {
+        super::nameplate::click(lua, h, button, scripted);
     }
     let mut take_loot = None;
     let fire = {
@@ -1202,12 +1255,6 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
         lua.app_data_mut::<Model>()
             .expect("model app_data")
             .record_lua_error(&e);
-    }
-    // A nameplate click selects its unit, from the pointer or `Click()` alike (the plate's
-    // override `0x7cb910` chains the base), after the handler so an erroring hook cannot eat it. A
-    // press selects nothing: the plate registers Up clicks only (`0x7cb637`).
-    if !down {
-        super::nameplate::note_click(lua, id, button);
     }
     // The take runs whatever the handler did (`0x4c1867`), inside the click: a row whose `OnClick`
     // errored still loots, and the click's next listener reads what the take did.

@@ -1,4 +1,4 @@
-//! The stock buff bar (`BuffFrame.xml`) under a stubbed aura feed. A button's `id` is an ordinal
+//! The stock buff bar (`BuffFrame.xml`) under a stubbed buff cache. A button's `id` is an ordinal
 //! within its filter; `GetPlayerBuff` maps it to the cache position every other buff verb takes.
 
 use benilla_ui::script::{AuraState, ExtractedQuad, QuadContent, UiScript};
@@ -7,6 +7,7 @@ use super::test_ui::load_ui as load_xml;
 
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // The one-letter duration strings, which `SecondsToTimeAbbrev` formats unguarded.
     load_xml(&s, "Interface\\FrameXML\\GlobalStrings.lua");
@@ -69,6 +70,9 @@ fn aura(
         until_cancelled: expiration_time == 0.0,
         channeled: false,
         raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
+        vision_hidden: false,
     }
 }
 
@@ -868,6 +872,8 @@ fn the_duration_line_reads_the_real_global_strings() {
         .expect("GlobalStrings.lua in the chain");
 
     let mut s = UiScript::new().unwrap();
+
+    s.keep_calls();
     crate::ui_script::test_ui::load_tooltip_template(&s);
     s.set_screen_size(1024.0, 768.0);
     s.run(&String::from_utf8_lossy(&src)).expect("runs clean");

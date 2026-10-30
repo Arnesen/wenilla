@@ -20,6 +20,57 @@ pub(super) struct FrameFlags {
     pub fall_time: u32,
 }
 
+/// The pitch keys' bit, which `0x7c6df0` sets only on a swimmer but nothing clears on leaving the
+/// water by a jump (`0x7c61f0` keeps it), so it rides the fall and the land after it.
+pub(super) fn pitch_bits(player: &Player) -> u32 {
+    match player.pitch_keys {
+        Some(true) => move_flags::PITCH_UP,
+        Some(false) => move_flags::PITCH_DOWN,
+        None => 0,
+    }
+}
+
+/// Milliseconds since the arc began, 0 on the ground: the wire's `fall_time`.
+pub(super) fn fall_ms(player: &Player, now: f32) -> u32 {
+    player
+        .airborne_since
+        .map_or(0, |t0| ((now - t0) * 1000.0).max(0.0) as u32)
+}
+
+/// The direction and turn bits the netted commands give the word, before the gates strip them
+/// ([`state::incapacitated_flags`]). `swim` is `Some((fwd, side))` while swimming, the netted swim
+/// amounts, whose direction bits the swim gait selector cascades on (`0x5fd100`: turn 41, strafe
+/// 43/44, back 45, forward 42, idle 41), and which carry no turn bit. On land the bits come off the
+/// net axes: a pair that nets to zero streams no direction bit, the emitter's STOP, and the server
+/// relays no packet carrying both strafe bits. A turn key turns only off mouselook, where it
+/// strafes instead.
+pub(super) fn command_bits(axes: &input::MoveAxes, swim: Option<(f32, f32)>) -> u32 {
+    let mut bits = 0;
+    let (fwd, side) = match swim {
+        Some((fwd, side)) => (fwd, side),
+        None => (axes.fwd as f32, axes.side as f32),
+    };
+    if fwd < 0.0 {
+        bits |= move_flags::BACKWARD;
+    } else if fwd > 0.0 {
+        bits |= move_flags::FORWARD;
+    }
+    if side < 0.0 {
+        bits |= move_flags::STRAFE_LEFT;
+    } else if side > 0.0 {
+        bits |= move_flags::STRAFE_RIGHT;
+    }
+    if swim.is_none() && !axes.mouselook {
+        if axes.turn_left {
+            bits |= move_flags::TURN_LEFT;
+        }
+        if axes.turn_right {
+            bits |= move_flags::TURN_RIGHT;
+        }
+    }
+    bits
+}
+
 /// Builds this frame's two flag words. `swim` is `Some((fwd, side))` while swimming, the netted
 /// amounts that drove the mover.
 pub(super) fn this_frame(
@@ -38,62 +89,25 @@ pub(super) fn this_frame(
     launch_y: f32,
 ) -> FrameFlags {
     // Taken before the arc bookkeeping clears `airborne_since` on the landing frame, so FALL_LAND
-    // carries the whole fall: vmangos `Player::HandleFall` charges no damage under 1229 ms.
-    let wire_fall_time = if jumped {
-        // A jump starts a fresh arc at zero, even a same-frame relaunch whose `airborne_since`
-        // is still the last arc's.
-        0
-    } else {
-        player
-            .airborne_since
-            .map_or(0, |t0| ((now - t0) * 1000.0).max(0.0) as u32)
-    };
+    // carries the whole fall: vmangos `Player::HandleFall` charges no damage under 1229 ms. A jump
+    // starts a fresh arc at zero, even a same-frame relaunch whose `airborne_since` is still the
+    // last arc's.
+    let wire_fall_time = if jumped { 0 } else { fall_ms(player, now) };
     // Every granted mover mode rides every packet, root included: the reference's builder reads
     // the `[cmov+0x40]` the server's merge wrote them into, and a mode dropped here is cleared by
     // the server's next echo.
     let mut move_flags_now = player.modes.wire_flags();
     // The swim branch never lands: leaving the water resumes the ground mover from rest.
     let landed;
-    if let Some((swim_fwd, swim_side)) = swim {
-        // SWIMMING (its pitch tail rides with it) and the direction bits of the netted swim
-        // amounts, which the swim gait selector cascades on (`0x5fd100`: turn 41, strafe 43/44,
-        // back 45, forward 42, idle 41). Space sets nothing: its swim role is the breach
+    move_flags_now |= command_bits(axes, swim);
+    if swim.is_some() {
+        // SWIMMING (its pitch tail rides with it). Space sets nothing: its swim role is the breach
         // (`0x7c6230`). No FALLING, and the arc is cleared.
         move_flags_now |= move_flags::SWIMMING;
-        if swim_fwd < 0.0 {
-            move_flags_now |= move_flags::BACKWARD;
-        } else if swim_fwd > 0.0 {
-            move_flags_now |= move_flags::FORWARD;
-        }
-        if swim_side < 0.0 {
-            move_flags_now |= move_flags::STRAFE_LEFT;
-        } else if swim_side > 0.0 {
-            move_flags_now |= move_flags::STRAFE_RIGHT;
-        }
         player.airborne_since = None;
         player.fall_far = false;
         landed = false;
     } else {
-        // Off the net axis: a pair that nets to zero streams no direction bit, the emitter's STOP.
-        match axes.fwd.signum() {
-            1 => move_flags_now |= move_flags::FORWARD,
-            -1 => move_flags_now |= move_flags::BACKWARD,
-            _ => {}
-        }
-        // Off the netted strafe axis: the server relays no packet carrying both strafe bits.
-        match axes.side.signum() {
-            -1 => move_flags_now |= move_flags::STRAFE_LEFT,
-            1 => move_flags_now |= move_flags::STRAFE_RIGHT,
-            _ => {}
-        }
-        if !axes.mouselook {
-            if axes.turn_left {
-                move_flags_now |= move_flags::TURN_LEFT;
-            }
-            if axes.turn_right {
-                move_flags_now |= move_flags::TURN_RIGHT;
-            }
-        }
         // The arc's edges; FALLING rides the wire too, so observers replay the arc.
         let arc = player.advance_airborne_arc(airborne, jumped, now, launch_y);
         landed = arc.landed;
@@ -118,6 +132,7 @@ pub(super) fn this_frame(
             move_flags_now = 0;
         }
     }
+    move_flags_now |= pitch_bits(player);
     // `MOVEFLAG_WALK_MODE` (`0x100`) is a mode, not a motion, so it goes on after the settle's
     // wipe and survives the root and stun suppressions: the reference's input allow-list
     // (`0x615c71`, table `0x618054`) blocks translation under a root and permits run/walk.
@@ -245,6 +260,59 @@ mod tests {
             0.0,
         );
         assert_eq!(f.wire & move_flags::WALK_MODE, 0);
+    }
+
+    /// The pitch keys ride the word as `0x40` or `0x80` (`0x7c6df0`) in every mode: a jump out of
+    /// the water (`0x7c61f0`) keeps them through the fall and onto the land.
+    #[test]
+    fn the_pitch_keys_ride_the_word_out_of_the_water() {
+        let mut player = Player {
+            pitch_keys: Some(true),
+            ..Default::default()
+        };
+        let word = |player: &mut Player, swim| {
+            this_frame(
+                player,
+                &still(),
+                swim,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                1.0,
+                0.0,
+            )
+            .wire
+        };
+        assert_eq!(
+            word(&mut player, Some((0.0, 0.0))),
+            move_flags::SWIMMING | move_flags::PITCH_UP
+        );
+        player.pitch_keys = Some(false);
+        assert_eq!(
+            word(&mut player, Some((0.0, 0.0))),
+            move_flags::SWIMMING | move_flags::PITCH_DOWN
+        );
+        assert_eq!(word(&mut player, None), move_flags::PITCH_DOWN, "on land");
+        let falling = this_frame(
+            &mut player,
+            &still(),
+            None,
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            1.0,
+            0.0,
+        )
+        .wire;
+        assert_eq!(falling & 0xc0, move_flags::PITCH_DOWN, "in the fall");
+        player.pitch_keys = None;
+        assert_eq!(word(&mut player, None) & 0xc0, 0);
     }
 
     #[test]

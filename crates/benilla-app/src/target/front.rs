@@ -11,10 +11,10 @@
 //!
 //! The bind itself belongs to the cursor's owner ([`crate::spell::CursorPicks`]): a selection writer
 //! holds the attack seam, whose cast state the cast ladder holds too, so it parks the unit and the
-//! owner binds it.
+//! owner binds it as the select returns, ahead of what the writer does next.
 //!
 //! A world click does not pass here: it holds off while the cursor is up and the cursor's own click
-//! binds the picked object ([`crate::spell::targeting::commit_object_cast_on_click`],
+//! binds the picked object ([`crate::spell::targeting::ClickCommits::object`],
 //! `0x4925d0` → `0x493540`).
 
 use bevy::ecs::system::SystemParam;

@@ -66,6 +66,17 @@ pub(crate) fn index_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Resul
     index_arg32(lua, v, usage).map(|n| n as usize)
 }
 
+/// A slot argument the binding decrements as a double before the truncation: `is-number`
+/// (`0x6f34d0`), `tonumber` (`0x6f3620`), `fsub 1.0` and `_ftol` ([`ftol`]), so `0.5` is slot 0
+/// and 0 is -1, which the caller's signed range test drops (`SetMerchantItem` `0x534159`,
+/// `SetTradePlayerItem` `0x5342b1`). A non-number raises the binding's own `usage`.
+pub(crate) fn less_one_arg(lua: &Lua, v: Value, usage: &str) -> mlua::Result<i32> {
+    match lua.coerce_number(v)? {
+        Some(n) => Ok(ftol(n - 1.0)),
+        None => Err(mlua::Error::RuntimeError(usage.into())),
+    }
+}
+
 /// [`index_arg`] for the parameters the bindings keep as `u32`.
 pub(crate) fn index_arg32(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<u32> {
     number_arg(lua, v, usage).map(|n| n as u32)
@@ -97,7 +108,7 @@ pub(crate) fn coerced_number(lua: &Lua, v: Option<Value>) -> f64 {
 /// `is-number-or-string` (`0x6f3510`) then `0x6f3690`, raising the binding's `Usage:` on failure:
 /// a number is stringified (`UnitAffectingCombat(5)` passes here, then the unit resolver raises
 /// `Unknown unit name` for `"5"`, `0x515c14`), and nil, a boolean, a table or a function raises.
-pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &'static str) -> mlua::Result<String> {
+pub(crate) fn string_arg(lua: &Lua, v: Value, usage: &str) -> mlua::Result<String> {
     match lua.coerce_string(v)? {
         // Lossy: a Lua string is bytes, so invalid UTF-8 costs a glyph, never the call.
         Some(s) => Ok(s.to_string_lossy()),
@@ -119,17 +130,6 @@ pub(crate) fn optional_string(lua: &Lua, v: &Value) -> Option<String> {
             .flatten()
             .map(|s| s.to_string_lossy()),
         _ => None,
-    }
-}
-
-/// A free-text argument for the text sinks (`SetText`, `SetFormattedText`, `EditBox:Insert`):
-/// `Option<String>`'s conversion, except that a string that is not valid UTF-8 becomes lossy text
-/// instead of raising, as the reference takes bytes.
-pub(crate) fn text_arg(lua: &Lua, v: Option<Value>) -> mlua::Result<Option<String>> {
-    match v {
-        None | Some(Value::Nil) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.to_string_lossy())),
-        Some(other) => mlua::FromLua::from_lua(other, lua).map(Some),
     }
 }
 
@@ -206,6 +206,16 @@ pub(crate) fn usage(lua: &Lua, this: &Table, line: &str) -> mlua::Error {
 /// numeric string passes, else the method's [`usage`] line naming `this`.
 pub(crate) fn method_number(lua: &Lua, this: &Table, v: Value, line: &str) -> mlua::Result<f64> {
     lua.coerce_number(v)?.ok_or_else(|| usage(lua, this, line))
+}
+
+/// A method's string argument: `is-number-or-string` (`0x6f3510`) then `lua_tostring`
+/// (`0x6f3690`), so a number passes as its text, else the method's [`usage`] line naming `this`.
+pub(crate) fn method_string(lua: &Lua, this: &Table, v: Value, line: &str) -> mlua::Result<String> {
+    match lua.coerce_string(v)? {
+        // Lossy: a Lua string is bytes, so invalid UTF-8 costs a glyph, never the call.
+        Some(s) => Ok(s.to_string_lossy()),
+        None => Err(usage(lua, this, line)),
+    }
 }
 
 /// `SetOrientation`'s argument on the StatusBar and the Slider (`0x78f320`, `0x790610`): a
@@ -312,6 +322,12 @@ pub fn s_str_to_float(s: &str) -> f64 {
     } else {
         value
     }
+}
+
+/// A CVar record's float as `CVar::InternalSet` stores it: `SStrToFloat` (`0x63e130`) kept as a
+/// single (`fstp dword [esi+0x24]`, `0x63e135`), with no parse check of the text.
+pub fn record_float(text: &str) -> f32 {
+    s_str_to_float(text) as f32
 }
 
 /// `value * pow(10, exp)` as the x87 forms it: the power keeps the extended exponent range until

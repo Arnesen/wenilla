@@ -1,11 +1,14 @@
-//! The `Unit*` bindings. The app pushes each token's [`UnitState`] every frame through
-//! [`UiScript::set_unit`], and the units a `target` chain ends on by guid through
-//! [`UiScript::set_unit_by_guid`]; the globals read that plain data, which keeps this crate free of
-//! the ECS. Every predicate answers the number `1` or nil, never a Lua boolean.
+//! The `Unit*` bindings. A getter resolves its token and reads the unit through the lent host as
+//! it runs ([`UnitStateQuery`], [`read_object`]), which keeps this crate free of the ECS; with no
+//! host free to ask it reads the [`UnitState`] snapshots the app pushes per token
+//! ([`UiScript::set_unit`]) and per guid ([`UiScript::set_unit_by_guid`]). Every predicate answers
+//! the number `1` or nil, never a Lua boolean.
+
+use std::borrow::Cow;
 
 use mlua::Lua;
 
-use super::{Model, NearestMode, ScriptCall};
+use super::{Model, ScriptCall};
 
 /// A selection ask from Lua, queued in call order for the app to resolve and commit. The reference
 /// routes `TargetUnit`, `AssistUnit` and `TargetLastEnemy` through one helper (`0x489a40`: commit,
@@ -111,6 +114,10 @@ pub struct UnitState {
     pub class: Option<String>,
     /// `UnitClass`'s second return, the uppercase token (`"WARRIOR"`).
     pub class_file: Option<String>,
+    /// `UnitCreatureFamily`'s word (`0x6055e0`, `0x51a372`): the localized `CreatureFamily.dbc` name of the
+    /// family word in the unit's cached creature record (`[[unit+0xb30]+0x1c]`); `None` without a
+    /// record, with family 0, or for a family the table lacks. Players have no record.
+    pub family: Option<String>,
     /// `UnitHasRelicSlot` (`0x519e50`): INVSLOT 17 is a relic slot, from `ChrClasses.dbc` field
     /// 16. Players only, true for Paladin, Shaman and Druid.
     pub has_relic_slot: bool,
@@ -177,8 +184,9 @@ pub struct UnitState {
     /// disconnected, which greys a stock mana bar (`UnitFrame.lua:214`), so a hand-built live
     /// unit must set it; the app's `snapshot` does for every held one.
     pub is_connected: bool,
-    /// `UnitIsPVPFreeForAll`: `PLAYER_FLAGS` bit `0x80`, or the roster status byte's `0x10`;
-    /// independent of [`Self::pvp`].
+    /// `UnitIsPVPFreeForAll` (`0x516540`): a held unit's `UNIT_FIELD_FLAGS` 0x8 and its
+    /// controlling player's `PLAYER_FLAGS` 0x80, or for one with no object the roster status
+    /// byte's `0x10`; independent of [`Self::pvp`].
     pub is_pvp_ffa: bool,
     /// `UnitPVPRank`: the current rank on the internal `0..=18` scale (0 none), from the public
     /// `PLAYER_BYTES_3` byte 3. The private lifetime highest rides
@@ -223,7 +231,7 @@ pub struct UnitState {
     /// The unit's own stat, resistance, damage, speed and attack-power fields, which the stat
     /// getters read for any unit but the active player (`ui/unitstats`); zeros where the server
     /// sends the field to the owner alone.
-    pub combat: super::char_stats::UnitCombatStats,
+    pub combat: super::stat_read::UnitCombatStats,
     /// `UNIT_FIELD_SUMMONEDBY` (fields 12-13), 0 for none: `UnitDefense` and `UnitAttackBothHands`
     /// answer a unit the active player summoned (`0x519272`, `0x518881`).
     pub summoned_by: u64,
@@ -268,7 +276,22 @@ pub fn unit_is_grey(player_level: u32, unit_level: u32) -> bool {
 /// `UnitReaction` <= 2 here) and grey to it (`0x5f0700`, `0x6125a6`). The tooltip's CIVILIAN line
 /// and `UnitPVPName`'s civilian prefix (`0x609370`) both read it.
 pub fn is_civilian_kill(u: &UnitState, player_level: u32) -> bool {
-    u.civilian && u.pvp && u.reaction != 0 && u.reaction <= 2 && unit_is_grey(player_level, u.level)
+    civilian_kill_of(u, u.civilian, u, player_level)
+}
+
+/// [`is_civilian_kill`] with the record's civilian flag as given, and the PvP flag and the level
+/// off `object`.
+fn civilian_kill_of(
+    u: &UnitState,
+    civilian: bool,
+    object: &dyn UnitObjectRead,
+    player_level: u32,
+) -> bool {
+    civilian
+        && object.pvp()
+        && u.reaction != 0
+        && u.reaction <= 2
+        && unit_is_grey(player_level, object.level())
 }
 
 /// The tooltip's "??" level gate (`0x529fe0`): level 0, or [`level_is_hidden`].
@@ -281,9 +304,17 @@ pub fn level_reads_unknown(u: &UnitState, player_level: u32) -> bool {
 /// `UnitReaction` <= 2 here) at least 10 levels above the player, players among them, since
 /// neither path tests the unit's type; and world-boss rank 3 (`0x51807d`-`0x518087`, `0x52a373`).
 pub fn level_is_hidden(u: &UnitState, player_level: u32) -> bool {
-    let much_higher_hostile =
-        u.reaction != 0 && u.reaction <= 2 && u.level >= player_level.saturating_add(10);
-    u.rank == 3 || much_higher_hostile
+    level_is_hidden_at(u, u.level, u.rank, Some(player_level))
+}
+
+/// [`level_is_hidden`] at `level`, the one read off the unit's object, and `rank`, the one read
+/// off its creature record; with no active player, `None`, the hostile leg is skipped
+/// (`0x518055`) and only the rank hides.
+fn level_is_hidden_at(u: &UnitState, level: u32, rank: u32, player_level: Option<u32>) -> bool {
+    let much_higher_hostile = player_level.is_some_and(|player_level| {
+        u.reaction != 0 && u.reaction <= 2 && level >= player_level.saturating_add(10)
+    });
+    rank == 3 || much_higher_hostile
 }
 
 /// The level a drunk player sees on a unit it can attack, the unit tooltip's arithmetic
@@ -327,10 +358,15 @@ pub fn power_token(ty: u8) -> &'static str {
 }
 
 impl super::UiScript {
-    /// Drains the guids `UnitName` read off a unit with no object and found no name for, which the
-    /// reference's lookup asks the server for (`0x5171eb`).
+    /// The guids `UnitName` read off a unit with no object and found no name for, which the
+    /// reference's lookup asks the server for (`0x5171eb`), as a harness's VM kept them
+    /// ([`Self::keep_calls`]), in call order.
+    #[cfg(test)]
     pub fn take_unit_name_asks(&mut self) -> Vec<u64> {
-        self.model_mut().unit_name_asks.drain().collect()
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::RecordAsk(super::RecordAsk::PlayerName(guid)) => Some(*guid),
+            _ => None,
+        })
     }
 
     /// [`unknownobject`]'s text, for a reader outside the VM that copies it, as the deactivate
@@ -342,8 +378,10 @@ impl super::UiScript {
             .unwrap_or_else(|| "Unknown Being".to_string())
     }
 
-    /// Push, or clear with `None`, a token's snapshot; the app's feed calls it each frame before
-    /// event dispatch, so a frame's `OnEvent` sees current values.
+    /// Push, or clear with `None`, the VM's copy of a token's unit, which the getters read with no
+    /// host free to ask ([`UnitStateQuery`]); a `/reload`'s seat and the mouseover's hover push
+    /// it. Nothing redraws off a push: a tooltip's bar follows its unit's health watcher
+    /// (`0x52a08d` → `0x529560`).
     pub fn set_unit(&mut self, token: &str, state: Option<UnitState>) {
         {
             let mut model = self.model_mut();
@@ -377,15 +415,14 @@ impl super::UiScript {
                 }
             }
         }
-        // A push of the unit a tooltip shows re-drives its health bar, without a line rebuild.
-        super::tooltip_unit::on_unit_push(&self.lua, token);
     }
 
     /// Push, or clear with `None`, the snapshot of a unit a `target` chain can end on, by guid. A
     /// token with a hop that no push names (`"party1target"`, `"raid3targettarget"`) resolves
     /// through [`UnitGuids`] to a guid and reads that guid's entry, the reference's order
-    /// (`0x515970`, then each getter's object lookup `0x468460`); the guids to cover are
-    /// [`Self::chain_end_guids`]. A token without a hop reads its own push, not this.
+    /// (`0x515970`, then each getter's object lookup `0x468460`), with no host free to ask; the
+    /// app pushes none, as its getters read the unit through the host ([`UnitStateQuery`]). A
+    /// token without a hop reads its own push, not this.
     pub fn set_unit_by_guid(&mut self, guid: u64, state: Option<UnitState>) {
         let mut model = self.model_mut();
         match state {
@@ -398,13 +435,9 @@ impl super::UiScript {
         }
     }
 
-    /// The guids the chains a script can spell end on ([`UnitGuids::chain_ends`]), each once: the
-    /// units whose snapshots [`Self::set_unit_by_guid`] serves.
-    pub fn chain_end_guids(&self) -> Vec<u64> {
-        let mut ends: Vec<u64> = self.model_ref().unit_guids.chain_ends().collect();
-        ends.sort_unstable();
-        ends.dedup();
-        ends
+    /// The snapshot pushed under `token` itself, as [`Self::set_unit`] left it.
+    pub fn unit_view(&self, token: &str) -> Option<UnitState> {
+        self.model_ref().pushed_unit(token).cloned()
     }
 
     /// Push the player's copper (`PLAYER_FIELD_COINAGE`), read by `GetMoney`.
@@ -412,17 +445,18 @@ impl super::UiScript {
         self.model_mut().money = copper;
     }
 
-    /// Push `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, private fields that `UnitXP` and `UnitXPMax`
-    /// answer for `"player"` alone.
+    /// Set the VM's copy of `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, private fields that `UnitXP`
+    /// and `UnitXPMax` answer for `"player"` alone, which they read with no host lent
+    /// ([`super::SelfRead`]).
     pub fn set_player_xp(&mut self, xp: u32, next_level_xp: u32) {
         let mut model = self.model_mut();
         model.player_xp = xp;
         model.player_next_level_xp = next_level_xp;
     }
 
-    /// Push the rest state (`PLAYER_BYTES_2` byte 3), the rested pool
-    /// (`PLAYER_REST_STATE_EXPERIENCE`, raw) and `PLAYER_FLAGS_RESTING` together, so
-    /// `GetRestState`, `GetXPExhaustion` and `IsResting` never read a half update.
+    /// Set the VM's copy of the rest state (`PLAYER_BYTES_2` byte 3), the rested pool
+    /// (`PLAYER_REST_STATE_EXPERIENCE`, raw) and `PLAYER_FLAGS_RESTING`, which `GetRestState`,
+    /// `GetXPExhaustion` and `IsResting` read with no host lent ([`super::SelfRead`]).
     pub fn set_rest_state(&mut self, state: u8, pool: u32, resting: bool) {
         let mut model = self.model_mut();
         model.rest_state = state;
@@ -430,8 +464,8 @@ impl super::UiScript {
         model.resting = resting;
     }
 
-    /// Push `PLAYER_FLAGS` bits 12 (`PartialPlayTime`) and 13 (`NoPlayTime`) together, as
-    /// `PlayerFrame.lua:244` tests them in one if/elseif.
+    /// Set the VM's copy of `PLAYER_FLAGS` bits 12 (`PartialPlayTime`) and 13 (`NoPlayTime`),
+    /// which those getters read with no host lent ([`super::SelfRead`]).
     pub fn set_play_time(&mut self, partial: bool, none: bool) {
         let mut model = self.model_mut();
         model.partial_play_time = partial;
@@ -478,9 +512,9 @@ impl super::UiScript {
         self.model_ref().exhaustion.get(&state).cloned()
     }
 
-    /// Push the combo points (`PLAYER_FIELD_BYTES` byte 1) and their target
-    /// (`PLAYER_FIELD_COMBO_TARGET`) together, as `Player::SetComboPoints` writes them. Raw:
-    /// `GetComboPoints`' class and target gates are the binding's.
+    /// Set the VM's copy of the combo points (`PLAYER_FIELD_BYTES` byte 1) and their target
+    /// (`PLAYER_FIELD_COMBO_TARGET`), which `GetComboPoints` reads with no host lent
+    /// ([`super::SelfRead`]). Raw: its class and target gates are the binding's.
     pub fn set_combo_points(&mut self, points: u8, target: u64) {
         let mut model = self.model_mut();
         model.combo_points = points;
@@ -498,7 +532,8 @@ impl super::UiScript {
     /// Take the `TargetNearest*([reverse])` calls out of the call stream, `true` for reverse.
     /// They name no unit: the reference runs the TAB cycler (`0x493f60`) straight into
     /// `SetSelection`.
-    pub fn take_target_nearest_requests(&mut self) -> Vec<(NearestMode, bool)> {
+    #[cfg(test)]
+    pub fn take_target_nearest_requests(&mut self) -> Vec<(super::NearestMode, bool)> {
         self.take_calls_where(|c| match c {
             ScriptCall::TargetNearest { mode, reverse, .. } => Some((*mode, *reverse)),
             _ => None,
@@ -506,6 +541,7 @@ impl super::UiScript {
     }
 
     /// Take the `TargetByName(name, exactMatch)` calls out of the call stream.
+    #[cfg(test)]
     pub fn take_target_by_name_requests(&mut self) -> Vec<(String, bool)> {
         self.take_calls_where(|c| match c {
             ScriptCall::TargetByName { name, exact, .. } => Some((name.clone(), *exact)),
@@ -518,12 +554,6 @@ impl super::UiScript {
         !self
             .take_calls_where(|c| matches!(c, ScriptCall::ClearTarget).then_some(()))
             .is_empty()
-    }
-
-    /// Drain `DropItemOnUnit`'s tokens; on the pet the app casts the learned Feed Pet spell at
-    /// the held item (`0x48d960`).
-    pub fn take_drop_item_on_unit(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().drop_item_on_unit)
     }
 
     /// Take the `SpellTargetUnit` calls out of the call stream.
@@ -550,8 +580,111 @@ pub(crate) fn check_unit_token(token: &Option<String>) -> mlua::Result<()> {
     }
 }
 
-/// Map a token's snapshot through `f` under a short model borrow, or answer `default` for an
-/// absent unit, after the token check.
+/// The state of the unit `token` names, as a getter reads it at the call: the guid the resolver
+/// names now ([`resolve::live_parsed`]: `0x515970` reads the objects and the group rows inside the
+/// call), then that unit as the lent host reads it now ([`UnitStateQuery`]): its object, else the
+/// group's record of it (`0x496400`, `0x496420`), else what the name cache knows; `None` for
+/// nobody. A host that declines, or none free to ask (a glue VM, or a call's apply under way), or a
+/// token that reads no object, reads the snapshots: the token's push while it names the same unit,
+/// else what the getters read for the guid ([`Model::unit_of_guid`]), else
+/// [`Model::snapshot_unit`].
+pub(crate) fn view<'m>(lua: &Lua, model: &'m Model, token: &str) -> Option<Cow<'m, UnitState>> {
+    view_as(lua, model, token, false)
+}
+
+/// [`view`] for a reader that takes the held unit's own fields off the object through the host
+/// ([`read_object`], [`read_identity`], [`read_record`]): a held unit is its guid and the legs
+/// [`UnitHeldQuery`] answers, with nothing built or copied; an unheld one is [`view`]'s.
+pub(crate) fn view_held<'m>(
+    lua: &Lua,
+    model: &'m Model,
+    token: &str,
+) -> Option<Cow<'m, UnitState>> {
+    view_as(lua, model, token, true)
+}
+
+/// The unit `guid` names as a builder that finds it by guid reads it (`0x529fe0` looks the object
+/// up at `0x52a021`, then the group's records at `0x52a02b`, `0x52a036`): through the lent host as
+/// a token naming it does, else, with no host, what the getters read for the guid.
+pub(crate) fn view_of_guid<'m>(lua: &Lua, model: &'m Model, guid: u64) -> Cow<'m, UnitState> {
+    let query = UnitStateQuery {
+        guid,
+        player: false,
+    };
+    if let Some(UnitStateAnswer::Held(state) | UnitStateAnswer::Unheld(state)) =
+        super::live::ask(lua, &query)
+    {
+        return Cow::Owned(state);
+    }
+    let held =
+        super::host::read_host(lua, |h| h.read_unit_object(guid, &mut |_| {})) != Some(false);
+    model.unit_of_guid(guid, held)
+}
+
+fn view_as<'m>(lua: &Lua, model: &'m Model, token: &str, thin: bool) -> Option<Cow<'m, UnitState>> {
+    let snapshot = model.snapshot_unit(token);
+    let UnitTokenParse::Unit { base, hops } = parse_unit_token(token) else {
+        return snapshot.map(Cow::Borrowed);
+    };
+    let Some(live) = resolve::live_parsed(lua, &model.unit_guids, base, hops) else {
+        return snapshot.map(Cow::Borrowed);
+    };
+    // Every token reads the unit live, as the getters read the object the resolver names
+    // (`0x515970`, then `0x468460`), else the group's record of its guid (`0x496400`, `0x496420`).
+    match (snapshot, live) {
+        (Some(pushed), None) if pushed.guid == 0 => Some(Cow::Borrowed(pushed)),
+        (_, None) => None,
+        (snapshot, Some(guid)) => {
+            let query = UnitStateQuery {
+                guid,
+                player: base == UnitBase::Player && hops == 0,
+            };
+            if thin {
+                if let Some(UnitHeld::Held {
+                    is_player,
+                    reaction,
+                }) = super::live::ask(lua, &UnitHeldQuery(query))
+                {
+                    return Some(Cow::Owned(UnitState {
+                        exists: true,
+                        has_object: true,
+                        is_connected: true,
+                        guid,
+                        is_player,
+                        reaction,
+                        ..Default::default()
+                    }));
+                }
+            }
+            match super::live::ask(lua, &query) {
+                Some(UnitStateAnswer::Held(state) | UnitStateAnswer::Unheld(state)) => {
+                    return Some(Cow::Owned(state))
+                }
+                None => {}
+            }
+            if let Some(pushed) = snapshot.filter(|p| p.guid == guid) {
+                return Some(Cow::Borrowed(pushed));
+            }
+            // The object lookup each getter makes after the resolver (`0x468460`), held as a unit:
+            // `UnitExists`' slot 22 answers 0 for a game object or an item (`0x515fee`), the
+            // objects named apart ([`ObjectNameQuery`]).
+            let held = super::host::read_host(lua, |h| h.read_unit_object(guid, &mut |_| {}))
+                == Some(true)
+                && super::live::ask(lua, &ObjectNameQuery(guid)).is_none();
+            Some(model.unit_of_guid(guid, held))
+        }
+    }
+}
+
+/// The guid `token` names at the call ([`resolve::resolve_token`]), `None` for nobody, raising
+/// `Unknown unit name` for a token none of the resolver's compares match.
+pub(crate) fn guid_of(lua: &Lua, model: &Model, token: &str) -> mlua::Result<Option<u64>> {
+    token_guid(lua, &model.unit_guids, token)
+}
+
+/// Map a token's state through `f` under a short model borrow ([`view`]), or answer `default` for
+/// an absent unit, after the token check: a getter that reads nothing of the object
+/// ([`with_object`]).
 fn with_unit<T>(
     lua: &Lua,
     token: &Option<String>,
@@ -560,10 +693,124 @@ fn with_unit<T>(
 ) -> mlua::Result<T> {
     check_unit_token(token)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    Ok(match token.as_ref().and_then(|t| model.unit(t)) {
-        Some(u) => f(u),
+    Ok(match token.as_ref().and_then(|t| view(lua, &model, t)) {
+        Some(u) => f(&u),
         None => default,
     })
+}
+
+/// Whether `token` names the active player: `"player"`, or any token the resolver turns into the
+/// player's guid at the call (`target` on yourself, `0x5173ad`-`0x5173c9`). The private player
+/// blocks (`UnitXP`, `UnitCharacterPoints`) answer for this unit alone.
+pub(super) fn names_self(lua: &Lua, model: &Model, token: &str) -> bool {
+    let me = model.unit_guids.player;
+    token.eq_ignore_ascii_case("player")
+        || (me != 0
+            && resolve::resolve_token(lua, &model.unit_guids, token)
+                .ok()
+                .flatten()
+                == Some(me))
+}
+
+/// [`read_object`] on `token`, or `default` for an absent unit, after the token check.
+pub(super) fn with_object<T>(
+    lua: &Lua,
+    token: &Option<String>,
+    default: T,
+    f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> T,
+) -> mlua::Result<T> {
+    check_unit_token(token)?;
+    Ok(token
+        .as_deref()
+        .and_then(|t| read_object(lua, t, f))
+        .unwrap_or(default))
+}
+
+/// The unit `token` names, mapped through `f` with its snapshot and its object; `None` for no
+/// unit. The token resolves at the call ([`view`]); `f` then reads each of the
+/// object's own fields it answers off the object the lent host holds, as the reference's getters
+/// read the object they resolved (`UnitHealth`, `0x5174d0`), and anything else off the snapshot.
+/// With no host free to ask (a glue VM, or a call's apply under way), or no object held, the
+/// snapshot answers both.
+pub(crate) fn read_object<T>(
+    lua: &Lua,
+    token: &str,
+    f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> T,
+) -> Option<T> {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let unit = view_held(lua, &model, token)?;
+    let unit: &UnitState = &unit;
+    let mut f = Some(f);
+    let mut out = None;
+    if unit.has_object && unit.guid != 0 {
+        super::host::read_host(lua, |h| {
+            h.read_unit_object(unit.guid, &mut |object| {
+                out = f.take().map(|f| f(unit, object));
+            })
+        });
+    }
+    match (out, f) {
+        (Some(out), _) => Some(out),
+        (None, Some(f)) => Some(f(unit, unit)),
+        (None, None) => None,
+    }
+}
+
+/// The unit `token` names, mapped through `f` with its snapshot and what names it; `None` for no
+/// unit. The token resolves at the call ([`view`]); a held unit's name, race and class are read
+/// off its object and the name caches through the lent host, as the reference's getters name any
+/// unit the object manager holds (`0x51710c` → `0x609210`), so a unit no snapshot holds is named
+/// too; a field the caches or tables miss answers from the snapshot, which a feed may have named
+/// from the roster. With no host free to ask, or no object held, the snapshot answers.
+pub(crate) fn read_identity<T>(
+    lua: &Lua,
+    token: &str,
+    f: impl FnOnce(&UnitState, &dyn UnitIdentityRead) -> T,
+) -> Option<T> {
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let unit = view_held(lua, &model, token)?;
+    let unit: &UnitState = &unit;
+    let mut f = Some(f);
+    let mut out = None;
+    if unit.has_object && unit.guid != 0 {
+        super::host::read_host(lua, |h| {
+            h.read_unit_identity(unit.guid, &mut |live| {
+                out = f.take().map(|f| f(unit, &LiveOr { live, unit }));
+            })
+        });
+    }
+    match (out, f) {
+        (Some(out), _) => Some(out),
+        (None, Some(f)) => Some(f(unit, unit)),
+        (None, None) => None,
+    }
+}
+
+/// A live identity read, each field the snapshot's where the live read has none.
+struct LiveOr<'a> {
+    live: &'a dyn UnitIdentityRead,
+    unit: &'a UnitState,
+}
+
+impl UnitIdentityRead for LiveOr<'_> {
+    fn name(&self) -> Option<String> {
+        self.live.name().or_else(|| self.unit.name.clone())
+    }
+    fn race(&self) -> Option<(String, String)> {
+        self.live
+            .race()
+            .or_else(|| UnitIdentityRead::race(self.unit))
+    }
+    fn class(&self) -> Option<(String, String)> {
+        self.live
+            .class()
+            .or_else(|| UnitIdentityRead::class(self.unit))
+    }
+    fn family(&self) -> Option<String> {
+        self.live
+            .family()
+            .or_else(|| UnitIdentityRead::family(self.unit))
+    }
 }
 
 /// A unit predicate's body: the number 1 or nil through [`super::binding_abi::flag`], never a Lua
@@ -578,19 +825,42 @@ fn unit_predicate(
     Ok(super::binding_abi::flag(with_unit(lua, token, false, f)?))
 }
 
+/// [`unit_predicate`] for a predicate on the object's own fields ([`with_object`]).
+fn object_predicate(
+    lua: &Lua,
+    token: &Option<String>,
+    f: impl FnOnce(&UnitState, &dyn UnitObjectRead) -> bool,
+) -> mlua::Result<mlua::Value> {
+    Ok(super::binding_abi::flag(with_object(lua, token, false, f)?))
+}
+
 /// The `Unit*` and `GetQuestGreenRange` registrations.
 mod bindings;
 pub mod by_name;
 #[cfg(test)]
 mod chain_tests;
+mod object;
+mod record;
 mod relations;
 mod resolve;
+mod selection_read;
 #[cfg(test)]
 mod selection_tests;
+mod state_read;
 #[cfg(test)]
 mod tests;
 
-pub use relations::UnitRelations;
-pub use resolve::{parse_unit_token, UnitBase, UnitGuids, UnitTokenParse};
+pub use object::{UnitIdentityRead, UnitObject, UnitObjectRead};
+pub(crate) use record::read_record;
+pub use record::{PlayerNameQuery, UnitRecord, UnitRecordQuery};
+pub(crate) use relations::with_relations;
+pub use relations::{RelationAnswer, RelationQuery, UnitRelations};
+pub use resolve::{
+    bound_tokens_in, field_watchers_in, parse_unit_token, resolve_unit_in, tokens_in, UnitBase,
+    UnitGuids, UnitTokenGlobals, UnitTokenObjects, UnitTokenParse,
+};
+pub(crate) use resolve::{token_guid, with_live_objects, LiveGlobals};
+pub use selection_read::{ObjectNameQuery, SelectionGlobals, SelectionQuery};
+pub use state_read::{UnitHeld, UnitHeldQuery, UnitStateAnswer, UnitStateQuery};
 
 pub(super) use bindings::install;

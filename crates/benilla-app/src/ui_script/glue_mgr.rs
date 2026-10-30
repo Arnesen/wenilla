@@ -148,9 +148,20 @@
 //!    (`0x46c118` → `0x46c177`). The dialog's button in state 5 cancels the operation and goes to
 //!    state 0 (`0x46b776`), sending nothing.
 //!
-//! The login engine reports a logon as one blocking step, so of the logon's states only
-//! `CONNECTING` and `AUTHENTICATED` are seen; its refusals map through the reference's own
-//! byte-to-result table ([`realmd_result`]).
+//! The logon's states, in the order the logon object reports them: `CONNECTING` (1) on the dial,
+//! `AUTHENTICATING` (3) as the challenge goes out (`0x5b2196`), then on the challenge's reply
+//! `CHECKINGVERSIONS` (9) for an account with no PIN or `PIN` (7) for one with (`0x5b1cd7`, the
+//! PIN flag at `+0x1ac`), `HANDSHAKING` (2) once the proof is out (`0x5b1f93`)
+//! and `AUTHENTICATED` (4) when the server accepts it. The login engine reports each as it
+//! reaches it ([`LoginStage`]); a PIN's 9 is the keys' own (`0x5b31cc`), reported by
+//! `PINEntered`. Its refusals map through the reference's own byte-to-result table
+//! ([`realmd_result`]).
+//!
+//! The PIN: a challenge that asks for one reports logon state 7, whose arm closes the dialog,
+//! fires `PLAYER_ENTER_PIN` with the keypad's grid and waits in state 8 (`0x46bac3`-`0x46bb1d`);
+//! the stock keypad's `PINEntered` opens `CANCEL` and hands the keys to the logon (`0x46b0c0`),
+//! which reports state 9 and proves them. A refusal 4 or 5 of a logon with a PIN counts, and the
+//! count picks its text (`0x5b2d00`).
 
 use bevy::prelude::*;
 
@@ -173,6 +184,7 @@ use crate::net::{
     LoginQueuedMessage, LoginStageMessage, ParkRequest, RealmListMessage, RealmRequest,
     RosterFailedMessage, WorldAuthMessage,
 };
+use crate::run_mode::EnvPin;
 
 /// `CGlueMgr`'s `screenState` (`0xb41da0`), named by the functions that set each value: the
 /// states the login, the realm list, the character list, the create, the delete, the rename and
@@ -258,12 +270,19 @@ const URL_STATUSES: [(u8, &str); 5] = [
 
 /// Login states, the reference's numbers.
 const LOGIN_CONNECTING: i32 = 1;
+const LOGIN_HANDSHAKING: i32 = 2;
+const LOGIN_AUTHENTICATING: i32 = 3;
 const LOGIN_AUTHENTICATED: i32 = 4;
 const LOGIN_FAILED_STATE: i32 = 5;
 const LOGIN_DOWNLOADFILE: i32 = 6;
+const LOGIN_PIN: i32 = 7;
 const LOGIN_PIN_WAIT: i32 = 8;
+const LOGIN_CHECKINGVERSIONS: i32 = 9;
 
 /// Results.
+const RESULT_UNKNOWN_ACCOUNT: i32 = 0x07;
+const RESULT_UNKNOWN_ACCOUNT_PIN: i32 = 0x08;
+const RESULT_UNKNOWN_ACCOUNT_CALL: i32 = 0x09;
 const RESULT_LOGIN_FAILED: i32 = 0x0b;
 const RESULT_DISCONNECTED: i32 = 0x14;
 
@@ -315,9 +334,10 @@ const RENAME_NAME_IN_USE: u8 = 0x31;
 /// dispatch (`0x5b2c90`, byte index `0x5b2ea4`, jumps `0x5b2e78`) after the handlers' clamp of a
 /// byte past `0x0f` to `0xff` (`0x5bac36`, `0x5bad8d`). 0x00 and 0x0E take the success arm
 /// (`0x5b2cc9`, `0x5b2cd4` to `0x5b2e16`), authenticated; the unknown account and the wrong
-/// password share one arm (`0x5b2d00`, result 7 with no PIN); a challenge's 0x0A is the patch state
-/// (`0x5b2d3b`). A proof's 0x0A never gets here: `Grunt::OnLogonProof` returns on it (`0x5bada2`),
-/// so the logon reports nothing and its dialog stands (`None`).
+/// password share one arm (`0x5b2d00`, result 7 with no PIN, [`GlueMgr::count_pin_failure`] with
+/// one); a challenge's 0x0A is the patch state (`0x5b2d3b`). A proof's 0x0A never gets here:
+/// `Grunt::OnLogonProof` returns on it (`0x5bada2`), so the logon reports nothing and its dialog
+/// stands (`None`).
 pub(crate) fn realmd_result(byte: u8, reply: benilla_protocol::LogonReply) -> Option<(i32, i32)> {
     if byte == 0x0a && reply == benilla_protocol::LogonReply::Proof {
         return None;
@@ -326,7 +346,7 @@ pub(crate) fn realmd_result(byte: u8, reply: benilla_protocol::LogonReply) -> Op
     let result = match byte {
         0x00 | 0x0e => return Some((LOGIN_AUTHENTICATED, 0)),
         0x03 => 0x0d,
-        0x04 | 0x05 => 0x07,
+        0x04 | 0x05 => RESULT_UNKNOWN_ACCOUNT,
         0x06 => 0x0f,
         0x07 => 0x10,
         0x08 => 0x11,
@@ -444,6 +464,11 @@ enum Step {
     RequestRealmList,
     /// `0x46b880`, as the delete's success calls it (`0x46c1a7`).
     GetCharacterList,
+    /// The PIN arm's store of logon state 8, `PIN_WAIT`, after its signals (`0x46bb1d`).
+    PinWait,
+    /// `PINEntered`'s tail past its dialog (`0x46b0e0` → `0x5ab5a0` → `0x5b3120`): logon state 9
+    /// reported (`0x5b31cc`) and the keys on to the logon.
+    SubmitPin(benilla_ui::script::GluePin),
 }
 
 /// A password in a step, which never prints.
@@ -496,6 +521,10 @@ enum Outgoing {
     SelectLast,
     /// `FORCE_RENAME_CHARACTER(key)` (event 23, `0x46b4a8`, `0x46b4cd`): the key, unresolved.
     ForceRename(&'static str),
+    /// `PLAYER_ENTER_PIN` (event 25, `0x46bb15`) with the keypad's grid.
+    EnterPin([u8; 10]),
+    /// The stock keypad's buttons at these positions, then its Okay, pressed.
+    PressKeypad(Vec<u8>),
     /// A CVar the manager set.
     Cvar { name: &'static str, value: String },
     /// The manager's step that follows the signals before it ([`Step`]).
@@ -520,6 +549,8 @@ impl Outgoing {
             Outgoing::SelectFirst => GlueSignal::SelectFirst,
             Outgoing::SelectLast => GlueSignal::SelectLast,
             Outgoing::ForceRename(key) => GlueSignal::ForceRename(key),
+            Outgoing::EnterPin(grid) => GlueSignal::EnterPin(grid),
+            Outgoing::PressKeypad(positions) => GlueSignal::PressKeypad(positions),
             Outgoing::Cvar { name, value } => GlueSignal::Cvar { name, value },
             out @ (Outgoing::Begin(_)
             | Outgoing::Queue
@@ -618,6 +649,16 @@ pub(crate) struct GlueMgr {
     /// A world authentication that came inside the logon's frame, waiting on the logon arm's
     /// steps.
     auth_waits: bool,
+    /// The keypad's grid and the IO thread's prompt number when this attempt's challenge asked
+    /// for a PIN: the logon object's security byte (`+0x1ac`, zeroed by each connect, `0x5b2fdd`)
+    /// and its grid (`+0x1ae`).
+    pin: Option<([u8; 10], u64)>,
+    /// Refusals 4 and 5 of logons with a PIN (`+0x1ad`), a byte that wraps, zeroed by a success
+    /// (`0x5b2e1f`) and kept across logons, as the logon object is (`0x5ab4b0`).
+    pin_failures: u8,
+    /// `$WOW_PIN` or `$WOW_PIN_TOTP`, which answers the keypad in place of a key press
+    /// ([`Self::answer_pin_from_env`]).
+    env_pin: EnvPin,
 }
 
 impl GlueMgr {
@@ -664,6 +705,7 @@ impl GlueMgr {
         match call {
             GlueCall::Login(c) => self.login(c.account, c.password),
             GlueCall::StatusDialogClick => self.status_dialog_click(),
+            GlueCall::PinEntered(pin) => self.pin_entered(pin),
             GlueCall::DisconnectFromServer => self.disconnect_from_server(),
             GlueCall::QuitGame => self.login_out.push(GlueLogin::Quit),
             GlueCall::RequestRealmList { dialog } => self.request_realm_list(dialog),
@@ -721,6 +763,62 @@ impl GlueMgr {
             account,
             password: Secret(password),
         }));
+    }
+
+    /// `PINEntered`'s tail (`0x46b0c0`): the `CANCEL` dialog with no text (`0x46b0d2`), then the
+    /// keys on to the logon. The logon object takes them whatever the screen's state (`0x5ab5a0`
+    /// tests only that it exists); the IO thread proves them only at its keypad.
+    fn pin_entered(&mut self, pin: benilla_ui::script::GluePin) {
+        self.open("CANCEL", None);
+        self.outbox.push(Outgoing::Begin(Step::SubmitPin(pin)));
+    }
+
+    /// The PIN prompt this attempt waits on, answered from the environment ([`EnvPin`]) in place of
+    /// a key press: the digits go to the keys they sit at on the prompt's grid and on as
+    /// `PINEntered` hands its keys on, to the same prompt, reporting the same state 9. With the
+    /// keypad up the stock keypad is pressed key by key and Okay, so its own `PINEntered` call
+    /// ([`Self::pin_entered`]) and its hide run; with none on the screen, the step without the
+    /// dialog. A setting that cannot answer is logged and answers the prompt with no
+    /// keys, which fails the logon as an unanswerable keypad does. `false` when the environment
+    /// holds no PIN, and nothing is done.
+    fn answer_pin_from_env(&mut self, keypad_up: bool) -> bool {
+        let Some((grid, prompt)) = self.pin else {
+            return false;
+        };
+        let keys = match self.env_pin.digits_now() {
+            Ok(None) => return false,
+            Ok(Some(digits)) => benilla_protocol::auth::pin::positions(&grid, &digits)
+                .map(|positions| benilla_ui::script::GluePin { positions })
+                .ok_or("the PIN has a digit the keypad lacks"),
+            Err(why) => Err(why),
+        };
+        match keys {
+            Ok(keys) => {
+                info!("login: the PIN prompt is answered from the environment");
+                if keypad_up {
+                    self.outbox.push(Outgoing::PressKeypad(keys.positions));
+                } else {
+                    self.run_step(Step::SubmitPin(keys));
+                }
+            }
+            Err(why) => {
+                error!("login: the PIN prompt cannot be answered from the environment — {why}");
+                self.park_out
+                    .push(RealmRequest::Pin { prompt, keys: None }.into());
+            }
+        }
+        true
+    }
+
+    /// `0x5b2d00` for a refusal 4 or 5 with a PIN this attempt: one more failure (`0x5b2d13`),
+    /// the PIN text below 3 and the call text from 3 (`0x5b2d19`-`0x5b2d23`).
+    fn count_pin_failure(&mut self) -> i32 {
+        self.pin_failures = self.pin_failures.wrapping_add(1);
+        if self.pin_failures < 3 {
+            RESULT_UNKNOWN_ACCOUNT_PIN
+        } else {
+            RESULT_UNKNOWN_ACCOUNT_CALL
+        }
     }
 
     /// Login's own state edge: the cells cleared, the latch down, state 1, and the `CANCEL`
@@ -911,7 +1009,31 @@ impl GlueMgr {
                 } else if self.cells.state == LOGIN_FAILED_STATE {
                     self.login_out.push(GlueLogin::CloseLink);
                     self.state = ScreenState::Idle;
+                } else if self.cells.state == LOGIN_PIN {
+                    // `0x46bac3`: the dialog down, the keypad's event with the grid, state 8.
+                    self.outbox.push(Outgoing::Close);
+                    let grid = self.pin.map(|(grid, _)| grid).unwrap_or_default();
+                    self.outbox.push(Outgoing::EnterPin(grid));
+                    self.outbox.push(Outgoing::Begin(Step::PinWait));
                 }
+            }
+            Step::PinWait => {
+                self.cells.state = LOGIN_PIN_WAIT;
+                // The keypad is up and waiting (state 8): an unattended run presses its keys.
+                self.answer_pin_from_env(true);
+            }
+            Step::SubmitPin(pin) => {
+                self.cells.state = LOGIN_CHECKINGVERSIONS;
+                self.cells.result = 0;
+                // Prompt 0 is none, for keys with no prompt to answer.
+                let prompt = self.pin.map_or(0, |(_, prompt)| prompt);
+                self.park_out.push(
+                    RealmRequest::Pin {
+                        prompt,
+                        keys: Some(pin),
+                    }
+                    .into(),
+                );
             }
             Step::BeginAuth => self.op = Operation::begin(OpKind::Auth, STATUS_AUTHENTICATING),
             Step::Authenticated => {
@@ -1226,6 +1348,8 @@ impl GlueMgr {
     fn on_stage(&mut self, stage: LoginStage, glue_up: bool) {
         match stage {
             LoginStage::Connecting => {
+                // The connect zeroes the logon object's security byte (`0x5b2fdd`).
+                self.pin = None;
                 if self.state == ScreenState::Idle && glue_up {
                     self.begin_logon();
                 }
@@ -1234,8 +1358,25 @@ impl GlueMgr {
                     self.cells.result = 0;
                 }
             }
-            // The SRP exchange is inside the IO thread's one blocking logon call.
-            LoginStage::Authenticating => {}
+            // The states the logon object reports on the way to the PIN or the proof: 3 as the
+            // challenge goes out (`0x5b2196`), 9 on a reply that asks for no PIN (`0x5b1cd7`) and
+            // 2 once the proof is out (`0x5b1f93`). Each shows its text on the frame it lands on.
+            LoginStage::Authenticating => self.on_logon_state(LOGIN_AUTHENTICATING),
+            LoginStage::CheckingVersions => self.on_logon_state(LOGIN_CHECKINGVERSIONS),
+            LoginStage::ProofSent => self.on_logon_state(LOGIN_HANDSHAKING),
+            // The challenge's PIN kept (`0x5b1ed0`) and logon state 7 reported (`0x5b1cd7`). With
+            // no logon on the screen to show the keypad (no glue screen, or one in another state)
+            // the prompt is answered with no keys at once, which fails the logon.
+            LoginStage::Pin { grid, prompt } => {
+                self.pin = Some((grid, prompt));
+                if self.state == ScreenState::Logon {
+                    self.cells.state = LOGIN_PIN;
+                    self.cells.result = 0;
+                } else if !self.answer_pin_from_env(false) {
+                    self.park_out
+                        .push(RealmRequest::Pin { prompt, keys: None }.into());
+                }
+            }
             // The world dial begins: a logon with no realm list to publish is done.
             LoginStage::Handshaking => self.on_logon_done(),
             // The connect completes `RESPONSE_CONNECTED` and the world link's flag goes up with the
@@ -1259,9 +1400,18 @@ impl GlueMgr {
         self.open("OKAY", Some(Text::Raw(why.to_string())));
     }
 
+    /// The logon object reports `state` while the logon is on the screen.
+    fn on_logon_state(&mut self, state: i32) {
+        if self.state == ScreenState::Logon {
+            self.cells.state = state;
+            self.cells.result = 0;
+        }
+    }
+
     /// The logon authenticated: login state 4, which arms the final latch (`0x46b0f0`).
     fn on_logon_done(&mut self) {
         if self.state == ScreenState::Logon {
+            self.pin_failures = 0;
             self.cells.state = LOGIN_AUTHENTICATED;
             self.cells.result = 0;
             self.auth_final = true;
@@ -1285,7 +1435,10 @@ impl GlueMgr {
                     // after the connect is that disconnect alone.
                     _ => Some((LOGIN_FAILED_STATE, RESULT_DISCONNECTED)),
                 };
-                if let Some((state, result)) = cells {
+                if let Some((state, mut result)) = cells {
+                    if result == RESULT_UNKNOWN_ACCOUNT && self.pin.is_some() {
+                        result = self.count_pin_failure();
+                    }
                     self.cells.state = state;
                     self.cells.result = result;
                 }
@@ -1293,9 +1446,11 @@ impl GlueMgr {
             ScreenState::Connect => {
                 let status = match msg.refusal {
                     Some(LoginRefusal::World(code)) => code,
-                    Some(LoginRefusal::Logon(_) | LoginRefusal::LogonProof(_)) => {
-                        STATUS_RESPONSE_FAILURE
-                    }
+                    Some(
+                        LoginRefusal::Logon(_)
+                        | LoginRefusal::LogonProof(_)
+                        | LoginRefusal::NoPinEntry,
+                    ) => STATUS_RESPONSE_FAILURE,
                     None => STATUS_FAILED_TO_CONNECT,
                 };
                 self.op.complete(false, status);
@@ -1757,9 +1912,14 @@ pub(crate) struct LoginNews<'w, 's> {
     login_refusals: MessageReader<'w, 's, CharacterLoginFailedMessage>,
     /// What the login engine decided with no network message behind it.
     notices: MessageReader<'w, 's, LoginGuardRefused>,
-    /// The name check's lists, which the glue VM is seated with (`0x6c91a0`).
-    names: Option<Res<'w, crate::text_filter::NameFilter>>,
 }
+
+/// The realmlist and the engine-side CVar table, which the call host's CVar callbacks write
+/// inside the calls that write their rows.
+type GlueKnobs = (
+    Option<ResMut<'static, crate::realmlist::Realmlist>>,
+    Option<ResMut<'static, crate::cvars::Cvars>>,
+);
 
 /// What the manager asks of the rest of the app.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -1774,8 +1934,6 @@ pub(crate) struct GlueAsks<'w> {
     /// the world entry's pick is its pending one.
     roster: Option<ResMut<'w, crate::glue_session::roster::Roster>>,
     pick: Option<Res<'w, crate::net::CharPick>>,
-    /// The engine-side CVar table `EnterWorld` writes and saves.
-    cvars: Option<ResMut<'w, crate::cvars::Cvars>>,
     /// What a new character's entry reads for its intro eye.
     eyes: crate::glue_session::roster::IntroEyes<'w>,
 }
@@ -1802,18 +1960,29 @@ pub(crate) fn read_agreements(cvars: &crate::cvars::Cvars) -> [NoticeState; 4] {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_glue_mgr(
     shared: NonSend<SharedGlueMgr>,
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // With the realmlist and the engine-side CVar table `EnterWorld` writes and saves, whose
+    // callbacks the call host runs inside the calls that write them.
+    mut vm: crate::script_calls::VmWith<GlueKnobs>,
     mut news: LoginNews,
     mut asks: GlueAsks,
     tables: Option<Res<crate::glue_session::realm::RealmTables>>,
     run: Option<Res<RunModeRealm>>,
-    mut realmlist: Option<ResMut<crate::realmlist::Realmlist>>,
+    env_pin: Option<Res<EnvPin>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     sources: super::glue_create::CreateSources,
     state: Option<Res<State<crate::client_state::ClientState>>>,
     time: Res<Time>,
 ) {
-    hosted_vm.run(|script| {
+    // The realmlist as the frame starts, and the typed value it refused as no address.
+    let (realmlist, mut refused) = {
+        let (realmlist, _) = vm.own();
+        let mut realmlist = realmlist;
+        let refused = realmlist.as_deref_mut().and_then(|r| r.take_refused());
+        (realmlist.as_deref().cloned(), refused)
+    };
+    let realmlist = realmlist.as_ref();
+    let mut last_character = None;
+    vm.run(|script| {
         let shared = shared.clone();
         let now_ms = time.elapsed().as_millis() as u32;
         let mut script = script.filter(|s| s.vm_kind() == VmKind::Glue);
@@ -1833,14 +2002,10 @@ pub(crate) fn drive_glue_mgr(
                     &shared,
                     s,
                     news.addon_reply.as_deref().and_then(|r| r.0.as_deref()),
-                    news.names.as_deref(),
                     tables.as_deref(),
-                    realmlist.as_deref(),
+                    realmlist,
                 );
                 fresh_vm = true;
-            }
-            if let Some(names) = news.names.as_ref().filter(|n| !fresh_vm && n.is_changed()) {
-                s.set_glue_name_lists(std::rc::Rc::new((**names).clone()));
             }
             // The create screen's catalog, on every new VM (the glue build's walk, `0x470430`) and
             // whenever a catalog behind it arrives.
@@ -1873,6 +2038,10 @@ pub(crate) fn drive_glue_mgr(
 
         {
             let mut mgr = shared.get_mut();
+            // The environment's answer, taken when the resource is added.
+            if let Some(pin) = env_pin.as_ref().filter(|p| p.is_changed()) {
+                mgr.env_pin = EnvPin::clone(pin);
+            }
             // The alert a finished fetch left, shown before anything else this frame (`0x46b939`).
             mgr.poll_alert();
             if glue_up {
@@ -1911,15 +2080,7 @@ pub(crate) fn drive_glue_mgr(
             }
             // `EnterWorld`'s `lastCharacterIndex` (`0x46b5fa`, `"%d"` of the selection) into the
             // engine's table, then `SaveConfig` (`0x46b6f6`).
-            if let Some(index) = mgr.last_character.take() {
-                if let Some(cvars) = asks.cvars.as_deref_mut() {
-                    cvars.set(
-                        crate::glue_session::roster::CVAR_LAST_CHARACTER,
-                        &index.to_string(),
-                    );
-                    cvars.save();
-                }
-            }
+            last_character = mgr.last_character.take();
         }
 
         // `SMSG_ADDON_INFO` read (`0x5b4260`): the index rebuilt from the reply (`0x51da70`), then
@@ -1969,7 +2130,7 @@ pub(crate) fn drive_glue_mgr(
             pump(
                 &shared,
                 script.as_deref_mut(),
-                realmlist.as_deref(),
+                realmlist,
                 now_ms,
                 &names,
                 asks.roster.as_deref_mut(),
@@ -2001,7 +2162,7 @@ pub(crate) fn drive_glue_mgr(
             pump(
                 &shared,
                 script.as_deref_mut(),
-                realmlist.as_deref(),
+                realmlist,
                 now_ms,
                 &names,
                 asks.roster.as_deref_mut(),
@@ -2034,7 +2195,7 @@ pub(crate) fn drive_glue_mgr(
         pump(
             &shared,
             script.as_deref_mut(),
-            realmlist.as_deref(),
+            realmlist,
             now_ms,
             &names,
             asks.roster.as_deref_mut(),
@@ -2044,7 +2205,7 @@ pub(crate) fn drive_glue_mgr(
             mgr.tick();
             // The realmlist control's typed value that was not an address reopens its dialog.
             if script.is_some() {
-                if let Some(typed) = realmlist.as_deref_mut().and_then(|r| r.take_refused()) {
+                if let Some(typed) = refused.take() {
                     mgr.outbox.push(Outgoing::Open {
                         which: "BENILLA_REALMLIST",
                         text: Some(Text::Raw(
@@ -2058,7 +2219,7 @@ pub(crate) fn drive_glue_mgr(
         pump(
             &shared,
             script.as_deref_mut(),
-            realmlist.as_deref(),
+            realmlist,
             now_ms,
             &names,
             asks.roster.as_deref_mut(),
@@ -2069,7 +2230,19 @@ pub(crate) fn drive_glue_mgr(
         }
         // The frame's asks, the verbs' calls since the last frame and the handlers' inside it.
         send_asks(&mut mgr, &mut asks);
-    })
+    });
+    let (mut realmlist, cvars) = vm.own();
+    // A refusal no glue VM was up to reopen its dialog for waits for one.
+    if let (Some(typed), Some(r)) = (refused, realmlist.as_deref_mut()) {
+        r.keep_refused(typed);
+    }
+    if let (Some(index), Some(mut cvars)) = (last_character, cvars) {
+        cvars.set(
+            crate::glue_session::roster::CVAR_LAST_CHARACTER,
+            &index.to_string(),
+        );
+        cvars.save();
+    }
 }
 
 /// Run what the manager has raised so far: into the glue VM when one stands, its slots seeded
@@ -2101,7 +2274,6 @@ fn seat_glue(
     shared: &SharedGlueMgr,
     s: &mut UiScript,
     addon_reply: Option<&[benilla_protocol::messages::AddonRecord]>,
-    names: Option<&crate::text_filter::NameFilter>,
     tables: Option<&crate::glue_session::realm::RealmTables>,
     realmlist: Option<&crate::realmlist::Realmlist>,
 ) {
@@ -2115,9 +2287,6 @@ fn seat_glue(
     s.set_glue_select_cells(mgr.select_cells);
     super::addons::seat_glue_addons(s, addon_reply);
     mgr.holder_moved = true;
-    if let Some(names) = names {
-        s.set_glue_name_lists(std::rc::Rc::new(names.clone()));
-    }
     if let Some(r) = tables {
         let (categories, types) = r.glue_setup();
         s.set_glue_realm_setup(categories, types);
@@ -2141,7 +2310,6 @@ pub(crate) fn seat_glue_build(world: &mut World, script: &mut UiScript) {
         world
             .get_resource::<AddonInfoReply>()
             .and_then(|r| r.0.as_deref()),
-        world.get_resource::<crate::text_filter::NameFilter>(),
         world.get_resource::<crate::glue_session::realm::RealmTables>(),
         world.get_resource::<crate::realmlist::Realmlist>(),
     );

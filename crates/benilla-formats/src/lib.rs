@@ -169,6 +169,12 @@ mod light;
 pub use light::{Atmosphere, LightCatalog, Submersion, ZERO_KEY_COLOR, ZERO_KEY_SCALAR};
 mod loading_screen;
 pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
+// The route a transport transfer's loading screen draws.
+mod loading_route;
+pub use loading_route::{
+    load_loading_screen_taxi_splines, LoadingScreenTaxiSpline, LoadingScreenTaxiSplines, Route,
+    RouteQuad, RouteVertex, TaxiLegTable,
+};
 mod liquid;
 pub use liquid::{LiquidKind, LiquidMesh};
 mod maps;
@@ -227,28 +233,31 @@ mod spells;
 pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
-    load_spell_ranges, min_max_range, min_max_range_reads_units, resolve_parts, soft_modify,
-    substitute, substitute_parts, CcExemption, ExpandAt, FormRefusal, LearnAnnouncement,
-    LearnEffect, OpenLock, RangeTargets, RangeUnit, ShapeshiftForm, SpellCastTime,
-    SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay, SpellDuration,
-    SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog, SpellRange,
+    load_spell_ranges, min_max_range, min_max_range_reads_ranged_slot, min_max_range_reads_units,
+    resolve_parts, soft_modify, substitute, substitute_parts, CcExemption, ExpandAt, FormRefusal,
+    LearnAnnouncement, LearnEffect, OpenLock, RangeTargets, RangeUnit, ShapeshiftForm,
+    SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay,
+    SpellDuration, SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, TokenNumber, TokenPart, UnitMotion, ATTR_CASTABLE_WHILE_DEAD,
     ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
     MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL,
     SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,
-    SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL, SPELL_EFFECT_PROSPECTING,
-    SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
+    SPELL_EFFECT_LANGUAGE, SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
+    SPELL_EFFECT_PROSPECTING, SPELL_EFFECT_SKILL_STEP, SPELL_EFFECT_SKINNING,
+    SPELL_EFFECT_TRADE_SKILL,
 };
 mod skill_lines;
 pub use skill_lines::{
-    load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SkillRaceClass, SlaInfo,
+    load_skill_line_catalog, LineAbility, SkillLineCatalog, SkillLineInfo, SkillRaceClass, SlaInfo,
 };
 mod spell_focus;
 mod spell_mechanic;
 pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
 pub use spell_mechanic::{load_spell_mechanic_catalog, SpellMechanicCatalog};
 mod talents;
-pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
+pub use talents::{
+    load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK, TALENT_PREREQS,
+};
 mod spell_visual;
 pub use spell_visual::{
     char_proc_small_int, char_proc_type, load_spell_visual_catalog, ChainEffect, ChainProc,
@@ -281,17 +290,17 @@ pub use models::{
     parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_pane_cameras,
     parse_m2_playable_animation_lookup, parse_m2_portrait_camera, parse_m2_render_submeshes,
     parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights,
-    parse_wmo_portals, parse_wmo_root, rotation_2x2, uv_transform, wmo_group_doodad_refs,
-    wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
-    wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim,
-    AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot,
-    CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
-    GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds, M2CameraTracks,
-    M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
-    PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton, SkeletonBone,
-    StringAnchors, TextureStage, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog,
-    WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
-    DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    parse_wmo_portals, parse_wmo_root, point_in_convex_volume, rotation_2x2, uv_transform,
+    wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
+    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
+    wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
+    BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
+    GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds,
+    M2CameraTracks, M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm,
+    ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
+    SkeletonBone, StringAnchors, TextureStage, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad,
+    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
+    WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{
@@ -352,9 +361,8 @@ pub use zone_map::{load_zone_map, ZONE_MAP_EDGE};
 // Taxi and transport paths, and the transport timetable.
 mod taxi;
 pub use taxi::{load_taxi_path_nodes, TaxiPathNode, TaxiPathNodes};
-mod transport_period;
 mod transports;
-pub use transports::{TransportSample, TransportTimetable};
+pub use transports::{ShipAnim, TransportSample, TransportTimetable};
 // Type-11 elevator and lift keyframe paths.
 mod elevators;
 pub use elevators::{
@@ -481,6 +489,15 @@ pub fn blp_mips_to_png(blp_bytes: &[u8], out: &Path) -> Result<Vec<BlpMipStats>>
             .with_context(|| format!("writing PNG {}", path.display()))?;
     }
     blp_mip_stats(blp_bytes)
+}
+
+/// Whether the device texture path makes a texture of this size on a device that halves nothing
+/// (`0x448b60`): `0x448450` makes none for a side that is not a power of two or is 1024 or more
+/// (`0x4484ae`-`0x4484d0`), and a side of 16 or less goes to `GxTexCreate` (`0x58ab10`), which
+/// refuses one below 8 (`0x58ab40`, `0x58ab4c`). A side of 0 is refused there.
+pub fn makes_device_texture(width: u32, height: u32) -> bool {
+    let fits = |n: u32| n.is_power_of_two() && (8..1024).contains(&n);
+    fits(width) && fits(height)
 }
 
 /// Decode a BLP's level 0 to RGBA8: `(width, height, pixels)`.

@@ -6,9 +6,10 @@
 //! `GLUE_SCREENSHOT_SUCCEEDED` or `GLUE_SCREENSHOT_FAILED` (`0x46c520`), whichever VM is up
 //! ([`UiScript::screenshot_event`]).
 //!
-//! Our UI quads are built at the top of `UiInput` and the binding runs at its bottom, so a capture
-//! on the press frame would still show a second press's fading status; [`ask_for_captures`]
-//! therefore holds each ask exactly one frame.
+//! The binding runs in `UiInput`, where `TakeScreenshot()` hides the status inside its call; the
+//! ask drains in `UiDrain`, after the tick and before the paint builds the frame's quads, so the
+//! press frame's own image no longer shows the status. [`ask_for_captures`] still holds each ask
+//! one frame, which this order no longer needs.
 //!
 //! Deviation: the file is a PNG where the reference writes a TGA (`0x4426f0`, the name
 //! `%s\WoWScrnShot_%s.tga` at `0x834c44`), because a 32-bit Targa of a modern window is about
@@ -63,11 +64,11 @@ impl Default for ScreenshotState {
 }
 
 impl ScreenshotState {
-    /// `WoWScrnShot_MMDDYY_HHMMSS.png`, the reference's field order and padding.
+    /// `WoWScrnShot_MMDDYY_HHMMSS.png`, the reference's field order and padding, in local time
+    /// (`0x429450`, `strftime` of `localtime`).
     ///
     /// A second capture in the same second gets `_2`, `_3`: the reference overwrites, so a burst
-    /// leaves one file, a data loss not copied. Deviation: UTC, not local time, because there is
-    /// no timezone source (as for Lua `date()`, [`benilla_ui::civil`]).
+    /// leaves one file, a data loss not copied.
     fn next_name(&mut self, now: i64) -> String {
         if now == self.last_second {
             self.within_second += 1;
@@ -75,7 +76,7 @@ impl ScreenshotState {
             self.last_second = now;
             self.within_second = 0;
         }
-        let c = benilla_ui::civil::from_unix(now);
+        let (c, _) = benilla_ui::civil::local(now);
         let base = format!(
             "{STEM}_{:02}{:02}{:02}_{:02}{:02}{:02}",
             c.month,
@@ -93,13 +94,21 @@ impl ScreenshotState {
 }
 
 /// Captures each `Screenshot()` one frame after the call. Spawn last frame's asks before draining
-/// this frame's: that order is the one-frame hold (module doc).
+/// this frame's: that order is the one-frame hold (module doc). While a movie plays the frame pass
+/// skips its present block, the capture in it (`0x44267c`), so the asks wait for its end. Not a
+/// call's: the verb only arms the request (`0x4893d0`, `0x442a10`), which the frame pass takes.
 fn ask_for_captures(
     mut commands: Commands,
     mut hosted_vm: crate::script_calls::HostedVm,
     mut state: ResMut<ScreenshotState>,
 ) {
     hosted_vm.run(|script| {
+        if script
+            .as_deref()
+            .is_some_and(benilla_ui::script::UiScript::movie_playing)
+        {
+            return;
+        }
         spawn_captures(&mut commands, std::mem::take(&mut state.pending));
         if let Some(script) = script {
             state.pending += script.take_screenshot_asks();
@@ -198,10 +207,12 @@ impl Plugin for ScreenshotPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::civil::ZoneGuard;
     use benilla_ui::script::UiScript;
 
     #[test]
     fn names_follow_the_reference_and_never_collide() {
+        let _zone = ZoneGuard::set("UTC0");
         let mut s = ScreenshotState::default();
         // 2026-08-21T13:45:07Z.
         assert_eq!(s.next_name(1_787_319_907), "WoWScrnShot_082126_134507.png");
@@ -216,6 +227,31 @@ mod tests {
         assert_eq!(s.next_name(1_787_319_908), "WoWScrnShot_082126_134508.png");
         // 2001-01-02T03:04:05Z: every field needs its `%02d` zero.
         assert_eq!(s.next_name(978_404_645), "WoWScrnShot_010201_030405.png");
+    }
+
+    /// The stamp is the local time (`0x429450`, `strftime` of `localtime`): 5:45 east of UTC,
+    /// 13:45:07Z is 19:30:07, and 20:00Z is past local midnight.
+    #[test]
+    fn names_stamp_the_local_time() {
+        let _zone = ZoneGuard::set("NPT-05:45");
+        let mut s = ScreenshotState::default();
+        assert_eq!(s.next_name(1_787_319_907), "WoWScrnShot_082126_193007.png");
+        assert_eq!(s.next_name(1_787_342_400), "WoWScrnShot_082226_014500.png");
+    }
+
+    /// The zone is the process's, read once (`0x414568`): a test holds its own through the guard,
+    /// so the stamp follows each zone set in turn, whatever ran before.
+    #[test]
+    fn the_stamp_follows_the_zone_a_test_holds() {
+        for (tz, name) in [
+            ("NPT-05:45", "WoWScrnShot_082126_193007.png"),
+            ("UTC0", "WoWScrnShot_082126_134507.png"),
+            ("NPT-05:45", "WoWScrnShot_082126_193007.png"),
+        ] {
+            let _zone = ZoneGuard::set(tz);
+            let mut s = ScreenshotState::default();
+            assert_eq!(s.next_name(1_787_319_907), name, "TZ {tz}");
+        }
     }
 
     /// An ask made during frame N is spawned on frame N+1.
@@ -311,6 +347,40 @@ mod tests {
     }
 
     /// The real [`ask_for_captures`] with no VM, as at character select.
+    /// While a movie plays the frame pass presents nothing, so an ask waits (`0x44267c`): no
+    /// capture until the movie stops, then the held one.
+    #[test]
+    fn an_ask_waits_while_a_movie_plays() {
+        let mut s = benilla_ui::script::UiScript::new_glue().unwrap();
+        s.set_movie_reader(Box::new(|path, _| {
+            path.ends_with(".avi").then(|| {
+                benilla_movie::testing::synthetic_avi(1024, 464, (1, 25), 9, &[&[][..]; 9], &[])
+            })
+        }));
+        s.run(r#"M = CreateFrame("MovieFrame", "MovieProbe") M:StartMovie("A")"#)
+            .unwrap();
+        let mut app = App::new();
+        app.init_resource::<ScreenshotState>();
+        app.insert_non_send_resource(s);
+        app.add_systems(Update, ask_for_captures);
+        app.world_mut().resource_mut::<ScreenshotState>().pending = 1;
+        let shots = |app: &mut App| {
+            app.world_mut()
+                .query::<&Screenshot>()
+                .iter(app.world())
+                .count()
+        };
+        app.update();
+        app.update();
+        assert_eq!(shots(&mut app), 0, "held while the movie plays");
+        app.world()
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .run("M:StopMovie()")
+            .unwrap();
+        app.update();
+        assert_eq!(shots(&mut app), 1, "taken once it stops");
+    }
+
     fn spawn_pending_only(mut commands: Commands, mut state: ResMut<ScreenshotState>) {
         spawn_captures(&mut commands, std::mem::take(&mut state.pending));
     }

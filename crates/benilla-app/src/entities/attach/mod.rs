@@ -289,6 +289,10 @@ pub(super) fn attach_entity_visuals(
         mut images,
     ) = skin_build;
     let now = time.elapsed_secs();
+    // Mount children this pass has despawned for a dismounted rider. The query was read before
+    // the despawn applies, so a child visited after its rider is still in it: skipping it here
+    // keeps every write off an entity the pass itself removed, whatever the iteration order.
+    let mut dropped: Vec<Entity> = Vec::new();
     for (
         entity,
         net,
@@ -301,6 +305,9 @@ pub(super) fn attach_entity_visuals(
         shown_rebuild,
     ) in &pending
     {
+        if dropped.contains(&entity) {
+            continue;
+        }
         // The appear ramp's origin: the unit's arrival, however long its visual waited to build.
         let arrived = arrival.map_or(now, |a| a.0);
         // A player attaches once its equipment settles, so it never flashes naked.
@@ -403,6 +410,7 @@ pub(super) fn attach_entity_visuals(
             if mount_display != 0 {
                 match super::mount::seat_or_spawn_mount(
                     &mut commands,
+                    &mut dropped,
                     &mount_children,
                     &mut built_poses,
                     creatures.as_deref(),
@@ -420,9 +428,8 @@ pub(super) fn attach_entity_visuals(
                 }
             } else if let Some(&super::mount::MountChild(child)) = mount_child {
                 // Dismounted while pending: drop the mount it ordered.
-                if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.despawn();
-                }
+                commands.entity(child).try_despawn();
+                dropped.push(child);
                 commands.entity(entity).remove::<super::mount::MountChild>();
             }
             let kind = match net.kind {
@@ -1081,5 +1088,105 @@ mod tests {
             world.entity(live).contains::<VisualAttached>(),
             "a live unit still builds"
         );
+    }
+
+    /// A rider that drops its still-pending mount child, dismounted or mounted on another display,
+    /// has the pass skip that child wherever the iteration reaches it: its writes would otherwise
+    /// apply to an entity the same pass despawned, which the default command error handler
+    /// panics on.
+    #[test]
+    fn a_dropped_pending_mount_child_is_skipped_whatever_the_visit_order() {
+        use super::super::mount::{MountBody, MountChild};
+
+        for (child_table_first, stale_display) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+                .init_asset::<Image>()
+                .init_asset::<Mesh>()
+                .init_asset::<benilla_assets::materials::WowModelMaterial>()
+                .init_resource::<benilla_world::model_render::ModelMaterials>()
+                .init_resource::<super::super::corpse::BonesModels>()
+                .init_resource::<SkinComposites>()
+                .init_resource::<merge::MergedFormsCache>()
+                .init_resource::<benilla_world::doodad_anim::UvAnimMaterials>()
+                .init_resource::<benilla_world::doodad_anim::TintAnimMaterials>()
+                .init_resource::<benilla_world::mat_anim_table::MatAnimTable>()
+                .init_resource::<benilla_world::rig_palette::RigPalettes>()
+                .init_resource::<benilla_world::collision::ColliderEpoch>()
+                .insert_resource(CubeAssets {
+                    mesh: Handle::default(),
+                    player_mesh: Handle::default(),
+                    player_mat: Handle::default(),
+                    npc_mat: Handle::default(),
+                })
+                // A loaded model that names a file and draws nothing: the build runs, so the
+                // rider's dismount branch and the child's writes are reached.
+                .insert_resource(Creatures {
+                    catalog: Default::default(),
+                    models: std::collections::HashMap::from([(
+                        1u32,
+                        DisplayModel {
+                            handle: ModelHandle::M2(Handle::default()),
+                            parts: Some(Vec::new()),
+                            ..super::super::display::empty_shell()
+                        },
+                    )]),
+                });
+            let net = || NetEntity {
+                kind: EntityKind::Unit,
+                display_id: Some(1),
+                scale: 1.0,
+            };
+            let world = app.world_mut();
+            // The mount display the rider's field names: none (dismounted), or one the child was
+            // not built for.
+            let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                benilla_protocol::field::FIELD_UNIT_MOUNTDISPLAYID,
+                if stale_display { 2 } else { 0 },
+            )]));
+            // The two sit in different tables, and which one the query walks first follows the
+            // order they were created in, so each layout is run: the rider is visited before its
+            // child in one of them (measured, not assumed).
+            let (rider, child) = if child_table_first {
+                let child = world
+                    .spawn((
+                        net(),
+                        MountBody {
+                            host: Entity::PLACEHOLDER,
+                        },
+                    ))
+                    .id();
+                let rider = world.spawn((net(), MountChild(child), store)).id();
+                world.entity_mut(child).insert(MountBody { host: rider });
+                (rider, child)
+            } else {
+                let child = world.spawn_empty().id();
+                let rider = world.spawn((net(), MountChild(child), store)).id();
+                world.entity_mut(child).insert((
+                    net(),
+                    MountBody { host: rider },
+                    Transform::default(),
+                ));
+                (rider, child)
+            };
+
+            let mut build = IntoSystem::into_system(attach_entity_visuals);
+            build.initialize(world);
+            build
+                .run_without_applying_deferred((), world)
+                .expect("the build system runs");
+            build.apply_deferred(world);
+
+            assert!(
+                world.get_entity(child).is_err(),
+                "the pending mount is gone (child_table_first={child_table_first}, stale={stale_display})"
+            );
+            let rider = world.entity(rider);
+            assert!(!rider.contains::<MountChild>());
+            // A stale mount waits for the next pass to spawn the right one; a dismounted unit builds.
+            assert_eq!(rider.contains::<VisualAttached>(), !stale_display);
+        }
     }
 }

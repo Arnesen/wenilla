@@ -89,6 +89,8 @@ rtrb = "0.3"
 mint = "0.5"
 # The gossip greeting's weighted draw, re-rolled per open as in the reference.
 rand = "0.8"
+# The account-data sections' digests, MD5 as the reference's (`0x5af940`) and the server's.
+md-5 = "0.10.6"
 
 # The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. Native-only:
 # arboard has no wasm32 backend (`textinput/clipboard.rs` falls back to no pasteboard there).
@@ -186,6 +188,8 @@ windows-sys = { version = "0.59", features = [
 # The login cycle's fake realmd runs the server half of SRP6 (`net::io::cycle_tests`).
 [dev-dependencies]
 benilla-srp = { path = "../benilla-srp" }
+# The synthetic movie the movie screen's tests open.
+benilla-movie = { path = "../benilla-movie", features = ["test-support"] }
 # The UI's geometry comparisons (`benilla_ui::assert_near!`).
 benilla-ui = { path = "../benilla-ui", features = ["test-support"] }
 # The schedule census keeps the build's own graph, sync points included, through a build pass,

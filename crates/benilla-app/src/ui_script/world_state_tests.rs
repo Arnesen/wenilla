@@ -7,6 +7,7 @@ use super::test_ui::load_ui as load_xml;
 
 pub(crate) fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -65,6 +66,7 @@ fn textures(s: &mut UiScript) -> Vec<String> {
 
 pub(crate) fn push(s: &mut UiScript, rows: Vec<WorldStateUiView>) {
     s.set_world_state_ui(rows);
+    s.fire_event("UPDATE_WORLD_STATES", vec![]);
     s.tick(0.0);
     s.fire_event("UPDATE_WORLD_STATES", vec![]);
 }

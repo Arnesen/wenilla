@@ -6,7 +6,7 @@
 
 use bevy::prelude::*;
 
-use super::{Player, SETTLE_TIMEOUT};
+use super::{MoverLock, Player, SETTLE_TIMEOUT};
 use benilla_world::terrain_stream::{ViewFocus, WorldLoadProgress};
 use benilla_world::view::Viewer;
 
@@ -77,6 +77,12 @@ pub(super) fn publish_view_focus(
         }
     }
     *was_flying = flying;
+    // Far reloads, a teleport's snap or a cinematic's far cut, are one mark to the stream: a change
+    // re-arms its load, which a pacing edge does only for a focus that was settled.
+    let reloads = player
+        .as_deref()
+        .map_or(0, |p| p.reloads)
+        .wrapping_add(cinematic.as_deref().map_or(0, |c| c.reloads()));
     // Spawn caps pace only a live avatar in a settled world; through entry, a teleport or a world
     // swap a cap would only lengthen the load.
     *focus = match player.as_deref() {
@@ -97,7 +103,33 @@ pub(super) fn publish_view_focus(
             Some((map, pos)) => ViewFocus::entry(map, pos),
             None => ViewFocus::camera(),
         },
-    };
+    }
+    .with_reload(reloads);
+}
+
+/// The reference's reload gate: a forced move of more than 30 yards (`d² > 900`, `0x80c730` is
+/// 30.0 and the compare is strict, `0x617ee5`; the cinematic shot arm's gate `0x48eec1` compares
+/// the 30.0 of `0x804554`, and EndCinematic's `0x48f0fc`, camera against the followed object, that
+/// of `0x804558`) reloads the destination before the frame goes on. `from` and `to` are in one frame.
+pub(crate) fn is_far_reload(from: Vec3, to: Vec3) -> bool {
+    from.distance_squared(to) > 30.0 * 30.0
+}
+
+/// Is the load's focus the tile under `at` (a Bevy position)? Residency counts only for the tile
+/// the held thing stands on: on a mismatch (the snap frame, a free-fly eye) a release is refused.
+pub(crate) fn focus_is_under(p: &WorldLoadProgress, at: Vec3) -> bool {
+    p.focus_tile.is_some_and(|t| {
+        let wow = benilla_assets::coords::bevy_to_wow(at);
+        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
+        t == (tx as i32, ty as i32)
+    })
+}
+
+/// The tile under `at` is in: this map's own tile (a WMO-only map's one building) is spawned or
+/// its read failed, which a swap reaches only after draining every tile of the map we left. A
+/// destination is presentable ([`WorldLoadProgress::presentable`]) only once this holds too.
+pub(crate) fn residency_reached(p: &WorldLoadProgress, at: Vec3) -> bool {
+    p.focus_resident && p.total > 0 && focus_is_under(p, at)
 }
 
 /// Ends the post-snap hold when the destination's world has arrived. Runs after the stream stage,
@@ -112,14 +144,8 @@ pub(super) fn release_post_snap_hold(
     let Some(p) = progress else { return };
     // Residency counts only for the tile under the body. On a mismatch (the teleport's snap frame,
     // a free-fly eye) the release and the stale-clear are refused and only the backstop runs.
-    let focus_matches = p.focus_tile.is_some_and(|t| {
-        let wow = benilla_assets::coords::bevy_to_wow(player.pos);
-        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
-        t == (tx as i32, ty as i32)
-    });
-    // Residency means this map's own tile (a WMO-only map's one building) is spawned, which a
-    // swap reaches only after draining every tile of the map we left.
-    if p.focus_resident && p.total > 0 && focus_matches {
+    let focus_matches = focus_is_under(&p, player.pos);
+    if residency_reached(&p, player.pos) {
         player.world_stale = false;
     }
     // Any counter moving is the destination still arriving; tracked every frame, so the first
@@ -140,7 +166,10 @@ pub(super) fn release_post_snap_hold(
     // the deadline is pushed while the resident world is still the map we left and while the
     // stream advances, so only a stream with no progress for the whole budget times out.
     let now = time.elapsed_secs();
-    if p.presentable() && !player.world_stale && focus_matches {
+    if player.world_reload && now >= player.reload_ceiling {
+        // The reload's ceiling, which nothing below extends.
+        player.end_settle(false, now);
+    } else if p.presentable() && !player.world_stale && focus_matches {
         player.end_settle(true, now);
     } else if player.world_stale || progressed {
         player.settle_deadline = now + SETTLE_TIMEOUT;
@@ -184,6 +213,7 @@ pub(crate) struct BarUnitOutdoors(pub(crate) Option<(u64, bool)>);
 pub(crate) fn publish_caster_outdoors(
     test: benilla_world::wmo_portal::EntityOutdoors,
     player: Option<Res<Player>>,
+    lock: Option<Res<MoverLock>>,
     mut outdoors: ResMut<PlayerOutdoors>,
     bar: Option<Res<crate::ui_pet::PetBar>>,
     index: Option<Res<crate::net::GuidIndex>>,
@@ -193,7 +223,14 @@ pub(crate) fn publish_caster_outdoors(
     let now = match player.as_deref() {
         // `pos` is another unit's while we drive it, and still the last mover's until the new
         // one's pose is adopted (`reseat`): our own body's answer holds.
-        Some(p) if p.active && (p.foreign_mover.is_some() || p.reseat) => None,
+        Some(p)
+            if p.active
+                && lock
+                    .as_deref()
+                    .is_some_and(|l| l.foreign_mover.is_some() || l.reseat) =>
+        {
+            None
+        }
         Some(p) if p.active => Some(test.at(p.pos)),
         // No body: a null entity reads outdoors (`0x6706fa`).
         _ => Some(true),
@@ -360,6 +397,36 @@ mod tests {
             !p.world_stale,
             "and re-staled a world the streamer had cleared"
         );
+    }
+
+    /// A teleport's far snap and a cinematic's far cut reach the stream as the same mark, so its
+    /// load re-arms for either, with the focus unpaced or not.
+    #[test]
+    fn far_reloads_of_the_body_and_of_a_shot_both_reach_the_stream() {
+        let mut app = App::new();
+        app.insert_resource(ViewFocus::default())
+            .insert_resource(Player {
+                active: true,
+                ..Player::default()
+            })
+            .insert_resource(crate::cinematic::Cinematic::playing_for_test())
+            .add_systems(Update, publish_view_focus);
+        app.update();
+        let mark = |app: &App| app.world().resource::<ViewFocus>().reload();
+        let steady = mark(&app);
+        app.update();
+        assert_eq!(mark(&app), steady, "a frame with no reload keeps the mark");
+
+        app.world_mut().resource_mut::<Player>().reloads += 1;
+        app.update();
+        let after_snap = mark(&app);
+        assert_ne!(after_snap, steady, "a far snap");
+
+        app.world_mut()
+            .resource_mut::<crate::cinematic::Cinematic>()
+            .mark_reload();
+        app.update();
+        assert_ne!(mark(&app), after_snap, "a far shot");
     }
 
     #[test]
@@ -591,16 +658,21 @@ mod tests {
         use benilla_assets::coords::wow_to_bevy;
 
         // One frame of the system over the test room, from the answer `last`.
+        let ask_locked =
+            |flags: u32, player: Player, lock: MoverLock, viewer: Viewer, last: bool| {
+                let mut app = App::new();
+                insert_test_room(app.world_mut(), flags);
+                app.insert_resource(player)
+                    .insert_resource(lock)
+                    .insert_resource(viewer)
+                    .insert_resource(PlayerOutdoors(last))
+                    .init_resource::<BarUnitOutdoors>()
+                    .add_systems(Update, publish_caster_outdoors);
+                app.update();
+                app.world().resource::<PlayerOutdoors>().0
+            };
         let ask = |flags: u32, player: Player, viewer: Viewer, last: bool| {
-            let mut app = App::new();
-            insert_test_room(app.world_mut(), flags);
-            app.insert_resource(player)
-                .insert_resource(viewer)
-                .insert_resource(PlayerOutdoors(last))
-                .init_resource::<BarUnitOutdoors>()
-                .add_systems(Update, publish_caster_outdoors);
-            app.update();
-            app.world().resource::<PlayerOutdoors>().0
+            ask_locked(flags, player, MoverLock::default(), viewer, last)
         };
         let (inside, outside) = (
             wow_to_bevy([1.0, 2.0, 30.0]),
@@ -645,20 +717,20 @@ mod tests {
             !ask(0, body(inside), seen(outside), true),
             "the body, not the viewer"
         );
-        let driving = Player {
+        let driving = MoverLock {
             foreign_mover: Some(0xF130_0000_0000_0043),
-            ..body(outside)
+            ..MoverLock::default()
         };
         assert!(
-            !ask(0, driving, seen(outside), false),
+            !ask_locked(0, body(outside), driving, seen(outside), false),
             "driving another unit holds the answer"
         );
-        let reseating = Player {
+        let reseating = MoverLock {
             reseat: true,
-            ..body(outside)
+            ..MoverLock::default()
         };
         assert!(
-            !ask(0, reseating, seen(outside), false),
+            !ask_locked(0, body(outside), reseating, seen(outside), false),
             "so does the frame before our own body's pose is adopted"
         );
     }

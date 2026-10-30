@@ -208,6 +208,103 @@ fn debugstack_frames_end_in_newline_and_count1_does_not_clamp() {
     assert_eq!(lines[1], "...", "the marker is its own complete line");
 }
 
+/// `debugstack` takes each level off the front while `is-number` passes (`0x703782`), so a
+/// numeric string is a level, and joins what is left in front of the frames (`0x7039b0`); a first
+/// remainder that is no string or number returns the last argument (`0x70382d` → `0x7039b6`).
+#[test]
+fn debugstack_coerces_its_levels_and_joins_the_rest() {
+    let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(
+        f(r#"return debugstack("99")"#),
+        "",
+        "\"99\" is a level past the stack"
+    );
+    assert_eq!(f(r#"return debugstack(99, "msg")"#), "msg");
+    let late = f(r#"return debugstack("msg", 99)"#);
+    assert!(
+        late.starts_with("msg99") && late.ends_with('\n'),
+        "a level only in front: {late:?}"
+    );
+    assert_eq!(f(r#"return debugstack(99, 1, 1, "a", 2)"#), "a2");
+    let msg = f(r#"return debugstack("msg: ")"#);
+    assert!(msg.starts_with("msg: ") && msg.ends_with('\n'), "{msg:?}");
+    assert_eq!(f(r#"return debugstack({}, "last")"#), "last");
+    assert!(s
+        .eval::<bool>("local t = {} return debugstack(1, t) == t")
+        .unwrap());
+    let err = s
+        .eval::<String>(r#"return debugstack("a", {})"#)
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("attempt to concatenate a table value"),
+        "{err}"
+    );
+}
+
+/// The levels are 32-bit: a level below 0 is `lua_getstack`'s tail-call pseudo-frame
+/// (`0x6fbad4`-`0x6fbade`, filled by `0x6fbd20`), and the window adds with wrap and compares
+/// unsigned (`0x70384c`, `0x703857`), so a negative `start + count1` prints every level.
+#[test]
+fn debugstack_levels_wrap_as_32_bit_and_a_negative_one_is_a_tail_call() {
+    let s = script();
+    s.run(
+        "function DSDeep(n) \
+           if n == 0 then local r = debugstack(unpack(DSArgs)) return r end \
+           local r = DSDeep(n - 1) return r \
+         end",
+    )
+    .unwrap();
+    let at = |args: &str| -> Vec<String> {
+        s.run(&format!("DSArgs = {{{args}}}")).unwrap();
+        let out = s.eval::<String>("local r = DSDeep(30) return r").unwrap();
+        assert!(out.ends_with('\n'), "{args}: {out:?}");
+        out.lines().map(str::to_owned).collect()
+    };
+    let whole = at("0, 99, 0");
+    let deep = whole.len();
+    assert!(deep > 30, "{whole:?}");
+    assert!(whole.iter().all(|l| l != "..." && l != "(tail call): ?"));
+
+    // -1: the pseudo-frame, then levels 0..=10, then the marker and the last 10.
+    let minus_one = at("-1");
+    assert_eq!(minus_one[0], "(tail call): ?");
+    assert_eq!(minus_one[1..12], whole[..11]);
+    assert_eq!(minus_one[12], "...");
+    assert_eq!(minus_one[13..], whole[deep - 10..]);
+
+    // -12: the window's limit is 0, below the first `next` compared unsigned, and the probe lands
+    // on a pseudo-frame: the marker and the last `count2` levels alone.
+    assert_eq!(
+        at("-12, 12, 3"),
+        [&["...".to_string()][..], &whole[deep - 3..]].concat()
+    );
+
+    // A negative `start + count1` is a huge unsigned limit: every level, no marker.
+    assert_eq!(at("1, -3"), whole[1..]);
+    assert_eq!(
+        at("1, 2147483648"),
+        whole[1..],
+        "2^31 truncates to i32::MIN"
+    );
+}
+
+/// `luaV_concat` works down from the top, so with frames on top of two bad remainders the raise
+/// names the upper one; with no frame the top pair fails on its lower value.
+#[test]
+fn debugstack_raises_for_the_bad_remainder_nearest_the_top() {
+    let s = script();
+    let err = |src: &str| s.eval::<String>(src).unwrap_err().to_string();
+    let e = err(r#"return debugstack("a", {}, function() end)"#);
+    assert!(e.contains("attempt to concatenate a function value"), "{e}");
+    let e = err(r#"return debugstack(99, 1, 1, "a", {}, true)"#);
+    assert!(e.contains("attempt to concatenate a table value"), "{e}");
+    let e = err(r#"return debugstack(99, 1, 1, "a", "b", true)"#);
+    assert!(e.contains("attempt to concatenate a boolean value"), "{e}");
+    assert_eq!(s.eval::<i64>("return debugstack(99, 1, 1, 5)").unwrap(), 5);
+}
+
 /// An addon chunk is named as the reference names it, `@Interface\AddOns\<folder>\<file>`:
 /// `FuBarPlugin-2.0.lua:752` finds its folder with a greedy `"\\AddOns\\(.*)\\"`, which captures
 /// up to the last backslash, so the file must be in the name. The test bounds the capture at the
@@ -381,6 +478,7 @@ fn the_lua_5_0_dialect_vanilla_addons_are_written_in_runs_here() {
 /// `_G` (slots 34 and 33 of its base registry); addons save `time()` and compare across logins.
 #[test]
 fn time_is_epoch_seconds_and_date_formats_them() {
+    let _zone = crate::civil::ZoneGuard::set("UTC0");
     let s = script();
 
     // A plausible wall clock, between 2020 and 2100, not GetTime's 0-based one.
@@ -429,6 +527,7 @@ fn time_is_epoch_seconds_and_date_formats_them() {
 /// specifier writes nothing. An empty or 256-byte answer raises, a negative time answers nil.
 #[test]
 fn date_formats_as_msvcs_strftime() {
+    let _zone = crate::civil::ZoneGuard::set("UTC0");
     let s = script();
     let date = |args: &str| -> String {
         s.eval::<String>(&format!("return date({args})"))
@@ -447,10 +546,7 @@ fn date_formats_as_msvcs_strftime() {
         (r#""%#d.%#m %#H:%#M %#j", 1000000000"#, "9.9 1:46 252"),
         (r#""%U %W", 1000086400"#, "36 37"),
         (r#""%U %W", 1000000000"#, "36 36"),
-        (
-            r#""%Z|%z", 1000000000"#,
-            "Coordinated Universal Time|Coordinated Universal Time",
-        ),
+        (r#""%Z|%z", 1000000000"#, "UTC|UTC"),
         (r#""a%Qb%hc%ed", 1000000000"#, "abcd"),
         (r#""*tx", 1000000000"#, "*tx"),
         (r#""%Y", "1000000000""#, "2001"),
@@ -483,6 +579,7 @@ fn date_formats_as_msvcs_strftime() {
 /// negative time nil.
 #[test]
 fn time_converts_a_date_table() {
+    let _zone = crate::civil::ZoneGuard::set("UTC0");
     let s = script();
     let time = |t: &str| -> String {
         s.eval::<mlua::Value>(&format!("return time({t})"))
@@ -533,6 +630,106 @@ fn time_converts_a_date_table() {
         )
         .unwrap();
     assert!(round, "a date table converts back");
+}
+
+/// `date` and `time` read the system's zone as 1.12.1's runtime does: `localtime` (`0x73f125`)
+/// unless the format leads with `!`, which is `gmtime` (`0x7033f0`), and `_mktime` (`0x74066b`),
+/// which adds the zone's offset and, for a table whose `isdst` is true, its daylight bias
+/// (`0x740811`, `0x740836`). `%Z` is the zone's name for the time's `isdst`, the standard one
+/// after `!` (`0x413916`).
+#[test]
+fn date_and_time_read_the_local_zone() {
+    let s = script();
+    let eval = |src: &str| -> String {
+        s.eval::<mlua::Value>(src)
+            .map(|v| match v {
+                mlua::Value::Nil => "nil".to_string(),
+                mlua::Value::Boolean(b) => b.to_string(),
+                mlua::Value::String(t) => t.to_str().unwrap().to_string(),
+                v => format!("{}", v.as_f64().unwrap()),
+            })
+            .unwrap_or_else(|e| format!("error: {e}"))
+    };
+    {
+        // 5:45 east of UTC, no daylight saving.
+        let _zone = crate::civil::ZoneGuard::set("NPT-05:45");
+        for (src, want) in [
+            (r#"return date("%H:%M", 0)"#, "05:45"),
+            (r#"return date("!%H:%M", 0)"#, "00:00"),
+            (
+                r#"return date("%Y-%m-%d %H:%M", 72000)"#,
+                "1970-01-02 01:45",
+            ),
+            (
+                r#"local t = date("*t", 72000) return t.day * 100 + t.hour"#,
+                "201",
+            ),
+            (r#"return date("!*t", 72000).hour"#, "20"),
+            (r#"return date("*t", 0).isdst"#, "false"),
+            (r#"return date("%Z", 0)"#, "NPT"),
+            (r#"return date("!%Z", 0)"#, "NPT"),
+            (
+                "return time{year=1970, month=1, day=1, hour=5, min=45}",
+                "0",
+            ),
+            // A zone with no daylight saving has no daylight bias (`_dstbias` 0), so `isdst`
+            // moves nothing (`0x740836`).
+            (
+                "return time{year=1970, month=1, day=2, hour=5, min=45, isdst=true}",
+                "86400",
+            ),
+            (
+                "return time{year=2001, month=7, day=1, hour=5, min=45, isdst=true}",
+                "993945600",
+            ),
+            ("return time{year=1970, month=1, day=1, hour=0}", "nil"),
+            ("return time(date('*t', 1000000000))", "1000000000"),
+        ] {
+            assert_eq!(eval(src), want, "{src}");
+        }
+    }
+    // `_mktime` adds the zone's offset as it stands now, not the one the zone kept on the
+    // table's date: Moscow ran four hours east in 2012 (2011-14) and runs three now, so the sum
+    // takes three.
+    #[cfg(unix)]
+    {
+        let _zone = crate::civil::ZoneGuard::set("Europe/Moscow");
+        assert_eq!(
+            eval("return time{year=2012, month=6, day=1, hour=0}"),
+            (1_338_508_800_i64 - 3 * 3600).to_string()
+        );
+    }
+    // Five hours west, an hour less in summer: 1_000_000_000 is 2001-09-08 21:46:40 EDT.
+    let zone = if cfg!(windows) {
+        "EST5EDT"
+    } else {
+        "EST5EDT,M3.2.0,M11.1.0"
+    };
+    let _zone = crate::civil::ZoneGuard::set(zone);
+    for (src, want) in [
+        (
+            r#"return date("%Y-%m-%d %H:%M:%S", 1000000000)"#,
+            "2001-09-08 21:46:40",
+        ),
+        (r#"return date("*t", 1000000000).isdst"#, "true"),
+        (r#"return date("!*t", 1000000000).isdst"#, "false"),
+        (r#"return date("%Z", 1000000000)"#, "EDT"),
+        (r#"return date("!%Z", 1000000000)"#, "EST"),
+        (r#"return date("%H", 980000000)"#, "09"),
+        (r#"return date("%Z", 980000000)"#, "EST"),
+        // `isdst` read as a boolean, so nil is 0: the fields are standard time, an hour later.
+        (
+            "return time{year=2001, month=9, day=8, hour=21, min=46, sec=40}",
+            "1000003600",
+        ),
+        (
+            "return time{year=2001, month=9, day=8, hour=21, min=46, sec=40, isdst=true}",
+            "1000000000",
+        ),
+        ("return time(date('*t', 1000000000))", "1000000000"),
+    ] {
+        assert_eq!(eval(src), want, "{src}");
+    }
 }
 
 // ── RunScript ──
@@ -702,4 +899,145 @@ fn a_frame_no_instruction_names_takes_a_globals_name() {
         named.contains("in function <"),
         "no global holds it: {named}"
     );
+}
+
+/// The bare aliases are the client's `compat.lua` chunk (`0x8722e8`, named at `0x872cbc`): an error
+/// inside one is `[string "compat.lua"]:<line>:` with the line the alias has in the client's
+/// 53-line text (`sin` 36, `cos` 20, `tan` 38, `asin` 16), and the closures capture the chunk's own
+/// `math`, so a script that replaces the global leaves them working.
+#[test]
+fn the_bare_aliases_are_the_clients_compat_chunk() {
+    let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(
+        f(r#"local ok, e = pcall(sin, "a") return e"#),
+        r#"[string "compat.lua"]:36: bad argument #1 to `rad' (number expected, got string)"#
+    );
+    assert_eq!(
+        f(r#"local ok, e = pcall(cos, nil) return e"#),
+        r#"[string "compat.lua"]:20: bad argument #1 to `rad' (number expected, got nil)"#
+    );
+    assert_eq!(
+        f(r#"local ok, e = pcall(tan, {}) return e"#),
+        r#"[string "compat.lua"]:38: bad argument #1 to `rad' (number expected, got table)"#
+    );
+    assert_eq!(
+        f(r#"local ok, e = pcall(asin, "x") return e"#),
+        r#"[string "compat.lua"]:16: bad argument #1 to `asin' (number expected, got string)"#
+    );
+    assert_eq!(
+        f(r#"math = nil
+             return string.format("%.4f %.4f %.4f", sin(30), tan(45), atan2(1, 1))"#),
+        "0.5000 1.0000 45.0000"
+    );
+}
+
+/// `seterrorhandler` (`0x702900`) checks that argument 1 is a function, then `luaL_ref`s the
+/// stack's top (`0x702930`): the last argument, and a nil there is -1 (`0x6f534a`), no handler.
+/// `geterrorhandler` (`0x702950`) answers the referenced value, nil for -1.
+#[test]
+fn seterrorhandler_keeps_the_top_value() {
+    let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(
+        f(r#"local a, b = function() end, function() end
+             seterrorhandler(a) local r1 = geterrorhandler() == a
+             seterrorhandler(a, b) local r2 = geterrorhandler() == b
+             seterrorhandler(a, nil) local r3 = geterrorhandler()
+             seterrorhandler(b) seterrorhandler(a, 5) local r4 = geterrorhandler()
+             return table.concat({tostring(r1), tostring(r2), tostring(r3), tostring(r4)}, " ")"#),
+        "true true nil 5"
+    );
+    // Argument 1 must be a function, whatever follows it. The 5 is cleared first: a raise runs it.
+    s.run("seterrorhandler(function() end, nil)").unwrap();
+    for call in [
+        "seterrorhandler()",
+        "seterrorhandler(nil)",
+        "seterrorhandler(nil, print)",
+    ] {
+        let e = s.run(call).expect_err(call).to_string();
+        assert!(e.contains("Usage: seterrorhandler(errfunc)"), "{call}: {e}");
+    }
+}
+
+/// With the slot cleared the catch closure calls nothing (`0x703b45`); a held value that is no
+/// function is called, and the call raises.
+#[test]
+fn a_cleared_error_handler_is_not_called() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "caught = {} h = function(m) table.insert(caught, m) end \
+         seterrorhandler(h, nil) \
+         local b = CreateFrame('Button') \
+         b:SetScript('OnClick', function() error('click boom') end) \
+         b:Click()",
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i32>("return table.getn(caught)").unwrap(), 0);
+    // A held value that is no function is called all the same, and the call raises: as the error
+    // function of a running call it recurses to `error in error handling` (`0x6f65cf`), and for a
+    // chunk that failed to compile it is called directly (`0x704b42`).
+    s.run(
+        "seterrorhandler(h, 5) \
+         local b = CreateFrame('Button') \
+         b:SetScript('OnClick', function() error('again') end) \
+         b:Click()",
+    )
+    .unwrap();
+    let errors = s.take_errors().join("|");
+    assert!(
+        errors.contains("again — error handler failed: error in error handling"),
+        "the host log keeps the message and the handler's failure: {errors}"
+    );
+    s.run("x = = 1").expect_err("a compile failure");
+    let errors = s.take_errors().join("|");
+    assert!(
+        errors.contains(
+            "unexpected symbol near `=' — error handler failed: attempt to call a number value"
+        ),
+        "{errors}"
+    );
+}
+
+/// The error function answers the held handler's result (`0x703b6d`, `lua_call(1, 1)`), which is
+/// what a status reads (`0x704b7f`); with the slot at -1, the message itself (`0x703b45`).
+#[test]
+fn the_error_function_answers_the_handlers_result() {
+    let s = script();
+    let f: mlua::Function = s.eval("return function() error('raw', 0) end").unwrap();
+    let h = crate::script::stdlib::error_function(s.lua()).expect("installed");
+    let answer = || {
+        let e = f.call_under::<()>(&h, ()).expect_err("raised");
+        e.lua_value(s.lua())
+    };
+    assert_eq!(answer().unwrap().to_string().unwrap(), "raw");
+    s.run("seterrorhandler(function(m) return 'replaced ' .. m end)")
+        .unwrap();
+    assert_eq!(answer().unwrap().to_string().unwrap(), "replaced raw");
+    s.run("seterrorhandler(function(m) end)").unwrap();
+    assert!(answer().is_none_or(|v| v.is_nil()));
+}
+
+/// The engine's `GetText` call is a runner's call of its own (`0x703cad`): an error the handler
+/// hears inside it is never taken for the error of the script the call runs in, whose own fault
+/// the host log keeps.
+#[test]
+fn a_failed_get_text_inside_a_script_leaves_the_scripts_own_error() {
+    let s = script();
+    s.run("function GetText() error('inner', 0) end seterrorhandler(function(m) return m end)")
+        .unwrap();
+    let outer: mlua::Function = s.eval("return function() error('outer', 0) end").unwrap();
+    let h = crate::script::stdlib::error_function(s.lua()).expect("installed");
+    let e = crate::script::stdlib::with_capture(|| {
+        let text = crate::strings::Strings::Vm(s.lua()).get_text("T", None, Some(2));
+        assert_eq!(
+            text.as_deref(),
+            Some("inner"),
+            "the handler's answer is the text"
+        );
+        outer.call_under::<()>(&h, ())
+    })
+    .expect_err("the outer script raised");
+    assert_eq!(crate::script::lua_message(&e), "outer");
 }

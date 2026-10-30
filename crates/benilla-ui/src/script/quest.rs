@@ -1,11 +1,14 @@
-//! The questgiver bindings: the app pushes the open panel ([`UiScript::set_quest`]), and the panel
-//! verbs queue selects and button intents it drains. One [`QuestState`] serves the flat getters
-//! `QuestFrame.lua` reads on each panel; the app fires `QUEST_GREETING`, `QUEST_DETAIL`,
-//! `QUEST_PROGRESS` or `QUEST_COMPLETE` for the live one.
+//! The questgiver bindings: each getter reads the panel's cells through the lent host at the call
+//! ([`QuestGiverQuery`]), as the reference's read its globals (`0x501a20`-`0x502090`), and each
+//! panel verb hands the host its call ([`QuestCall`]), which applies it before the verb returns.
+//! One [`QuestState`] holds every cell `QuestFrame.lua` reads; the app fires `QUEST_GREETING`,
+//! `QUEST_DETAIL`, `QUEST_PROGRESS` or `QUEST_COMPLETE` at each panel's packet. With no host the
+//! getters read the VM's copy ([`UiScript::set_quest`]), which only a harness sets.
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{self, flag};
+use super::live::{ask, LiveQuery};
 use super::Model;
 
 /// Which questgiver panel a [`QuestState`] is for, set from the wire packet.
@@ -29,13 +32,10 @@ pub struct QuestItemView {
     pub name: Option<String>,
     pub texture: Option<String>,
     pub count: u32,
-    /// 0 poor to 5 legendary; 1 until the template lands.
-    pub quality: u32,
+    /// 0 poor to 5 legendary, -1 for an item with no inventory type; 0 until the template lands.
+    pub quality: i32,
     /// The item id the quest tooltips render by; 0 until the wire row resolves.
     pub item_id: u32,
-    /// Whether the player can use the item, `isUsable` as 1 or nil; stock tints the row red when
-    /// not (`QuestFrame.lua:393`). The app always sends `true`.
-    pub usable: bool,
     /// The escaped item link `GetQuestItemLink` and `GetQuestLogItemLink` serve; `None` until the
     /// template lands, since it embeds the name and the quality.
     pub link: Option<String>,
@@ -52,23 +52,27 @@ pub struct QuestRewardSpell {
     pub tradeskill: bool,
 }
 
-/// One open questgiver panel, with every field the four panels read; pushed whole by the app.
+/// The questgiver panel's cells as the getters read them: each written by its own panel's packet
+/// and kept until another writes it, past a close (`0x500bd0`, `0x500ef0`, `0x501070`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuestState {
     pub panel: QuestPanel,
-    // Greeting panel.
+    /// `0xbde068`, the greeting's text.
     pub greeting: String,
+    /// The greeting's two pools, each row's title at `+0x08` and level at `+0x04` of one 0x4c
+    /// record (`0xbde690` active, `0xbdfe60` available), refilled by the next greeting alone.
     pub active_titles: Vec<String>,
     pub available_titles: Vec<String>,
-    /// Each greeting quest's level, beside its title in the same pool (`+0x04` of a row, the title
-    /// at `+0x08`, `0xbde690` and `0xbdfe60`): `GetActiveLevel` and `GetAvailableLevel` read it. A
-    /// pool built without levels reads 0.
+    /// A pool built without levels reads 0.
     pub active_levels: Vec<u32>,
     pub available_levels: Vec<u32>,
-    // Detail, progress and reward panels.
+    /// `0xbdf900`.
     pub title: String,
-    /// The text of whichever panel is live: quest, progress or reward.
-    pub body: String,
+    /// The three panel texts, each its own buffer (`0xbde288`, `0xbdf0f8`, `0xbdf958`).
+    pub quest_text: String,
+    pub progress_text: String,
+    pub reward_text: String,
+    /// `0xbdf500`.
     pub objectives: String,
     /// Rewards the player picks one of.
     pub choices: Vec<QuestItemView>,
@@ -97,7 +101,9 @@ impl Default for QuestState {
             active_levels: Vec::new(),
             available_levels: Vec::new(),
             title: String::new(),
-            body: String::new(),
+            quest_text: String::new(),
+            progress_text: String::new(),
+            reward_text: String::new(),
             objectives: String::new(),
             choices: Vec::new(),
             rewards: Vec::new(),
@@ -111,11 +117,22 @@ impl Default for QuestState {
     }
 }
 
-/// The levels of the last greeting's active and available rows, one per row.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PoolLevels {
-    active: Vec<u32>,
-    available: Vec<u32>,
+/// The panel's cells as the host holds them at the call: the item rows resolved off the item cache
+/// then (`0x5017de`, `0x502114`) and `completable` the packet's flag with the player's held counts
+/// (`0x501230`).
+#[derive(Clone, Copy, Debug)]
+pub struct QuestGiverQuery;
+
+impl LiveQuery for QuestGiverQuery {
+    type Answer = QuestState;
+}
+
+/// The cells now: the host's, else the VM's copy.
+pub(crate) fn state(lua: &Lua) -> Option<QuestState> {
+    ask(lua, &QuestGiverQuery).or_else(|| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        model.quest.clone()
+    })
 }
 
 /// A greeting row picked by `SelectActiveQuest` or `SelectAvailableQuest`, 1-based in its list.
@@ -125,65 +142,60 @@ pub struct QuestSelect {
     pub index: u32,
 }
 
-/// A questgiver button intent; the app sends the matching message for its NPC and quest.
+/// A questgiver, quest-log or share verb, which the host applies inside the call: its gates and
+/// its packet, before the verb returns, as the reference's bindings do in their own bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuestAction {
-    /// Detail panel Accept → `CMSG_QUESTGIVER_ACCEPT_QUEST`.
+pub enum QuestCall {
+    /// `SelectActiveQuest(i)` (`0x501ce0` → `0x501320`) or `SelectAvailableQuest(i)`
+    /// (`0x501ca0` → `0x5012a0`): `CMSG_QUESTGIVER_COMPLETE_QUEST`, or `_QUERY_QUEST` for an
+    /// available row that is not one-click, and the already-acted latch.
+    Select(QuestSelect),
+    /// `AcceptQuest()` (`0x501d20` → `0x501380`): on the detail panel, `CMSG_QUESTGIVER_ACCEPT_QUEST`,
+    /// the latch, the close `0x501130(0,0)` and the Quest Log tutorial.
     Accept,
-    /// Progress panel Continue → `CMSG_QUESTGIVER_REQUEST_REWARD`.
-    Continue,
-    /// Reward panel Complete → `CMSG_QUESTGIVER_CHOOSE_REWARD` with the 0-based choice.
-    Reward(u32),
-    /// `DeclineQuest()`: the detail panel's Decline and the progress and reward panels' Cancel.
-    /// Its binding (`0x501d30`) re-opens the giver through `0x5013f0`: `CMSG_GOSSIP_HELLO` for a
-    /// gossip unit, `CMSG_QUESTGIVER_HELLO` for another unit, the teardown `0x501130(0,1)` for an
-    /// item or a player (or with `0xbe0824` set), a GameObject's interact call. The app owns this.
+    /// `DeclineQuest()` (`0x501d30` → `0x5013f0`): `CMSG_GOSSIP_HELLO` for a gossip unit,
+    /// `CMSG_QUESTGIVER_HELLO` for another unit, the teardown `0x501130(0,1)` for an item or a
+    /// player (or with `0xbe0824` set), a GameObject's interact call.
     Decline,
-    /// `CloseQuest()`, from `QuestFrame_OnHide`: ESC, the close button, the greeting's Goodbye, a
-    /// panel eviction. Its binding (`0x501a10`) calls only the teardown `0x501130(0,1)`, whose one
-    /// send is `MSG_QUEST_PUSH_RESULT` DECLINE for a player source, so closing an NPC's window
-    /// sends nothing. It stays apart from `Decline`: the re-open is `DeclineQuest`'s alone.
+    /// `CompleteQuest()` (`0x501d70` → `0x501560`): on the progress panel,
+    /// `CMSG_QUESTGIVER_REQUEST_REWARD` and the latch.
+    Complete,
+    /// `GetQuestReward([choice])` (`0x501d80` → `0x5015b0`), the choice less one, -1 for none
+    /// (`0x501d89`-`0x501da8`): on the reward panel, the latch, the choice's range, which raises
+    /// from the verb, and `CMSG_QUESTGIVER_CHOOSE_REWARD`.
+    Reward(i32),
+    /// `CloseQuest()` (`0x501a10` → `0x501130(0,1)`): a sharer's decline, the zeroed cell
+    /// (`0x501201`), the latch's release (`0x50120d`) and `QUEST_FINISHED` (`0x501217`), in the
+    /// call.
     Close,
+    /// `ConfirmAcceptQuest()` (`0x5021b0`): `CMSG_QUEST_CONFIRM_ACCEPT` with the quest the last
+    /// confirm held (`[0xbe0840]`, `0x5021e0`), an engine cell the host keeps.
+    ConfirmAccept,
+    /// `AbandonQuest()` on the marked quest's row (`0x4df070`): `CMSG_QUESTLOG_REMOVE_QUEST` with
+    /// its slot (`0x4df0ca`).
+    Abandon(u8),
+    /// `QuestLogPushQuest()` past its gates (`0x4e1340`): `CMSG_PUSHQUESTTOPARTY` (`0x4e13b7`).
+    Push(u32),
+}
+
+/// Hand `call` to the host, which applies it before this returns ([`super::calls::submit`]).
+pub(super) fn submit(lua: &Lua, call: QuestCall) -> mlua::Result<()> {
+    super::calls::submit(lua, super::ScriptCall::Quest(call))
 }
 
 impl super::UiScript {
-    /// Push (or clear, with `None`) the open questgiver panel snapshot.
-    ///
-    /// A greeting also refills the two level pools, which stay when the panel closes or another
-    /// panel opens, as the reference's pools do until its next quest list (`0x5dbb10`).
+    /// Set (or clear, with `None`) the VM's copy of the cells, which the getters read with no host
+    /// lent: a harness's alone.
     pub fn set_quest(&mut self, state: Option<QuestState>) {
-        let mut model = self.model_mut();
-        if let Some(q) = state.as_ref().filter(|q| q.panel == QuestPanel::Greeting) {
-            let pool = |titles: &[String], levels: &[u32]| {
-                (0..titles.len())
-                    .map(|i| levels.get(i).copied().unwrap_or(0))
-                    .collect()
-            };
-            model.quest_pool_levels = PoolLevels {
-                active: pool(&q.active_titles, &q.active_levels),
-                available: pool(&q.available_titles, &q.available_levels),
-            };
-        }
-        model.quest = state;
+        self.model_mut().quest = state;
     }
 
-    /// Drain the greeting-panel row selects queued since the last call.
-    pub fn take_quest_selects(&mut self) -> Vec<QuestSelect> {
-        std::mem::take(&mut self.model_mut().quest_selects)
-    }
-
-    /// Drain the button intents queued since the last call.
-    pub fn take_quest_actions(&mut self) -> Vec<QuestAction> {
-        std::mem::take(&mut self.model_mut().quest_actions)
-    }
-
-    /// Take the `CloseQuest()` calls queued since the last drain, leaving the other intents in
-    /// order: a close core answers the call its own `QUEST_FINISHED` raised through `OnHide`.
-    pub fn take_quest_close(&mut self) -> bool {
-        let actions = &mut self.model_mut().quest_actions;
-        let before = actions.len();
-        actions.retain(|a| !matches!(a, QuestAction::Close));
-        actions.len() != before
+    /// The quest calls a harness's VM kept ([`Self::keep_calls`]), in call order.
+    pub fn take_quest_calls(&mut self) -> Vec<QuestCall> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Quest(call) => Some(*call),
+            _ => None,
+        })
     }
 }
 
@@ -219,14 +231,17 @@ pub(super) fn reward_spell_returns(
 /// lookup falls back to the question mark (`0x5d88b0`, `0x847fe4`) under the icon folder.
 const EMPTY_ROW_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
 
-/// The list `GetQuestItemInfo(type, index)` reads for `type`.
+/// The list `GetQuestItemInfo(type, index)` reads for `type`, matched in any case (`SStrCmpI`,
+/// `0x501936`, `0x501957`, `0x501978`).
 pub(super) fn item_vec<'a>(state: &'a QuestState, kind: &str) -> Option<&'a Vec<QuestItemView>> {
-    match kind {
-        "choice" => Some(&state.choices),
-        "reward" => Some(&state.rewards),
-        "required" => Some(&state.required),
-        _ => None,
-    }
+    [
+        ("reward", &state.rewards),
+        ("choice", &state.choices),
+        ("required", &state.required),
+    ]
+    .into_iter()
+    .find(|(name, _)| kind.eq_ignore_ascii_case(name))
+    .map(|(_, list)| list)
 }
 
 /// Register the questgiver globals.
@@ -238,29 +253,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.globals().set(
             name,
             lua.create_function(move |lua, ()| {
-                let text = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
-                    model.quest.as_ref().map(pick).unwrap_or_default()
-                };
+                let text = state(lua).as_ref().map(pick).unwrap_or_default();
                 Ok(Value::String(lua.create_string(&text)?))
             })?,
         )
     }
     install_text(lua, "GetGreetingText", |q| q.greeting.clone())?;
     install_text(lua, "GetTitleText", |q| q.title.clone())?;
-    install_text(lua, "GetQuestText", |q| q.body.clone())?;
-    install_text(lua, "GetProgressText", |q| q.body.clone())?;
-    install_text(lua, "GetRewardText", |q| q.body.clone())?;
+    // Each reads its own buffer (`0x501a40`, `0x501a60`, `0x501a70`).
+    install_text(lua, "GetQuestText", |q| q.quest_text.clone())?;
+    install_text(lua, "GetProgressText", |q| q.progress_text.clone())?;
+    install_text(lua, "GetRewardText", |q| q.reward_text.clone())?;
     install_text(lua, "GetObjectiveText", |q| q.objectives.clone())?;
 
     // ── Count and money getters ──
     fn install_count(lua: &Lua, name: &str, pick: fn(&QuestState) -> i64) -> mlua::Result<()> {
         lua.globals().set(
             name,
-            lua.create_function(move |lua, ()| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                Ok(model.quest.as_ref().map(pick).unwrap_or(0))
-            })?,
+            lua.create_function(move |lua, ()| Ok(state(lua).as_ref().map(pick).unwrap_or(0)))?,
         )
     }
     install_count(lua, "GetNumActiveQuests", |q| q.active_titles.len() as i64)?;
@@ -273,12 +283,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_count(lua, "GetRewardMoney", |q| i64::from(q.reward_money))?;
     install_count(lua, "GetQuestMoneyToGet", |q| i64::from(q.required_money))?;
 
+    // 1 or nil (`0x501d40`): the host's answer counts the required items at the call (`0x501230`).
     g.set(
         "IsQuestCompletable",
-        lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(flag(model.quest.as_ref().is_some_and(|q| q.completable)))
-        })?,
+        lua.create_function(|lua, ()| Ok(flag(state(lua).is_some_and(|q| q.completable))))?,
     )?;
 
     fn install_title(lua: &Lua, name: &str, usage: &'static str, active: bool) -> mlua::Result<()> {
@@ -286,18 +294,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, i: Value| {
                 let i = binding_abi::index_arg(lua, i, usage)?;
-                let title = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
-                    model.quest.as_ref().and_then(|q| {
-                        let v = if active {
-                            &q.active_titles
-                        } else {
-                            &q.available_titles
-                        };
-                        i.checked_sub(1).and_then(|n| v.get(n)).cloned()
-                    })
-                };
-                Ok(Value::String(lua.create_string(title.unwrap_or_default())?))
+                let title = state(lua).and_then(|q| {
+                    let v = if active {
+                        q.active_titles
+                    } else {
+                        q.available_titles
+                    };
+                    i.checked_sub(1).and_then(|n| v.into_iter().nth(n))
+                });
+                // Past the pool a null string, which is nil (`jae` at `0x501ae9`, `0x501b05`).
+                match title {
+                    Some(t) => Ok(Value::String(lua.create_string(&t)?)),
+                    None => Ok(Value::Nil),
+                }
             })?,
         )
     }
@@ -323,14 +332,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, index: Value| {
                 let row = binding_abi::number_arg(lua, index, usage)?.wrapping_sub(1) as u32;
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let pool = &model.quest_pool_levels;
-                let levels = if active {
-                    &pool.active
-                } else {
-                    &pool.available
-                };
-                let level = levels.get(row as usize).copied().unwrap_or(0);
+                let level = state(lua).map_or(0, |q| {
+                    let (titles, levels) = if active {
+                        (q.active_titles, q.active_levels)
+                    } else {
+                        (q.available_titles, q.available_levels)
+                    };
+                    let row = row as usize;
+                    if row < titles.len() {
+                        levels.get(row).copied().unwrap_or(0)
+                    } else {
+                        0
+                    }
+                });
                 // The level is pushed through `fild` of a signed dword.
                 Ok(i64::from(level as i32))
             })?,
@@ -374,27 +388,46 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Err(invalid());
             }
             let item = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let empty = Vec::new();
-                let list = match model.quest.as_ref() {
-                    Some(q) => item_vec(q, &kind),
-                    None => ["reward", "choice", "required"]
-                        .contains(&kind.as_str())
-                        .then_some(&empty),
-                };
-                let Some(list) = list else {
+                let empty = QuestState::default();
+                let state = state(lua);
+                let Some(list) = item_vec(state.as_ref().unwrap_or(&empty), &kind) else {
                     return Err(invalid());
                 };
                 list.get(row as usize).cloned()
             };
+            // The lookup (`0x5017de`) of a template in flight asks it and keeps the callback
+            // `0x5018c0` on it inside the call, one per call; item id 0 is never looked up.
+            if let Some(it) = item
+                .as_ref()
+                .filter(|it| it.name.is_none() && it.item_id != 0)
+            {
+                super::calls::ask(
+                    lua,
+                    super::RecordAsk::Item {
+                        entry: it.item_id,
+                        // The panel's source (`[0xbe0810]`), which the host holds.
+                        owner: 0,
+                        callback: super::ItemCallback::Quest,
+                    },
+                )?;
+            }
             let (name, texture, count, quality, usable) = match item {
-                Some(it) => (
-                    it.name.unwrap_or_default(),
-                    it.texture,
-                    it.count,
-                    it.quality,
-                    it.usable,
-                ),
+                Some(it) => {
+                    // `isUsable` seeds 1 (`0x50172e`) and the item-usable predicate clears it for
+                    // a cached template it refuses (`0x501882`-`0x501899`); the stock frame tints
+                    // the row red by it (`QuestFrame.lua:393`).
+                    let usable = it.name.is_none() || {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        super::item_stats::item_usable_by_id(lua, &model, it.item_id)
+                    };
+                    (
+                        it.name.unwrap_or_default(),
+                        it.texture,
+                        it.count,
+                        it.quality,
+                        usable,
+                    )
+                }
                 None => (String::new(), Some(EMPTY_ROW_ICON.to_string()), 0, 0, true),
             };
             Ok(MultiValue::from_vec(vec![
@@ -410,25 +443,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetQuestItemLink(type, index), for a row's ctrl and shift clicks (`QuestFrame.lua:118`).
+    // GetQuestItemLink(type, index), for a row's ctrl and shift clicks (`QuestFrame.lua:118`):
+    // `lua_isstring(1)` and `lua_isnumber(2)`, else its usage (`0x5020b5`, `0x5020c9`, `0x50217f`).
     g.set(
         "GetQuestItemLink",
-        lua.create_function(|lua, (kind, index): (String, Value)| {
+        lua.create_function(|lua, (kind, index): (Value, Value)| {
+            const USAGE: &str = "Usage: GetQuestItemLink(\"type\", index)";
+            let kind = binding_abi::string_arg(lua, kind, USAGE)?;
             // `index - 1` is compared unsigned against 6 (`0x501924`), so a zero or negative index
             // is no item; every miss pushes one nil (`0x50216a`).
-            let index = super::binding_abi::index_arg(
-                lua,
-                index,
-                "Usage: GetQuestItemLink(\"type\", index)",
-            )?;
-            let link = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.quest.as_ref().and_then(|q| {
-                    item_vec(q, &kind)
-                        .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
-                        .and_then(|it| it.link.clone())
-                })
-            };
+            let index = binding_abi::index_arg(lua, index, USAGE)?;
+            let link = state(lua).and_then(|q| {
+                item_vec(&q, &kind)
+                    .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
+                    .and_then(|it| it.link.clone())
+            });
             match link {
                 Some(l) => Ok(Value::String(lua.create_string(&l)?)),
                 None => Ok(Value::Nil),
@@ -440,61 +469,66 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetRewardSpell",
         lua.create_function(|lua, ()| {
-            let spell = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.quest.as_ref().and_then(|q| q.reward_spell.clone())
-            };
-            reward_spell_returns(lua, spell)
+            reward_spell_returns(lua, state(lua).and_then(|q| q.reward_spell))
         })?,
     )?;
 
-    // ── Intents ──
-    fn install_select(lua: &Lua, name: &str, active: bool) -> mlua::Result<()> {
+    // ── Verbs ──
+    // The row is a number or numeric string (`0x501ca8`, `0x501ce8`) truncated (`_ftol`,
+    // `0x501cbd`), else the binding's usage raises; the host takes it less one (`0x501cc4`,
+    // `0x501d04`).
+    fn install_select(
+        lua: &Lua,
+        name: &str,
+        active: bool,
+        usage: &'static str,
+    ) -> mlua::Result<()> {
         lua.globals().set(
             name,
-            lua.create_function(move |lua, i: u32| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model
-                    .quest_selects
-                    .push(super::QuestSelect { active, index: i });
-                Ok(())
+            lua.create_function(move |lua, i: Value| {
+                let index = binding_abi::index_arg32(lua, i, usage)?;
+                submit(lua, QuestCall::Select(QuestSelect { active, index }))
             })?,
         )
     }
-    install_select(lua, "SelectActiveQuest", true)?;
-    install_select(lua, "SelectAvailableQuest", false)?;
+    install_select(
+        lua,
+        "SelectActiveQuest",
+        true,
+        "Usage: SelectActiveQuest(index)",
+    )?;
+    install_select(
+        lua,
+        "SelectAvailableQuest",
+        false,
+        "Usage: SelectAvailableQuest(index)",
+    )?;
 
-    fn install_action(lua: &Lua, name: &str, action: super::QuestAction) -> mlua::Result<()> {
-        lua.globals().set(
-            name,
-            lua.create_function(move |lua, ()| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.quest_actions.push(action);
-                Ok(())
-            })?,
-        )
+    fn install_verb(lua: &Lua, name: &str, call: QuestCall) -> mlua::Result<()> {
+        lua.globals()
+            .set(name, lua.create_function(move |lua, ()| submit(lua, call))?)
     }
-    install_action(lua, "AcceptQuest", super::QuestAction::Accept)?;
-    install_action(lua, "DeclineQuest", super::QuestAction::Decline)?;
-    install_action(lua, "CloseQuest", super::QuestAction::Close)?;
-    install_action(lua, "CompleteQuest", super::QuestAction::Continue)?;
+    install_verb(lua, "AcceptQuest", QuestCall::Accept)?;
+    install_verb(lua, "DeclineQuest", QuestCall::Decline)?;
+    install_verb(lua, "CompleteQuest", QuestCall::Complete)?;
+
+    // CloseQuest(), from `QuestFrame_OnHide`: ESC, the close button, the greeting's Goodbye, a
+    // panel eviction. Its binding (`0x501a10`) calls only the teardown `0x501130(0,1)`, whose one
+    // send is `MSG_QUEST_PUSH_RESULT` DECLINE for a player source.
+    g.set(
+        "CloseQuest",
+        lua.create_function(|lua, ()| submit(lua, QuestCall::Close))?,
+    )?;
 
     // GetQuestBackgroundMaterial() → nil or a material name (`0x502230`).
     g.set(
         "GetQuestBackgroundMaterial",
-        lua.create_function(|lua, ()| {
-            let material = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model
-                    .quest
-                    .as_ref()
-                    .and_then(|q| q.background_material.clone())
-            };
-            match material {
+        lua.create_function(
+            |lua, ()| match state(lua).and_then(|q| q.background_material) {
                 Some(m) => Ok(Value::String(lua.create_string(&m)?)),
                 None => Ok(Value::Nil),
-            }
-        })?,
+            },
+        )?,
     )?;
 
     // QuestChooseRewardError() (`0x5021a0`), no returns: Complete pressed with choices and none
@@ -522,53 +556,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ConfirmAcceptQuest(): the escort confirm's Yes (`StaticPopup.lua:731-733`). It takes no quest
-    // id, as the client answers the confirm it holds, so calls are counted and the app adds the id.
-    g.set(
-        "ConfirmAcceptQuest",
-        lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.quest_confirms += 1;
-            Ok(())
-        })?,
-    )?;
+    // ConfirmAcceptQuest(): the escort confirm's Yes (`StaticPopup.lua:731-733`), which answers the
+    // confirm the client holds (`[0xbe0840]`, `0x5021e0`), with no test.
+    install_verb(lua, "ConfirmAcceptQuest", QuestCall::ConfirmAccept)?;
 
-    // GetQuestReward(choice): stock passes the 1-based row (`QuestFrame.lua:100`), and the wire
-    // takes it less one, floored at 0, as in the reference (`0x501d80`); vmangos indexes
-    // `RewChoiceItemId` with it.
+    // GetQuestReward([choice]): stock passes the 1-based row (`QuestFrame.lua:100`). A number is
+    // `trunc(n) - 1` (`0x501da8`), read as signed; an absent or non-number one leaves -1
+    // (`0x501d89`). The host runs `0x5015b0` on it, whose range failure raises here.
     g.set(
         "GetQuestReward",
         lua.create_function(|lua, choice: Option<Value>| {
-            // `is-number` failing leaves the choice at -1 (`0x501d89`) and raises nothing; a
-            // number is `trunc(n) - 1` (`0x501da8`), read as signed.
             let choice = match choice {
                 Some(v) => lua
                     .coerce_number(v)?
                     .map_or(-1, |n| super::binding_abi::ftol(n).wrapping_sub(1)),
                 None => -1,
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // Off the reward panel the reference does nothing and answers success (`0x5015b0`:
-            // `[0xbe0818] != 3`).
-            let Some(q) = model
-                .quest
-                .as_ref()
-                .filter(|q| q.panel == QuestPanel::Reward)
-            else {
-                return Ok(());
-            };
-            // With choices on offer an index outside `[0, n)` fails (`0x501608`..`0x50160e`) and
-            // the binding raises; without any, the wire gets `max(choice, 0)` (`0x501627`).
-            let n = q.choices.len() as i32;
-            if n > 0 && !(0..n).contains(&choice) {
-                return Err(mlua::Error::RuntimeError(
-                    "Invalid reward choice in GetQuestReward([choice])".into(),
-                ));
-            }
-            model
-                .quest_actions
-                .push(super::QuestAction::Reward(choice.max(0) as u32));
-            Ok(())
+            submit(lua, QuestCall::Reward(choice))
         })?,
     )?;
 
@@ -577,14 +581,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
+    use super::{QuestCall, QuestItemView, QuestPanel, QuestSelect, QuestState};
     use crate::script::UiScript;
 
     fn detail() -> QuestState {
         QuestState {
             panel: QuestPanel::Detail,
             title: "A Threat Within".into(),
-            body: "Kill the kobolds infesting the mine.".into(),
+            quest_text: "Kill the kobolds infesting the mine.".into(),
             objectives: "Slay 10 Kobold Vermin.".into(),
             rewards: vec![QuestItemView {
                 item_id: 7278,
@@ -592,7 +596,6 @@ mod tests {
                 texture: Some("Interface\\Icons\\INV_Boots_01".into()),
                 count: 1,
                 quality: 2,
-                usable: true,
                 link: Some("|cff1eff00|Hitem:7278:0:0:0|h[Brdle Leather Boots]|h|r".into()),
             }],
             choices: vec![
@@ -602,7 +605,6 @@ mod tests {
                     texture: None,
                     count: 1,
                     quality: 1,
-                    usable: true,
                     ..Default::default()
                 },
                 QuestItemView {
@@ -611,7 +613,6 @@ mod tests {
                     texture: None,
                     count: 1,
                     quality: 1,
-                    usable: true,
                     ..Default::default()
                 },
             ],
@@ -655,6 +656,39 @@ mod tests {
             vec![crate::script::SoundRequest::KitName("igQuestFailed".into())],
             "row 0x98's cue plays with the message"
         );
+    }
+
+    /// `GetQuestItemInfo` answers `isUsable` through the item-usable predicate for a cached
+    /// template (`0x50188d` into `0x5ea930`): nil for one the gate refuses. A row whose template
+    /// is in flight stays usable, as `0x501700` seeds it (`0x50172e`).
+    #[test]
+    fn a_giver_row_answers_the_usable_gate_and_one_in_flight_reads_usable() {
+        let mut s = UiScript::new().unwrap();
+        s.set_player_req_state(crate::script::PlayerReqState {
+            level: 10,
+            class_id: 1,
+            race_id: 1,
+            ..Default::default()
+        });
+        s.set_item_template(
+            7278,
+            crate::script::ItemTemplateView {
+                name: "Brdle Leather Boots".into(),
+                quality: 2,
+                inventory_type: 8,
+                required_level: 20,
+                allowable_class: -1,
+                allowable_race: -1,
+                ..Default::default()
+            },
+        );
+        s.set_quest(Some(detail()));
+        assert!(s
+            .eval::<bool>(r#"local _, _, _, _, u = GetQuestItemInfo("reward", 1) return u == nil"#)
+            .unwrap());
+        assert!(s
+            .eval::<bool>(r#"local _, _, _, _, u = GetQuestItemInfo("choice", 2) return u == 1"#)
+            .unwrap());
     }
 
     #[test]
@@ -737,9 +771,56 @@ mod tests {
             .unwrap());
     }
 
+    /// `GetQuestItemLink` matches its type in any case (`SStrCmpI`, `0x501936`-`0x501978`), and a
+    /// non-string type or non-number index raises its own usage (`0x5020b5`, `0x50217f`).
+    #[test]
+    fn the_item_link_type_is_any_case_and_its_arguments_raise_the_usage() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest(Some(detail()));
+        assert_eq!(
+            s.eval::<String>("return GetQuestItemLink(\"Reward\", 1)")
+                .unwrap(),
+            "|cff1eff00|Hitem:7278:0:0:0|h[Brdle Leather Boots]|h|r"
+        );
+        for call in [
+            "GetQuestItemLink(nil, 1)",
+            "GetQuestItemLink({}, 1)",
+            "GetQuestItemLink(\"reward\")",
+            "GetQuestItemLink(\"reward\", \"x\")",
+        ] {
+            let e = s.run(call).expect_err(call).to_string();
+            assert!(
+                e.contains(r#"Usage: GetQuestItemLink("type", index)"#),
+                "{call}: {e}"
+            );
+        }
+    }
+
+    /// The three texts are three buffers (`0xbde288`, `0xbdf0f8`, `0xbdf958`): each getter reads
+    /// its own.
+    #[test]
+    fn each_panel_text_getter_reads_its_own_buffer() {
+        let mut s = UiScript::new().unwrap();
+        s.set_quest(Some(QuestState {
+            panel: QuestPanel::Progress,
+            quest_text: "Q".into(),
+            progress_text: "P".into(),
+            reward_text: "R".into(),
+            ..Default::default()
+        }));
+        assert_eq!(
+            s.eval::<(String, String, String)>(
+                "return GetQuestText(), GetProgressText(), GetRewardText()"
+            )
+            .unwrap(),
+            ("Q".into(), "P".into(), "R".into())
+        );
+    }
+
     #[test]
     fn greeting_panel_lists_and_selects() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_quest(Some(QuestState {
             panel: QuestPanel::Greeting,
             greeting: "What can I do for you?".into(),
@@ -761,23 +842,34 @@ mod tests {
             s.eval::<String>("return GetAvailableTitle(2)").unwrap(),
             "Kobold Camp Cleanup"
         );
+        // Past the pool a null string, nil (`0x501ae9`, `0x501b05`).
+        for call in [
+            "GetActiveTitle(2)",
+            "GetAvailableTitle(0)",
+            "GetAvailableTitle(3)",
+        ] {
+            assert!(
+                s.eval::<bool>(&format!("return {call} == nil")).unwrap(),
+                "{call}"
+            );
+        }
 
         s.run("SelectActiveQuest(1)").unwrap();
         s.run("SelectAvailableQuest(2)").unwrap();
         assert_eq!(
-            s.take_quest_selects(),
+            s.take_quest_calls(),
             vec![
-                QuestSelect {
+                QuestCall::Select(QuestSelect {
                     active: true,
                     index: 1
-                },
-                QuestSelect {
+                }),
+                QuestCall::Select(QuestSelect {
                     active: false,
                     index: 2
-                },
+                }),
             ]
         );
-        assert!(s.take_quest_selects().is_empty(), "drained");
+        assert!(s.take_quest_calls().is_empty(), "taken");
     }
 
     /// `GetActiveLevel` / `GetAvailableLevel` (`0x501c20`, `0x501ba0`): the level stored beside
@@ -825,18 +917,6 @@ mod tests {
                 "{call}"
             );
         }
-        // The pools outlive the panel: closing it, or opening another, keeps the last list's
-        // levels until a new list replaces them.
-        s.set_quest(Some(QuestState {
-            panel: QuestPanel::Greeting,
-            active_titles: vec!["Report to Goldshire".into(), "Wolves".into()],
-            active_levels: vec![1, 7],
-            ..QuestState::default()
-        }));
-        s.set_quest(None);
-        assert_eq!(s.eval::<i64>("return GetActiveLevel(2)").unwrap(), 7);
-        s.set_quest(Some(QuestState::default()));
-        assert_eq!(s.eval::<i64>("return GetActiveLevel(1)").unwrap(), 1);
         s.set_quest(Some(QuestState {
             panel: QuestPanel::Greeting,
             active_titles: vec!["Another".into()],
@@ -860,14 +940,13 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_quest(Some(QuestState {
             panel: QuestPanel::Progress,
-            body: "Do you have the tusks?".into(),
+            progress_text: "Do you have the tusks?".into(),
             required: vec![QuestItemView {
                 item_id: 0,
                 name: Some("Chipped Boar Tusk".into()),
                 texture: None,
                 count: 8,
                 quality: 0,
-                usable: true,
                 ..Default::default()
             }],
             required_money: 500,
@@ -883,94 +962,59 @@ mod tests {
         assert!(s.eval::<bool>("return IsQuestCompletable()").unwrap());
     }
 
+    /// Each panel verb hands the host its call; the gates are the host's ([`QuestCall`]).
     #[test]
-    fn button_intents_queue() {
+    fn the_panel_verbs_hand_the_host_their_calls() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_quest(Some(detail()));
-        s.run("AcceptQuest()").unwrap();
-        assert_eq!(s.take_quest_actions(), vec![QuestAction::Accept]);
-
-        s.run("CompleteQuest()").unwrap(); // progress -> reward
-        let mut offer = detail();
-        offer.panel = QuestPanel::Reward;
-        s.set_quest(Some(offer)); // the app pushes the reward panel
-        s.run("GetQuestReward(2)").unwrap(); // row 2 (1-based) → wire choice 1 (0-based)
-        s.run("DeclineQuest()").unwrap();
+        s.run("AcceptQuest() CompleteQuest() GetQuestReward(2) DeclineQuest()")
+            .unwrap();
         assert_eq!(
-            s.take_quest_actions(),
+            s.take_quest_calls(),
             vec![
-                QuestAction::Continue,
-                QuestAction::Reward(1),
-                QuestAction::Decline,
+                QuestCall::Accept,
+                QuestCall::Complete,
+                QuestCall::Reward(1),
+                QuestCall::Decline,
             ]
         );
-        assert!(s.take_quest_actions().is_empty(), "drained");
     }
 
-    /// `GetQuestReward` (`0x501d80` → `0x5015b0`): with choices on offer an index outside `[0, n)`
-    /// raises "Invalid reward choice" (`0x84eda4`), the default for no argument being -1; with
-    /// none the wire gets `max(index, 0)`; off the reward panel it does nothing.
+    /// The row selects take a number or numeric string (`0x501ca8`, `0x501ce8`), truncated
+    /// (`0x501cbd`), and raise their own usage for anything else (`0x84ed60`, `0x84ed84`); a row
+    /// of 0 or below reaches the host, whose unsigned bound refuses it.
     #[test]
-    fn get_quest_reward_validates_the_choice_against_the_offer() {
+    fn the_row_selects_read_their_number_as_the_reference_does() {
         let mut s = UiScript::new().unwrap();
-        s.set_quest(Some(detail()));
-        let n_choices = s.eval::<i64>("return GetNumQuestChoices()").unwrap();
-        assert!(n_choices >= 2);
-        // Not on the reward panel yet: nothing happens, and nothing raises.
-        s.run("GetQuestReward(99)").unwrap();
-        assert!(s.take_quest_actions().is_empty());
-        s.run("CompleteQuest()").unwrap();
-        s.take_quest_actions();
-        let mut offer = detail();
-        offer.panel = QuestPanel::Reward;
-        s.set_quest(Some(offer));
-        for call in [
-            "GetQuestReward()",
-            "GetQuestReward(0)",
-            "GetQuestReward(-3)",
-            &format!("GetQuestReward({})", n_choices + 1),
-            "GetQuestReward('x')",
-        ] {
-            let err = s.run(call).unwrap_err().to_string();
-            assert!(
-                err.contains("Invalid reward choice in GetQuestReward([choice])"),
-                "{call}: {err}"
-            );
-        }
-        assert!(
-            s.take_quest_actions().is_empty(),
-            "a failed pick sends nothing"
-        );
-        s.run(&format!("GetQuestReward({n_choices})")).unwrap();
-        s.run("GetQuestReward(1.9)").unwrap();
+        s.keep_calls();
+        s.run("SelectAvailableQuest(0) SelectActiveQuest(-1) SelectAvailableQuest('2.7')")
+            .unwrap();
+        let select = |active, index| QuestCall::Select(QuestSelect { active, index });
         assert_eq!(
-            s.take_quest_actions(),
-            vec![
-                QuestAction::Reward(n_choices as u32 - 1),
-                QuestAction::Reward(0)
-            ]
+            s.take_quest_calls(),
+            [select(false, 0), select(true, u32::MAX), select(false, 2)]
         );
+        for verb in ["SelectAvailableQuest", "SelectActiveQuest"] {
+            let err = s.run(&format!("{verb}('x')")).unwrap_err().to_string();
+            assert!(err.contains(&format!("Usage: {verb}(index)")), "{err}");
+        }
+    }
 
-        // No choices on offer: any index goes, as `max(index, 0)`.
-        let mut bare = detail();
-        bare.choices.clear();
-        bare.panel = QuestPanel::Reward;
+    /// `GetQuestReward` (`0x501d80`) passes `trunc(n) - 1`, signed (`0x501da8`), and -1 for an
+    /// absent or non-number argument (`0x501d89`); `0x5015b0` judges it in the host.
+    #[test]
+    fn get_quest_reward_passes_the_choice_less_one() {
         let mut s = UiScript::new().unwrap();
-        s.set_quest(Some(bare));
-        for call in [
-            "GetQuestReward()",
-            "GetQuestReward(-3)",
-            "GetQuestReward(4)",
-        ] {
-            s.run(call).unwrap();
-        }
+        s.keep_calls();
+        s.run(
+            "GetQuestReward() GetQuestReward(0) GetQuestReward(-3) GetQuestReward(2) \
+             GetQuestReward(1.9) GetQuestReward('x') GetQuestReward('3')",
+        )
+        .unwrap();
         assert_eq!(
-            s.take_quest_actions(),
-            vec![
-                QuestAction::Reward(0),
-                QuestAction::Reward(0),
-                QuestAction::Reward(3)
-            ]
+            s.take_quest_calls(),
+            [-1, -1, -4, 1, 0, -1, 2].map(QuestCall::Reward)
         );
     }
 
@@ -984,24 +1028,28 @@ mod tests {
         assert!(s.eval::<bool>("return GetRewardSpell() == nil").unwrap());
     }
 
+    /// `DeclineQuest` is a call; `CloseQuest` is the app's teardown, taken apart from it.
     #[test]
-    fn decline_and_close_are_two_intents() {
+    fn decline_is_a_call_and_close_the_teardown() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_quest(Some(detail()));
-        s.run("DeclineQuest()").unwrap();
-        s.run("CloseQuest()").unwrap();
+        s.run("DeclineQuest() CloseQuest()").unwrap();
         assert_eq!(
-            s.take_quest_actions(),
-            vec![QuestAction::Decline, QuestAction::Close]
+            s.take_quest_calls(),
+            vec![QuestCall::Decline, QuestCall::Close]
         );
     }
 
+    /// `ConfirmAcceptQuest` is a call each time, held confirm or none (`0x5021b0`).
     #[test]
-    fn confirm_accept_quest_counts_and_drains() {
+    fn confirm_accept_quest_is_a_call_each_time() {
         let mut s = UiScript::new().unwrap();
-        assert_eq!(s.take_quest_confirms(), 0);
+        s.keep_calls();
         s.run("ConfirmAcceptQuest() ConfirmAcceptQuest()").unwrap();
-        assert_eq!(s.take_quest_confirms(), 2);
-        assert_eq!(s.take_quest_confirms(), 0, "drained");
+        assert_eq!(
+            s.take_quest_calls(),
+            vec![QuestCall::ConfirmAccept, QuestCall::ConfirmAccept]
+        );
     }
 }

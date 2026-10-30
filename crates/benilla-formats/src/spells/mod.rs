@@ -32,9 +32,9 @@ mod immunity;
 pub use immunity::{cc_exemption, grants_immunity, CcExemption};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
 pub use ranges::{
-    load_spell_ranges, min_max_range, min_max_range_reads_units, RangeTargets, RangeUnit,
-    SpellRange, SpellRangeCatalog, UnitMotion, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
-    MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE,
+    load_spell_ranges, min_max_range, min_max_range_reads_ranged_slot, min_max_range_reads_units,
+    RangeTargets, RangeUnit, SpellRange, SpellRangeCatalog, UnitMotion, COMBAT_REACH_ADD,
+    MELEE_RANGE_FLOOR, MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE,
 };
 pub use soft_float::modify as soft_modify;
 pub use tokens::{
@@ -85,7 +85,7 @@ const COL_SPELL_FAMILY_FLAGS_LOW: usize = 161;
 /// `Targets` (`+0x34`): the seed the cast arm loads into its targeting word (`0x6e525a`).
 const COL_TARGETS: usize = 13;
 /// `TargetCreatureType` (`+0x38`): the creature-type mask `BindTarget` (`0x6e5c26`) and
-/// `SpellCanTargetUnit`'s mirror (`0x6e6544`) test the unit's type against, bit `type - 1`.
+/// `SpellCanTargetObject`'s mirror (`0x6e6544`) test the unit's type against, bit `type - 1`.
 const COL_TARGET_CREATURE_TYPE: usize = 14;
 /// `EffectImplicitTargetA[0]` (`+0x148`), the key of the cast arm's 62-case switch (`0x6e5484`).
 const COL_IMPLICIT_TARGET_A1: usize = 82;
@@ -177,6 +177,7 @@ const COL_MAX_TARGET_LEVEL: usize = 159;
 const COL_MAX_AFFECTED_TARGETS: usize = 163;
 const COL_MIN_FACTION_ID: usize = 170;
 const COL_MIN_REPUTATION: usize = 171;
+const COL_REQUIRED_AURA_VISION: usize = 172;
 const COL_DAMAGE_MULTIPLIER_1: usize = 167;
 const COL_EFFECT_POINTS_PER_COMBO_POINT_1: usize = 112;
 
@@ -299,6 +300,33 @@ pub struct SpellCatalog {
     /// Spell id to the `Languages.dbc` id its first effect declares.
     declared_language: HashMap<u32, u32>,
     dispel_types: SpellDispelTypes,
+    /// The weapon-skill spell by weapon subclass ([`weapon_skill_table`]), `0xc4d730`.
+    weapon_skills: Vec<u32>,
+}
+
+/// The weapon subclasses the weapon-skill table holds: `0x5e2db0` sizes it one past the highest
+/// class-2 subclass in `ItemSubClass.dbc`, 20 (Fishing Pole) at build 5875.
+const WEAPON_SUBCLASSES: u32 = 21;
+
+/// The table `0x5e2ca0` builds at world entry from weapon subclass to the spell that teaches its
+/// skill (`0xc4d730`, data at `0xc4d738`): of the spells with `Attributes & 0x40`, each with
+/// `EquippedItemClass` 2 and a single subclass bit (`0x5e2e10`) writes its id for that subclass,
+/// walking the rows from last to first, so the first row wins (`0x5e2d30`-`0x5e2d9a`). Spell.dbc's
+/// rows run in id order. A subclass no spell names holds 0.
+fn weapon_skill_table(spells: &HashMap<u32, SpellDisplay>) -> Vec<u32> {
+    let mut table = vec![0; WEAPON_SUBCLASSES as usize];
+    let mut ids: Vec<u32> = spells.keys().copied().collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    for id in ids {
+        let d = &spells[&id];
+        let mask = d.equipped_item_subclass_mask;
+        if d.attributes & 0x40 != 0 && d.equipped_item_class == 2 && mask.is_power_of_two() {
+            if let Some(slot) = table.get_mut(mask.trailing_zeros() as usize) {
+                *slot = id;
+            }
+        }
+    }
+    table
 }
 
 impl SpellCatalog {
@@ -322,13 +350,36 @@ impl SpellCatalog {
                 })
             })
             .collect();
+        // The language declaration off slot 0, as the loader reads it.
+        let declared_language = spells
+            .iter()
+            .filter(|(_, d)| d.effects[0] == SPELL_EFFECT_LANGUAGE && d.effect_misc_value[0] > 0)
+            .map(|(&id, d)| (id, d.effect_misc_value[0] as u32))
+            .collect();
         Self {
+            weapon_skills: weapon_skill_table(&spells),
             spells,
             learned_spell,
             learn_effects,
-            declared_language: HashMap::new(),
+            declared_language,
             dispel_types: SpellDispelTypes::default(),
         }
+    }
+
+    /// The catalog with `dispel_types` for its dispel table, for the aura tests.
+    pub fn with_dispel_types(mut self, dispel_types: SpellDispelTypes) -> Self {
+        self.dispel_types = dispel_types;
+        self
+    }
+
+    /// The spell that teaches the skill of a weapon of `subclass`, the table `0xc4d738` that
+    /// `GetSkillSpell 0x5ea5d0` indexes by a hand's weapon subclass; `None` for a subclass with no
+    /// such spell (`0x5ea666`).
+    pub fn weapon_skill_spell(&self, subclass: u32) -> Option<u32> {
+        self.weapon_skills
+            .get(subclass as usize)
+            .copied()
+            .filter(|&id| id != 0)
     }
 
     /// A spell's learn effects in slot order, empty for a plain ability.
@@ -631,6 +682,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 max_affected_targets: u32_at(r, COL_MAX_AFFECTED_TARGETS).unwrap_or(0),
                 min_faction_id: u32_at(r, COL_MIN_FACTION_ID).unwrap_or(0),
                 min_reputation: u32_at(r, COL_MIN_REPUTATION).unwrap_or(0),
+                required_aura_vision: u32_at(r, COL_REQUIRED_AURA_VISION).unwrap_or(0),
                 effect_base_points: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
                 }),
@@ -676,6 +728,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
         );
     }
     Ok(SpellCatalog {
+        weapon_skills: weapon_skill_table(&spells),
         spells,
         learned_spell,
         learn_effects,

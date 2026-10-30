@@ -207,15 +207,46 @@ pub(crate) fn face_loads(model: &Model, path: &str) -> bool {
     !path.is_empty() && model.font_probe.as_ref().is_none_or(|probe| probe(path))
 }
 
+/// Whether a FontString's font load takes this height: `0x7714f0` hands the height in layout units
+/// times its scale `[+0x7c]`, the owner's effective scale, to `0x44d040` (`0x77155d`-`0x77156c`),
+/// which divides by `K2` (`0x41ae50`) and calls `GxuFontCreateFont`, which refuses a size of 0 or
+/// less (`0x5c1b0e`), 1 or more or NaN (`0x5c1afe`); a refusal leaves the string without a font
+/// (`0x771575`). So a negative height never loads, nor one the size of the screen.
+pub(crate) fn fontstring_size_loads(model: &Model, rh: RegionHandle, height: Len) -> bool {
+    let units = model.layout_units();
+    let scale = model
+        .arena
+        .region(rh)
+        .and_then(|r| model.arena.frame(r.owner))
+        .map_or(1.0, |f| f.effective_scale);
+    font_size_loads(units, height.layout(units) * scale)
+}
+
+/// Whether `GxuFontCreateFont` takes a height of `layout` units: `0x44d040` divides it by `K2`
+/// (`0x44d073`) and stores the quotient as a float (`0x44d078`), which the factory tests
+/// (`0x5c1af3`), refusing 0 or less (`0x5c1b0e`), 1 or more, or NaN (`0x5c1afe`).
+pub(crate) fn font_size_loads(units: crate::screencoord::LayoutUnits, layout: f32) -> bool {
+    let size = (f64::from(layout) / f64::from(units.k2())) as f32;
+    size > 0.0 && size < 1.0
+}
+
 /// The tolerance both XML font legs read a held height as unchanged within, 2⁻²² (`0x8029d4`, at
 /// the FontString's `0x77152a` and the Font's `0x783e4d`).
 pub(crate) const SAME_FONT_HEIGHT: f32 = 1.0 / 4_194_304.0;
 
-/// The shared path's verdict (`0x79f210`): no load for a height of 0 or less
-/// (`0x79f2f1`-`0x79f2ff`), else [`face_loads`]. A failure writes nothing (`0x79f30f` →
-/// `0x79f361`). Borrows the model, so a caller asks before it holds it.
+/// The shared path's verdict (`0x79f210`): the height in layout units (`0x79f264`-`0x79f27b`)
+/// must load ([`font_size_loads`], through `0x44d040` at `0x79f30a`), so neither 0 or less nor a
+/// screen or more does, and the path must ([`face_loads`]). A failure writes nothing (`0x79f30f`
+/// → `0x79f361`).
+fn shared_loads(model: &Model, path: &str, height: f32) -> bool {
+    let units = model.layout_units();
+    font_size_loads(units, units.store(height)) && face_loads(model, path)
+}
+
+/// [`shared_loads`] for a caller that does not hold the model: it borrows it, so a caller asks
+/// before it holds it.
 pub(super) fn instance_loads(lua: &Lua, path: &str, height: f32) -> bool {
-    height > 0.0 && face_loads(&lua.app_data_ref::<Model>().expect("model"), path)
+    shared_loads(&lua.app_data_ref::<Model>().expect("model"), path, height)
 }
 
 /// Install the twelve font-block methods onto `m`, reading `this` through `resolve`; only for a
@@ -306,14 +337,17 @@ pub(super) fn install(
                     .get(&rh)
                     .map(|d| (d.font_path.clone(), d.font_height, d.outline, d.monochrome));
                 let load = match kind {
-                    // A FontString loads for any height but 0 (`0x77154d`-`0x77155b`); 0 skips the
-                    // load and frees its font (`0x7715b3`), which still answers 1. What a negative
-                    // height does inside the load (`0x44d040`) is untraced: the probe judges it.
+                    // A FontString tries any height but 0 (`0x77154d`-`0x77155b`); 0 skips the
+                    // load and frees its font (`0x7715b3`), which still answers 1. The load
+                    // refuses a size outside (0, 1) of the screen ([`fontstring_size_loads`]).
                     FontKind::FontString if height == 0.0 => Load::Freed,
-                    FontKind::FontString => Load::verdict(face_loads(&model, &path)),
+                    FontKind::FontString => Load::verdict(
+                        fontstring_size_loads(&model, rh, Len::Script(height))
+                            && face_loads(&model, &path),
+                    ),
                     // The shared path answers nil for a height of 0 or less without loading
-                    // (`0x79f2f1`-`0x79f2ff`).
-                    FontKind::Instance => Load::verdict(height > 0.0 && face_loads(&model, &path)),
+                    // (`0x79f2f1`-`0x79f2ff`), and for one the load refuses ([`shared_loads`]).
+                    FontKind::Instance => Load::verdict(shared_loads(&model, &path, height)),
                 };
                 if load == Load::Failed {
                     return Ok(Value::Nil);
@@ -413,12 +447,10 @@ pub(super) fn install(
                 .region_data
                 .get(&rh)
                 .map_or(crate::color::Rgba8::WHITE, |d| d.vertex_color_or_white());
-            let (r, g, b, a) = c.channels();
             Ok(if kind == FontKind::FontString {
-                let f = |x: f64| f64::from(x as f32);
-                (r, f(g), f(b), f(a))
+                super::object::colour_values_f32_gba(c)
             } else {
-                (r, g, b, a)
+                c.channels()
             })
         })?,
     )?;
@@ -458,11 +490,16 @@ pub(super) fn install(
             Ok(super::object::colour_values(c))
         })?,
     )?;
-    // SetShadowOffset(x, y): both required, else `Usage: %s:SetShadowOffset(x, y)` (`0x87c6e8`).
+    // SetShadowOffset(x, y): both must pass `lua_isnumber` (FontString `0x79e102`, `0x79e117`;
+    // the shared `0x79f9d7`, `0x79f9eb` of the EditBox and message frames), else
+    // `Usage: %s:SetShadowOffset(x, y)` (`0x87c6e8`) naming the object.
     m.set(
         "SetShadowOffset",
-        lua.create_function(move |lua, (this, x, y): (Table, f32, f32)| {
+        lua.create_function(move |lua, (this, x, y): (Table, Value, Value)| {
             let rh = resolve(lua, &this)?;
+            let line = "SetShadowOffset(x, y)";
+            let x = binding_abi::method_number(lua, &this, x, line)? as f32;
+            let y = binding_abi::method_number(lua, &this, y, line)? as f32;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
             let color = d.font_shadow.map_or(kind.unset_shadow(), |s| s.color);

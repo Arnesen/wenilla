@@ -8,7 +8,10 @@
 //! side (`0x4e89c0`) and sorted so the rows that fit the level come first (`0x4e8b20`); the quest
 //! list (type 3) is the quest log's ids, cached titles first (`0x4e8be0`, `0x4e8c80`). A type's
 //! entries are the first `count` of its sorted list, so a row of the wrong side can show where a
-//! right one is cut, as in the reference.
+//! right one is cut, as in the reference. Each recount and rebuild signals `UPDATE_LFG_TYPES`
+//! (`0x4e8b0e`, `0x4e8c70`): the app fires it at a level change and at each quest slot that moved
+//! (`field_watch` in benilla-app), and the world-enter cascade twice
+//! ([`super::UiScript::fire_world_enter_rebuilds`]).
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -40,15 +43,15 @@ impl super::UiScript {
 
 /// A type's displayed entries and their count (`0xbc6f18[type]`): the first `count` names of the
 /// sorted list, which are all there is for the quest list, whose count is its length.
-fn type_list(model: &Model, kind: usize) -> (usize, Vec<String>) {
+fn type_list(lua: &Lua, model: &Model, kind: usize) -> (usize, Vec<String>) {
     if kind == 3 {
         // Every nonzero quest id of the log's 20 slots (`0x4e8c1e`-`0x4e8c32`), cached titles
         // first, by title (`0x4e8c80`), the count stored at `0x4e8c5b`. The reference's list is a
         // snapshot `0x4e8be0` rebuilds when the slot watcher runs (`0x5dde98`); this reads the
-        // slots and the records at the call, so a record landing since re-sorts it.
+        // slots off the host and the records at the call, so a record landing since re-sorts it.
         let store = &model.quest_store;
-        let mut titles: Vec<&str> = store
-            .slots
+        let slots = super::quest_live::slots(lua, model);
+        let mut titles: Vec<&str> = slots
             .iter()
             .filter(|s| s.quest_id != 0)
             .map(|s| {
@@ -65,8 +68,8 @@ fn type_list(model: &Model, kind: usize) -> (usize, Vec<String>) {
         });
         return (count, titles.into_iter().map(str::to_string).collect());
     }
-    // The recount needs the active player (`0x4e89cc`).
-    let Some(player) = model.unit("player").filter(|p| p.level > 0) else {
+    // The recount needs the active player (`0x4e89cc`), read as the call runs.
+    let Some(player) = super::unit::view(lua, model, "player").filter(|p| p.level > 0) else {
         return (0, Vec::new());
     };
     let level = player.level;
@@ -123,7 +126,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let inside = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                kind < 6 && (entry as usize) < type_list(&model, kind as usize).0
+                kind < 6 && (entry as usize) < type_list(lua, &model, kind as usize).0
             };
             if !inside {
                 return Ok(());
@@ -174,7 +177,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if kind >= 6 {
                 return Ok(MultiValue::new());
             }
-            let (count, names) = type_list(&model, kind as usize);
+            let (count, names) = type_list(lua, &model, kind as usize);
             let out = names
                 .iter()
                 .take(count)

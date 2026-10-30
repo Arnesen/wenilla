@@ -19,7 +19,9 @@ fn svc(
         name: Some(name.into()),
         subtext: Some("Rank 1".into()),
         texture: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
+        icon_wait: None,
         description: Some(format!("Teaches {name}.")),
+        description_wait: None,
         cost: 100,
         prof_first_rank: false,
         category: cat,
@@ -27,11 +29,13 @@ fn svc(
         skill_req: None,
         ability_reqs: vec![],
         is_trade_skill: false,
+        learn_spell: Some(false),
         group_key,
         group_name: group_name.into(),
         skill_step: false,
         step_increase: None,
         line_name: Some(group_name.into()),
+        skill_line: None,
     }
 }
 
@@ -56,6 +60,8 @@ fn trainer() -> TrainerState {
         "Fury",
     );
     TrainerState {
+        list: 0,
+        guid: 0x42,
         greeting: "What would you like to learn?".into(),
         trainer_type: 0,
         groups: Vec::new(),
@@ -215,7 +221,8 @@ fn service_getters_read_the_row_at_a_visible_index() {
         met: true,
     });
     t.services[0].ability_reqs = vec![TrainerAbilityReq {
-        name: "Apprentice".into(),
+        spell_id: 2,
+        name: Some("Apprentice".into()),
         met: false,
     }];
     s.set_trainer(Some(t));
@@ -260,6 +267,44 @@ fn service_getters_read_the_row_at_a_visible_index() {
     assert!(s
         .eval::<bool>("return GetTrainerServiceSkillReq(1) == nil")
         .unwrap());
+
+    // An empty name answers `nil, 0` and the flag (`0x4d9589`).
+    let mut t = trainer();
+    t.services[0].skill_req = Some(TrainerSkillReq {
+        name: String::new(),
+        rank: 100,
+        met: false,
+    });
+    s.set_trainer(Some(t));
+    assert!(s
+        .eval::<bool>(
+            "local n, r, m = GetTrainerServiceSkillReq(2) return n == nil and r == 0 and m == nil"
+        )
+        .unwrap());
+}
+
+/// `GetTrainerServiceSkillLine` answers the service's own skill line (`0x4d92bb`), never its
+/// group's name, and nil for a header, a service with none and a row past the list.
+#[test]
+fn the_skill_line_is_the_services_own_not_its_groups() {
+    let mut s = UiScript::new().unwrap();
+    let mut t = trainer();
+    t.services[0].skill_line = Some("Alchemy".into());
+    s.set_trainer(Some(t));
+    // Row 1 is Arms' header; rows 2 and 3 are its services.
+    assert_eq!(
+        s.eval::<String>("return GetTrainerServiceSkillLine(2)")
+            .unwrap(),
+        "Alchemy",
+        "not the group's \"Arms\""
+    );
+    for row in [1, 3, 99] {
+        assert!(
+            s.eval::<bool>(&format!("return GetTrainerServiceSkillLine({row}) == nil"))
+                .unwrap(),
+            "row {row}"
+        );
+    }
 }
 
 /// The reference's filter hide exempts no header (`0x4d8528`, `0x4d8535`).
@@ -294,12 +339,21 @@ fn state_filter_takes_a_groups_header_with_its_last_service() {
 
     // The rows remain: the getters bound on the total `ds:0xb73a10` (`0x4d89b0`), not the visible
     // count `ds:0xb73a18`.
+    let mut names: Vec<String> = (1..=5)
+        .map(|i| {
+            s.eval::<String>(&format!("return (GetTrainerServiceInfo({i}))"))
+                .unwrap()
+        })
+        .collect();
+    names.sort();
     assert_eq!(
-        s.eval::<String>("return (GetTrainerServiceInfo(1))")
-            .unwrap(),
-        "Arms",
-        "row 1 is still the Arms header, now in the hidden tail"
+        names,
+        ["Arms", "Bloodrage", "Cleave", "Fury", "Heroic Strike"],
+        "every row is still in the hidden tail"
     );
+    assert!(s
+        .eval::<bool>("return GetTrainerServiceInfo(6) == nil")
+        .unwrap());
     assert_eq!(
         s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
         0,
@@ -373,20 +427,26 @@ fn collapse_survives_a_content_update_and_resets_on_close() {
 
 /// The reference's buy refuses any state byte but 0 (`0x4d89d0`, `0x4d89e5`).
 #[test]
-fn buy_queues_an_available_services_spell_id_and_refuses_every_other_row() {
+fn buy_calls_with_an_available_services_spell_id_and_refuses_every_other_row() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_trainer(Some(trainer()));
     s.run("BuyTrainerService(2)").unwrap();
-    assert_eq!(s.take_trainer_buys(), vec![78]);
-    assert!(s.take_trainer_buys().is_empty(), "drained");
+    assert_eq!(
+        s.take_trainer_calls(),
+        vec![TrainerCall::Buy {
+            trainer: 0x42,
+            spell_id: 78
+        }]
+    );
 
     s.run("BuyTrainerService(1)").unwrap();
-    assert!(s.take_trainer_buys().is_empty(), "a header is not buyable");
+    assert!(s.take_trainer_calls().is_empty(), "a header is not buyable");
 
     s.run("BuyTrainerService(3)").unwrap();
     s.run("BuyTrainerService(5)").unwrap();
     assert!(
-        s.take_trainer_buys().is_empty(),
+        s.take_trainer_calls().is_empty(),
         "only state byte 0 — available — reaches the wire"
     );
 }
@@ -394,6 +454,7 @@ fn buy_queues_an_available_services_spell_id_and_refuses_every_other_row() {
 #[test]
 fn selection_and_close_intents() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_trainer(Some(trainer()));
     assert_eq!(
         s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
@@ -410,18 +471,17 @@ fn selection_and_close_intents() {
         0
     );
 
-    assert!(!s.take_trainer_close());
     s.run("CloseTrainer()").unwrap();
-    assert!(s.take_trainer_close());
-    assert!(!s.take_trainer_close(), "drained");
+    assert_eq!(s.take_trainer_calls(), [TrainerCall::Close]);
 }
 
-/// `IsTradeskillTrainer` tests type 2 (`0x4d8ea0`), `IsTalentTrainer` type 1 (`0x4d8ed0`).
+/// `IsTradeskillTrainer` tests type 2 (`0x4d8ea0`); `IsTalentTrainer` answers 1 with no trainer
+/// open (`0x4d8edb`, the zero guid) or at type 1 (`0x4d8ee4`).
 #[test]
 fn tradeskill_and_talent_flags() {
     let mut s = UiScript::new().unwrap();
     assert!(s
-        .eval::<bool>("return IsTradeskillTrainer() == nil")
+        .eval::<bool>("return IsTradeskillTrainer() == nil and IsTalentTrainer() == 1")
         .unwrap());
 
     s.set_trainer(Some(trainer()));
@@ -439,6 +499,8 @@ fn tradeskill_and_talent_flags() {
     );
     recipe.is_trade_skill = true;
     s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
         greeting: String::new(),
         trainer_type: 2,
         groups: Vec::new(),
@@ -452,6 +514,8 @@ fn tradeskill_and_talent_flags() {
         .unwrap());
 
     s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
         greeting: String::new(),
         trainer_type: 1,
         groups: Vec::new(),
@@ -466,6 +530,63 @@ fn tradeskill_and_talent_flags() {
     assert!(s
         .eval::<bool>("return IsTalentTrainer() == 1 and IsTradeskillTrainer() == nil")
         .unwrap());
+
+    // A class trainer answers nil, and the close answers 1 again.
+    s.set_trainer(Some(trainer()));
+    assert!(s.eval::<bool>("return IsTalentTrainer() == nil").unwrap());
+    s.set_trainer(None);
+    assert!(s.eval::<bool>("return IsTalentTrainer() == 1").unwrap());
+}
+
+/// The row comparators compare names and ranks with `SStrCmp` (`0x64a480` → `_strncmp`), byte for
+/// byte (`0x4d86db`, `0x4d86fe`): at a warlock trainer "Curse of Weakness" sorts before "Curse of
+/// the Elements", `W` (0x57) below `t` (0x74). The headers keep `SStrCmpI` (`0x4d7c12`), so
+/// "affliction" sorts before "Demonology".
+#[test]
+fn row_names_compare_byte_for_byte_and_headers_ignore_case() {
+    let curse = |id: u32, name: &str, rank: &str| {
+        let mut s = svc(
+            id,
+            name,
+            TrainerServiceCategory::Available,
+            355,
+            "affliction",
+        );
+        s.level_req = 32;
+        s.subtext = Some(rank.into());
+        s
+    };
+    let services = vec![
+        svc(
+            706,
+            "Demon Armor",
+            TrainerServiceCategory::Available,
+            354,
+            "Demonology",
+        ),
+        curse(1490, "Curse of the Elements", "Rank 1"),
+        curse(7646, "Curse of Weakness", "Rank 4"),
+    ];
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
+        greeting: String::new(),
+        trainer_type: 0,
+        groups: Vec::new(),
+        services,
+    }));
+    let got: Vec<String> = visible(&mut s).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        got,
+        [
+            "affliction",
+            "Curse of Weakness",
+            "Curse of the Elements",
+            "Demonology",
+            "Demon Armor",
+        ]
+    );
 }
 
 #[test]
@@ -629,6 +750,8 @@ fn tradeskill_trainer_matches_the_emulated_reference_order() {
 
     let mut s = UiScript::new().unwrap();
     s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
         greeting: "Care to learn how to turn the ore that you find into weapons?".into(),
         trainer_type: 2,
         groups: Vec::new(),
@@ -700,7 +823,11 @@ fn mount_trainer_folds_known_services_into_my_talents() {
         ),
     ];
     let mut s = UiScript::new().unwrap();
+    // The header reads its text by name (`0x4d8b11`), not off a service.
+    s.run("KNOWN_TALENTS_HEADER = 'My Talents'").unwrap();
     s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
         greeting: "Ready to ride?".into(),
         trainer_type: 1,
         groups: Vec::new(),
@@ -739,6 +866,8 @@ fn talent_order_sorts_on_state_within_a_group() {
     ];
     let mut s = UiScript::new().unwrap();
     s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
         greeting: String::new(),
         trainer_type: 1,
         groups: Vec::new(),
@@ -749,6 +878,8 @@ fn talent_order_sorts_on_state_within_a_group() {
 
     // At a class trainer the same three sort by name: equal levels, no skill gates.
     s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
         greeting: String::new(),
         trainer_type: 0,
         groups: Vec::new(),
@@ -774,19 +905,55 @@ fn the_filter_and_collapse_verbs_fire_trainer_update_in_place() {
     assert_eq!(seen, ["TRAINER_UPDATE 4", "TRAINER_UPDATE 3"]);
 }
 
-/// `OpenTrainer` (`0x4d8cf0`) asks for the player's own list: it queues the intent for the app,
-/// which owns the player, and takes no argument.
+/// The fold verbs take `n - 1` signed (`0x4da6f4`, `0x4da774`): below 0 they fold every group, a
+/// row that is no header (`0x4d8be0` answers -1 for a service or a row past the total) raises
+/// "Bad skill line in ..." and fires no `TRAINER_UPDATE`.
 #[test]
-fn open_trainer_queues_a_close_and_the_own_list_request() {
+fn the_fold_verbs_take_a_negative_index_for_all_and_raise_on_a_bad_row() {
     let mut s = UiScript::new().unwrap();
-    assert!(!s.take_trainer_open_own());
-    s.run("OpenTrainer()").unwrap();
-    assert!(s.take_trainer_open_own());
-    assert!(!s.take_trainer_open_own(), "drained");
+    s.set_trainer(Some(trainer()));
+    s.run("CollapseTrainerSkillLine(-1)").unwrap();
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 2);
+    s.run("ExpandTrainerSkillLine(-5)").unwrap();
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
+
+    crate::script::tick::heard::listen(&s, &["TRAINER_UPDATE"], None);
+    for (call, want) in [
+        (
+            "CollapseTrainerSkillLine(2)",
+            "Bad skill line in CollapseTrainerSkillLine",
+        ),
+        (
+            "CollapseTrainerSkillLine(6)",
+            "Bad skill line in CollapseTrainerSkillLine",
+        ),
+        (
+            "ExpandTrainerSkillLine(3)",
+            "Bad skill line in ExpandTrainerSkillLine",
+        ),
+        (
+            "ExpandTrainerSkillLine(99)",
+            "Bad skill line in ExpandTrainerSkillLine",
+        ),
+    ] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains(want), "{call}: {err}");
+    }
     assert!(
-        !s.take_trainer_close(),
-        "the close waits on the player, which the app sees"
+        crate::script::tick::heard::take(&s).is_empty(),
+        "a raise fires no update"
     );
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
+}
+
+/// `OpenTrainer` (`0x4d8cf0`) asks for the player's own list: it hands the host its call, which
+/// holds the player, and takes no argument.
+#[test]
+fn open_trainer_calls_for_the_own_list() {
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
+    s.run("OpenTrainer()").unwrap();
+    assert_eq!(s.take_trainer_calls(), vec![TrainerCall::OpenOwn]);
 }
 
 /// `IsTrainerServiceSkillStep` (`0x4d9dd0`) and `GetTrainerServiceStepIncrease` (`0x4da030`).
@@ -1011,4 +1178,407 @@ fn setting_the_skill_line_filter_signals_trainer_update() {
         2,
         "a refusal signals nothing"
     );
+}
+
+/// The whole row array as `(visible count, rows)`: each service by its spell id, a header as -1.
+fn array(s: &mut UiScript) -> (i64, Vec<i64>) {
+    let visible = s.eval::<i64>("return GetNumTrainerServices()").unwrap();
+    let rows = s
+        .eval::<Vec<i64>>(
+            r#"
+            local out, i = {}, 1
+            while GetTrainerServiceInfo(i) ~= nil or GetTrainerServiceIcon(i) ~= nil do
+                local icon = GetTrainerServiceIcon(i)
+                table.insert(out, icon and tonumber((string.gsub(icon, ".*_", ""))) or -1)
+                i = i + 1
+            end
+            return out
+            "#,
+        )
+        .unwrap();
+    (visible, rows)
+}
+
+/// The finalizer `0x4d8410` sorts the one persistent row array with the CRT `qsort` (`0x4d857e`)
+/// from the order it left, every group's rows and the hidden ones together, so the rows its
+/// comparator ties (a service with no spell record, `0x4d868d`; two hidden rows, `0x4d85e0`)
+/// land where that history puts them. Each expected array is the client's own: `0x4d8410` run in
+/// the emulator over the same list, from the builder's layout (the services in list order, then
+/// the header rows), under the same filters in turn.
+#[test]
+fn every_finalize_sorts_the_whole_array_from_its_last_order() {
+    for trainer_type in [0, 2] {
+        let row = |id: u32, name: Option<&str>, cat, key: u32, group: &str| {
+            let mut s = svc(id, "", cat, key, group);
+            s.name = name.map(Into::into);
+            s.subtext = name.map(|_| "Rank 1".into());
+            s.level_req = 1;
+            s
+        };
+        use TrainerServiceCategory::{Available as A, Unavailable as U, Used};
+        let services = vec![
+            row(100, Some("Zeta"), A, 26, "Arms"),
+            row(101, None, A, 26, "Arms"),
+            row(102, Some("Alpha"), A, 26, "Arms"),
+            row(103, None, A, 26, "Arms"),
+            row(106, Some("Alpha"), A, 26, "Arms"),
+            row(104, Some("Beta"), Used, 256, "Fury"),
+            row(105, Some("Gamma"), U, 256, "Fury"),
+        ];
+        let mut s = UiScript::new().unwrap();
+        s.reset_trainer_list_state(trainer_type);
+        s.set_trainer(Some(TrainerState {
+            list: 0,
+            guid: 0,
+            greeting: String::new(),
+            trainer_type,
+            groups: Vec::new(),
+            services,
+        }));
+        let mut seen = vec![array(&mut s)];
+        for lua in [
+            "SetTrainerServiceTypeFilter('unavailable', 0)",
+            "SetTrainerServiceTypeFilter('used', 1)",
+            "SetTrainerServiceTypeFilter('unavailable', 1)",
+            "CollapseTrainerSkillLine(1)",
+            "ExpandTrainerSkillLine(0)",
+        ] {
+            s.run(lua).unwrap();
+            seen.push(array(&mut s));
+        }
+        assert_eq!(
+            seen,
+            [
+                (8, vec![-1, 102, 103, 101, 106, 100, -1, 105, 104]),
+                (6, vec![-1, 103, 101, 102, 106, 100, 105, 104, -1]),
+                (8, vec![-1, 101, 102, 103, 106, 100, -1, 104, 105]),
+                (9, vec![-1, 102, 103, 101, 106, 100, -1, 104, 105]),
+                (4, vec![-1, -1, 104, 105, 100, 101, 103, 102, 106]),
+                (9, vec![-1, 102, 106, 100, 101, 103, -1, 104, 105]),
+            ],
+            "trainer type {trainer_type}"
+        );
+    }
+}
+
+/// `GetTrainerServiceNumAbilityReq` (`0x4d9600`) counts the slots whose id is above 0
+/// (`0x4d9653`); `GetTrainerServiceAbilityReq(index, i)` (`0x4d96e0`) reads slot `i - 1` in place
+/// (`0x4d97a5`), so a gap answers nil and a slot past the count still answers, and a requirement
+/// with no `Spell.dbc` record names nothing (`0x4d97c8`), its flag left at 1 (`0x4d9761`).
+#[test]
+fn ability_reqs_read_their_slots_in_place() {
+    let mut s = UiScript::new().unwrap();
+    let mut t = trainer();
+    t.services[0].ability_reqs = vec![
+        TrainerAbilityReq {
+            spell_id: 0,
+            name: None,
+            met: true,
+        },
+        TrainerAbilityReq {
+            spell_id: 78,
+            name: Some("Heroic Strike (Rank 1)".into()),
+            met: false,
+        },
+        TrainerAbilityReq {
+            spell_id: 99999,
+            name: None,
+            met: true,
+        },
+    ];
+    s.set_trainer(Some(t));
+    let req = |s: &mut UiScript, i: i64| {
+        s.eval::<(Option<String>, Option<i64>)>(&format!(
+            "return GetTrainerServiceAbilityReq(2, {i})"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        s.eval::<i64>("return GetTrainerServiceNumAbilityReq(2)")
+            .unwrap(),
+        2
+    );
+    assert_eq!(req(&mut s, 1), (None, Some(1)));
+    assert_eq!(
+        req(&mut s, 2),
+        (Some("Heroic Strike (Rank 1)".into()), None)
+    );
+    assert_eq!(req(&mut s, 3), (None, Some(1)));
+    assert_eq!(req(&mut s, 4), (None, Some(1)));
+}
+
+/// The state filter as `(available, unavailable, used)`.
+fn type_filter(s: &mut UiScript) -> (bool, bool, bool) {
+    let on = |s: &mut UiScript, kind: &str| {
+        s.eval::<Option<i64>>(&format!("return GetTrainerServiceTypeFilter('{kind}')"))
+            .unwrap()
+            .is_some()
+    };
+    (on(s, "available"), on(s, "unavailable"), on(s, "used"))
+}
+
+/// `SetTrainerServiceTypeFilter("type", on [, exclusive])` (`0x4da260`): `"all"` sets the mask to
+/// 7 and reads no second argument (`0x4da2a9`); a nonzero number third makes the one bit the whole
+/// mask (`0x4da359`-`0x4da364`); `on` and `exclusive` are truncated (`0x40a2b0`), so 0.5 is off;
+/// both names compare without case (`0x64a4c0`, `0x4da390`). Every path commits through
+/// `0x4d8c90`, which fires `TRAINER_UPDATE`.
+#[test]
+fn the_type_filter_takes_all_the_exclusive_mode_and_a_truncated_on() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    s.reset_trainer_list_state(0);
+    s.run(
+        "n = 0 local f = CreateFrame('Frame') f:RegisterEvent('TRAINER_UPDATE') \
+         f:SetScript('OnEvent', function() n = n + 1 end)",
+    )
+    .unwrap();
+    assert_eq!(
+        type_filter(&mut s),
+        (true, true, false),
+        "the list's mask 3"
+    );
+
+    s.run("SetTrainerServiceTypeFilter('all')").unwrap();
+    assert_eq!(type_filter(&mut s), (true, true, true));
+    assert_eq!(visible(&mut s).len(), 5, "every row shows");
+    assert_eq!(s.eval::<i64>("return n").unwrap(), 1, "the commit fires");
+
+    s.run("SetTrainerServiceTypeFilter('used', 1, 1)").unwrap();
+    assert_eq!(type_filter(&mut s), (false, false, true), "exclusive");
+    s.run("SetTrainerServiceTypeFilter('ALL', 0)").unwrap();
+    assert_eq!(
+        type_filter(&mut s),
+        (true, true, true),
+        "\"all\" without case, its second argument never read"
+    );
+
+    s.run("SetTrainerServiceTypeFilter('Available', 0.5)")
+        .unwrap();
+    assert_eq!(
+        type_filter(&mut s),
+        (false, true, true),
+        "0.5 truncates to 0"
+    );
+    s.run("SetTrainerServiceTypeFilter('available', '1', 0.5)")
+        .unwrap();
+    assert_eq!(
+        type_filter(&mut s),
+        (true, true, true),
+        "a numeric string is a number, and 0.5 exclusive truncates to 0: added"
+    );
+    s.run("SetTrainerServiceTypeFilter('unavailable', -0.9)")
+        .unwrap();
+    assert_eq!(
+        type_filter(&mut s),
+        (true, false, true),
+        "-0.9 truncates to 0"
+    );
+    s.run("SetTrainerServiceTypeFilter('unavailable', 2, true)")
+        .unwrap();
+    assert_eq!(
+        type_filter(&mut s),
+        (true, true, true),
+        "a boolean third argument is no number: added"
+    );
+    s.run("SetTrainerServiceTypeFilter('used', 1, '1')")
+        .unwrap();
+    assert_eq!(type_filter(&mut s), (false, false, true));
+    assert_eq!(s.eval::<i64>("return n").unwrap(), 8);
+}
+
+/// `0x4da260`'s three refusals, in its order and words (`0x84ab60`, `0x84ab2c`, `0x84aaf0`): the
+/// name must be a string or a number (`0x6f3510`), then one the mapper `0x4da390` knows, then `on`
+/// must be a number (`0x6f34d0`). A refusal commits nothing and fires nothing.
+#[test]
+fn the_type_filter_raises_the_exes_errors() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    s.reset_trainer_list_state(0);
+    s.run(
+        "n = 0 local f = CreateFrame('Frame') f:RegisterEvent('TRAINER_UPDATE') \
+         f:SetScript('OnEvent', function() n = n + 1 end)",
+    )
+    .unwrap();
+    let raises = |s: &mut UiScript, call: &str, text: &str| {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains(text), "{call}: {err}");
+    };
+    let usage = r#"Usage: SetTrainerServiceTypeFilter("type" [, on\off, exclusive])"#;
+    let bad = "Bad service type in SetTrainerServiceTypeFilter";
+    let missing = "Missing on//off parameter in SetTrainerServiceTypeFilter";
+    raises(&mut s, "SetTrainerServiceTypeFilter()", usage);
+    raises(&mut s, "SetTrainerServiceTypeFilter(nil, 1)", usage);
+    raises(&mut s, "SetTrainerServiceTypeFilter({}, 1)", usage);
+    raises(&mut s, "SetTrainerServiceTypeFilter('bogus', 1)", bad);
+    raises(&mut s, "SetTrainerServiceTypeFilter('bogus')", bad);
+    raises(&mut s, "SetTrainerServiceTypeFilter(1, 1)", bad);
+    raises(&mut s, "SetTrainerServiceTypeFilter('used')", missing);
+    raises(&mut s, "SetTrainerServiceTypeFilter('used', true)", missing);
+    raises(&mut s, "SetTrainerServiceTypeFilter('used', 'x')", missing);
+    assert_eq!(type_filter(&mut s), (true, true, false), "nothing moved");
+    assert_eq!(s.eval::<i64>("return n").unwrap(), 0, "nothing fired");
+}
+
+/// At a mount trainer the list builds the known group first, header 0 with key -1
+/// (`0x4d7609`-`0x4d7697`), whether or not a service is known: with no member its header is
+/// hidden (`0x4d8447`), but it is a skill line, the first, named by `KNOWN_TALENTS_HEADER`
+/// (`0x4d8b11`) and with no `SkillLine.dbc` row.
+#[test]
+fn a_mount_trainer_always_builds_the_known_group_first() {
+    let mut s = UiScript::new().unwrap();
+    s.run("KNOWN_TALENTS_HEADER = 'My Talents'").unwrap();
+    s.set_trainer(Some(TrainerState {
+        list: 0,
+        guid: 0,
+        greeting: String::new(),
+        trainer_type: 1,
+        groups: Vec::new(),
+        services: vec![
+            svc(
+                33,
+                "Riding",
+                TrainerServiceCategory::Available,
+                762,
+                "Riding",
+            ),
+            svc(
+                8394,
+                "Ram Riding",
+                TrainerServiceCategory::Available,
+                152,
+                "Ram Riding",
+            ),
+        ],
+    }));
+    let (n, first, second, third): (i64, Option<String>, Option<String>, Option<String>) = s
+        .eval(
+            "local n = function(...) return arg.n, arg[1], arg[2], arg[3] end \
+             return n(GetTrainerSkillLines())",
+        )
+        .unwrap();
+    assert_eq!(
+        (n, first, second.as_deref(), third.as_deref()),
+        (3, None, Some("Ram Riding"), Some("Riding"))
+    );
+    assert_eq!(
+        visible(&mut s)
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["Ram Riding", "Ram Riding", "Riding", "Riding"],
+        "the empty known group shows no header"
+    );
+    // The hidden header sits in the array's tail, past the visible count.
+    let (name, kind): (String, String) = s
+        .eval("local n, _, t = GetTrainerServiceInfo(5) return n, t")
+        .unwrap();
+    assert_eq!((name.as_str(), kind.as_str()), ("My Talents", "header"));
+    // The skill-line indices count it: group 2 is Ram Riding.
+    s.run("SetTrainerSkillLineFilter(2, 1, 1)").unwrap();
+    assert_eq!(
+        visible(&mut s)
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["Ram Riding", "Ram Riding"]
+    );
+    assert!(s
+        .eval::<Option<i64>>("return GetTrainerSkillLineFilter(3)")
+        .unwrap()
+        .is_none());
+
+    // A class trainer's list builds no such group.
+    s.reset_trainer_list_state(0);
+    s.set_trainer(Some(trainer()));
+    assert_eq!(
+        s.eval::<i64>("local n = function(...) return arg.n end return n(GetTrainerSkillLines())")
+            .unwrap(),
+        2
+    );
+}
+
+/// `GetTrainerServiceTypeFilter("type")` (`0x4da510`) maps the name through `0x4da390`, without
+/// case, and raises its two errors: a non-string first (`0x84ac78`), an unknown name (`0x84ac48`).
+#[test]
+fn the_type_filter_getter_reads_any_case_and_raises_the_exes_errors() {
+    let mut s = UiScript::new().unwrap();
+    s.set_trainer(Some(trainer()));
+    s.reset_trainer_list_state(0);
+    assert_eq!(
+        s.eval::<(Option<i64>, Option<i64>)>(
+            "return GetTrainerServiceTypeFilter('AVAILABLE'), GetTrainerServiceTypeFilter('Used')"
+        )
+        .unwrap(),
+        (Some(1), None)
+    );
+    let raises = |s: &mut UiScript, call: &str, text: &str| {
+        let err = s.run(call).expect_err(call).to_string();
+        assert!(err.contains(text), "{call}: {err}");
+    };
+    let usage = r#"Usage: GetTrainerServiceTypeFilter("type")"#;
+    let bad = "Bad service type in GetTrainerServiceTypeFilter";
+    raises(&mut s, "GetTrainerServiceTypeFilter()", usage);
+    raises(&mut s, "GetTrainerServiceTypeFilter({})", usage);
+    raises(&mut s, "GetTrainerServiceTypeFilter('all')", bad);
+    raises(&mut s, "GetTrainerServiceTypeFilter(1)", bad);
+}
+
+/// The header array is built per list (`0x4d7560`, its count `0xb73a14`) and a state pass only
+/// re-keys a row now known to -1 at type 1 (`0x4d82b2`-`0x4d82c1`): the last row of a skill line
+/// moving to the known group leaves the line's header in the array, so the line count and the
+/// filter's group indices hold until the next list.
+#[test]
+fn a_pass_keeps_the_lists_header_array() {
+    let services = |known: bool| {
+        let mut horse = svc(
+            824,
+            "Horse Riding",
+            TrainerServiceCategory::Available,
+            148,
+            "Horse Riding",
+        );
+        if known {
+            horse.category = TrainerServiceCategory::Used;
+            (horse.group_key, horse.group_name, horse.line_name) =
+                (TRAINER_GROUP_KNOWN, "My Talents".into(), None);
+        }
+        let ram = svc(
+            8394,
+            "Ram Riding",
+            TrainerServiceCategory::Available,
+            152,
+            "Ram Riding",
+        );
+        TrainerState {
+            list: 0,
+            guid: 0x42,
+            greeting: String::new(),
+            trainer_type: 1,
+            groups: Vec::new(),
+            services: vec![horse, ram],
+        }
+    };
+    let lines = |s: &mut UiScript| {
+        s.eval::<i64>("local function n(...) return arg.n end return n(GetTrainerSkillLines())")
+            .unwrap()
+    };
+    let mut s = UiScript::new().unwrap();
+    s.run("KNOWN_TALENTS_HEADER = 'My Talents'").unwrap();
+    s.reset_trainer_list_state(1);
+    s.set_trainer(Some(services(false)));
+    assert_eq!(lines(&mut s), 3, "My Talents, Horse Riding, Ram Riding");
+    s.set_trainer(Some(services(true)));
+    assert_eq!(lines(&mut s), 3, "Horse Riding's header stays");
+    s.run("SetTrainerSkillLineFilter(3, 0)").unwrap();
+    assert_eq!(
+        s.eval::<Option<i64>>("return GetTrainerSkillLineFilter(3)")
+            .unwrap(),
+        None,
+        "index 3 is still Ram Riding's"
+    );
+    let shown: Vec<String> = visible(&mut s).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(shown, ["My Talents", "Horse Riding"]);
+    s.reset_trainer_list_state(1);
+    s.set_trainer(Some(services(true)));
+    assert_eq!(lines(&mut s), 2, "the next list builds its own");
 }
