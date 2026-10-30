@@ -436,6 +436,9 @@ pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &
     ("::minimap::feed_minimap_arrows", &["death::DeathNet", "net::GuidIndex", "net::ObjectStore",
         "poi_marker::PoiMarker", "ui_party::GroupState"],
         "the arrow half of the minimap's render (`0x4ec950`), which aims them by bearing"),
+    ("::player::camera::focus_on_look_edges", &["player::camera::CameraControl"],
+        "the mouse half of the freelook edges the frame's mouse made, which the input pass runs \
+         ahead of its tick (`0x51491f` → `0x493070`, `0x493090`); a call's edge runs it inside"),
     ("::spell::targeting::feed_targeting_to_input", &["items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
@@ -1389,6 +1392,12 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
         "::player::controller::control",
         "the mover's queue sends the root and unroot acks at its frame update (`0x616438`, \
          `0x6164a9`), and their input tick stops an auto-move there (`0x60e33d` → `0x60e347`)",
+    ),
+    (
+        "::player::press::press_tick",
+        "the window deactivate runs the input tick outside every call (`0x514490` → \
+         `0x5144b5`), its direction and pitch bits cleared (`0x5144a3`), whose pitch stop ends \
+         the auto-move there (`0x60ddda` → `0x60e990`)",
     ),
     (
         "::ui_chat::channels::end_session_channels_on_disconnect",
