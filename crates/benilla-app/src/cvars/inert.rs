@@ -4,7 +4,7 @@
 //! on a miss (`0x488be7`, `0x488c53`, `0x488d37`). So every such record the reference registers is
 //! registered here with its registered default, or an addon that sets one stops with an error.
 //!
-//! A row is inert: no observer reads it, `GetCVar` answers what was written, and it persists like
+//! A row is inert: no change callback reads it, `GetCVar` answers what was written, and it persists like
 //! any row, as a `[cvars]` entry in `benilla-config/config.toml` only while off its default. The
 //! flag bit1 rows are latched, as in the reference (a write is kept until a restart that never
 //! comes for the sound block, and `RestartGx` commits the `gx*` pair). A row whose callback
@@ -12,15 +12,14 @@
 //! `0x50bfe0`, `0x50c000`, `0x50c040`), the error filter's (`0x4030f0`), the target range's
 //! (`0x490720`) and the world's (`0x688b70`, `0x688bd0`, `0x688f00`, `0x688fb0`, `0x689000`,
 //! `0x689050`, `0x689250`, `0x689450`, `0x6d8530`). The two LOD distances' (`0x688ab0`,
-//! `0x6891f0`) never refuse but print a line out of range, and run too. The trailing address is
+//! `0x6891f0`) never refuse but print a line out of range, and `ffxRectangle`'s (`0x6cde30`)
+//! prints its state; they run too. The trailing address is
 //! the register site in `reference/cvars.tsv`.
 
 use super::table::{same, Registered};
 
 pub(super) const INERT: &[Registered] = &[
     // ── The camera block ─────────────────────────────────────────────────────────────────────
-    same("cameraCustomViewSmoothing", "0"), // 0x50bad0
-    same("cameraDistanceMoveSpeed", "8.33").checked(benilla_ui::script::check_camera_decay), // 0x50b7f3
     same("cameraDistanceSmoothSpeed", "8.33").checked(benilla_ui::script::check_camera_decay), // 0x50b8a2
     same("cameraDive", "1"), // 0x50be03
     same("cameraFoVSmoothSpeed", "0.5").checked(benilla_ui::script::check_camera_rate), // 0x50b87f
@@ -212,10 +211,10 @@ pub(super) const INERT: &[Registered] = &[
     same("DistCull", "500").checked(benilla_ui::script::check_dist_cull), // 0x688570
     same("EnableGroupSpeech", "1"),         // 0x457859
     same("ErrorFilter", "all").checked(benilla_ui::script::check_error_filter), // 0x402d2a
-    same("ErrorLevelMax", "3"),             // 0x402d07
-    same("ErrorLevelMin", "1"),             // 0x402ce4
+    same("ErrorLevelMax", "3").checked(benilla_ui::script::check_error_level_max), // 0x402d07
+    same("ErrorLevelMin", "1").checked(benilla_ui::script::check_error_level_min), // 0x402ce4
     same("Errors", "0"),                    // 0x402c9e
-    same("ffxRectangle", "1"),              // 0x6cd007
+    same("ffxRectangle", "1").checked(benilla_ui::script::check_ffx_echo), // 0x6cd007
     same("footstepBias", "0.125").checked(benilla_ui::script::check_footstep_bias), // 0x6888b4
     same("FootstepSounds", "1"),            // 0x623133
     same("fullAlpha", "0"),                 // 0x6884b2
@@ -238,7 +237,6 @@ pub(super) const INERT: &[Registered] = &[
     same("MapWaterSounds", "1"),            // 0x462ac9
     same("MaxLights", "4").checked(benilla_ui::script::check_max_lights), // 0x688596
     same("mouseInvertYaw", "0"),            // 0x50b72d
-    same("movie", "1"),                     // 0x402bf5
     same("ObjectSelectionCircle", "1"),     // 0x6146ec
     same("occlusion", "1"),                 // 0x6888da
     same("particleDensity", "1.0").checked(benilla_ui::script::check_particle_density), // 0x688738
@@ -265,5 +263,4 @@ pub(super) const INERT: &[Registered] = &[
     same("UnitNameRenderMode", "2"),        // 0x48fdc3
     same("violenceLevel", "2"),             // 0x6c5ae1
     same("waterLOD", "0").checked(benilla_ui::script::check_water_lod), // 0x688784
-    same("widescreen", "1"),                // 0x63a74f
 ];

@@ -727,6 +727,7 @@ dependencies = [
  "avian3d",
  "benilla-assets",
  "benilla-formats",
+ "benilla-movie",
  "benilla-protocol",
  "benilla-srp",
  "benilla-ui",
@@ -748,6 +749,7 @@ dependencies = [
  "js-sys",
  "kira",
  "libc",
+ "md-5",
  "mint",
  "naga",
  "num-bigint",
@@ -862,6 +864,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "benilla-movie"
+version = "0.2.0"
+dependencies = [
+ "benilla-bytes",
+ "benilla-formats",
+]
+
+[[package]]
 name = "benilla-mpq"
 version = "0.2.0"
 dependencies = [
@@ -879,6 +889,7 @@ dependencies = [
  "flate2",
  "futures-lite",
  "js-sys",
+ "libc",
  "num-bigint",
  "rand 0.8.6",
  "send_wrapper",
@@ -905,7 +916,11 @@ name = "benilla-ui"
 version = "0.2.0"
 dependencies = [
  "benilla-mlua",
+ "benilla-movie",
+ "js-sys",
+ "libc",
  "roxmltree",
+ "wasm-bindgen",
  "web-time",
 ]
 
@@ -9016,8 +9031,6 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "27.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b21cb61c57ee198bc4aff71aeadff4cbb80b927beb912506af9c780d64313ce"
 dependencies = [
  "android_system_properties",
  "arrayvec",

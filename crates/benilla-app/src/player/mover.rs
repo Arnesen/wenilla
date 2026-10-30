@@ -2,8 +2,8 @@
 //! step-up and step-down, over avian's `MoveAndSlide` with one-sided faces (a face blocks only the
 //! motion its authored winding opposes, the reference's `0x632700`).
 
-use avian3d::character_controller::move_and_slide::MoveHitData;
 use avian3d::prelude::*;
+use benilla_world::collision::BodyHit;
 use bevy::prelude::*;
 
 use super::{
@@ -88,6 +88,34 @@ pub(super) fn step(
         TERMINAL_VELOCITY
     };
 
+    // No direction or fall bit (`0x200f`): the substep loop resolves nothing (`0x634100`), so a
+    // body standing where its last step left it neither collides, classifies nor starts a fall.
+    // `SetPitch` aimed under the water-walk floor starts that fall itself (`0x7c6f70`).
+    let dives = player.modes.water_walking
+        && !player.swimming
+        && player.mover_pitch <= WATER_WALK_PITCH_FLOOR;
+    let idle = !player.settling
+        && !moving
+        && !want_jump
+        && !wire_jump
+        && knockback.is_none()
+        && !player.airborne_prev
+        && !dives;
+    if let Some((_, ground)) = player.rest.filter(|&(at, _)| idle && at == player.pos) {
+        player.vel_y = 0.0;
+        player.horiz_vel = Vec3::ZERO;
+        return Outcome {
+            held: false,
+            grounded: true,
+            jumped: false,
+            knocked: false,
+            air_nudged: false,
+            ground,
+            gated: false,
+        };
+    }
+    player.rest = None;
+
     // The world query gate for a body falling into the frame, whose mode at the substep loop is
     // FALLING: a refused query leaves it hanging before anything could land it, its speed and fall
     // clock kept. A knockback is a command ahead of the loop, so it is flown and gated below; the
@@ -131,7 +159,11 @@ pub(super) fn step(
     };
     let ground_reach = hover_offset + base_reach;
     let classify = probe_down(center, ground_reach);
-    let on_walkable = classify.as_ref().is_some_and(|h| h.normal1.y >= GROUND_COS);
+    // Walkable by the face's own normal, the world record the settle reads (`0x636ecf`), never the
+    // contact: a body resting on a stair's nosing touches its edge.
+    let on_walkable = classify
+        .as_ref()
+        .is_some_and(|h| h.face_normal.y >= GROUND_COS);
     // Water walking makes the liquid surface ground (`0x63162e`). Liquid is queried here, not
     // swept, so the classify asks the plane too, or a water-walker reads airborne and coasts. The
     // reach includes the hover offset: the finalize probe (`0x636e45` → `0x632ba0` → `0x631e70`)
@@ -350,8 +382,9 @@ pub(super) fn step(
     // rate-limited climb below (`0x636fa1`). The one push up is ours: the body may not end the
     // frame under the surface, which the reference's swept surface never lets it reach, and only
     // a body that is not rising is caught, so a hover launch under the waterline flies clear.
-    // `SetPitch`'s standstill dive kick (`0x7c6f70`) is not built: it serves a walk resolver that
-    // skips a body at rest, and our classify runs every frame, so dropping the layers is the dive.
+    // `SetPitch`'s standstill dive kick (`0x7c6f70`) is the idle gate's `dives`: the frame
+    // resolves, and with the layers dropped the body sinks.
+    let lift_from = center.y;
     if let Some(surface) = water_floor {
         let feet = center.y - half_h.y;
         let rest = surface + hover_offset;
@@ -380,6 +413,8 @@ pub(super) fn step(
             }
         }
     }
+    // The water and hover lifts run on idle frames too, so a lifting body is not yet at rest.
+    let lifted = center.y != lift_from;
 
     player.pos = center - half_h;
     move_trace::frame(move_trace::Frame {
@@ -398,17 +433,19 @@ pub(super) fn step(
     // The mover's own airborne record: a launch frame counts though the body still stands, or the
     // next frame reads as a fresh step-off and re-seeds the arc.
     player.airborne_prev = !held && !anchored && (jumped || !grounded);
+    let ground = if grounded && !held {
+        ground_entity
+    } else {
+        None
+    };
+    player.rest = (grounded && !held && !jumped && !lifted).then_some((player.pos, ground));
     Outcome {
         held,
         grounded,
         jumped,
         knocked,
         air_nudged,
-        ground: if grounded && !held {
-            ground_entity
-        } else {
-            None
-        },
+        ground,
         gated: false,
     }
 }
@@ -589,7 +626,8 @@ pub(crate) fn grounded_step(
     });
     let floor = match (hit, water) {
         (Some(h), Some(w)) if w < h.distance => Some((w, 1.0, None)),
-        (Some(h), _) => Some((h.distance, h.normal1.y, Some(h.entity))),
+        // The face's own normal classifies the floor, as the settle reads the record (`0x636ecf`).
+        (Some(h), _) => Some((h.distance, h.face_normal.y, Some(h.entity))),
         (None, Some(w)) => Some((w, 1.0, None)),
         (None, None) => None,
     };
@@ -825,7 +863,7 @@ pub(crate) struct StepAttempt {
 /// trunks only on steep faces, so none commits and the plain slide keeps the frame.
 /// [`super::step_probe`] sweeps `advance` to find where a step would clear.
 pub(crate) fn step_up(
-    cast: &impl Fn(Vec3, Vec3) -> Option<MoveHitData>,
+    cast: &impl Fn(Vec3, Vec3) -> Option<BodyHit>,
     center: Vec3,
     dir_h: Vec3,
     look: f32,
@@ -841,7 +879,8 @@ pub(crate) fn step_up(
     let Some(ahead) = cast(center, dir_h * look) else {
         return none(StepVerdict::NoFace);
     };
-    let n = ahead.normal1;
+    // The face's own normal: `0x6334a0` classifies the hit's record (`0x6334e6`), not a contact.
+    let n = ahead.face_normal;
     if n.y >= GROUND_COS || n.y < OVERHANG_EPS || n.dot(dir_h) >= 0.0 {
         return none(StepVerdict::NoFace);
     }
@@ -864,7 +903,10 @@ pub(crate) fn step_up(
     let Some(down) = cast(over, Vec3::NEG_Y * reach) else {
         return at(StepVerdict::NoFloor { up, fwd });
     };
-    let (dist, ny) = (down.distance, down.normal1.y);
+    // The floor's class is the face's own normal, as the probe reads the world record's `n.z`
+    // (`0x636592`), never the contact: settling on a stair's nosing touches an edge, whose contact
+    // normal is a steep slant though the face under it is a tread.
+    let (dist, ny) = (down.distance, down.face_normal.y);
     if ny < GROUND_COS {
         return at(StepVerdict::SteepFloor { up, fwd, dist, ny });
     }
@@ -1016,6 +1058,313 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .unwrap()
+    }
+
+    /// A headless world of the walking faces of the `wmo` placements on `map` within `half` yd of
+    /// the WoW pin `(x, y)`, at their authored winding, as the WMO loader bakes them; `None`
+    /// without an install.
+    fn world_from_wmo(map: &str, wmo: &str, x: f32, y: f32, half: f32) -> Option<App> {
+        use benilla_assets::coords::{placement_rotation, wow_to_bevy};
+        let data = benilla_formats::wow_data_or_skip!(None);
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let tiles = benilla_formats::MapTiles::load(&mut chain, map).expect("map tiles");
+        let (tx, ty) = tiles.tile_at(x, y);
+        let tile = benilla_formats::load_tile_mesh(&mut chain, map, tx, ty).expect("tile");
+        let (lo, hi) = (
+            wow_to_bevy([x + half, y + half, -1.0e4]),
+            wow_to_bevy([x - half, y - half, 1.0e4]),
+        );
+        let inside = |v: Vec3| v.x >= lo.x && v.x <= hi.x && v.z >= lo.z && v.z <= hi.z;
+        let (mut verts, mut tris) = (Vec::new(), Vec::new());
+        for w in tile
+            .wmos
+            .iter()
+            .filter(|w| w.model.to_lowercase().contains(wmo))
+        {
+            let placed = Transform {
+                translation: wow_to_bevy(w.position),
+                rotation: placement_rotation(w.rotation),
+                scale: Vec3::ONE,
+            };
+            let stem = w.model.to_ascii_lowercase().replace('\\', "/");
+            let stem = stem.strip_suffix(".wmo").unwrap_or(&stem).to_string();
+            let mut group = 0;
+            while let Ok(bytes) = chain.read_file(&format!("{stem}_{group:03}.wmo")) {
+                let (mut pos, mut idx) = (Vec::new(), Vec::new());
+                benilla_formats::accumulate_wmo_group_collision(&bytes, &mut pos, &mut idx);
+                let at: Vec<Vec3> = pos
+                    .iter()
+                    .map(|p| placed.transform_point(wow_to_bevy(*p)))
+                    .collect();
+                for t in idx.as_chunks::<3>().0 {
+                    let tri = t.map(|i| at[i as usize]);
+                    if tri.iter().any(|&v| inside(v)) {
+                        let b = verts.len() as u32;
+                        verts.extend(tri);
+                        tris.push([b, b + 1, b + 2]);
+                    }
+                }
+                group += 1;
+            }
+        }
+        assert!(!tris.is_empty(), "no {wmo} faces near ({x}, {y})");
+        let mut app = App::new();
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::trimesh(verts, tris),
+            Transform::default(),
+        ));
+        app.update();
+        Some(app)
+    }
+
+    /// Feet heights of a body dropped onto the floor under the WoW pin `(x, y, z)` and walked
+    /// `frames` grounded frames at 7 yd/s along the WoW heading `facing`, in WoW `z`.
+    fn walk_wow(mut world: App, at: [f32; 3], facing: f32, frames: usize) -> Vec<f32> {
+        use benilla_assets::coords::wow_to_bevy;
+        world
+            .world_mut()
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let half = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
+                let above = wow_to_bevy(at) + half;
+                let drop = world
+                    .cast_mover(&capsule, above, Vec3::NEG_Y * 2.0, SKIN_WIDTH)
+                    .map_or(0.0, |h| h.distance);
+                let mut center = above + Vec3::NEG_Y * drop;
+                let dir = wow_to_bevy([facing.cos(), facing.sin(), 0.0]);
+                let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                let mut support = Support::default();
+                (0..frames)
+                    .map(|_| {
+                        let g = grounded_step(&world, &capsule, center, dir * 7.0, dt, support);
+                        center = g.center - Vec3::Y * g.unsupported.unwrap_or(0.0);
+                        support.steep = g.steep_support;
+                        center.y - half.y
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_stormwind_auction_house_stairs_are_climbed_head_on_and_at_an_angle() {
+        // The Trade District auction house's street door, WoW `(-8807.8, 650.5, 94.6)`: a stone
+        // kerb and three wooden steps of about 0.4 yd up to its 96.2 yd porch. Settling on a
+        // nosing touches its edge, so a probe that read the contact normal saw a 68° slant there
+        // and stalled the body at the kerb.
+        // Head-on (12° off the stairs' line, as they are skewed), and 21° off it the other way.
+        for (x, facing) in [(-8807.8, std::f32::consts::FRAC_PI_2), (-8810.0, 1.0)] {
+            let Some(world) = world_from_wmo("Azeroth", "stormwind.wmo", -8807.0, 652.0, 12.0)
+            else {
+                return;
+            };
+            let feet = walk_wow(world, [x, 648.0, 95.0], facing, 120);
+            let top = feet.iter().copied().fold(f32::MIN, f32::max);
+            assert!(
+                top > 96.1,
+                "facing {facing}: the body must climb onto the 96.2 yd porch, not stall at the \
+                 kerb; feet {feet:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_stopped_on_a_stair_nosing_stands_on_the_tread() {
+        // Stopped with its centre just past the second tread's nosing at the Trade District
+        // auction house door, the body rests on the nosing's edge. Down there only the tread faces
+        // the sweep (the riser is a backface), so the reference's record is the tread and the body
+        // stands (`0x636ecf`); the contact normal is a 60° slant, and reading it dropped the body.
+        let Some(mut world) = world_from_wmo("Azeroth", "stormwind.wmo", -8807.0, 652.0, 12.0)
+        else {
+            return;
+        };
+        let rows = world
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                use benilla_assets::coords::wow_to_bevy;
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                // The second tread's nosing on the WoW line x = -8807.8: the first point up the
+                // stairs whose floor is above 95.5.
+                let floor = |y: f32| {
+                    let top = wow_to_bevy([-8807.8, y, 99.0]);
+                    world
+                        .ray_body(top, Dir3::NEG_Y, 10.0)
+                        .map(|h| top.y - h.distance)
+                };
+                let nosing = (0..300)
+                    .map(|i| 650.5 + i as f32 * 0.01)
+                    .find(|&y| floor(y).is_some_and(|z| z > 95.5))
+                    .expect("the second tread");
+                let mut player = Player {
+                    pos: wow_to_bevy([-8807.8, nosing - 0.29, 95.8]),
+                    ..Default::default()
+                };
+                let half = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
+                let drop = world
+                    .cast_mover(&capsule, player.pos + half, Vec3::NEG_Y, SKIN_WIDTH)
+                    .map_or(0.0, |h| h.distance);
+                player.pos.y -= drop;
+                let rest = player.pos.y;
+                let rows: Vec<_> = (0..30)
+                    .map(|_| {
+                        let out = step(
+                            &mut player,
+                            &time,
+                            &world,
+                            &capsule,
+                            false,
+                            Vec3::X,
+                            0.0,
+                            false,
+                            false,
+                            None,
+                            None,
+                            AIR_NUDGE_SPEED,
+                        );
+                        (out.grounded, player.pos.y)
+                    })
+                    .collect();
+                (rest, rows)
+            })
+            .unwrap();
+        let (rest, rows) = rows;
+        assert!(
+            rest > 95.6,
+            "the body must come to rest on the nosing: {rest}"
+        );
+        assert!(
+            rows.iter()
+                .all(|&(grounded, y)| grounded && (y - rest).abs() < 0.01),
+            "a body at rest on a nosing stands there: rest {rest}, frames {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_body_stopped_anywhere_on_the_auction_house_stairs_stands_there() {
+        // Stopped after every frame count of the climb, the body stands where it stopped: the
+        // substep loop runs only for a direction or fall bit (`0x634100`), so nothing re-classifies
+        // a stopped body's support or starts it falling, as a live tap at 95.24 once did.
+        let Some(mut world) = world_from_wmo("Azeroth", "stormwind.wmo", -8807.0, 652.0, 12.0)
+        else {
+            return;
+        };
+        let moved = world
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                use benilla_assets::coords::wow_to_bevy;
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let dir = wow_to_bevy([0.0, 1.0, 0.0]);
+                let mut moved = Vec::new();
+                for walk in 1..60 {
+                    let mut player = Player {
+                        pos: wow_to_bevy([-8807.8, 648.0, 94.42]),
+                        ..Default::default()
+                    };
+                    let mut stopped = None;
+                    for i in 0..walk + 20 {
+                        let moving = i < walk;
+                        let out = step(
+                            &mut player,
+                            &time,
+                            &world,
+                            &capsule,
+                            moving,
+                            dir,
+                            7.0,
+                            false,
+                            false,
+                            None,
+                            None,
+                            AIR_NUDGE_SPEED,
+                        );
+                        if i == walk {
+                            stopped = Some(player.pos);
+                        }
+                        if i > walk && (!out.grounded || Some(player.pos) != stopped) {
+                            moved.push((walk, i, out.grounded, stopped, player.pos));
+                            break;
+                        }
+                    }
+                }
+                moved
+            })
+            .unwrap();
+        assert!(moved.is_empty(), "stopped bodies that moved: {moved:?}");
+    }
+
+    #[test]
+    fn short_presses_up_the_auction_house_stairs_never_leave_the_ground() {
+        // The same stairs taken in taps, the reporter's "pressing forward a bit": every stop
+        // rests the body on whatever edge it reached. The kerb's lip is shared by its top and its
+        // 53° bevel, an edge tie ([`benilla_world`]'s `EDGE_TIE`); picking one face lifts it off.
+        let Some(mut world) = world_from_wmo("Azeroth", "stormwind.wmo", -8807.0, 652.0, 12.0)
+        else {
+            return;
+        };
+        let rows = world
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                use benilla_assets::coords::wow_to_bevy;
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let mut player = Player {
+                    pos: wow_to_bevy([-8807.8, 648.0, 94.42]),
+                    ..Default::default()
+                };
+                let dir = wow_to_bevy([0.0, 1.0, 0.0]);
+                // Taps of 4 frames forward and 20 standing, until well onto the porch.
+                (0..24 * 30)
+                    .map(|i| {
+                        let moving = i % 24 < 4;
+                        let out = step(
+                            &mut player,
+                            &time,
+                            &world,
+                            &capsule,
+                            moving,
+                            dir,
+                            7.0,
+                            false,
+                            false,
+                            None,
+                            None,
+                            AIR_NUDGE_SPEED,
+                        );
+                        (moving, out.grounded, player.pos.y)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        let airborne: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.1)
+            .map(|(i, r)| (i, r.0, r.2))
+            .collect();
+        assert!(
+            airborne.is_empty(),
+            "no frame of a tapped climb may leave the ground: {airborne:?}"
+        );
+        assert!(
+            rows.last().unwrap().2 > 96.1,
+            "the taps must reach the porch: {:?}",
+            rows.last()
+        );
     }
 
     /// Booty Bay's 0.40 yd vertical riser onto a ~22° ramp, at WoW `(-14314.3, 466.2, 18.5)`,

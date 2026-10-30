@@ -86,6 +86,7 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
             challenge.client_public_key(),
             challenge.client_proof(),
             &salt,
+            None,
         )
         .context("sending logon proof")?;
 

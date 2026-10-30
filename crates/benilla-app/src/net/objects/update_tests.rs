@@ -6,7 +6,7 @@ const ME: u64 = 0x0000_0000_0000_0007;
 const MOB: u64 = 0xF130_0000_1234_0001;
 
 fn client() -> App {
-    crate::game_plugins::schedule_tests::headless_client()
+    crate::game_plugins::schedule_tests::headless_client_unrun()
 }
 
 /// An indexed entity for `guid`, as a create leaves it.
@@ -596,7 +596,9 @@ fn a_movement_block_for_the_mover_brings_nothing_back() {
     send(world, [unit(MOB, &[(ENTRY, 299)])]);
     send(world, [out_of_range(&[MOB])]);
     world.init_resource::<crate::player::Player>();
-    world.resource_mut::<crate::player::Player>().foreign_mover = Some(MOB);
+    world
+        .resource_mut::<crate::player::MoverLock>()
+        .foreign_mover = Some(MOB);
 
     send(world, [moved(MOB)]);
     assert!(!held(world, MOB), "the mover's block is dropped");
@@ -611,7 +613,9 @@ fn a_movement_block_for_the_mover_brings_nothing_back() {
 
     // Control lost zeroes the mover (`0x5fa600`), and the block brings the unit back.
     send(world, [out_of_range(&[MOB])]);
-    world.resource_mut::<crate::player::Player>().control_lost = true;
+    world
+        .resource_mut::<crate::player::MoverLock>()
+        .control_lost = true;
     send(world, [moved(MOB)]);
     assert!(
         held(world, MOB),
@@ -808,6 +812,99 @@ fn a_first_create_raises_no_flag_tutorial() {
         [FieldNotice::Tutorial { id: 0x18 }],
         "the ghost bit set again; the resting bit, already set, moved nothing"
     );
+}
+
+/// The ghost flag's clear runs `SetAreaSpiritHealer(0, 0)` (`0x5dea20` → `0x4921c0`) ahead of
+/// `PLAYER_UNGHOST` (`0x5dea2a`), inside its packet: with a resurrection wave pending, the healer
+/// is cleared, `CMSG_CANCEL_AURA` for 2584 goes out (`0x6e70eb`) and
+/// `AREA_SPIRIT_HEALER_OUT_OF_RANGE` signals ahead of the unghost.
+#[test]
+fn the_unghost_edge_clears_a_pending_area_spirit_healer_ahead_of_its_event() {
+    use crate::field_watch::{id, FieldNotice};
+    const PLAYER_FLAGS: u16 = 190;
+    const HEALER: u64 = 0xF130_0000_0042_0001;
+    let mut app = client();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.insert_resource(NetCommands(tx));
+    let world = app.world_mut();
+    world.resource_mut::<SelfGuid>().0 = Some(ME);
+    send(world, [player(ME, &[(PLAYER_FLAGS, 0x10)])]);
+    {
+        let mut spirit = world.resource_mut::<crate::ui_dialog_verbs::AreaSpiritHealer>();
+        spirit.set_healer(Some(HEALER));
+        assert!(spirit.on_time(HEALER, 30_000, std::time::Instant::now()));
+    }
+    notices(world);
+    rx.try_iter().count();
+
+    send(world, [values(ME, &[(PLAYER_FLAGS, 0)])]);
+    let at =
+        |id: u16, all: &[FieldNotice]| all.iter().position(|n| *n == FieldNotice::Global { id });
+    let all = notices(world);
+    let (out, unghost) = (
+        at(id::AREA_SPIRIT_HEALER_OUT_OF_RANGE, &all),
+        at(id::PLAYER_UNGHOST, &all),
+    );
+    assert!(out.is_some(), "the wave's cancel signals: {all:?}");
+    assert!(out < unghost, "ahead of PLAYER_UNGHOST: {all:?}");
+    assert_eq!(
+        rx.try_iter()
+            .filter(|c| matches!(c, crate::net::ClientCommand::CancelAura { .. }))
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>(),
+        [format!(
+            "{:?}",
+            crate::net::ClientCommand::CancelAura {
+                spell_id: crate::ui_dialog_verbs::AREA_SPIRIT_HEALER_AURA
+            }
+        )]
+    );
+    let spirit = world.resource::<crate::ui_dialog_verbs::AreaSpiritHealer>();
+    assert!(
+        spirit.healer().is_none() && !spirit.armed(),
+        "the healer is cleared"
+    );
+}
+
+/// With no wave pending the same call changes nothing the reference signals or sends
+/// (`0x4921cf`-`0x4921df` return on an unchanged guid; a cached healer with no clock sends
+/// nothing, `0x4921fa`).
+#[test]
+fn the_unghost_edge_with_no_wave_pending_signals_and_sends_no_healer_cancel() {
+    use crate::field_watch::{id, FieldNotice};
+    const PLAYER_FLAGS: u16 = 190;
+    const HEALER: u64 = 0xF130_0000_0042_0001;
+    for cached in [false, true] {
+        let mut app = client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let world = app.world_mut();
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        send(world, [player(ME, &[(PLAYER_FLAGS, 0x10)])]);
+        if cached {
+            world
+                .resource_mut::<crate::ui_dialog_verbs::AreaSpiritHealer>()
+                .set_healer(Some(HEALER));
+        }
+        notices(world);
+        rx.try_iter().count();
+
+        send(world, [values(ME, &[(PLAYER_FLAGS, 0)])]);
+        let all = notices(world);
+        let global = |id: u16| FieldNotice::Global { id };
+        assert!(all.contains(&global(id::PLAYER_UNGHOST)), "{all:?}");
+        assert!(
+            !all.contains(&global(id::AREA_SPIRIT_HEALER_OUT_OF_RANGE)),
+            "cached {cached}: {all:?}"
+        );
+        assert!(
+            !rx.try_iter()
+                .any(|c| matches!(c, crate::net::ClientCommand::CancelAura { .. })),
+            "cached {cached}"
+        );
+        let spirit = world.resource::<crate::ui_dialog_verbs::AreaSpiritHealer>();
+        assert!(spirit.healer().is_none(), "cached {cached}: cleared");
+    }
 }
 
 /// `PLAYER_GUILD_TIMESTAMP`'s player watcher (`0x5e2890`) keeps each guild's last stamp: an
@@ -1096,13 +1193,14 @@ fn a_groupmates_pet_leaving_its_field_tears_down_that_pets_selection() {
             None,
             Some(ME),
         );
-    let torn = |world: &mut World| -> Vec<u64> {
-        world
-            .resource_mut::<Messages<crate::target::DeselectGuid>>()
-            .drain()
-            .map(|d| d.0)
-            .collect()
+    // The selection `guid` names, by its guid alone, then whether the packet tore it down.
+    let select = |world: &mut World, guid: u64| {
+        *world.resource_mut::<crate::target::Selection>() = crate::target::Selection {
+            guid: Some(guid),
+            ..Default::default()
+        };
     };
+    let torn = |world: &mut World| world.resource::<crate::target::Selection>().guid.is_none();
     send(
         world,
         [
@@ -1113,15 +1211,147 @@ fn a_groupmates_pet_leaving_its_field_tears_down_that_pets_selection() {
             unit(NEAR_PET, &[(2, 0x9)]),
         ],
     );
-    torn(world);
 
+    select(world, PET);
     send(world, [values(MATE, &guid(0, 8))]);
-    assert_eq!(torn(world), [PET], "a groupmate's summon");
+    assert!(torn(world), "a groupmate's summon");
+    select(world, PET);
     send(world, [values(STRANGER, &guid(0, 8))]);
-    assert!(torn(world).is_empty(), "a player outside the group");
+    assert!(!torn(world), "a player outside the group");
     send(world, [values(ME, &guid(PET, 6))]);
     send(world, [values(ME, &guid(NEAR_PET, 6))]);
-    assert_eq!(torn(world), [PET], "our own charm, moved off");
+    assert!(torn(world), "our own charm, moved off");
+    select(world, NEAR_PET);
     send(world, [values(ME, &guid(0, 6))]);
-    assert!(torn(world).is_empty(), "an old pet still held");
+    assert!(!torn(world), "an old pet still held");
+}
+
+/// A transport's clock is anchored at the instant its packet arrived, the time the queue node
+/// stamps (`0x538851`) and the constructor subtracts (`0x5f7080`), not when the drain applies it.
+#[test]
+fn a_transport_create_anchors_its_clock_at_the_packets_arrival() {
+    const BOAT: u64 = 0xF120_0000_0000_0010;
+    let mut app = client();
+    let world = app.world_mut();
+    let arrived = std::time::Instant::now() - std::time::Duration::from_secs(2);
+    // `GAMEOBJECT_TYPE_ID`, field 21: a type-15 ship.
+    let SessionEvent::ObjectCreate {
+        guid,
+        kind,
+        display_id,
+        position,
+        orientation,
+        scale,
+        speeds,
+        mover,
+        transport,
+        spline,
+        fields,
+        ..
+    } = created(BOAT, EntityKind::GameObject, [0.0; 3], &[(21, 15)])
+    else {
+        unreachable!()
+    };
+    send(
+        world,
+        [SessionEvent::ObjectCreate {
+            guid,
+            kind,
+            display_id,
+            position,
+            orientation,
+            scale,
+            speeds,
+            mover,
+            transport_progress: Some(benilla_protocol::TransportClock {
+                progress_ms: 1234,
+                arrived: Some(arrived),
+            }),
+            transport,
+            spline,
+            fields,
+        }],
+    );
+    world.flush();
+    let e = world.resource::<GuidIndex>().0[&BOAT];
+    let anchor = world
+        .get::<crate::transport::TransportAnchor>(e)
+        .expect("anchored");
+    assert_eq!(anchor.progress_ms, 1234);
+    assert_eq!(anchor.at, arrived);
+}
+
+/// A type-15 ship's create block with this clock.
+fn ship_create(guid: u64, progress_ms: u32, arrived: std::time::Instant) -> SessionEvent {
+    let SessionEvent::ObjectCreate {
+        guid,
+        kind,
+        display_id,
+        position,
+        orientation,
+        scale,
+        speeds,
+        mover,
+        transport,
+        spline,
+        fields,
+        ..
+    } = created(guid, EntityKind::GameObject, [0.0; 3], &[(21, 15)])
+    else {
+        unreachable!()
+    };
+    SessionEvent::ObjectCreate {
+        guid,
+        kind,
+        display_id,
+        position,
+        orientation,
+        scale,
+        speeds,
+        mover,
+        transport_progress: Some(benilla_protocol::TransportClock {
+            progress_ms,
+            arrived: Some(arrived),
+        }),
+        transport,
+        spline,
+        fields,
+    }
+}
+
+fn anchor_of(world: &World, guid: u64) -> Option<(u32, std::time::Instant)> {
+    let e = *world.resource::<GuidIndex>().0.get(&guid)?;
+    world
+        .get::<crate::transport::TransportAnchor>(e)
+        .map(|a| (a.progress_ms, a.at))
+}
+
+/// Only the constructor sets a transport's clock (`0x5f7080`): a create for a held object updates
+/// it (`0x466350`), and one bringing a released object back reactivates it (`0x464530`), neither
+/// of which constructs, so both keep the anchor; so does a values block bringing it back.
+#[test]
+fn a_known_transport_keeps_its_anchor_through_a_re_create() {
+    const BOAT: u64 = 0xF120_0000_0000_0011;
+    let mut app = client();
+    let world = app.world_mut();
+    let first = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    let later = std::time::Instant::now();
+    send(world, [ship_create(BOAT, 1234, first)]);
+    world.flush();
+    assert_eq!(anchor_of(world, BOAT), Some((1234, first)));
+    send(world, [ship_create(BOAT, 99_999, later)]);
+    world.flush();
+    assert_eq!(anchor_of(world, BOAT), Some((1234, first)), "held");
+    send(world, [out_of_range(&[BOAT])]);
+    send(world, [ship_create(BOAT, 99_999, later)]);
+    world.flush();
+    assert_eq!(anchor_of(world, BOAT), Some((1234, first)), "brought back");
+    send(world, [out_of_range(&[BOAT])]);
+    send(world, [values(BOAT, &[(21, 15)])]);
+    world.flush();
+    assert_eq!(
+        anchor_of(world, BOAT),
+        Some((1234, first)),
+        "brought back by values"
+    );
 }

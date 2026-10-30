@@ -224,7 +224,9 @@ fn chat_window_flags_read_get_bool_or_default() {
 /// The guild flags: show-offline (`0x4d1e17`, default 1), the rank checkbox (`0x4d20b7`, default 0).
 #[test]
 fn guild_flags_read_get_bool_or_default() {
-    let s = script();
+    let mut s = script();
+    // The setter's call is the host's; this VM keeps it.
+    s.keep_calls();
     check(
         &s,
         "SetGuildRosterShowOffline",
@@ -232,7 +234,7 @@ fn guild_flags_read_get_bool_or_default() {
         "GetGuildRosterShowOffline() == 1",
         true,
     );
-    let staged = || s.model_ref().guild_control.staged[0];
+    let staged = || s.model_ref().guild_cells.rank_control.staged[0];
     s.run("GuildControlSetRankFlag(1, true) GuildControlSetRankFlag(1)")
         .unwrap();
     assert!(!staged(), "no argument takes the default 0");
@@ -335,7 +337,8 @@ fn queued_verbs_read_their_flags_through_get_bool_or_default() {
 /// nil clears; a bare call is the getter.
 #[test]
 fn logging_flags_read_get_bool_or_default_with_default_one() {
-    let s = script();
+    let mut s = script();
+    s.keep_calls();
     for name in ["LoggingChat", "LoggingCombat"] {
         for (arg, want) in cases(true) {
             s.run(&format!("{name}({})", if want { "false" } else { "true" }))

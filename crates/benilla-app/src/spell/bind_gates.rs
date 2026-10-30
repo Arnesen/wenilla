@@ -1,7 +1,7 @@
 //! `BindTarget 0x6e5b40`'s gates: the five silent exits a unit meets before any relation arm
 //! (`6e5bd8`-`6e5ca2`). A refused unit binds nothing, so `ArmCast` falls to its next candidate,
 //! the player behind `autoSelfCast`, and then to the enemy-word refusal or the targeting cursor.
-//! The read-only mirror `SpellCanTargetUnit 0x6e6460` runs the same five (`6e6507`-`6e65ab`), so
+//! The read-only mirror `SpellCanTargetObject 0x6e6460` runs the same five (`6e6507`-`6e65ab`), so
 //! the press, the cursor's click, `SpellTargetUnit` and the hover verdict share this one gate
 //! through [`super::cast_target::unit_binds`].
 
@@ -98,13 +98,12 @@ mod tests {
         store: &ObjectStore,
         types: CreatureTypeSources,
     ) -> bool {
-        static EMPTY: Reputations = Reputations::from_slots(Vec::new());
         let rel = TargetRelations {
             target_store: Some(store),
             target_owner_store: None,
             self_store: None,
             factions: None,
-            reputations: &EMPTY,
+            reputations: Reputations::empty(),
             types,
             group: Default::default(),
         };

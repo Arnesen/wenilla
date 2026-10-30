@@ -5,14 +5,12 @@
 //! description, gold. The aura builder `0x52f880` is [`super::tooltip_aura`]'s.
 //!
 //! The app resolves each spell into a [`SpellTooltipView`] (`$`-tokens, cast, range and duration
-//! data, each `GlobalStrings.lua` template by key, read at the render), kept in an ask-once store
-//! by spell id and pushed ahead of a hover: one store for the
-//! views built against the player and one for those built against its pet, which the builder's
-//! unit selector asks for. A miss records the id; a `set_spell_by_id` miss also waits, and the
-//! app's answer re-renders that tooltip a frame after the hover. That frame is a known difference
-//! from the reference, which builds every spell tooltip at the call (`0x52e610`); a spell no
-//! pushed set names, such as an `enchant:` link's, always meets it. A talent miss shows its view on
-//! the next hover. An aura view's miss waits the same way.
+//! data, each `GlobalStrings.lua` template by key, read at the render), built at the setter's call
+//! through the lent host ([`SpellViewQuery`]), as the reference builds every spell tooltip at the
+//! call (`0x52e610`). With no host to ask, the views come from an ask-once store by spell id, one
+//! for the views built against the player and one for those built against its pet, which the
+//! builder's unit selector asks for: a miss records the id and waits, and a push of the view
+//! re-renders that tooltip. An aura view's miss waits the same way.
 
 use mlua::{Lua, Table, Value};
 
@@ -82,6 +80,11 @@ pub struct SpellTooltipView {
     pub use_all: Option<TooltipText>,
     /// The `$`-substituted description.
     pub description: TooltipText,
+    /// The tools' and reagents' entries whose record the item cache missed at this build, each
+    /// looked up with the tooltip as its answer's cookie (`0x52eda4`, `0x52f3f4`) and counted
+    /// (`0x52edaf`, `0x52f3ff`): the last to answer rebuilds the tooltip
+    /// ([`answer_spell_items`]).
+    pub item_misses: Vec<u32>,
 }
 
 /// The spell's reputation line (`0x52f2ae`-`0x52f38e`): `ITEM_REQ_REPUTATION` (`0x854b8c`) of the
@@ -100,10 +103,23 @@ pub struct ReputationRequirement {
     pub female: bool,
 }
 
+/// A spell's view built at the call, as the builder `0x52e610` builds it at each setter's: against
+/// the player, or with `pet`, the builder's unit selector (`0x6e3130`), against its pet. The host
+/// declines a spell with no record, and the getter reads the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpellViewQuery {
+    pub spell_id: u32,
+    pub pet: bool,
+}
+
+impl super::live::LiveQuery for SpellViewQuery {
+    type Answer = SpellTooltipView;
+}
+
 impl super::UiScript {
     /// Store or replace a spell's view built against the player, answering its ask: a tooltip
-    /// waiting on it re-renders now, a frame after its hover, where the reference builds it whole
-    /// at the call (`0x52e610`).
+    /// waiting on it re-renders now. The store is what a setter reads with no host to build the
+    /// view at the call ([`SpellViewQuery`]).
     pub fn set_spell_tooltip(&mut self, spell_id: u32, view: SpellTooltipView) {
         self.store_spell_view(false, spell_id, view);
     }
@@ -142,58 +158,6 @@ impl super::UiScript {
     /// Drain the spell ids the renderers asked the pet's store for and it lacked.
     pub fn take_pet_spell_tooltip_asks(&mut self) -> Vec<u32> {
         self.model_mut().pet_spell_tooltip_asks.drain().collect()
-    }
-
-    /// The spells whose pet view a hover reads from the VM's own state: the pet's bar and book,
-    /// whose setters pass the builder's unit selector (`0x532888`, `0x532e23`). The app pushes
-    /// their views ahead of a hover.
-    pub fn pet_spell_tooltip_subjects(&self) -> Vec<u32> {
-        let model = self.model_ref();
-        let pet_bar = model
-            .pet_bar
-            .slots
-            .iter()
-            .filter(|s| !s.view.is_token)
-            .filter_map(|s| s.view.spell_id);
-        let pet_book = model.pet_book.slots.iter().map(|s| s.spell_id);
-        pet_bar.chain(pet_book).filter(|&id| id != 0).collect()
-    }
-
-    /// The spells whose player view a hover reads from the VM's own state rather than the
-    /// player's book: the open quest's and each log entry's reward spell and the open craft's
-    /// spell subjects. The app pushes their views ahead of a hover; the auras' views are
-    /// [`Self::aura_tooltip_subjects`].
-    pub fn spell_tooltip_subjects(&self) -> Vec<u32> {
-        let model = self.model_ref();
-        let rewards = model
-            .quest
-            .iter()
-            .filter_map(|q| q.reward_spell.as_ref())
-            .chain(
-                model
-                    .quest_log
-                    .entries
-                    .iter()
-                    .filter(|e| !e.is_header)
-                    .filter_map(|e| {
-                        model
-                            .quest_store
-                            .records
-                            .get(&e.quest_id)?
-                            .reward_spell
-                            .as_ref()
-                    }),
-            )
-            .map(|s| s.spell_id);
-        let craft = model
-            .craft
-            .iter()
-            .flat_map(|c| &c.recipes)
-            .filter_map(|r| match r.tooltip {
-                CraftTooltip::Spell(id) => Some(id),
-                CraftTooltip::Item(_) => None,
-            });
-        rewards.chain(craft).filter(|&id| id != 0).collect()
     }
 }
 
@@ -343,13 +307,16 @@ fn spell_store(
     }
 }
 
-/// Look up a spell's view built against the player, or with `alt_caster` against its pet; a miss
-/// records the ask.
+/// A spell's view built against the player, or with `alt_caster` against its pet, at the call
+/// through the lent host ([`SpellViewQuery`]), else off the store, where a miss records the ask.
 pub(super) fn spell_view_of(
     lua: &Lua,
     spell_id: u32,
     alt_caster: bool,
 ) -> Option<SpellTooltipView> {
+    if let Some(v) = built_at_the_call(lua, spell_id, alt_caster) {
+        return Some(v);
+    }
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let (views, asks) = spell_store(&mut model, alt_caster);
     let v = views.get(&spell_id).cloned();
@@ -357,6 +324,28 @@ pub(super) fn spell_view_of(
         asks.insert(spell_id);
     }
     v
+}
+
+/// [`spell_view_of`] recording no ask: the view built at the call, else the store's.
+pub(super) fn spell_view_peek(
+    lua: &Lua,
+    spell_id: u32,
+    alt_caster: bool,
+) -> Option<SpellTooltipView> {
+    built_at_the_call(lua, spell_id, alt_caster).or_else(|| {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        spell_store(&mut model, alt_caster)
+            .0
+            .get(&spell_id)
+            .cloned()
+    })
+}
+
+/// The view the lent host builds at the call ([`SpellViewQuery`]); spell 0 asks nothing.
+fn built_at_the_call(lua: &Lua, spell_id: u32, pet: bool) -> Option<SpellTooltipView> {
+    (spell_id != 0)
+        .then(|| super::live::ask(lua, &SpellViewQuery { spell_id, pet }))
+        .flatten()
 }
 
 /// The talent lines [`render_spell`] interleaves (`TOOLTIP_TALENT_RANK 0x854a2c`,
@@ -560,7 +549,7 @@ fn render_spell(
                 opts.remaining_ms,
                 "ITEM_COOLDOWN_TIME",
                 true,
-                &|key| crate::strings::global(lua, key),
+                crate::strings::Strings::Vm(lua),
             );
             if let Some(line) = line {
                 append_line(lua, this, (line, WHITE), None, false)?;
@@ -621,8 +610,7 @@ fn render_spell(
 /// `ITEM_REQ_REPUTATION` of the faction and the rank's gendered label
 /// ([`crate::strings::standing_label`]).
 fn reputation_line(lua: &Lua, r: &ReputationRequirement) -> Option<String> {
-    let label =
-        crate::strings::standing_label(&|k| crate::strings::global(lua, k), r.rank, r.female);
+    let label = crate::strings::standing_label(crate::strings::Strings::Vm(lua), r.rank, r.female);
     let template = crate::strings::global(lua, "ITEM_REQ_REPUTATION")?;
     Some(crate::strings::fill(
         &template,
@@ -651,6 +639,7 @@ pub(super) fn set_spell_with_talent(
     }
     match spell_view_of(lua, spell_id, false) {
         Some(v) => {
+            note_build(lua, h, spell_id, &v.item_misses);
             render_spell(lua, this, &v, SpellRenderOpts::default(), Some(&talent))?;
         }
         None => {
@@ -706,6 +695,100 @@ pub(super) fn set_spell_flagged(
     fill_spell(lua, this, h, spell_id, fallback_name, opts)
 }
 
+/// What a fresh spell build keeps on its tooltip for the rebuild an item answer runs: the spell id
+/// (`+0x39c`, stored at `0x52e6c6`, zeroed by the clear at `0x5300e3`) and the misses still owed
+/// (`+0x3b0`, zeroed at `0x52e6cc`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SpellBuild {
+    spell_id: u32,
+    misses: u32,
+}
+
+/// A fresh build of `spell_id` on `h`, which missed the item records `misses`: the tooltip keeps
+/// the spell and the count, and each miss keeps one answer's callback per tooltip and entry
+/// (`0x55ba30` with flag 1, `0x52ed85`), across later builds and clears.
+fn note_build(lua: &Lua, h: FrameHandle, spell_id: u32, misses: &[u32]) {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    model.spell_builds.insert(
+        h,
+        SpellBuild {
+            spell_id,
+            misses: misses.len() as u32,
+        },
+    );
+    if misses.is_empty() {
+        return;
+    }
+    let waits = model.spell_item_waits.entry(h).or_default();
+    for &entry in misses {
+        if !waits.contains(&entry) {
+            waits.push(entry);
+        }
+    }
+    model.tooltip_record_asks.extend_from_slice(misses);
+    drop(model);
+    super::tooltip_item::build::ask_tooltip_records(lua);
+}
+
+/// `CGTooltip::OnSpellItemAnswer` (`0x52f820`) for every item record pushed since the last tick,
+/// or with `only`, for that entry's answer alone, at its packet: each answer a tooltip waits on
+/// takes one off its count (`0x52f838`), and once none is owed (`0x52f847`) a tooltip still
+/// keeping a spell (`0x52f849`) builds it again fresh, with every other argument 0 (`0x52f862`),
+/// and sizes it (`0x52f867`). A refused record never answers (`0x52f826`).
+pub(super) fn answer_spell_items(lua: &Lua, only: Option<u32>) -> Vec<mlua::Error> {
+    let answered: Vec<(FrameHandle, usize)> = {
+        let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
+        let model = &mut *guard;
+        if model.spell_item_waits.is_empty() {
+            return Vec::new();
+        }
+        let tips: Vec<FrameHandle> = model.spell_item_waits.keys().copied().collect();
+        let mut answered = Vec::new();
+        for h in tips {
+            let Some(mut waits) = model.spell_item_waits.remove(&h) else {
+                continue;
+            };
+            let before = waits.len();
+            waits.retain(|entry| {
+                !(only.is_none_or(|e| e == *entry) && model.item_templates.contains_key(entry))
+            });
+            if !waits.is_empty() {
+                model.spell_item_waits.insert(h, waits.clone());
+            }
+            if waits.len() < before {
+                answered.push((h, before - waits.len()));
+            }
+        }
+        answered
+    };
+    let mut errors = Vec::new();
+    for (h, answers) in answered {
+        for _ in 0..answers {
+            let rebuild = {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let id = model.frame_id(h);
+                model.spell_builds.get_mut(&h).and_then(|b| {
+                    b.misses = b.misses.saturating_sub(1);
+                    (b.misses == 0 && b.spell_id != 0).then_some((id, b.spell_id))
+                })
+            };
+            let Some((id, spell_id)) = rebuild else {
+                continue;
+            };
+            clear(lua, h);
+            let rebuilt = frame_wrapper(lua, id).and_then(|this| {
+                fill_spell(lua, &this, h, spell_id, None, SpellRenderOpts::default())
+            });
+            if let Err(e) = rebuilt {
+                errors.push(e);
+            }
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            super::tooltip::size_tooltip(&mut model, h);
+        }
+    }
+    errors
+}
+
 /// Fill a cleared tooltip with the spell's view, or with the fallback name and a wait on the ask.
 fn fill_spell(
     lua: &Lua,
@@ -716,7 +799,10 @@ fn fill_spell(
     opts: SpellRenderOpts,
 ) -> mlua::Result<bool> {
     let live = match spell_view_of(lua, spell_id, opts.alt_caster) {
-        Some(v) => render_spell(lua, this, &v, opts, None)?,
+        Some(v) => {
+            note_build(lua, h, spell_id, &v.item_misses);
+            render_spell(lua, this, &v, opts, None)?
+        }
         None => {
             if let Some(name) = fallback_name.clone() {
                 append_line(lua, this, (name, WHITE), None, false)?;
@@ -744,19 +830,20 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // the player's book), the index `trunc(n - 1)` in `[0, 0x400)`, else the binding
             // raises "Invalid spell slot in SetSpell" (`0x532ec8`, string `0x855290`).
             let (book_id, book_type) =
-                super::spellbook::spell_slot_args(book_id, book_type, "SetSpell")?;
+                super::spellbook::spell_slot_args(lua, book_id, book_type, "SetSpell")?;
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
-                match super::spellbook::book_slot(&model, book_id, &book_type) {
+                match super::spellbook::book_slot(lua, &model, book_id, &book_type) {
                     Some(s) => {
-                        let cooldown = s.cooldown.map(|(start_ms, duration_ms, enabled)| {
-                            (
-                                start_ms as f64 / 1000.0,
-                                f64::from(duration_ms) / 1000.0,
-                                enabled,
-                            )
-                        });
+                        // The slot's cooldown off its book's list now (`0x6e2ea0`), else the copy.
+                        let query = if super::spellbook::is_pet_book(&book_type) {
+                            super::CooldownQuery::PetSpell(s.spell_id)
+                        } else {
+                            super::CooldownQuery::Spell(s.spell_id)
+                        };
+                        let cooldown = super::cooldown_read::read_live(lua, query)
+                            .unwrap_or_else(|| s.cooldown.map(super::cooldown_read::seconds));
                         (
                             s.spell_id,
                             Some(s.name.clone()),
@@ -781,19 +868,14 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetShapeshift",
         lua.create_function(|lua, (this, index): (Table, Value)| {
             // `is-number` else `Usage: SetShapeshift(slot)` (`0x85523c`, `0x532ad6`).
-            let index = binding_abi::index_arg(lua, index, "Usage: SetShapeshift(slot)")?;
+            let index = binding_abi::index_arg32(lua, index, "Usage: SetShapeshift(slot)")?;
             let now = crate::script::clock::now(lua);
-            let (spell_id, name, remaining_ms) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                match model.shapeshift_forms.get(index.saturating_sub(1)) {
-                    Some(f) => (
-                        f.view.spell_id,
-                        Some(f.view.name.clone()),
-                        live_remaining_ms(f.cooldown, now),
-                    ),
-                    None => return Ok(Value::Nil),
-                }
+            // `index - 1` against the count, unsigned (`0x5329fe`, `0x532a01`): 0 is past it.
+            let Some((spell_id, name, cooldown)) = super::shapeshift::tooltip_form(lua, index)
+            else {
+                return Ok(Value::Nil);
             };
+            let remaining_ms = live_remaining_ms(cooldown, now);
             // Both legs pass the rank and the `UberTooltips` compact flag (`0x532a62`-`0x532a84`,
             // `0x532aaf`-`0x532abe`).
             let opts = SpellRenderOpts {
@@ -819,21 +901,29 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // `is-number` else `Usage: SetPetAction(slot)` (`0x855220`, `0x5328f4`).
             let index = binding_abi::index_arg(lua, index, "Usage: SetPetAction(slot)")?;
             let now = crate::script::clock::now(lua);
-            let (spell_id, name, remaining_ms) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
-                match model
-                    .pet_bar
-                    .slots
-                    .get(index.saturating_sub(1))
-                    .filter(|s| !s.view.is_token)
-                {
-                    Some(s) => match s.view.spell_id {
-                        Some(id) => (id, s.view.name.clone(), live_remaining_ms(s.cooldown, now)),
-                        None => return Ok(Value::Nil),
-                    },
-                    None => return Ok(Value::Nil),
-                }
+            // The slot as it stands, and its spell's cooldown off the pet's list (`0x6e2ea0`); the
+            // index less one, compared unsigned, so 0 is past the bar (`0x532806`, `0x532812`).
+            let Some(view) = u32::try_from(index)
+                .ok()
+                .and_then(|i| super::pet::slot_now(lua, i))
+                .filter(|v| !v.is_token)
+            else {
+                return Ok(Value::Nil);
             };
+            let Some(spell_id) = view.spell_id else {
+                return Ok(Value::Nil);
+            };
+            let cooldown =
+                super::cooldown_read::read_live(lua, super::CooldownQuery::PetSpell(spell_id))
+                    .unwrap_or_else(|| {
+                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        model
+                            .pet_bar
+                            .slots
+                            .get(index.saturating_sub(1))
+                            .and_then(|s| s.cooldown)
+                    });
+            let (name, remaining_ms) = (view.name, live_remaining_ms(cooldown, now));
             // The unit selector and the rank on both legs (`0x532886`, `0x5328ce`).
             let opts = SpellRenderOpts {
                 alt_caster: true,
@@ -853,14 +943,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetQuestRewardSpell",
         lua.create_function(|lua, this: Table| {
-            let id = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model
-                    .quest
-                    .as_ref()
-                    .and_then(|q| q.reward_spell.as_ref())
-                    .map(|s| (s.spell_id, s.name.clone()))
-            };
+            // The panel's spell cell as the host holds it at the call (`0xbe0830`).
+            let id = crate::script::quest::state(lua)
+                .and_then(|q| q.reward_spell)
+                .map(|s| (s.spell_id, s.name));
             set_reward_spell(lua, &this, id)
         })?,
     )?;
@@ -882,35 +968,56 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // macro (0x40) to `0x52b040`, which fetches it (`0x4f0f40`) and renders only its name, white
     // (`0x5303b0` in colour `0xc0cf60`), or hides with none; 1.12 has no `#showtooltip`. It
     // answers the spell or item builder's return value as 1 or nil (`0x5325a9`), the spell's only
-    // with a cooldown running, nil for the macro leg, an empty slot and any other kind;
+    // with a cooldown running, nil for the Attack slot, the macro leg, an empty slot and any other kind;
     // `ActionButton_SetTooltip` arms `updateTooltip` from it.
     m.set(
         "SetAction",
         lua.create_function(|lua, (this, slot): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
             // `is-number` else `Usage: SetAction(slot)` (`0x855200`, `0x5326c3`).
             let slot = binding_abi::index_arg32(lua, slot, "Usage: SetAction(slot)")?;
             let now = crate::script::clock::now(lua);
-            let (action, remaining_ms, owned) = {
+            // The slot's cooldown query (`0x5323a6` → `0x4e6ca0`) and its attack test (`0x5323b4` →
+            // `0x4e59b0`), both at the call, as `GetActionCooldown` and `IsAttackAction` read them.
+            let state = super::action::state_of(lua, slot);
+            let cooldown = state
+                .filter(|s| !s.no_cooldown_query)
+                .and_then(|s| super::action::slot_cooldown(lua, &s));
+            let (action, remaining_ms, owned, attack) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let action = model.actions.get(&slot).cloned();
                 // An item word resolves to the player's own item by entry (`0x532490`).
                 let owned = action
                     .as_ref()
                     .filter(|a| a.kind == 0x80)
-                    .and_then(|a| super::tooltip_item::owned_instance(&model, a.action));
+                    .and_then(|a| super::tooltip_item::owned_instance(lua, &model, a.action));
                 (
                     action,
-                    live_remaining_ms(model.action_states.get(&slot).and_then(|s| s.cooldown), now),
+                    live_remaining_ms(cooldown, now),
                     owned,
+                    state.is_some_and(|s| s.is_attack),
                 )
             };
+            // Every slot clears the tooltip first (`0x5323ad`), an empty one included.
+            clear(lua, h);
+            // A slot whose spell has the attack effect (`0x4e59b0`) is one white line,
+            // `GetText("ATTACK")` (`0x855218`) in a 32-byte copy, shown, and nil
+            // (`0x5323bd`..`0x532409`).
+            if attack {
+                let text = super::glue_core::global_text(lua, "ATTACK");
+                let text = super::macros::cut_bytes(&text, 31).to_string();
+                append_line(lua, &this, (text, WHITE), None, false)?;
+                // The shown bit and the show slot, unconditionally (`0x5323f4`..`0x5323fe`).
+                super::visibility::set_shown(lua, h, true);
+                return Ok(Value::Nil);
+            }
             let Some(a) = action else {
                 return Ok(Value::Nil);
             };
             // A macro is a word whose top nibble is 4 (`0x5322a0`), so a character macro's slot
             // (kind 0x41) is one too.
             if let Some(id) = super::action::macro_slot_id(a.kind, a.action) {
-                let h = frame_handle_of(lua, &this)?;
+                // The macro builder clears again (`0x52b046`).
                 clear(lua, h);
                 // The same lookup as `GetActionText` and the bar icon, so the three agree on a
                 // slot's macro.
@@ -928,7 +1035,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             match a.kind {
                 // The builder's value counts only with a cooldown running (`0x532597`); the other
                 // leg builds with a zero remainder and pushes nil (`0x53267c`, `0x532690`), so
-                // Attack, Parry, Block and Dodge answer nil here, whatever their chance line.
+                // Parry, Block and Dodge answer nil here, whatever their chance line.
                 0x00 => {
                     let live = set_spell_flagged(
                         lua,
@@ -965,10 +1072,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GameTooltip:SetTrainerService(index): the trainer detail icon's hover
     // (`Blizzard_TrainerUI.xml:452`); list rows have no tooltip. `0x5338b0` writes no line itself
     // and hands a shared builder the subject the app resolved (`TrainerService::tooltip`). `index`
-    // is a visible row, headers included; a header is a no-op.
+    // is a visible row, headers included.
     m.set(
         "SetTrainerService",
         lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `this` first (`0x5338f0`), as every method's prologue.
+            frame_handle_of(lua, &this)?;
             // `is-number` else `Invalid trainer service in SetTrainerService(index)` (`0x8553a4`,
             // `0x533968`).
             let index = binding_abi::index_arg(
@@ -976,11 +1085,17 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 index,
                 "Invalid trainer service in SetTrainerService(index)",
             )?;
+            // A row past the count (`0x533990`) or a spell with no record, a header's -1
+            // (`0x53399a`), raises the same line (`0x533a9a`).
             let subject = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 match super::trainer::service(&model, index) {
                     Some(s) => s.tooltip.clone(),
-                    None => return Ok(()),
+                    None => {
+                        return Err(mlua::Error::runtime(
+                            "Invalid trainer service in SetTrainerService(index)",
+                        ))
+                    }
                 }
             };
             match subject {
@@ -1007,23 +1122,33 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     // GameTooltip:SetCraftSpell(craftIndex): the craft detail icon's hover
     // (`Blizzard_CraftUI.xml:566`). `SetCraftSpell 0x533e90` hands a shared builder the subject the
-    // app resolved from the recipe's own effects (`CraftRecipe::tooltip`). `craftIndex` is a plain
-    // recipe position: the craft list has no headers.
+    // app resolved from the recipe's own effects (`CraftRecipe::tooltip`). `craftIndex` is 1-based
+    // into the craft rows, where a header holds no recipe.
     m.set(
         "SetCraftSpell",
         lua.create_function(|lua, (this, craft_index): (Table, Value)| {
-            // `is-number` else `Invalid craft in SetCraftSpell(index)` (`0x85544c`, `0x533f54`).
-            let craft_index =
-                binding_abi::index_arg(lua, craft_index, "Invalid craft in SetCraftSpell(index)")?;
+            // `this` first (`0x533f29`), then `is-number` else `Invalid craft in
+            // SetCraftSpell(index)` (`0x85544c`, `0x533f54`).
+            let h = frame_handle_of(lua, &this)?;
+            const LINE: &str = "Invalid craft in SetCraftSpell(index)";
+            let craft_index = binding_abi::index_arg(lua, craft_index, LINE)?;
             let subject = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let Some(c) = &model.craft else {
-                    return Ok(());
-                };
-                match craft_index.checked_sub(1).and_then(|i| c.recipes.get(i)) {
-                    Some(r) => r.tooltip.clone(),
-                    None => return Ok(()),
+                match super::craft::recipe(&model, craft_index) {
+                    Some(r) => Some(r.tooltip.clone()),
+                    // A row past the count raises (`0x533f7b`, `0x53405a`).
+                    None if !super::craft::has_row(&model, craft_index) => {
+                        return Err(mlua::Error::runtime(LINE))
+                    }
+                    None => None,
                 }
+            };
+            // A header's spell -1 goes to the spell builder (`0x533f99`, `0x533fdf`), which finds
+            // no record, clears and hides (`0x52e63a`, `0x52e6a4`).
+            let Some(subject) = subject else {
+                clear(lua, h);
+                super::visibility::set_shown(lua, h, false);
+                return Ok(());
             };
             match subject {
                 CraftTooltip::Item(item_id) => {

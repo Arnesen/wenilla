@@ -31,9 +31,9 @@ pub struct AttackerState {
     /// `meleeSpellId` (`rec+0xac`), nonzero for an on-next-swing ability such as Heroic Strike; the
     /// reference only ever compares it to zero (`0x625e40`, `0x6246ca`).
     pub melee_spell_id: u32,
-    /// The first sub-damage block's school (0 physical to 6 arcane, `GetFirstSchoolInMask`), 0
-    /// with no blocks; a non-physical swing takes the combat log's `…SCHOOL` wording.
-    pub school: u8,
+    /// The first sub-damage block's school dword (`rec+0x18`, `0x625cb1`; vmangos 0 physical to 6
+    /// arcane), 0 with no blocks; a non-physical swing takes the combat log's `…SCHOOL` wording.
+    pub school: u32,
 }
 
 impl AttackerState {
@@ -66,12 +66,12 @@ pub(super) fn read_attacker_state(r: &mut impl Read) -> io::Result<AttackerState
     let subs = read_u8(r)?;
     let mut absorb = 0u32;
     let mut resist = 0i32;
-    let mut school = 0u8;
+    let mut school = 0u32;
     for i in 0..subs {
         // The school comes from the first block; later blocks split off other schools.
         let block_school = read_u32_le(r)?;
         if i == 0 {
-            school = u8::try_from(block_school).unwrap_or(0);
+            school = block_school;
         }
         let _damage_f = read_f32_le(r)?;
         let _damage = read_u32_le(r)?;
@@ -159,6 +159,17 @@ mod tests {
         b.extend_from_slice(&0u32.to_le_bytes()); // meleeSpellId
         b.extend_from_slice(&blocked.to_le_bytes()); // BlockedAmount
         b
+    }
+
+    /// `0x625c60` stores sub-damage block 0's school dword at `rec+0x18` (`0x625cb1`), which the
+    /// swing's `UNIT_COMBAT` pushes whole (`0x4946fc`).
+    #[test]
+    fn a_swing_keeps_its_first_blocks_school_dword() {
+        let mut b = packet(30, 1, 0);
+        let at = 4 + 2 + 2 + 4 + 1; // the first block's school
+        b[at..at + 4].copy_from_slice(&0x0001_0004u32.to_le_bytes());
+        let s = read_attacker_state(&mut b.as_slice()).expect("parse");
+        assert_eq!(s.school, 0x0001_0004);
     }
 
     #[test]

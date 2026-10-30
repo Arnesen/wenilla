@@ -1,46 +1,57 @@
 //! The session verbs: the game menu's Logout and Exit Game, their dialogs' answers, `ReloadUI`
-//! and the cinematic pair. Each queues a [`SessionRequest`] the app turns into a packet or an
-//! exit; the server decides whether a logout is instant or a 20-second countdown. Beside them,
-//! the world-enter cascade's two events and the `PLAYER_LOGIN` arm a UI load sets.
+//! and the cinematic pair. Each hands its [`SessionRequest`] to the call host, which sends the
+//! packet, sets the latch or ends the process before the verb returns, as the reference's do
+//! (`Logout` `0x489390` → `0x5ab000`); the server decides whether a logout is instant or a
+//! 20-second countdown. Beside them, the world-enter cascade's two events and the `PLAYER_LOGIN`
+//! arm a UI load sets.
 
 use mlua::Lua;
 
 use super::Model;
 
-/// A session intent queued by a Lua call, drained by the app.
+/// A session verb, which the call host applies inside the call ([`super::ScriptCall::Session`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionRequest {
-    /// `Logout()`: `CMSG_LOGOUT_REQUEST` (`0x5ab000`), back to character select.
+    /// `Logout()` (`0x489390`): `0x5ab000(0, 0)`, `CMSG_LOGOUT_REQUEST`, back to character select.
     Logout,
-    /// `Quit()`: the same request, then the process ends once the logout completes.
+    /// `Quit()` (`0x4893b0`): `0x5ab000(1, 0)`, the same request, then the process ends once the
+    /// logout completes.
     Quit,
-    /// `CancelLogout()`: `CMSG_LOGOUT_CANCEL`; the server's ack fires `LOGOUT_CANCEL`.
+    /// `CancelLogout()` (`0x48ab40` → `0x5aaf80`): `CMSG_LOGOUT_CANCEL`, and the pending latch
+    /// clears.
     CancelLogout,
-    /// `ForceQuit()`: end the process now, with no server round trip.
+    /// `ForceQuit()` (`0x48ab60` → `0x401560(0)`): end the process now, with no server round
+    /// trip.
     ForceQuit,
-    /// `ForceLogout()` (`0x48ab50`): an empty `CMSG_PLAYER_LOGOUT` (`0x4A`), bypassing the
-    /// pending-logout latch, and nothing without a live in-world session (`0x5ab020`).
+    /// `ForceLogout()` (`0x48ab50` → `0x5aaff0`): `0x5ab000(0, 1)`, an empty `CMSG_PLAYER_LOGOUT`
+    /// (`0x4A`), bypassing the pending-logout latch, and nothing without a live in-world session
+    /// (`0x5ab020`).
     ForceLogout,
     /// `ReloadUI()` (`0x4884d0`) only sets `0xb4b3f4`; the next frame's `0x495590` tears the VM
-    /// down and rebuilds it, so it is never destroyed mid-call. The app's drain, outside any call,
-    /// is the same guard.
+    /// down and rebuilds it, so it is never destroyed mid-call.
     ReloadUi,
-    /// `StopCinematic()` (`0x48b970`), the only skip: no native caller and no binding, so ESC
-    /// reaches it only through `CinematicFrame`'s `OnKeyDown`; playback therefore waits for the
-    /// in-game UI.
+    /// `StopCinematic()` (`0x48b970` → `0x48f050`), the only skip: no native caller and no
+    /// binding, so ESC reaches it only through `CinematicFrame`'s `OnKeyDown`; playback therefore
+    /// waits for the in-game UI.
     StopCinematic,
 }
 
 impl super::UiScript {
-    /// Drain the session intents queued since the last call.
-    pub fn take_session_requests(&mut self) -> Vec<SessionRequest> {
-        std::mem::take(&mut self.model_mut().session_requests)
+    /// Hand `request` to the call host, as its Lua verb does: `/logout`, `/camp`, `/quit` and
+    /// `/reload`, which benilla parses in Rust rather than through `SlashCmdList`, and the
+    /// engine's own calls (the idle handler's `0x5ab000`, the console's reload), take this route.
+    /// What the call raises, a call made with no host lent among it, is the error.
+    pub fn session_call(&mut self, request: SessionRequest) -> mlua::Result<()> {
+        let lua = self.lua().clone();
+        super::calls::submit(&lua, super::ScriptCall::Session(request))
     }
 
-    /// Queue an intent from the app: `/logout`, `/camp`, `/quit` and `/reload`, which benilla
-    /// parses in Rust rather than through `SlashCmdList`, take their Lua verbs' route this way.
-    pub fn queue_session_request(&mut self, request: SessionRequest) {
-        self.model_mut().session_requests.push(request);
+    /// The session calls a harness VM kept ([`Self::keep_calls`]), in call order.
+    pub fn take_session_requests(&mut self) -> Vec<SessionRequest> {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Session(request) => Some(*request),
+            _ => None,
+        })
     }
 
     /// Arm `PLAYER_LOGIN`, the UI load's last step: `UI_Init` sets the one-shot `[0xb4e260]` at
@@ -50,30 +61,137 @@ impl super::UiScript {
         self.model_mut().player_login_armed = true;
     }
 
+    /// The bag watchers' set-up in the world-enter cascade (`0x4f8cc0`): the bag cache zeroed,
+    /// then rescanned (`0x4f8da6` → `0x4f91a0`), so each of bags 1 to 10 the player holds fires
+    /// `BAG_UPDATE` with its number, in order (`0x4f9343`); the backpack, the bank and the keyring
+    /// are no bags of the cache. A bag held is a container pushed for its number.
+    fn bags_enter_world(&mut self) {
+        let held: Vec<i64> = {
+            let model = self.model_ref();
+            super::held::held_bags(&self.lua, &model)
+        };
+        for n in held {
+            self.fire_event("BAG_UPDATE", vec![super::ScriptValue::Int(n)]);
+        }
+    }
+
+    /// [`Self::fire_world_enter_with`] at the bonus bar offset the VM holds, for a harness with no
+    /// player form to read.
+    pub fn fire_world_enter(&mut self) {
+        let offset = self.model_ref().bonus_bar_offset;
+        self.fire_world_enter_with(offset);
+    }
+
     /// The world-enter cascade's events (`0x4908c0`): a full collection
     /// (`FrameScriptCollectGarbage(1)`, `0x490946`), then `PLAYER_LOGIN` (270, `0x490959`) only if
     /// a load armed it (read at `0x49094b`, cleared at `0x49095e`), then `PLAYER_ENTERING_WORLD`
     /// (272, `0x49096a`) every time, then the minimap's zoom reseed
-    /// ([`Self::minimap_enter_world`]), the quest log's rebuild and its `QUEST_LOG_UPDATE`
-    /// ([`Self::quest_log_enter_world`]) and the reputation list's rebuild and its `UPDATE_FACTION`
-    /// ([`Self::reputation_enter_world`]). The cascade runs with the player object in the world, so its
-    /// caller seats `"player"` first, and inside its own sound-suppression bracket (`0x4908d5` to
-    /// `0x490a56`), so a handler's `PlaySound` is dropped.
-    pub fn fire_world_enter(&mut self) {
-        let armed = std::mem::take(&mut self.model_mut().player_login_armed);
+    /// ([`Self::minimap_enter_world`]), the action bar's usable refresh and its
+    /// `ACTIONBAR_UPDATE_USABLE` when the caller says a pair changed, the bonus bar's offset,
+    /// `bonus_bar_offset`, from the player's form and its `UPDATE_BONUS_ACTIONBAR`, the buff
+    /// cache's setup and its `PLAYER_AURAS_CHANGED` (`0x490983`, the app's), the bags'
+    /// `BAG_UPDATE`s ([`Self::bags_enter_world`]), the quest log's rebuild and its `QUEST_LOG_UPDATE`
+    /// ([`Self::quest_log_enter_world`]), the pet bar's reset ([`Self::drop_pet_bar`],
+    /// [`Self::fire_pet_bar_dropped`]), the reputation list's rebuild and its `UPDATE_FACTION`
+    /// ([`Self::reputation_enter_world`]) and the skill list's rebuild and its
+    /// `SKILL_LINES_CHANGED` ([`Self::rebuild_skills`]). The cascade runs with the player object in
+    /// the world, so its caller seats `"player"` first, and inside its own sound-suppression
+    /// bracket (`0x4908d5` to `0x490a56`), so a handler's `PlaySound` is dropped.
+    ///
+    /// The pet bar here is the VM's own, and the buff cache's setup (`0x490983`), which the app
+    /// holds, is left out: a caller that holds the bar's guid and the cache runs the cascade in its
+    /// parts, [`Self::fire_world_enter_head`], the cache's setup,
+    /// [`Self::fire_world_enter_watchers`], the reset on both sides, then
+    /// [`Self::fire_world_enter_tail`].
+    pub fn fire_world_enter_with(&mut self, bonus_bar_offset: u8) {
+        self.fire_world_enter_head(bonus_bar_offset, false);
+        self.fire_world_enter_watchers();
+        let dropped = self.drop_pet_bar();
+        self.fire_pet_bar_dropped(dropped);
+        self.fire_world_enter_tail();
+    }
+
+    /// The cascade up to the buff cache's setup (`0x490983`): its events
+    /// ([`Self::fire_world_enter_events`]), then the action bar's ([`Self::fire_world_enter_action_bar`]).
+    /// [`Self::fire_world_enter_tail`] closes it.
+    pub fn fire_world_enter_head(&mut self, bonus_bar_offset: u8, usable_changed: bool) {
+        self.open_world_enter();
+        self.fire_world_enter_events();
+        self.fire_world_enter_action_bar(bonus_bar_offset, usable_changed);
+    }
+
+    /// The cascade's sound bracket opened (`0x4908d5` → `0x458f50`), ahead of its
+    /// `SelectTarget(0)` (`0x490927`), the caller's, so the target's handlers play nothing.
+    /// [`Self::close_world_enter`] closes it.
+    pub fn open_world_enter(&mut self) {
         self.push_sound_suppression();
+    }
+
+    /// The cascade past its `SelectTarget(0)`: the collection, `PLAYER_LOGIN` if armed,
+    /// `PLAYER_ENTERING_WORLD`, then the first call after the signal, the minimap initializer
+    /// (`0x49096f`), inside the bracket [`Self::open_world_enter`] opened. The chat release follows
+    /// it (`0x490974`), the caller's.
+    pub fn fire_world_enter_events(&mut self) {
+        self.seat_reputation();
+        let armed = std::mem::take(&mut self.model_mut().player_login_armed);
         // `0x703bc0` with 1: the threshold set to 0 (`0x703bd6`), so the collection runs now.
         self.lua.set_gc_threshold_kb(0);
         if armed {
             self.fire_event("PLAYER_LOGIN", Vec::new());
         }
         self.fire_event("PLAYER_ENTERING_WORLD", Vec::new());
-        // The calls after the signal, inside the bracket: the minimap initializer first
-        // (`0x49096f`), then among the rest the quest log's set-up (`0x4909a1`) and the
-        // reputation rebuild (`0x4909d3`).
         self.minimap_enter_world();
+    }
+
+    /// The action bar's call (`0x490979` → `0x4e4f90`): the usable refresh `0x4e5c00`, signalling
+    /// `ACTIONBAR_UPDATE_USABLE` on a changed pair (`0x4e5c53`), which `usable_changed` says the
+    /// caller's slots found, then the bonus bar (`0x4e4f95` → `0x4e4fc0`), which sets the offset
+    /// and signals whether or not it moved (`0x4e5018`).
+    pub fn fire_world_enter_action_bar(&mut self, bonus_bar_offset: u8, usable_changed: bool) {
+        if usable_changed {
+            self.fire_event("ACTIONBAR_UPDATE_USABLE", Vec::new());
+        }
+        self.set_bonus_bar_offset(bonus_bar_offset);
+        self.fire_event("UPDATE_BONUS_ACTIONBAR", Vec::new());
+    }
+
+    /// The cascade after the buff cache's setup up to the pet bar's reset (`0x4909c9`): the bag
+    /// watchers' set-up (`0x49098d`) and the quest log's (`0x4909a1`).
+    pub fn fire_world_enter_watchers(&mut self) {
+        self.fire_world_enter_bags();
+        self.fire_world_enter_quest_log();
+    }
+
+    /// The bag watchers' set-up (`0x49098d`, [`Self::bags_enter_world`]).
+    pub fn fire_world_enter_bags(&mut self) {
+        self.bags_enter_world();
+    }
+
+    /// The quest log's init (`0x4909a1`): its rebuild and `QUEST_LOG_UPDATE`.
+    pub fn fire_world_enter_quest_log(&mut self) {
         self.quest_log_enter_world();
+    }
+
+    /// The cascade after the pet bar's reset: its rebuilds ([`Self::fire_world_enter_rebuilds`]),
+    /// then the bracket closed ([`Self::close_world_enter`]).
+    pub fn fire_world_enter_tail(&mut self) {
+        self.fire_world_enter_rebuilds();
+        self.close_world_enter();
+    }
+
+    /// The reputation rebuild (`0x4909d3`), the looking-for-group lists' (`0x4909e7` → `0x4e7f00`)
+    /// and the skill list's (`0x4909f1` → `0x4d2c90`). The lists' call is the type recount, which
+    /// signals `UPDATE_LFG_TYPES` (`0x4e89c0`, `0x4e8b0e`), then the quest list's rebuild, which
+    /// signals it again (`0x4e8be0`, `0x4e8c70`).
+    pub fn fire_world_enter_rebuilds(&mut self) {
         self.reputation_enter_world();
+        self.fire_event("UPDATE_LFG_TYPES", Vec::new());
+        self.fire_event("UPDATE_LFG_TYPES", Vec::new());
+        self.rebuild_skills();
+    }
+
+    /// The cascade's bracket closed (`0x490a56`), after its last call.
+    pub fn close_world_enter(&mut self) {
         self.pop_sound_suppression();
     }
 }
@@ -101,9 +219,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 {
                     return Ok(());
                 }
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.session_requests.push(request);
-                Ok(())
+                super::calls::submit(lua, super::ScriptCall::Session(request))
             })?,
         )?;
     }
@@ -122,4 +238,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::script::{ContainerState, UiScript};
+
+    /// The cascade's bag watcher set-up (`0x49098d` → `0x4f8cc0`) zeroes the bag cache and
+    /// rescans it (`0x4f8da6` → `0x4f91a0`): `BAG_UPDATE` for each of the ten bags present, in
+    /// order, after `PLAYER_ENTERING_WORLD`; the backpack, the bank and the keyring are no bags of
+    /// the cache.
+    #[test]
+    fn the_world_enter_cascade_updates_each_bag_present() {
+        let mut s = UiScript::new().unwrap();
+        for bag in [-2, -1, 0, 1, 3, 5, 10] {
+            s.set_container(
+                bag,
+                Some(ContainerState {
+                    name: None,
+                    num_slots: 4,
+                    slots: Default::default(),
+                }),
+            );
+        }
+        s.run(
+            "Heard = {} local f = CreateFrame('Frame') f:RegisterEvent('BAG_UPDATE') \
+             f:RegisterEvent('PLAYER_ENTERING_WORLD') \
+             f:SetScript('OnEvent', function() table.insert(Heard, event .. ':' .. tostring(arg1)) end)",
+        )
+        .unwrap();
+        s.fire_world_enter();
+        assert_eq!(
+            s.eval::<Vec<String>>("return Heard").unwrap(),
+            [
+                "PLAYER_ENTERING_WORLD:nil",
+                "BAG_UPDATE:1",
+                "BAG_UPDATE:3",
+                "BAG_UPDATE:5",
+                "BAG_UPDATE:10"
+            ]
+        );
+    }
 }

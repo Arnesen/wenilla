@@ -2,8 +2,9 @@
 //! 10 s cast), then 2 s into the bar presses `W` through `ButtonInput<KeyCode>`, the controller
 //! path a player's key takes to `spell::local_self_cancel` and `CMSG_CANCEL_CAST`.
 //!
-//! With `WOW_CAST_TRACE=1` the `LOCAL self-cancel` line must land frames after the `SEND move
-//! StartForward` line, and the server's `RECV CAST_RESULT failure` must follow without repainting.
+//! With `WOW_CAST_TRACE=1` the `LOCAL self-cancel` line must land just before the `SEND move
+//! StartForward` line, in the same frame, as the press cancels before its tick (`0x51512a` before
+//! `0x5151a0`), and the server's `RECV CAST_RESULT failure` must follow without repainting.
 //! Every bar phase change is logged ([`bar_timeline`]) so the hold, burst and fade are measured
 //! from timestamps. Non-combat: a failed cancel only hearths the character home. The switches are
 //! `docs/CONTRIBUTING.md`, "Running it unattended".
@@ -93,10 +94,11 @@ fn cast_cancel_probe(
     time: ProbeClock,
     mut probe: ResMut<ProbeCastCancel>,
     self_player: Query<(), With<SelfPlayer>>,
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut keys: ResMut<ButtonInput<KeyCode>>,
+    // The keys, which the call host's click reads: pressed once the host is back.
+    mut vm: crate::script_calls::VmWith<ResMut<'static, ButtonInput<KeyCode>>>,
 ) {
-    hosted_vm.run(|script| {
+    let mut w = None;
+    vm.run(|script| {
         if self_player.is_empty() {
             return;
         }
@@ -129,14 +131,19 @@ fn cast_cancel_probe(
             1 if t >= probe.used_at.unwrap_or(f32::MAX) + 2.0 => {
                 probe.phase = 2;
                 info!("castcancel probe: pressing W mid-cast — the local cancel should fire NOW");
-                keys.press(KeyCode::KeyW);
+                w = Some(true);
             }
             2 if t >= probe.used_at.unwrap_or(f32::MAX) + 2.3 => {
                 probe.phase = 3;
                 info!("castcancel probe: releasing W — read the cast-trace for the verdict");
-                keys.release(KeyCode::KeyW);
+                w = Some(false);
             }
             _ => {}
         }
-    })
+    });
+    match w {
+        Some(true) => vm.own().press(KeyCode::KeyW),
+        Some(false) => vm.own().release(KeyCode::KeyW),
+        None => {}
+    }
 }

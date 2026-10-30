@@ -100,8 +100,7 @@ impl GoRig {
                       mut items: ResMut<crate::items::Items>,
                       spells: Res<Spells>,
                       mods: Res<crate::spell::SpellModifiers>,
-                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
-                      mut stand: MessageWriter<crate::player::StandStateRequest>,
+
                       edits: Res<crate::creature_anim::UnitEdits>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
@@ -112,9 +111,8 @@ impl GoRig {
                         vec![],
                         None,
                         None,
+                        GoPoints::default(),
                         None,
-                        None,
-                        item,
                         caster,
                         &mut commands,
                         &index,
@@ -125,6 +123,18 @@ impl GoRig {
                         &stores,
                         &mut go_lid,
                         &mut crate::ui_loot::LootLatch::default(),
+                        Some(&*spells),
+                        (&edits, false),
+                        1,
+                    );
+                    go_cooldown_inserts(
+                        caster,
+                        SPELL,
+                        item,
+                        &index,
+                        &self_guid,
+                        &stores,
+                        &net_commands,
                         (
                             &mut cooldowns,
                             Some(&*spells),
@@ -132,22 +142,6 @@ impl GoRig {
                             &mut pet_bar,
                             &mods,
                         ),
-                        (
-                            &mut crate::spell::AutoRepeatActive::default(),
-                            &mut sheath,
-                            &mut stand,
-                            &edits,
-                            (false, false),
-                            crate::creature_anim::StartGate::default(),
-                            &mut crate::spell::CastCore {
-                                pending: &mut Default::default(),
-                                queued_melee: &mut Default::default(),
-                                ground: &mut Default::default(),
-                                reports: &mut Default::default(),
-                                net: &net_commands,
-                            },
-                        ),
-                        1,
                     );
                 },
             )
@@ -418,4 +412,56 @@ fn a_not_ready_result_with_argument_0_drops_the_held_record() {
             "argument {arg:?}"
         );
     }
+}
+
+/// A 5 s recovery and the ordinary 133/1500 global cooldown.
+fn strike() -> SpellDisplay {
+    SpellDisplay {
+        name: "Strike".into(),
+        recovery_ms: 5_000,
+        start_recovery_category: 133,
+        start_recovery_ms: 1_500,
+        ..Default::default()
+    }
+}
+
+/// After its inserts the go sweeps both lists once its receive time reaches the stored one, the
+/// first go included, and stores it 120 s on (`0x6e8606`-`0x6e863a`). The sweep never reads a
+/// global cooldown (`0x6e1910`), so the send's record, which holds the global cooldown alone
+/// (`0x6e2e72`: times 0), goes at the first go, and another spell of the start category reads
+/// none; a go within the 120 s keeps the next send's.
+#[test]
+fn the_first_go_sweeps_the_sends_global_cooldown_and_the_next_keeps_it() {
+    let mut rig = GoRig::new(strike);
+    let other = SpellDisplay {
+        start_recovery_category: 133,
+        start_recovery_ms: 1_500,
+        ..Default::default()
+    };
+    let gcd = |rig: &GoRig| {
+        rig.cooldowns()
+            .info(133, 0, Some(&other), Instant::now())
+            .remaining_ms
+    };
+    let send = |rig: &mut GoRig| {
+        let d = rig.display();
+        rig.app
+            .world_mut()
+            .resource_scope(|world, mut cds: Mut<Cooldowns>| {
+                cds.start_gcd(
+                    SPELL,
+                    &d,
+                    Instant::now(),
+                    world.resource::<crate::spell::SpellModifiers>(),
+                )
+            });
+    };
+    send(&mut rig);
+    assert!(gcd(&rig) > 0, "the send's global cooldown runs");
+    rig.go(ME, None);
+    assert_eq!(gcd(&rig), 0, "the first go swept it");
+    assert!(rig.reads().0 > 0, "the go's own recovery stays");
+    send(&mut rig);
+    rig.go(ME, None);
+    assert!(gcd(&rig) > 0, "within 120 s the go sweeps nothing");
 }

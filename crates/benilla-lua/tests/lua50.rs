@@ -535,3 +535,168 @@ fn string_dump_dumps_its_last_argument() {
         "false,bad argument #1 to `?' (function expected, got number)"
     );
 }
+
+/// `string.sub` and `string.find` read their positions through `__ftol` and keep its low dword
+/// (`0x7fbd55`, `0x7fbd79`, `0x7fc3f7`); `posrelat` adds in 32 bits (`0x7fbde6`) and the clamps are
+/// signed 32-bit compares (`0x7fbd88`-`0x7fbd9f`, `0x7fc406`-`0x7fc413`).
+#[test]
+fn string_positions_are_32_bit() {
+    assert_eq!(run("return string.sub('hello', 2^32 + 2)"), "ello");
+    assert_eq!(run("return string.sub('hello', 1, 2^31)"), "");
+    assert_eq!(run("return string.sub('hello', 2, 2^32 + 3)"), "el");
+    assert_eq!(run("return string.sub('hello', -2^32 - 2)"), "lo");
+    assert_eq!(run("return string.find('abc', 'c', 2^32 + 1)"), "3,3");
+    assert_eq!(run("return string.find('abc', 'c', -2^32 - 1)"), "3,3");
+    // Out of the quadword's range the low dword is 0: `sub` starts at 1, `find` at 1.
+    assert_eq!(run("return string.sub('hello', 2^70)"), "hello");
+    assert_eq!(run("return string.find('abc', 'a', 2^70)"), "1,1");
+}
+
+/// `match_class` takes the escaped byte sign-extended from `singlematch` (`0x7fcbc6`) and
+/// `matchbracketclass` (`0x7fc8c6`); a byte of 0x80 or more reaches its default case and compares
+/// unequal with the subject byte (`0x7fcb38`): it never matches, inside brackets or out.
+#[test]
+fn an_escaped_high_byte_matches_nothing() {
+    assert_eq!(run("return string.find('\\195\\169', '%\\195')"), "nil");
+    assert_eq!(run("return string.find('\\195\\169', '[%\\195]')"), "nil");
+    assert_eq!(run("return string.find('\\195\\169', '[^%\\195]')"), "1,1");
+    assert_eq!(
+        run("return string.gsub('Zo\\195\\171', '%\\195%\\171', 'e')"),
+        "Zo\u{eb},0"
+    );
+    // With `*`, `-` or `?` after it, it still matches the empty string.
+    assert_eq!(run("return string.find('abc', '%\\195*b')"), "2,2");
+    assert_eq!(run("return string.find('abc', '%\\195-b')"), "2,2");
+    assert_eq!(run("return string.find('abc', '%\\195?b')"), "2,2");
+    // An escaped ASCII byte is unchanged, and a literal high byte still matches itself.
+    assert_eq!(run("return string.find('a.c', '%.')"), "2,2");
+    assert_eq!(run("return string.find('\\195\\169', '\\195\\169')"), "1,2");
+    // A name escaped with `(%W)` never matches itself when it has a high byte.
+    assert_eq!(
+        run(
+            "local n = '\\195\\169x' local p = string.gsub(n, '(%W)', '%%%1') \
+             return p == '%\\195%\\169x', string.find(n, p)"
+        ),
+        "true,nil"
+    );
+}
+
+/// `error` (`0x702970`) calls `luaL_checkany(1)` (`0x702993`) before it reads the message, so no
+/// value is a bad argument; a nil is a value.
+#[test]
+fn error_with_no_value_is_a_bad_argument() {
+    assert_eq!(
+        run("return pcall(error)"),
+        "false,bad argument #1 to `error' (value expected)"
+    );
+    assert_eq!(
+        run("return pcall(function() error() end)"),
+        "false,t:1: bad argument #1 to `error' (value expected)"
+    );
+    assert_eq!(run("return pcall(error, nil)"), "false,nil");
+    assert_eq!(run("return pcall(error, 'x', 0)"), "false,x");
+}
+
+/// `OP_UNM` (`0x6f8ea1`) on a value that is no number calls `call_binTM` (`0x6f8670`) with the
+/// operand and a nil temporary (`0x6f8edc`): `__unm` gets (operand, nil), not the operand twice.
+#[test]
+fn unm_gets_the_operand_and_nil() {
+    // The result is the first value only; record the arguments on the side.
+    assert_eq!(
+        run("local t t = setmetatable({}, {__unm = function(...) \
+             seen = {arg.n, arg[1] == t, arg[2]} return 7 end}) \
+             return -t, seen[1], seen[2], tostring(seen[3])"),
+        "7,2,true,nil"
+    );
+    assert_eq!(
+        run("return pcall(function() return -{} end)"),
+        "false,t:1: attempt to perform arithmetic on a table value"
+    );
+}
+
+/// `luaV_gettable` (`0x6f7cf0`) raises `loop in gettable` once its count passes 100 (`0x6f7cf7`).
+/// An instruction reads the first table itself and hands the `__index` step a count of 0
+/// (`0x6f8940`, `0x6f8bf3`), so it reaches 102 tables; `lua_gettable` (`0x6f3ab3`) starts at 0 on
+/// the first table, so `getglobal` reaches 101. `luaV_settable` (`0x6f7f40`) counts to 100
+/// (`0x6f7ffa`): 101 tables, entered either way.
+#[test]
+fn tag_method_chains_reach_the_clients_depth() {
+    let get = |n: usize, read: &str| {
+        run(&format!(
+            "local t = {{x = 1}} for i = 2, {n} do t = setmetatable({{}}, {{__index = t}}) end \
+             return {read}"
+        ))
+    };
+    assert_eq!(get(102, "t.x"), "1");
+    assert_eq!(get(103, "t.x"), "<raised> t:1: loop in gettable");
+    assert_eq!(
+        get(102, "t:x()"),
+        "<raised> t:1: attempt to call method `x' (a number value)"
+    );
+    assert_eq!(get(103, "t:x()"), "<raised> t:1: loop in gettable");
+    // The globals table is the first table; its chain is `getglobal`'s and `GETGLOBAL`'s.
+    let global = |n: usize, read: &str| {
+        run(&format!(
+            "local t = {{x = 1}} for i = 3, {n} do t = setmetatable({{}}, {{__index = t}}) end \
+             setmetatable(getfenv(0), {{__index = t}}) return {read}"
+        ))
+    };
+    assert_eq!(global(102, "x"), "1");
+    assert_eq!(global(103, "x"), "<raised> t:1: loop in gettable");
+    assert_eq!(global(101, "getglobal('x')"), "1");
+    assert_eq!(global(102, "getglobal('x')"), "<raised> loop in gettable");
+
+    let set = |n: usize| {
+        run(&format!(
+            "local last = {{}} local t = last for i = 2, {n} do t = setmetatable({{}}, {{__newindex = t}}) end \
+             t.x = 1 return rawget(last, 'x')"
+        ))
+    };
+    assert_eq!(set(101), "1");
+    assert_eq!(set(102), "<raised> t:1: loop in settable");
+    assert_eq!(
+        run(
+            "local last = {} setmetatable(getfenv(0), {__newindex = last}) \
+             local t = last for i = 3, 101 do t = setmetatable({}, {__newindex = t}) end \
+             setmetatable(last, nil) setmetatable(getfenv(0), {__newindex = t}) \
+             setglobal('y', 5) return rawget(last, 'y')"
+        ),
+        "5"
+    );
+}
+
+/// `math_deg` multiplies by the double 180/pi (`0x822d28`, `0x7fb14d`), where dividing by pi/180
+/// rounds otherwise for about one value in nine.
+#[test]
+fn math_deg_multiplies_by_180_over_pi() {
+    assert_eq!(
+        run("return math.deg(-7.312715117751976) == -418.9877130287011"),
+        "true"
+    );
+    assert_eq!(
+        run("return math.deg(-7.312715117751976) == -418.987713028701"),
+        "false"
+    );
+    assert_eq!(run("return math.deg(math.pi)"), "180");
+    assert_eq!(run("return math.deg(1) == 1 * (180 / math.pi)"), "true");
+}
+
+/// `error` (`0x702970`) concatenates the position whenever the message is a string or number and
+/// the level is not 0 (`0x7029a8`); a negative level has no line (`0x6fbad6`, `0x6f490b`), so it
+/// adds nothing but still makes the message a string.
+#[test]
+fn error_with_a_negative_level_still_makes_a_string() {
+    assert_eq!(
+        run("local ok, e = pcall(error, 5, -1) return type(e), e"),
+        "string,5"
+    );
+    assert_eq!(run("return pcall(error, 'x', -3)"), "false,x");
+    assert_eq!(
+        run("local ok, e = pcall(error, 5, 0) return type(e)"),
+        "number"
+    );
+    assert_eq!(
+        run("return pcall(function() error('x', 1) end)"),
+        "false,t:1: x"
+    );
+}

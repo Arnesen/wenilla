@@ -418,7 +418,7 @@ fn a_monster_line_with_no_macro_fires_at_its_packet() {
 /// player line's sender.
 #[test]
 fn each_answer_handler_queues_a_release_behind_a_line_that_reads_it() {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let world = app.world_mut();
     let log = || crate::ui_chat::ChatLog::default();
     for (line, answer) in [
@@ -451,6 +451,7 @@ fn own_watches(delta: &[(u16, u32)]) -> Vec<FieldNotice> {
     me.merge_diff(delta, |i, o, n| moved.push((i, o, n)));
     let around = crate::field_watch::Around {
         me: Some(ME),
+        target: None,
         creature_lookup: &|_| false,
         others: &Vec::new,
         pet_bar: 0,
@@ -518,15 +519,12 @@ fn cast_stops(_: In<SessionEvent>, mut reports: ResMut<crate::ui_cast::CastRepor
     reports.bar(crate::ui_cast::CastBarEdge::Stop);
 }
 
-/// A client with the cast reports' lane too, and what their readying reads.
+/// A client with the cast reports' lane too.
 fn cast_client(handlers: impl FnOnce(&mut App)) -> App {
-    let mut app = client(|app| {
+    client(|app| {
         app.add_plugins(crate::ui_cast::UiCastPlugin);
         handlers(app);
-    });
-    app.world_mut()
-        .init_resource::<crate::ui_action::CastFailRedisplays>();
-    app
+    })
 }
 
 /// A cast's report fires inside its packet's handler (`SPELLCAST_STOP` from `SMSG_CAST_RESULT`,
@@ -616,6 +614,11 @@ fn the_roster_events_fire_at_their_packet() {
     app.world_mut().resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
     app.world_mut()
         .init_resource::<crate::ui_quest::QuestGiver>();
+    // What the views lane reads, which the members' records start.
+    app.world_mut().init_resource::<crate::net::Reputations>();
+    app.world_mut().init_resource::<crate::target::Selection>();
+    app.world_mut()
+        .init_resource::<crate::ui_guild::GuildState>();
     app.world_mut()
         .non_send_resource_mut::<benilla_ui::script::UiScript>()
         .run(
@@ -654,7 +657,8 @@ fn the_roster_events_fire_at_their_packet() {
 }
 
 /// The session's end drops what the cast and house lanes hold, as the chat lane's end drops its
-/// lines: the Lua state they were readied for is replaced.
+/// lines: the Lua state they were readied for is replaced. They hold it here because the world's
+/// UI has not loaded yet, so no flush fires them.
 #[test]
 fn the_session_end_drops_the_cast_and_house_lanes() {
     let mut app = cast_client(|app| {
@@ -670,9 +674,29 @@ fn the_session_end_drops_the_cast_and_house_lanes() {
     world
         .resource_mut::<crate::ui_cast::CastReports>()
         .bar(crate::ui_cast::CastBarEdge::Stop);
+    world.insert_resource(crate::ui_script::PendingEntryUiLoad);
     crate::net::handlers::dispatch(world, vec![outbid()]);
+    assert!(heard(&mut app).is_empty(), "held while the UI loads");
+    let world = app.world_mut();
     world.run_schedule(OnExit(crate::client_state::ClientState::InWorld));
     assert!(world.resource::<crate::ui_cast::CastReports>().is_empty());
     fire_frame(world);
     assert!(heard(&mut app).is_empty(), "nothing left to fire");
+}
+
+/// A firing's own pushes are what moves its drain: a stamp another thread takes meanwhile, as a
+/// test beside it does on its own world, nests under nothing it fires.
+#[test]
+fn another_threads_stamp_is_no_push_of_the_firing() {
+    let at = crate::lanes::stamp();
+    let ((), moved) = crate::lanes::firing(at, || {
+        std::thread::spawn(crate::lanes::stamp)
+            .join()
+            .expect("stamps");
+    });
+    assert!(!moved, "another thread's stamp");
+    let ((), moved) = crate::lanes::firing(at, || {
+        crate::lanes::stamp();
+    });
+    assert!(moved, "the firing's own push");
 }

@@ -17,6 +17,24 @@ use bevy::math::{Dir3, Quat, Vec3};
 
 mod one_sided;
 
+/// A body sweep's first hit: avian's hit data, whose `normal1` is the contact normal (at an edge or
+/// a vertex, the direction to the touched feature), and the hit face's own authored normal. The
+/// reference classifies a hit by the face's record (`0xc4e534`, read at `0x636592` and `0x636ecf`),
+/// never by the contact, so a body resting on a stair's nosing touches a tread, not a 30° slope.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyHit {
+    pub hit: MoveHitData,
+    /// The hit triangle's authored normal, world space; a convex collider's contact normal.
+    pub face_normal: Vec3,
+}
+
+impl core::ops::Deref for BodyHit {
+    type Target = MoveHitData;
+    fn deref(&self) -> &MoveHitData {
+        &self.hit
+    }
+}
+
 /// The collision audiences. avian puts every collider without explicit `CollisionLayers` on bit 0,
 /// [`CollisionLayer::Default`]; only WMO faces and liquid carry a layer.
 #[derive(PhysicsLayer, Default, Clone, Copy)]
@@ -97,10 +115,12 @@ pub struct GroundDecalSurface;
 /// Marks a static collider that occludes the mouse pick: the reference traces the world too and
 /// drops the object hit when the world hit is strictly nearer (`0x480df0` at `0x480eb4`,
 /// `CWorld::Intersect` `0x672170`, mask `0x1000114`), so a unit behind a wall is not hoverable.
-/// Occluders are terrain (DDA `0x69c920`), WMO group faces outside MOPY reject mask `0x84` (here
-/// the walk collider, which rejects only `0x04`: a `0x84` face set is not built) and static
-/// default-set doodad hulls (`0x69cdb0`). Liquid (mask bits 16-19 off) is not, nor are unit and
-/// server-spawned GameObject hulls, transports included: those are the object trace.
+/// Occluder colliders are terrain (DDA `0x69c920`) and WMO group faces outside MOPY reject mask
+/// `0x84` (here the walk collider, which rejects only `0x04`: a `0x84` face set is not built). A
+/// static doodad occludes by its drawn opaque render batches, never its collision hull
+/// (`0x69cdb0` queues it in mode 2, [`crate::interact::DoodadOccluders`]), so no doodad hull
+/// carries this. Liquid (mask bits 16-19 off) is not an occluder, nor are unit and server-spawned
+/// GameObject hulls, transports included: those are the object trace.
 #[derive(Component)]
 pub struct PickOccluder;
 
@@ -177,7 +197,7 @@ impl WorldCollision<'_, '_> {
         from: Vec3,
         movement: Vec3,
         skin_width: f32,
-    ) -> Option<MoveHitData> {
+    ) -> Option<BodyHit> {
         self.cast_body_with(shape, from, movement, skin_width, &Self::body_filter())
     }
 
@@ -190,7 +210,7 @@ impl WorldCollision<'_, '_> {
         movement: Vec3,
         skin_width: f32,
         filter: &SpatialQueryFilter,
-    ) -> Option<MoveHitData> {
+    ) -> Option<BodyHit> {
         one_sided::cast_move(&self.ms, shape, from, movement, skin_width, filter)
     }
 
@@ -277,7 +297,7 @@ impl WorldCollision<'_, '_> {
         from: Vec3,
         movement: Vec3,
         skin_width: f32,
-    ) -> Option<MoveHitData> {
+    ) -> Option<BodyHit> {
         self.cast_body_with(shape, from, movement, skin_width, &self.mover_filter())
     }
 

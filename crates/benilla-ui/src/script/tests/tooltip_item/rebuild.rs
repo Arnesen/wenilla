@@ -30,6 +30,8 @@ fn lines(s: &mut UiScript, tt: &str) -> Vec<String> {
 /// backpack's slot 1 holds a copper bar.
 fn fixture() -> UiScript {
     let mut s = item_script();
+    // The build's lookups are calls, kept for the asserts.
+    s.keep_calls();
     s.set_screen_size(800.0, 600.0);
     s.run(
         r#"LOCKED_WITH_ITEM = "[LOCKED_WITH_ITEM %s]"
@@ -148,6 +150,32 @@ fn a_trade_targets_key_answer_adds_its_locked_with_line_without_a_rehover() {
     s.tick(0.1);
     let again: (i64, i64) = s.eval("return shows, cleared").unwrap();
     assert_eq!(again, after);
+    assert!(s.take_errors().is_empty());
+}
+
+/// An answer at its packet runs the callbacks kept on its own key alone (`0x55bdb0` walks the
+/// node it decoded, `0x55bf12`): another entry's answer leaves the key's wait standing, though the
+/// VM's copy already holds the key, and the key's own rebuilds the tooltip.
+#[test]
+fn an_answer_rebuilds_only_the_tooltips_waiting_on_its_entry() {
+    let mut s = fixture();
+    s.run("TT:SetOwner(Slot, 'ANCHOR_RIGHT') TT:SetTradeTargetItem(1)")
+        .unwrap();
+    s.set_item_template(
+        KEY,
+        ItemTemplateView {
+            name: "Skeleton Key".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    s.answer_item_tooltips(BAR);
+    assert_eq!(lines(&mut s, "TT"), ["Lockbox", "[LOCKED]"]);
+    s.answer_item_tooltips(KEY);
+    assert_eq!(
+        lines(&mut s, "TT"),
+        ["Lockbox", "[LOCKED]", "[LOCKED_WITH_ITEM Skeleton Key]"]
+    );
     assert!(s.take_errors().is_empty());
 }
 
@@ -420,6 +448,126 @@ fn an_action_items_late_maker_name_adds_its_line() {
         .unwrap();
     assert_eq!(lines(&mut s, "TT"), ["Copper Bar"]);
     s.set_container(0, Some(backpack((SMITH, Some("Smith")))));
+    s.tick(0.1);
+    assert_eq!(
+        lines(&mut s, "TT"),
+        ["Copper Bar", "|cff00ff00[CREATED_BY Smith]|r"]
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// With the host lent, the slot is read off the object as the build runs and the maker's name off
+/// the name cache (`0x55f080`): the name landing in the cache rebuilds the tooltip with the line
+/// (`0x52e530`), no view pushed.
+#[test]
+fn a_hosted_inspected_slots_maker_name_reads_the_name_cache() {
+    use crate::script::live::LiveAsk;
+    const MATE: u64 = 0x20;
+    struct Host {
+        name: Option<String>,
+        asked: Vec<u64>,
+    }
+    impl CallHost for Host {
+        fn apply(&mut self, _: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+            if let ScriptCall::RecordAsk(crate::script::RecordAsk::ItemBuildName(guid)) = call {
+                self.asked.push(guid);
+            }
+            None
+        }
+        fn read_live(&mut self, ask: &mut LiveAsk<'_>) -> bool {
+            ask.answer(|q: &VisibleSlotQuery| {
+                Some((q.slot == 5).then(|| InvSlotView {
+                    item_id: BAR,
+                    count: 1,
+                    quality: 1,
+                    name: Some("Copper Bar".into()),
+                    link: Some(format!("|cffffffff|Hitem:{BAR}:0:0:0|h[Copper Bar]|h|r")),
+                    creator_guid: SMITH,
+                    ..Default::default()
+                }))
+            }) || ask.answer(|q: &PlayerNameQuery| Some(self.name.clone().filter(|_| q.0 == SMITH)))
+        }
+    }
+    let mut s = fixture();
+    s.set_unit_guids(&UnitGuids {
+        target: MATE,
+        held: HashMap::from([(MATE, 0)]),
+        ..Default::default()
+    });
+    s.set_unit_reach(HashMap::from([(
+        MATE,
+        UnitReach {
+            dist_sq: 16.0,
+            inspectable: true,
+        },
+    )]));
+    let mut host = Host {
+        name: None,
+        asked: Vec::new(),
+    };
+    s.hosted(&mut host, |s| {
+        s.run("TT:SetOwner(Slot, 'ANCHOR_RIGHT') TT:SetInventoryItem('target', 5)")
+            .unwrap();
+    });
+    assert_eq!(lines(&mut s, "TT"), ["Copper Bar"]);
+    assert_eq!(
+        std::mem::take(&mut host.asked),
+        vec![SMITH],
+        "the build asks in its call"
+    );
+    host.name = Some("Smith".into());
+    s.hosted(&mut host, |s| s.tick(0.1));
+    assert_eq!(
+        lines(&mut s, "TT"),
+        ["Copper Bar", "|cff00ff00[CREATED_BY Smith]|r"]
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// An inspected slot's maker is its visible-item block's creator, which `SetInventoryItem` copies
+/// to the tooltip's `+0x410` (`0x5333cd`-`0x5333d5`) and the maker line reads (`0x52e1d5`): the
+/// build asks the name, and the inspected view carrying it once the app re-pushes it rebuilds the
+/// tooltip with the line.
+#[test]
+fn an_inspected_slots_maker_name_that_arrives_adds_its_line() {
+    const MATE: u64 = 0x20;
+    let mut s = fixture();
+    let worn = |creator: Option<&str>| {
+        let mut slots: InventorySlots = Default::default();
+        slots[5] = Some(InvSlotView {
+            item_id: BAR,
+            count: 1,
+            quality: 1,
+            name: Some("Copper Bar".into()),
+            link: Some(format!("|cffffffff|Hitem:{BAR}:0:0:0|h[Copper Bar]|h|r")),
+            creator_guid: SMITH,
+            creator: creator.map(str::to_string),
+            ..Default::default()
+        });
+        slots
+    };
+    s.set_visible_equipment(MATE, Some(worn(None)));
+    s.set_unit_guids(&UnitGuids {
+        target: MATE,
+        held: HashMap::from([(MATE, 0)]),
+        ..Default::default()
+    });
+    s.set_unit_reach(HashMap::from([(
+        MATE,
+        UnitReach {
+            dist_sq: 16.0,
+            inspectable: true,
+        },
+    )]));
+    s.run("TT:SetOwner(Slot, 'ANCHOR_RIGHT') TT:SetInventoryItem('target', 5)")
+        .unwrap();
+    assert_eq!(lines(&mut s, "TT"), ["Copper Bar"]);
+    assert_eq!(
+        s.take_item_name_asks(),
+        vec![SMITH],
+        "the build asks the app"
+    );
+    s.set_visible_equipment(MATE, Some(worn(Some("Smith"))));
     s.tick(0.1);
     assert_eq!(
         lines(&mut s, "TT"),

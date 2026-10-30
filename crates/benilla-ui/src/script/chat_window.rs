@@ -514,9 +514,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         Ok(out)
     }
 
-    // The group named by argument 2, case-folded; an unknown name changes nothing (`0x4a0ea9`).
-    // `is-number` on argument 1 and `is-number-or-string` on 2 gate both, else the binding's
-    // `Usage:`; the binding reads that one name, never a third argument.
+    // The group named by argument 2, compared as given with `SStrCmpI` and no trim (`0x4a0ee7`,
+    // `0x4a0fa7`); an unknown name changes nothing. `is-number` on argument 1 and
+    // `is-number-or-string` on 2 gate both, else the binding's `Usage:`; the binding reads that
+    // one name, never a third argument.
     fn group_of(
         lua: &Lua,
         (id, name): (Value, Value),
@@ -524,25 +525,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     ) -> mlua::Result<(i64, Option<&'static str>)> {
         let id = i64::from(binding_abi::number_arg(lua, id, line)?);
         let name = binding_abi::string_arg(lua, name, line)?;
-        Ok((
-            id,
-            message_group_index(name.trim()).map(|i| MESSAGE_GROUPS[i].0),
-        ))
+        Ok((id, message_group_index(&name).map(|i| MESSAGE_GROUPS[i].0)))
     }
 
-    // SetChatWindowName(id, name): `SStrCopy(record+0, name, 0x20)`, 31 bytes and the NUL. The
-    // reference stores "" for a name neither string nor number (`0x4a1436`); here a missing or nil
-    // name stores "", and a boolean or table raises.
+    // SetChatWindowName(id, name): `SStrCopy(record+0, name, 0x20)` (`0x4a1462`), 31 bytes and the
+    // NUL. The name is read only when `is-number-or-string` passes (`0x4a143b`); anything else,
+    // missing, nil, a boolean or a table, stores "" (`0x4a1436`) and never raises.
     lua.globals().set(
         "SetChatWindowName",
-        lua.create_function(|lua, (id, name): (Value, Option<String>)| {
+        lua.create_function(|lua, (id, name): (Value, Value)| {
             // `is-number` else `Usage: SetChatWindowName(index, "name")` (`0x844eac`, `0x4a1402`).
             let id = i64::from(binding_abi::number_arg(
                 lua,
                 id,
                 r#"Usage: SetChatWindowName(index, "name")"#,
             )?);
-            let mut name = name.unwrap_or_default();
+            let mut name = binding_abi::optional_string(lua, &name).unwrap_or_default();
             if name.len() > 31 {
                 let mut cut = 31;
                 while !name.is_char_boundary(cut) {
@@ -637,10 +635,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 name,
                 r#"Usage: AddChatWindowChannel(index, "channel")"#,
             )?;
-            let name = name.trim().to_string();
-            if name.is_empty() {
-                return Ok(MultiValue::new());
-            }
+            // `SStrCmpI` on the name as given (`0x4a10b2`): no trim, and "" or a padded name
+            // matches no row and is stored verbatim, answering 0 (`0x4a10f4`-`0x4a1100`).
             let matched = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
@@ -687,6 +683,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 key,
                 r#"Usage: RemoveChatWindowChannel(index, "channel")"#,
             )?;
+            let joined = super::channel::joined(lua);
             let key = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 let n = crate::script::binding_abi::s_str_to_int(&key);
@@ -695,7 +692,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // a pending slot's number removes nothing (`0x4a12c9`); a zero keeps the string
                 // raw, untrimmed, for the case-insensitive compares (`0x4a1315`, `0x4a1359`).
                 let key = if n != 0 {
-                    match super::channel::confirmed_channel(&model, i64::from(n)) {
+                    match super::channel::confirmed_channel(&joined, i64::from(n)) {
                         Some(c) => c.name.clone(),
                         None => return Ok(()),
                     }
@@ -1074,16 +1071,29 @@ mod record_tests {
             (false, true, false)
         );
         assert_eq!(looks[3].name.len(), 31, "31 bytes and the NUL");
+        // A name that is not a string or a number stores "" and raises nothing (`0x4a1436`); a
+        // number is its text.
+        for arg in ["true", "{}", "nil", "print"] {
+            s.run(&format!(
+                "SetChatWindowName(3, 'Loot') SetChatWindowName(3, {arg})"
+            ))
+            .unwrap();
+            assert_eq!(s.chat_window_looks()[2].name, "", "{arg}");
+        }
+        s.run("SetChatWindowName(3, 12)").unwrap();
+        assert_eq!(s.chat_window_looks()[2].name, "12");
     }
 
     #[test]
     fn message_types_are_flags_answered_in_table_order() {
         let mut s = UiScript::new().unwrap();
-        // One group per call, argument 2: a third argument is never read (`0x4a0ec4`).
+        // One group per call, argument 2: a third argument is never read (`0x4a0ec4`). The name
+        // is compared untrimmed (`0x4a0ee7`), so a padded one names no group.
         s.run(
             "AddChatWindowMessages(3, 'yell', 'SAY') AddChatWindowMessages(3, 'BOGUS') \
              AddChatWindowMessages(3, 'SAY') AddChatWindowMessages(3, 'SAY') \
-             AddChatWindowMessages(3, 'money') RemoveChatWindowMessages(1, 'Say', 'LOOT')",
+             AddChatWindowMessages(3, 'money') RemoveChatWindowMessages(1, 'Say', 'LOOT') \
+             AddChatWindowMessages(3, ' LOOT') AddChatWindowMessages(3, 'LOOT ')",
         )
         .unwrap();
         assert!(s.chat_window_looks()[0]
@@ -1138,31 +1148,40 @@ mod record_tests {
              B = {AddChatWindowChannel(1, 'MyChan')} \
              C = {AddChatWindowChannel(1, 'mychan')} \
              D = {AddChatWindowChannel(1, 'Trade')} \
-             E = {AddChatWindowChannel(1, '')}",
+             E = {AddChatWindowChannel(1, '')} \
+             F = {AddChatWindowChannel(1, ' general')}",
         )
         .unwrap();
+        // "" and a padded shortcut match no row (`SStrCmpI` untrimmed, `0x4a10b2`): each is
+        // stored verbatim and answers 0 (`0x4a10f4`).
         assert_eq!(
-            s.eval::<(i64, i64, i64)>("return A[1], B[1], C[1]")
+            s.eval::<(i64, i64, i64, i64, i64)>("return A[1], B[1], C[1], E[1], F[1]")
                 .unwrap(),
-            (1, 0, 0)
+            (1, 0, 0, 0, 0)
         );
-        assert!(s
-            .eval::<bool>("return table.getn(D) == 0 and table.getn(E) == 0")
-            .unwrap());
+        assert!(s.eval::<bool>("return table.getn(D) == 0").unwrap());
         assert_eq!(
             s.eval::<Vec<mlua::Value>>("return {GetChatWindowChannels(1)}")
                 .unwrap()
                 .len(),
-            4,
-            "name, id, name, id — the duplicate was not stored twice"
+            8,
+            "name, id pairs — the duplicate was not stored twice"
         );
         assert_eq!(
             s.chat_window_looks()[0].channels,
-            vec![("General".to_string(), 1), ("MyChan".to_string(), 0)],
+            vec![
+                ("General".to_string(), 1),
+                ("MyChan".to_string(), 0),
+                (String::new(), 0),
+                (" general".to_string(), 0)
+            ],
             "the DBC's spelling for the shortcut, the typed one for the custom channel"
         );
-        s.run("RemoveChatWindowChannel(1, 'MYCHAN') RemoveChatWindowChannel(1, '3')")
-            .unwrap();
+        s.run(
+            "RemoveChatWindowChannel(1, 'MYCHAN') RemoveChatWindowChannel(1, '3') \
+             RemoveChatWindowChannel(1, '') RemoveChatWindowChannel(1, ' GENERAL')",
+        )
+        .unwrap();
         assert_eq!(
             s.chat_window_looks()[0].channels,
             vec![("General".to_string(), 1)],

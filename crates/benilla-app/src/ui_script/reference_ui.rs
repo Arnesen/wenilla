@@ -1924,11 +1924,6 @@ mod tests {
                  `0x48f440`); benilla does not read that packet, and vmangos never sends it",
             ),
             (
-                "GOSSIP_ENTER_CODE",
-                "UIParent.lua — the code-entry gossip option (a door with a combination); \
-                 benilla's gossip feed carries no code-entry option kind yet",
-            ),
-            (
                 "TRADE_REQUEST",
                 "UIParent.lua — the trade ASK dialog, and the one entry on this list that is \
                  UNPRODUCEABLE rather than unbuilt: the 5875 client registers the event and \
@@ -1944,16 +1939,6 @@ mod tests {
                  has no caller or stored address, so, like TRADE_REQUEST, producing it would be \
                  a divergence, not a fix",
             ),
-            ("DISPLAY_SIZE_CHANGED", "the four paperdoll files"),
-            (
-                "GMSURVEY_DISPLAY",
-                "HelpFrame.lua — the post-ticket survey. A real 1.12 event (fired at \
-                 `0x5e797b`, id 538) whose whole UI is the LoadOnDemand `Blizzard_GMSurveyUI`; \
-                 we have neither the producer nor the addon on the chain, and the ticket \
-                 flow works without it",
-            ),
-            ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
-            ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
             (
                 "SHOW_COMPARE_TOOLTIP",
                 "PaperDollFrame.lua — the second `TRADE_REQUEST`: event 377 is \
@@ -1966,11 +1951,6 @@ mod tests {
                  event would be a divergence, not a fix",
             ),
             ("SYSMSG", "UIErrorsFrame.lua"),
-            (
-                "UNIT_MODEL_CHANGED",
-                "four files — the paperdoll model refresh",
-            ),
-            ("UNIT_PORTRAIT_UPDATE", "three files — the portrait refresh"),
             (
                 "ZONE_UNDER_ATTACK",
                 "ChatFrame.lua — registered, but the name is no row of the client's event table \
@@ -2136,10 +2116,13 @@ mod tests {
     /// The anchor loop (`0x767800`), the XML length readers (`0x6f1eb0`, `0x6f1d60`, `0x6f20a0`),
     /// the Backdrop's child loop (`0x77e875`), a text frame's `font=` (`0x879bc8`) and
     /// `<FontString>` child (`0x879b3c`) and a model's `scale` (`0x8788d8`) log a node they refuse.
-    /// The core and glue the default load reads, and benilla's layer, write none of these in
-    /// 1.12.1, so a line here is a read stricter than the reference's, or a layer file the
-    /// reference would refuse. (The one stock line among them, BrowseName's font override, is in
-    /// the load-on-demand Blizzard_AuctionUI, which `tests/auction_frame.rs` holds to it.)
+    /// The core and glue the default load reads, benilla's layer, and the twelve load-on-demand
+    /// Blizzard addons on top of the core write none of these in 1.12.1, so a line here is a read
+    /// stricter than the reference's, a build order other than its own (an anchor resolves as it
+    /// is read, `0x767964`, and the trainer, craft and trade-skill rows hang a label off a
+    /// highlight their template builds first, `ClassTrainerFrameTemplates.xml:38`, `:67`), or a
+    /// layer file the reference would refuse. The one stock line among them, BrowseName's font
+    /// override in Blizzard_AuctionUI, is `tests/auction_frame.rs`'s to hold.
     #[test]
     fn every_anchor_and_length_the_stock_interface_writes_reads() {
         let _data = benilla_formats::wow_data_or_skip!();
@@ -2168,6 +2151,23 @@ mod tests {
         core.set_screen_size(1024.0, 768.0);
         super::super::manifest::load_default_ui(&core);
         assert_eq!(refused(&mut core), Vec::<String>::new(), "the core");
+
+        for name in super::super::addons::BLIZZARD_ADDONS {
+            super::super::test_ui::seat_chain_addon(&mut core, name);
+            core.run(&format!("UIParentLoadAddOn(\"{name}\")")).unwrap();
+            assert!(
+                core.eval::<bool>(&format!("return IsAddOnLoaded(\"{name}\") == 1"))
+                    .unwrap(),
+                "{name}: did not load: {:?}",
+                core.errors()
+            );
+        }
+        // The capture reaches the addons' lines: BrowseName's override is among them.
+        let mut addons = refused(&mut core);
+        let browse = "BrowseName: FontString element overriding font";
+        assert!(addons.iter().any(|l| l.contains(browse)), "{addons:?}");
+        addons.retain(|l| !l.contains(browse));
+        assert_eq!(addons, Vec::<String>::new(), "the Blizzard addons");
 
         let mut glue = UiScript::new_glue().expect("VM");
         glue.set_screen_size(1024.0, 768.0);

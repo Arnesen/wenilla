@@ -91,6 +91,12 @@ impl FactionTemplate {
     }
 }
 
+/// The mask bit for a 1-based race or class byte, `dec ecx; shl reg,cl` (`0x4d5512`, `0x52a7dd`):
+/// x86 masks the count to five bits, so 0 tests bit 31 and 33 tests bit 0.
+fn unit_byte_bit(byte: u8) -> u32 {
+    1u32.wrapping_shl(u32::from(byte).wrapping_sub(1))
+}
+
 /// One `Faction.dbc` row's reputation identity: its list slot and the race/class-gated base values
 /// the reference adds to the wire standing.
 #[derive(Debug, Clone, Copy)]
@@ -115,8 +121,7 @@ impl FactionInfo {
     /// only in this loop's accept block (`0x4d5555`). Unlike vmangos's `GetIndexFitTo`, a slot
     /// with both masks zero is rejected (`0x4d550b`), and the last matching slot wins.
     pub fn slot_for(&self, race: u8, class: u8) -> Option<usize> {
-        let race_mask = 1u32 << (race.max(1) - 1);
-        let class_mask = 1u32 << (class.max(1) - 1);
+        let (race_mask, class_mask) = (unit_byte_bit(race), unit_byte_bit(class));
         (0..4).rfind(|&i| {
             let (races, classes) = (self.race_masks[i], self.class_masks[i]);
             (races != 0 || classes != 0)
@@ -142,8 +147,7 @@ impl FactionInfo {
     /// builder `0x529fe0` takes the first matching slot, not the last, and shows the line unless
     /// its flags carry `0x4`. A zero race mask matches on the class mask instead.
     pub fn tooltip_shows_for(&self, race: u8, class: u8) -> bool {
-        let race_bit = 1u32 << (race.max(1) - 1);
-        let class_bit = 1u32 << (class.max(1) - 1);
+        let (race_bit, class_bit) = (unit_byte_bit(race), unit_byte_bit(class));
         for i in 0..4 {
             let race_match = if self.race_masks[i] == 0 {
                 self.class_masks[i]
@@ -182,7 +186,8 @@ pub mod faction_flags {
     /// Listed in the reputation pane, the only flag that gates membership; the server sets it on
     /// first contact and sends `SMSG_SET_FACTION_VISIBLE`.
     pub const VISIBLE: u8 = 0x01;
-    /// The player has declared war on this faction.
+    /// At war: the player's reaction toward the faction's units is hostile (`0x60640c`). The
+    /// pane's toggle, `SMSG_SET_FACTION_ATWAR` and a standing of Hostile or below write it.
     pub const AT_WAR: u8 = 0x02;
     /// Suppresses the standing-change auto-reveal and rank-change chat line; the row stays listed.
     pub const HIDDEN: u8 = 0x04;
@@ -277,6 +282,24 @@ impl FactionCatalog {
             flags: [0; 4],
         };
         self.factions.insert(faction_id, info);
+        self
+    }
+
+    /// This catalog with `faction_id`'s `team` (its parent, the pane's grouping key), name and
+    /// description. Fixture constructor for tests; the row must exist ([`Self::with_reputation`]).
+    pub fn with_faction_text(
+        mut self,
+        faction_id: u32,
+        team: u32,
+        name: &str,
+        description: &str,
+    ) -> Self {
+        if let Some(info) = self.factions.get_mut(&faction_id) {
+            info.team = team;
+        }
+        self.names.insert(faction_id, name.to_string());
+        self.descriptions
+            .insert(faction_id, description.to_string());
         self
     }
 
@@ -819,5 +842,31 @@ mod tests {
             "Argent Dawn's description: {:?}",
             cat.faction_description(529)
         );
+    }
+
+    /// The slot pick builds its bits with `dec ecx; shl reg,cl` on the zero-extended unit bytes
+    /// (`0x4d5512`..`0x4d552d`, and the tooltip's `0x52a7dd`..`0x52a802`): x86 masks the count to
+    /// five bits, so byte 33 tests bit 0 and byte 0 tests bit 31, and no byte panics.
+    #[test]
+    fn slot_bits_mask_the_shift_count_like_shl() {
+        let info = FactionInfo {
+            rep_index: 0,
+            team: 0,
+            race_masks: [1, 1 << 31, 0, 0],
+            class_masks: [1, 1 << 31, 0, 0],
+            base: [100, 200, 0, 0],
+            flags: [0, 0x4, 0, 0],
+        };
+        assert_eq!(info.slot_for(1, 1), Some(0));
+        assert_eq!(info.slot_for(33, 33), Some(0), "count 32 masks to bit 0");
+        assert_eq!(info.slot_for(32, 32), Some(1));
+        assert_eq!(info.slot_for(0, 0), Some(1), "count -1 masks to bit 31");
+        assert_eq!(info.slot_for(34, 1), None, "bit 1 is in no race mask");
+        assert_eq!(info.slot_for(255, 255), None, "count 254 masks to bit 30");
+        assert_eq!(info.base_for(33, 33), 100);
+        assert!(info.tooltip_shows_for(33, 33));
+        assert!(!info.tooltip_shows_for(32, 32), "slot 1 hides the line");
+        assert!(!info.tooltip_shows_for(0, 0), "and so does byte 0's bit 31");
+        assert!(!info.tooltip_shows_for(255, 255));
     }
 }

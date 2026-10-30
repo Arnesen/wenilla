@@ -38,6 +38,122 @@ pub(crate) struct GoLockInputs<'w, 's> {
     pub(crate) objects: crate::net::Objects<'w, 's>,
 }
 
+/// What `GetMinMaxRange 0x6e3480` reads beyond [`GoLockInputs`], for the range of the spell that
+/// opens a GameObject's lock. Apart from it so the feeds that only name a lock (the tooltip) read
+/// no motion state.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct OpenerReach<'w, 's> {
+    /// The range modifier `GetMinMaxRange` applies (`0x6e3744`); absent, the row's own max.
+    spell_mods: Option<Res<'w, crate::spell::SpellModifiers>>,
+    /// The caster `GetMinMaxRange` reads for the opener spell's range.
+    range_units: crate::spell::RangeUnits<'w, 's>,
+}
+
+impl GoLockInputs<'_, '_> {
+    /// The spell `usable 0x5f3130` takes its distance range from (`0x5f330c`): the known spell
+    /// that opens the lock, or the use spell of a key item the player holds (`0x5f85ac`,
+    /// `0x5d8c80`: the first record spell whose trigger is 0). `None`: no lock, or none satisfied.
+    fn opener_spell(&self, outcome: LockOutcome) -> Option<u32> {
+        match outcome {
+            LockOutcome::OpenBySpell(id) => Some(id),
+            LockOutcome::OpenByKey(entry) => self
+                .items
+                .template(entry, 0, crate::query_cache::Ask::Read)?
+                .use_spell
+                .as_ref()
+                .map(|u| u.spell_id),
+            LockOutcome::Unlocked | LockOutcome::Unmet => None,
+        }
+    }
+}
+
+/// What `usable 0x5f3130` takes from the lock's opener (`0x5f330c`): whether a known spell (or a
+/// held key's use spell) opens it, which skips the state test (`0x5f3315`), and that spell's range
+/// for the distance test.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Opener {
+    pub(crate) spell: bool,
+    /// The spell's `GetMinMaxRange` maximum (`0x5f3328`); `None` while it is not in the catalog,
+    /// where the handler's own range stands.
+    pub(crate) range: Option<f32>,
+}
+
+impl OpenerReach<'_, '_> {
+    /// [`Self::opener`] for a GameObject, resolving its lock as the cursor does; `go` is its
+    /// store and resolved state. Default: no template or lock row yet, or no opener spell.
+    pub(crate) fn go_opener(
+        &self,
+        inputs: &GoLockInputs,
+        go: (&ObjectStore, u32),
+        openers: &[u32],
+        me: Option<&ObjectStore>,
+    ) -> Opener {
+        let Some(lock_id) = inputs.templates.of(&go.0 .0).map(|t| t.lock_id) else {
+            return Opener::default();
+        };
+        let Some(slots) = inputs
+            .locks
+            .as_deref()
+            .and_then(|l| l.0.slots(lock_id))
+            .filter(|_| lock_id != 0)
+        else {
+            return Opener::default();
+        };
+        let outcome = resolve_lock(
+            slots,
+            openers,
+            inputs.spells.as_deref(),
+            inputs.skill_lines.as_ref().map(|s| &s.catalog),
+            me,
+            &inputs.objects,
+            go_facts(Some(go)),
+            &mut None,
+        );
+        self.opener(inputs, outcome)
+    }
+
+    /// The opener a lock outcome gives (`0x5f3328`): the spell's maximum from `GetMinMaxRange
+    /// 0x6e3480` with the player as caster and target 0, range modifier included; a missing or
+    /// self row gives 0.
+    pub(crate) fn opener(&self, inputs: &GoLockInputs, outcome: LockOutcome) -> Opener {
+        let Some(spell_id) = inputs.opener_spell(outcome) else {
+            return Opener::default();
+        };
+        Opener {
+            spell: true,
+            range: self.spell_range(inputs, spell_id),
+        }
+    }
+
+    fn spell_range(&self, inputs: &GoLockInputs, spell_id: u32) -> Option<f32> {
+        let spells = inputs.spells.as_deref()?;
+        let spell = spells.catalog.get(spell_id)?;
+        let row = spells.ranges.get(spell.range_index);
+        let player = inputs.objects.player()?;
+        let unit = self
+            .range_units
+            .unit(player)
+            .unwrap_or(benilla_formats::RangeUnit::still(
+                crate::spell::DEFAULT_REACH,
+            ));
+        let caster = crate::spell::with_ranged_slot(
+            unit,
+            inputs.objects.player_fields(),
+            |guid| inputs.objects.object(guid),
+            Some(&inputs.items),
+        );
+        let targets = benilla_formats::RangeTargets {
+            target: None,
+            attack_target: self.range_units.attack_target(player),
+        };
+        let range = match self.spell_mods.as_deref() {
+            Some(mods) => mods.min_max_range(spell, row, caster, targets),
+            None => benilla_formats::min_max_range(spell, row, caster, targets),
+        };
+        Some(range.map_or(0.0, |(_, max)| max))
+    }
+}
+
 /// The wire facts the Action gate and the requirement fallback read, gathered by the caller.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GoFacts {
@@ -182,26 +298,39 @@ pub(crate) fn resolve_lock(
     }
 }
 
+/// `SPELL_EFFECT_OPEN_LOCK` (`0x5f82c0 cmp [ebx],0x21`).
+const SPELL_EFFECT_OPEN_LOCK: u32 = 0x21;
+/// `SPELL_EFFECT_OPEN_LOCK_ITEM` (`0x5f831c cmp [ebx],0x3b`).
+const SPELL_EFFECT_OPEN_LOCK_ITEM: u32 = 0x3b;
+
 /// `0x5f8260`, the targeting cursor's question for the pending spell (`[0xceac58]`) over a
 /// GameObject, from the object dispatcher `0x4828d0` through `0x6e6460`. Unlike [`resolve_lock`]
-/// it matches the spell's own `OPEN_LOCK` effects against each slot's `Index` and compares no skill
-/// values, so the cursor lights on a chest the skill cannot open and the server refuses the click;
-/// no `Lock.dbc` row (`0x5f8180` null) is false, so the cursor greys over a mailbox.
-///
-/// Not built: the `SPELL_EFFECT_OPEN_LOCK_ITEM` (59) arm, which matches the cast item's entry
-/// against a KEY slot; the catalog lacks its per-effect id.
+/// it compares no skill values, so the cursor lights on a chest the skill cannot open and the
+/// server refuses the click; no `Lock.dbc` row (`0x5f8180` null) is false, so the cursor greys over
+/// a mailbox. For each of the spell's three effects (`0x5f83a2`): an `OPEN_LOCK` one passes a SKILL
+/// slot whose `Index` is its `EffectMiscValue` (`0x5f82e0`-`0x5f82ec`), an `OPEN_LOCK_ITEM` one a
+/// KEY slot whose `Index` is the cast item's entry (`0x5f8360`-`0x5f836c`); `cast_item` is that
+/// entry, `None` when the record's guid (`0xceac48`) names no streamed item (`0x5f8344`). Either
+/// slot's Action must hold (`0x5f81d0`).
 pub(crate) fn spell_opens_lock(
     slots: &[LockSlot],
     spell: &benilla_formats::SpellDisplay,
     go: GoFacts,
+    cast_item: Option<u32>,
 ) -> bool {
-    let Some(lock_type) = spell.open_lock_type() else {
-        return false;
+    let opens = |key_type: u32, index: u32| {
+        slots.iter().any(|slot| {
+            slot.key_type == key_type
+                && slot.index == index
+                && slot.available(go.state, go.flag_locked)
+        })
     };
-    slots.iter().any(|slot| {
-        slot.key_type == LOCK_KEY_SKILL
-            && slot.index == lock_type
-            && slot.available(go.state, go.flag_locked)
+    (0..3).any(|i| {
+        let skill = spell.effects[i] == SPELL_EFFECT_OPEN_LOCK
+            && opens(LOCK_KEY_SKILL, spell.effect_misc_value[i] as u32);
+        let key = spell.effects[i] == SPELL_EFFECT_OPEN_LOCK_ITEM
+            && cast_item.is_some_and(|entry| opens(LOCK_KEY_ITEM, entry));
+        skill || key
     })
 }
 
@@ -251,10 +380,8 @@ mod tests {
         use benilla_formats::SpellDisplay;
         // Pick Lock: LockType 1, Lockpicking.
         let pick_lock = SpellDisplay {
-            open_lock: Some(benilla_formats::OpenLock {
-                effect: 0,
-                lock_type: 1,
-            }),
+            effects: [0x21, 0, 0],
+            effect_misc_value: [1, 0, 0],
             ..SpellDisplay::default()
         };
         let unlocked = GoFacts {
@@ -266,26 +393,27 @@ mod tests {
         // A Lockpicking slot demanding 300 skill, Action 1 (applies while flagged locked).
         let matching = [skill_slot(1, 300, 1), LockSlot::default()];
         assert!(
-            spell_opens_lock(&matching, &pick_lock, unlocked),
+            spell_opens_lock(&matching, &pick_lock, unlocked, None),
             "the right LockType through an applicable slot lights the cursor"
         );
 
         // No skill compare: a slot far beyond Pick Lock still lights, and the server refuses.
         let brutal = [skill_slot(1, 9999, 1), LockSlot::default()];
         assert!(
-            spell_opens_lock(&brutal, &pick_lock, unlocked),
+            spell_opens_lock(&brutal, &pick_lock, unlocked, None),
             "0x5f8260 compares no skill values — an out-of-reach lock still lights"
         );
 
         // Wrong LockType (3, Mining): a lockpick greys over an ore vein.
         let mining = [skill_slot(3, 0, 1), LockSlot::default()];
-        assert!(!spell_opens_lock(&mining, &pick_lock, unlocked));
+        assert!(!spell_opens_lock(&mining, &pick_lock, unlocked, None));
 
         // The shared Action gate: Action 0 applies only while not flagged locked.
         assert!(!spell_opens_lock(
             &[skill_slot(1, 0, 0)],
             &pick_lock,
-            unlocked
+            unlocked,
+            None
         ));
         assert!(spell_opens_lock(
             &[skill_slot(1, 0, 0)],
@@ -293,32 +421,45 @@ mod tests {
             GoFacts {
                 flag_locked: false,
                 ..unlocked
-            }
+            },
+            None
         ));
 
         // No lock row is false, unlike `resolve_lock`: no Pick Lock on a mailbox.
-        assert!(!spell_opens_lock(&[], &pick_lock, unlocked));
+        assert!(!spell_opens_lock(&[], &pick_lock, unlocked, None));
         assert!(!spell_opens_lock(
             &[LockSlot::default()],
             &pick_lock,
-            unlocked
+            unlocked,
+            None
         ));
 
         // A spell with no OPEN_LOCK effect opens nothing, whatever the lock says.
         assert!(!spell_opens_lock(
             &matching,
             &SpellDisplay::default(),
-            unlocked
+            unlocked,
+            None
         ));
 
-        // A KEY slot belongs to the unbuilt effect-59 arm.
+        // A KEY slot belongs to the effect-59 arm: the cast item's entry, never a skill effect.
         let key = [LockSlot {
             key_type: LOCK_KEY_ITEM,
-            index: 1,
+            index: 5000,
             skill: 0,
             action: 1,
         }];
-        assert!(!spell_opens_lock(&key, &pick_lock, unlocked));
+        assert!(!spell_opens_lock(&key, &pick_lock, unlocked, Some(5000)));
+        let key_spell = SpellDisplay {
+            effects: [0, 0x3b, 0],
+            ..SpellDisplay::default()
+        };
+        assert!(spell_opens_lock(&key, &key_spell, unlocked, Some(5000)));
+        assert!(!spell_opens_lock(&key, &key_spell, unlocked, Some(5001)));
+        assert!(
+            !spell_opens_lock(&key, &key_spell, unlocked, None),
+            "no item streamed"
+        );
     }
 
     #[test]

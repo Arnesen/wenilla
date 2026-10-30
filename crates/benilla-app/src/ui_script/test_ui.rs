@@ -17,6 +17,8 @@ pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
 /// template holds no line, as on 1.12.1; a test makes one with
 /// `CreateFrame("GameTooltip", name, parent, "TestTooltipTemplate")`.
 pub(crate) fn load_tooltip_template(s: &UiScript) {
+    // The FrameXML functions the tooltips' counted and gendered lines call (`0x703bf0`).
+    benilla_ui::test_support::install_text_rules(s);
     let mut xml = String::from(
         r#"<Ui><GameTooltip name="TestTooltipTemplate" virtual="true"><Layers><Layer level="ARTWORK">"#,
     );
@@ -102,7 +104,7 @@ pub(super) fn cooldown_play_any(s: &UiScript) -> Option<(u16, u32)> {
 }
 
 /// [`load_ui`], and a missing template fails too: the loader only warns, and the art is lost.
-pub(super) fn load_ui_strict(s: &UiScript, entry: &str) -> usize {
+pub(crate) fn load_ui_strict(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, true, false)
 }
 
@@ -185,7 +187,7 @@ fn load_entry(s: &UiScript, entry: &str, strict_templates: bool, no_warnings: bo
         let missing: Vec<&String> = report
             .warnings
             .iter()
-            .filter(|w| w.contains("unknown template"))
+            .filter(|w| w.contains("Couldn't find inherited node"))
             .collect();
         assert!(
             missing.is_empty(),
@@ -509,9 +511,9 @@ pub(super) const MERCHANT_UI: &[&str] = &[
     "ScrollTemplates.xml",
 ];
 
-/// Stock `GossipFrame.xml`'s dependencies in the production order, shared with `ui_gossip`'s feed
-/// tests. The greeting pane inherits `UIPanelScrollFrameTemplate`, and a missing template only
-/// warns, losing the scrollbar silently. Needs client data.
+/// Stock `GossipFrame.xml`'s dependencies in the production order, for the gossip lane's tests.
+/// The greeting pane inherits `UIPanelScrollFrameTemplate`, and a missing template only warns,
+/// losing the scrollbar silently. Needs client data.
 pub(crate) const GOSSIP_UI: &[&str] = &[
     r"Interface\FrameXML\GlobalStrings.lua",
     r"Interface\FrameXML\Fonts.xml",
@@ -563,7 +565,7 @@ pub(crate) const LOOT_UI: &[&str] = &[
 /// `MainMenuBar.xml` (`MainMenuExpBar`) and the `UIPanelTemplates` pair; two bite only on show:
 /// `HonorFrame.xml`, whose labels `PaperDollFrame.lua:103` and `:122` write, and
 /// `MainMenuBarMicroButtons.xml` (`MicroButtonTooltipText` on a tab hover). Needs client data.
-pub(super) const CHARACTER_UI: &[&str] = &[
+pub(crate) const CHARACTER_UI: &[&str] = &[
     // The stock strings, which `PaperDollFrame_OnLoad` reads at load; there are no fallbacks.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",
@@ -672,7 +674,7 @@ pub(super) fn load_social_ui(s: &mut UiScript) {
 
 /// The files a test needs before it can open a bag window, in the production order, trimmed to what
 /// the bags reach for. Needs client data: open with `benilla_formats::wow_data_or_skip!()`.
-pub(super) const BAG_UI: &[&str] = &[
+pub(crate) const BAG_UI: &[&str] = &[
     // The stock strings: the bar's hovers pass them to `GameTooltip:SetText`, which raises on nil.
     "Interface\\FrameXML\\GlobalStrings.lua",
     "Interface\\FrameXML\\Fonts.xml",

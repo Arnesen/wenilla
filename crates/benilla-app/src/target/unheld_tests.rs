@@ -9,9 +9,8 @@ use benilla_protocol::messages::{member_status, GroupMemberEntry, PartyMemberSta
 use benilla_protocol::SessionEvent;
 
 use super::front_tests::{fix, Fix, ME, OLD};
-use super::{by_name, scan, Selection};
-use crate::creature_anim::SwingMessage;
-use crate::net::{ClientCommand, Guid, GuidIndex, ObjectStore};
+use super::{scan, Selection};
+use crate::net::{ClientCommand, GuidIndex, ObjectStore};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_party::{GroupState, GROUPTYPE_RAID};
 
@@ -70,54 +69,54 @@ fn select_unheld(f: &mut Fix, guid: u64) {
     };
 }
 
+/// `guid`'s object streaming in, as its create block lands: alive, `kind`, indexed under the guid.
+fn create(f: &mut Fix, guid: u64, kind: benilla_protocol::EntityKind) -> Entity {
+    use benilla_protocol::messages::ObjectType;
+    let (mask, as_type) = match kind {
+        benilla_protocol::EntityKind::Player => (0x19, ObjectType::Player),
+        _ => (0x9, ObjectType::Unit),
+    };
+    let world = f.app.world_mut();
+    crate::net::handlers::dispatch(
+        world,
+        crate::net::wire(vec![SessionEvent::ObjectCreate {
+            guid,
+            kind,
+            display_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: None,
+            transport: None,
+            spline: None,
+            fields: benilla_protocol::ObjectFields::from_pairs(&[(2, mask), (22, 100), (28, 100)])
+                .into_created(as_type),
+        }]),
+    );
+    world.flush();
+    world.resource::<GuidIndex>().0[&guid]
+}
+
 /// [`MEMBER`]'s object streaming in: a player, alive, indexed under the guid.
 fn stream_in(f: &mut Fix) -> Entity {
-    let world = f.app.world_mut();
-    let e = world
-        .spawn((
-            Guid(MEMBER),
-            GlobalTransform::default(),
-            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
-                (2, 0x19),
-                (22, 100),
-                (28, 100),
-            ])),
-        ))
-        .id();
-    world.resource_mut::<GuidIndex>().0.insert(MEMBER, e);
-    e
+    create(f, MEMBER, benilla_protocol::EntityKind::Player)
 }
 
-/// An object leaving the object manager, as `net::objects` releases it: out of the index, its
-/// model left fading on the entity.
+/// An object leaving the object manager in an out-of-range list, which releases it
+/// (`0x464920`), its model left fading on the entity.
 fn stream_out(f: &mut Fix, guid: u64) {
-    let world = f.app.world_mut();
-    if let Some(e) = world.resource_mut::<GuidIndex>().0.remove(&guid) {
-        world.entity_mut(e).remove::<Guid>();
-    }
+    crate::net::handlers::dispatch(
+        f.app.world_mut(),
+        crate::net::wire(vec![SessionEvent::ObjectsRemoved(vec![guid])]),
+    );
 }
 
-/// The tracker's frame: the selection's object as the objects that streamed applied.
-fn track(f: &mut Fix) {
-    f.app
-        .world_mut()
-        .run_system_once(super::track::follow_selection_object)
-        .expect("the tracker runs");
-}
-
-/// One packet through the handler table, then the frame's selection systems: the tracker after the
-/// net stage, then the drain of the guid-scoped teardowns (`0x493910(guid, 1)`) the packet raised.
+/// One packet through the handler table, whose end runs the guid-scoped teardowns
+/// (`0x493910(guid, 1)`) the packet raised.
 fn deliver(f: &mut Fix, ev: SessionEvent) {
     crate::net::handlers::dispatch(f.app.world_mut(), vec![ev]);
-    track(f);
-    let world = f.app.world_mut();
-    world
-        .run_system_once(super::click::clear_target_requests)
-        .expect("the drain runs");
-    // A one-shot reader starts at the oldest message, as the frame's reader does not.
-    world
-        .resource_mut::<Messages<super::DeselectGuid>>()
-        .clear();
 }
 
 /// `SMSG_GROUP_LIST` naming `members` (our subgroup is 0), as the handler table delivers it.
@@ -181,10 +180,16 @@ fn target_unit_selects_a_party_member_out_of_range_by_guid() {
 }
 
 /// The call's own chunk reads the new target at once: a party member selected out of range reads as
-/// its guid does, the party row's (`0x515970`, `0x496400`), not the old target's snapshot.
+/// its guid does, its name off the name cache (`0x515970`, `0x5171eb`), not the old target's
+/// snapshot.
 #[test]
 fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
     let mut f = grouped();
+    // The name the list's lookup asked for, answered (`0x4e8477`).
+    f.app
+        .world_mut()
+        .resource_mut::<crate::names::NameCache>()
+        .insert_player(MEMBER, MEMBER_NAME.into(), None);
     let mut script = benilla_ui::script::UiScript::new().expect("a VM");
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: ME,
@@ -201,7 +206,6 @@ fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
         ..Default::default()
     };
     script.set_unit("target", Some(unit(OLD, "Old", true)));
-    script.set_unit("party1", Some(unit(MEMBER, MEMBER_NAME, false)));
     f.app.world_mut().insert_non_send_resource(script);
     run(&mut f, r#"TargetUnit("party1") SEEN = UnitName("target")"#);
     let seen = crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
@@ -238,7 +242,7 @@ fn assist_selects_the_bases_target_out_of_range_by_guid() {
 /// holds (`0x489c0e`); `AssistByName` shows `ERR_UNIT_NOT_FOUND` for a name whose pick is no held
 /// unit (`0x489d17`), a party member out of range included (`0x489c9b`), and
 /// `ERR_GENERIC_NO_TARGET` for an empty name with nothing selected (`0x489d2b`). A call's line is
-/// signalled inside it; the stock `/assist`, which no call carries, queues the same lines.
+/// signalled inside it, the stock `/assist`'s included.
 #[test]
 fn an_assist_that_finds_no_unit_says_so() {
     let mut f = grouped();
@@ -284,33 +288,6 @@ fn an_assist_that_finds_no_unit_says_so() {
         "an empty name assists the selection"
     );
 
-    let assist = |f: &mut Fix, name: Option<&str>| {
-        let world = f.app.world_mut();
-        world
-            .resource_mut::<Messages<by_name::AssistRequest>>()
-            .write(by_name::AssistRequest {
-                name: name.map(str::to_string),
-            });
-        world
-            .run_system_once(by_name::assist_requests)
-            .expect("the /assist reader runs");
-        // A one-shot reader starts at the oldest message, as the frame's reader does not.
-        world
-            .resource_mut::<Messages<by_name::AssistRequest>>()
-            .clear();
-    };
-    assist(&mut f, None);
-    assert_eq!(
-        errors(&f),
-        vec![UiError::key("ERR_GENERIC_NO_TARGET")],
-        "a bare /assist"
-    );
-    assist(&mut f, Some("Nobody"));
-    assert_eq!(
-        errors(&f),
-        vec![UiError::key("ERR_UNIT_NOT_FOUND")],
-        "/assist Nobody"
-    );
     assert_eq!(selection(&f), (None, None), "no miss moves the selection");
 }
 
@@ -331,28 +308,14 @@ fn clear_target_ends_a_selection_with_no_object() {
 fn an_attacker_never_replaces_a_selection_with_no_object() {
     let mut f = grouped();
     select_unheld(&mut f, MEMBER);
-    let (me, mob) = (f.app.world().resource::<GuidIndex>().0[&ME], f.mob);
-    f.app
-        .world_mut()
-        .resource_mut::<Messages<SwingMessage>>()
-        .write(SwingMessage {
-            attacker: mob,
-            victim: Some(me),
-            hit_info: 0,
-            victim_state: 1,
-            damage: 1,
-            displayed: true,
-            seq: 0,
-        });
-    f.app
-        .world_mut()
-        .run_system_once(scan::auto_acquire)
-        .expect("the acquire runs");
+    let mob = f.mob;
+    super::scan::owe_acquire(f.app.world_mut(), mob, super::scan::Acquire::Attacker);
+    super::scan::run_owed_selects_now(f.app.world_mut());
     assert_eq!(selection(&f), (Some(MEMBER), None));
     assert_eq!(picks(&f), Vec::<u64>::new());
 }
 
-/// A unit's deactivation runs the teardown on a matching selection (`0x5fbbe5`) unless
+/// A unit's release runs the teardown on a matching selection (`0x5fbbe5`) unless
 /// `IsRaidMemberOrPet` names it (`0x5fbbcd`): a party member streaming out stays selected by its
 /// guid, with nothing sent, and a unit off the roster ends the selection with the send.
 #[test]
@@ -364,15 +327,13 @@ fn a_party_member_streaming_out_stays_selected_by_guid() {
     assert_eq!(picks(&f), vec![MEMBER]);
 
     stream_out(&mut f, MEMBER);
-    track(&mut f);
     assert_eq!(selection(&f), (Some(MEMBER), None), "the guid stays");
     assert_eq!(f.app.world().resource::<Selection>().lit, None);
     assert_eq!(picks(&f), Vec::<u64>::new(), "no teardown send");
 
-    // Control: a unit no roster names ends at its deactivation.
+    // Control: a unit no roster names ends at its release.
     let mut f = grouped();
     stream_out(&mut f, OLD);
-    track(&mut f);
     assert_eq!(selection(&f), (None, None));
     assert_eq!(picks(&f), vec![0]);
 }
@@ -385,7 +346,6 @@ fn a_party_member_streaming_back_in_is_the_selections_object() {
     let mut f = grouped();
     select_unheld(&mut f, MEMBER);
     let member = stream_in(&mut f);
-    track(&mut f);
     let s = *f.app.world().resource::<Selection>();
     assert_eq!(
         (s.guid, s.target, s.lit),
@@ -553,19 +513,7 @@ fn a_unit_streaming_in_under_the_selection_is_not_the_last_enemy() {
     const FOE: u64 = 0xF130_0000_0000_0042;
     let mut f = fix(false);
     select_unheld(&mut f, FOE);
-    let world = f.app.world_mut();
-    let foe = world
-        .spawn((
-            Guid(FOE),
-            GlobalTransform::default(),
-            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
-                (22, 100),
-                (28, 100),
-            ])),
-        ))
-        .id();
-    world.resource_mut::<GuidIndex>().0.insert(FOE, foe);
-    track(&mut f);
+    let foe = create(&mut f, FOE, benilla_protocol::EntityKind::Unit);
     assert_eq!(selection(&f), (Some(FOE), Some(foe)));
     let remember = |f: &mut Fix| {
         f.app
@@ -703,4 +651,52 @@ fn a_far_spell_at_a_selection_with_no_object_sends_with_no_target() {
     assert_eq!(cast(MIND_VISION_2), (vec![None], false), "Mind Vision 2");
     assert_eq!(cast(EAGLE_EYE), (vec![None], false), "Eagle Eye");
     assert_eq!(cast(MIND_VISION_1), (vec![], true), "Mind Vision 1");
+}
+
+/// A transfer releases no target (`~CGUnit_C 0x5fb5e0` never reaches `0x493910`): a groupmate
+/// selected out of sight, with no object to deactivate, and a held unit both stay selected through
+/// the port, by guid, with nothing sent or signalled; the arrival's `SelectTarget(0)` (`0x490927`)
+/// clears them (`unit_feed_live_tests`).
+#[test]
+fn a_world_port_keeps_the_selection_by_guid() {
+    for held in [false, true] {
+        let mut f = grouped();
+        run(
+            &mut f,
+            r#"SEEN = 0 local f = CreateFrame("Frame") f:RegisterEvent("PLAYER_TARGET_CHANGED")
+            f:SetScript("OnEvent", function() SEEN = SEEN + 1 end)"#,
+        );
+        let guid = if held {
+            OLD
+        } else {
+            select_unheld(&mut f, MEMBER);
+            MEMBER
+        };
+        f.wire();
+        deliver(
+            &mut f,
+            SessionEvent::Worldport {
+                map_id: 1,
+                position: [0.0; 3],
+                orientation: 0.0,
+                needs_ack: true,
+            },
+        );
+        assert_eq!(
+            selection(&f).0,
+            Some(guid),
+            "the port's packet leaves the old world: held: {held}"
+        );
+        if held {
+            assert!(
+                selection(&f).1.is_some(),
+                "the held target's object stands until the timer"
+            );
+        }
+        crate::net::fire_worldport_timer(f.app.world_mut());
+        assert_eq!(selection(&f), (Some(guid), None), "held: {held}");
+        assert_eq!(picks(&f), Vec::<u64>::new(), "the port sends nothing");
+        let seen: u32 = crate::script_calls::eval_in_vm(f.app.world_mut(), "return SEEN");
+        assert_eq!(seen, 0);
+    }
 }

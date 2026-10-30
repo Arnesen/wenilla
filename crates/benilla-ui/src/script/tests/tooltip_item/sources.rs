@@ -26,7 +26,7 @@ fn texts_after(s: &mut UiScript, call: &str) -> Vec<String> {
 fn offer(s: &mut UiScript, state: TradeState, slots: &[(u32, u32)]) {
     // No host: the placements' calls are kept, and the VM writes our slots as a sent one would.
     s.keep_calls();
-    s.open_trade_window();
+    s.open_trade_window(0x7);
     s.set_trade(Some(state));
     for (bag_slot, trade_slot) in slots {
         s.run(&format!(
@@ -119,6 +119,8 @@ fn only_a_source_with_an_item_object_reads() {
 #[test]
 fn a_bank_vault_item_keeps_its_text_and_its_open_hint() {
     let mut s = script();
+    // The bank bands read through `GetItemInSlot`, open only at a banker.
+    s.set_bank(Some(crate::script::BankState::default()));
     s.set_screen_size(800.0, 600.0);
     s.set_item_template(
         9201,
@@ -340,6 +342,7 @@ fn the_trade_enchant_slot_shows_the_proposed_enchant() {
 #[test]
 fn a_traded_crafted_item_names_its_maker() {
     let mut s = script();
+    s.keep_calls();
     s.set_screen_size(800.0, 600.0);
     s.run(r#"TT = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")"#)
         .unwrap();

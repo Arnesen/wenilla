@@ -331,12 +331,6 @@ impl ZKey {
     pub const fn parts(self) -> ZParts {
         unpack(self.0)
     }
-
-    /// The key's `(strata, level)` plane in the flat pass.
-    #[inline]
-    const fn plane(self) -> u64 {
-        self.hi() >> LEVEL_SHIFT
-    }
 }
 
 /// A [`ZKey`]'s flat-pass fields, most significant first.
@@ -429,14 +423,34 @@ pub struct DrawEntry {
 /// The sorted draw list, shared so an unchanged frame hands out the same one.
 pub type DrawList = std::sync::Arc<[DrawEntry]>;
 
-/// Every shown frame with its own flat key, sorted: the hit test's planes.
-pub type PickList = std::sync::Arc<[(FrameHandle, ZKey)]>;
+/// A frame's place in a hit sweep: its `(strata, level)` plane, then its stamp in that plane's
+/// list, the earlier stamp probed first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PickKey {
+    plane: (u8, u16),
+    stamp: u64,
+}
+
+impl PickKey {
+    fn new(strata: Strata, level: u16, stamp: u64) -> PickKey {
+        PickKey {
+            plane: (strata.index(), level),
+            stamp,
+        }
+    }
+}
+
+/// Every shown frame with its [`PickKey`], sorted ascending: the hit test's planes.
+pub type PickList = std::sync::Arc<[(FrameHandle, PickKey)]>;
 
 /// [`traversal`]'s and [`pick_order`]'s memos.
 #[derive(Clone, Default, Debug)]
 pub struct OrderCache {
     draw: Memo<DrawEntry>,
-    pick: Memo<(FrameHandle, ZKey)>,
+    pick: Memo<(FrameHandle, PickKey)>,
+    /// The arena's [`WidgetArena::frame_mutations`] when `pick` was last walked: with no frame
+    /// changed since, its list stands without a walk.
+    pick_at: std::cell::Cell<Option<u64>>,
 }
 
 /// One memo: the last walk, in arena order, and the sorted list built from it.
@@ -628,24 +642,34 @@ fn walk(arena: &WidgetArena, out: &mut Vec<DrawEntry>) {
 /// at its ScrollFrame's HIGHLIGHT callback. Only effective-visible frames contribute, as the
 /// client skips a hidden frame's whole subtree (`0x76ae10`, `0x76ad50`). Every region of such a
 /// frame is listed; hidden ones (`region+0xc4`, set by `0x77fcb0`) are dropped by
-/// [`UiScript::extract`](crate::script::UiScript::extract), and where the client skips them at
-/// draw time is untraced. An unchanged walk returns the last list.
+/// [`UiScript::extract`](crate::script::UiScript::extract), as the client never meets them at
+/// draw time: hiding a region in a shown frame (`Texture::Hide` `0x79b830`, `FontString::Hide`
+/// `0x79ce70`) unlinks it from its layer list (`0x77fc60` → `0x77fc95` → `0x76a910`). An unchanged walk returns the last list.
 pub fn traversal(arena: &WidgetArena) -> DrawList {
     memo(&arena.order_cache.draw, |v| walk(arena, v), |e| e.key)
 }
 
-/// Every shown frame by its own flat key, scroll children included: the mouse index holds a frame
-/// by its strata and level whatever its draw (`0x764aa0`), and only the probe treats the scroll
-/// subtree apart (`0x76b034`).
+/// Every shown frame in the mouse list's order (`0x764aa0`), scroll children included: by strata
+/// and level whatever its draw, and in one plane by [`crate::widget::Frame::mouse_stamp`], so a
+/// frame whose mouse bit came back on (`0x76af00`) sorts after the frames already there. Only the
+/// probe treats the scroll subtree apart (`0x76b034`).
 pub fn pick_order(arena: &WidgetArena) -> PickList {
+    let cache = &arena.order_cache;
+    let at = arena.frame_mutations();
+    if cache.pick_at.get() == Some(at) {
+        if let Some((_, list)) = cache.pick.borrow().as_ref() {
+            return list.clone();
+        }
+    }
+    cache.pick_at.set(Some(at));
     memo(
-        &arena.order_cache.pick,
+        &cache.pick,
         |v| {
             for (fh, frame) in arena.iter_frames() {
                 if frame.effective_visible {
                     v.push((
                         fh,
-                        ZKey::frame(frame.strata, frame.level, frame.insertion_seq),
+                        PickKey::new(frame.strata, frame.level, frame.mouse_stamp),
                     ));
                 }
             }
@@ -654,12 +678,29 @@ pub fn pick_order(arena: &WidgetArena) -> PickList {
     )
 }
 
+/// Every shown frame in its level list's order, the draw link's (`0x7668c0`): the walk of
+/// `0x765490`, which reads the level lists and not the mouse list.
+pub fn link_order(arena: &WidgetArena) -> PickList {
+    let mut v: Vec<(FrameHandle, PickKey)> = arena
+        .iter_frames()
+        .filter(|(_, f)| f.effective_visible)
+        .map(|(fh, f)| {
+            (
+                fh,
+                PickKey::new(f.strata, f.level, u64::from(f.insertion_seq)),
+            )
+        })
+        .collect();
+    v.sort_by_key(|&(_, k)| k);
+    v.into()
+}
+
 /// Walk into a scratch vector and return the last sorted list when the walk is unchanged, else
 /// sort the new walk and keep it.
-fn memo<T: Clone + PartialEq>(
+fn memo<T: Clone + PartialEq, K: Ord>(
     cache: &Memo<T>,
     walk: impl FnOnce(&mut Vec<T>),
-    key: impl Fn(&T) -> ZKey,
+    key: impl Fn(&T) -> K,
 ) -> std::sync::Arc<[T]> {
     let mut cache = cache.borrow_mut();
     let mut walked = Vec::with_capacity(cache.as_ref().map_or(0, |(prev, _)| prev.len()));
@@ -685,7 +726,7 @@ fn memo<T: Clone + PartialEq>(
 /// ends the sweep whatever its handler does (`0x7663f7` overwrites the result of the call at
 /// `0x7663f4`), so a disabled button still eats the click.
 ///
-/// Equal levels go to the earlier link (`0x764aa0` appends after equals). A parent is linked before
+/// Equal levels go to the earlier entry (`0x764aa0` appends after equals). A parent is linked before
 /// its children (show at `0x76ae85`, then `0x76aeb6`; `SetFrameLevel` likewise), so it wins a tie
 /// with its child, which `TargetFrame.lua:33` relies on; and the first-declared sibling wins, so a
 /// full-area `<Button>` declared first, mouse-enabled by its constructor, swallows its window.
@@ -694,14 +735,14 @@ fn memo<T: Clone + PartialEq>(
 /// `sorted` is [`pick_order`]'s ascending list and `hits` says whether a frame is a candidate at
 /// the cursor.
 pub fn hit_test<F: Fn(FrameHandle) -> bool>(
-    sorted: &[(FrameHandle, ZKey)],
+    sorted: &[(FrameHandle, PickKey)],
     hits: F,
 ) -> Option<FrameHandle> {
     let mut end = sorted.len();
     while end > 0 {
-        let p = sorted[end - 1].1.plane();
+        let p = sorted[end - 1].1.plane;
         let mut start = end;
-        while start > 0 && sorted[start - 1].1.plane() == p {
+        while start > 0 && sorted[start - 1].1.plane == p {
             start -= 1;
         }
         // Planes descend; within one, the earlier-linked frame is probed first.
@@ -1186,6 +1227,25 @@ mod tests {
         assert_eq!(hit_test(&picks, |_| true), Some(button));
         let list = targets(&a);
         assert!(pos(&list, ZTarget::Frame(button)) < pos(&list, ZTarget::Frame(over)));
+    }
+
+    /// With no frame changed since the last pick order, the same list stands without a walk; any
+    /// frame borrowed mutably walks again, and a change that moves the order shows.
+    #[test]
+    fn the_pick_order_stands_until_a_frame_changes() {
+        let mut a = WidgetArena::new();
+        let low = a.create(FrameKind::Frame, None, None);
+        let high = a.create(FrameKind::Frame, None, None);
+        a.set_frame_level(high, 2, false);
+        let first = pick_order(&a);
+        assert!(std::sync::Arc::ptr_eq(&first, &pick_order(&a)));
+        assert_eq!(hit_test(&first, |_| true), Some(high));
+        a.set_frame_level(low, 3, false);
+        let moved = pick_order(&a);
+        assert_eq!(hit_test(&moved, |_| true), Some(low));
+        // A direct edit is seen as well.
+        a.frame_mut(high).expect("live").level = 4;
+        assert_eq!(hit_test(&pick_order(&a), |_| true), Some(high));
     }
 
     // ── Hit-testing (pure core) ─────────────────────────────────────────────────────────────────

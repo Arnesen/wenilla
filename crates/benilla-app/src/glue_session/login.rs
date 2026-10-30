@@ -35,6 +35,7 @@ pub(crate) struct LoginPolicy;
 
 pub(super) fn build(app: &mut App) {
     app.init_resource::<LoginIntent>()
+        .insert_resource(crate::run_mode::EnvPin::process().clone())
         .add_message::<GlueLogin>()
         .add_message::<LoginGuardRefused>()
         .add_systems(
@@ -45,7 +46,9 @@ pub(super) fn build(app: &mut App) {
             (answer_glue, drive_policy, to_select_on_auth, drive_quit)
                 .chain()
                 .in_set(LoginPolicy)
-                .after(benilla_world::schedule::WorldStage::Net),
+                .after(benilla_world::schedule::WorldStage::Net)
+                // After the calls, whose `realmList` callback writes the address it logs on to.
+                .after(crate::vm_pass::VmPass::End),
         )
         .add_systems(Update, debug_login_shot.after(LoginPolicy));
 }
@@ -283,12 +286,14 @@ pub(crate) fn drive_policy(
         match msg.refusal {
             Some(refusal) => {
                 // A refusal from either server: shown even on the silent path, never retried.
-                let byte = refusal.byte();
-                warn!("login: refused ({refusal:?}, {byte:#04x}) — {}", msg.reason);
+                let byte = refusal
+                    .byte()
+                    .map_or_else(|| "no byte".to_string(), |b| format!("{b:#04x}"));
+                warn!("login: refused ({refusal:?}, {byte}) — {}", msg.reason);
                 attempt.intent.clear();
                 if may_end_the_run
                     && crate::run_mode::fatal_when_driverless(&format!(
-                        "refused ({refusal:?}, {byte:#04x}) and no resubmit can change it"
+                        "refused ({refusal:?}, {byte}) and no resubmit can change it"
                     ))
                 {
                     exit.write(AppExit::error());

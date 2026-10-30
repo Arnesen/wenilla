@@ -33,9 +33,10 @@ fn payload_icon(script: &benilla_ui::script::UiScript, covered: bool) -> Option<
         CursorPayload::Money(m) => {
             Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
         }
-        // Mode 5: the vendor row's icon, which the reference resolves from its `ItemDisplayInfo`
-        // id (`0xb4d8ec`).
+        // Modes 5 and 9: the vendor row's or the ammo's icon, which the reference resolves from
+        // its `ItemDisplayInfo` id (`0xb4d8ec`).
         CursorPayload::Merchant(m) => m.texture,
+        CursorPayload::Ammo(a) => a.texture,
     }
 }
 
@@ -78,8 +79,8 @@ fn decode_payload_cursor_rgba(
     assets: &mut benilla_assets::WorldAssets,
     path: &str,
 ) -> Option<Vec<u8>> {
-    // The dragged picture opens with the loose flag, as the cursor code's `0x449610` opens it.
-    let (w, h, rgba) = assets.decode_rgba(path, benilla_assets::LooseOpen::Index)?;
+    // The dragged picture opens as the cursor code's `0x449610` opens it: its `.blp` alone.
+    let (w, h, rgba) = assets.cursor_rgba(path)?;
     let mut out = box_downsample_32(w, h, &rgba);
     for a in out.iter_mut().skip(3).step_by(4) {
         *a = 0xFF;
@@ -172,12 +173,12 @@ pub(crate) fn pointer_visibility(hidden: bool, ours: &mut bool, visible: bool) -
 pub(crate) struct CustomCursorName(pub(crate) String);
 
 /// Decode the custom cursor `SetCursor` checked to be 32×32, as `0x523cdb` copies its texels
-/// unfiltered with their alpha; opened with the loose flag, as `0x523c86` opens it.
+/// unfiltered with their alpha; opened as `0x523c86` opens it, through `0x449610`.
 fn decode_custom_cursor_rgba(
     assets: &mut benilla_assets::WorldAssets,
     path: &str,
 ) -> Option<Vec<u8>> {
-    let (w, h, rgba) = assets.decode_rgba(path, benilla_assets::LooseOpen::Index)?;
+    let (w, h, rgba) = assets.cursor_rgba(path)?;
     (w == 32 && h == 32).then_some(rgba)
 }
 
@@ -302,7 +303,14 @@ fn drive_displayed_cursor(
             }
         }
         if !over_ui.0 {
-            displayed.0 = *world;
+            // The classifier's clear (Point) is `0x523d30`, which shows the base mode: over open
+            // ground (`0x481875`) and at every no-cursor exit of the object classifier (`0x4826cb`,
+            // `0x48272d`, `0x4828bd`, `0x4829cf`), so repair mode and an armed wrap keep theirs.
+            displayed.0 = if *world == WorldCursor::default() {
+                base
+            } else {
+                *world
+            };
             *last = None;
             return;
         }
@@ -327,12 +335,17 @@ impl Plugin for CursorPlugin {
         app.add_systems(Startup, macos::setup.after(AssetSet::Open))
             .add_systems(
                 Update,
-                (read_glue_pointer, drive_displayed_cursor, macos::drive)
+                (
+                    read_glue_pointer,
+                    drive_displayed_cursor,
+                    // After every call, which may move the camera's rig whose look it shows.
+                    macos::drive.after(crate::vm_pass::VmPass::End),
+                )
                     .chain()
                     // After the tick: a FrameXML `SetCursor` made this frame is read here; and
                     // after the target chain, whose clicks, calls and selects end or raise the
                     // targeting cursor.
-                    .after(crate::ui_script::UiInput)
+                    .after(crate::ui_script::UiTick)
                     .after(crate::target::TargetUpdate),
             );
         #[cfg(not(target_os = "macos"))]
@@ -350,7 +363,7 @@ impl Plugin for CursorPlugin {
                     // After the tick: a FrameXML `SetCursor` made this frame is read here; and
                     // after the target chain, whose clicks, calls and selects end or raise the
                     // targeting cursor.
-                    .after(crate::ui_script::UiInput)
+                    .after(crate::ui_script::UiTick)
                     .after(crate::target::TargetUpdate),
             );
     }
@@ -781,8 +794,22 @@ mod tests {
         armed: bool,
         covered: bool,
     ) -> WorldCursor {
+        frame_with(standing, world, over_ui, lua, armed, covered, |_| {})
+    }
+
+    /// One frame; `setup` puts the VM in a mode before `lua` runs.
+    fn frame_with(
+        standing: WorldCursor,
+        world: WorldCursor,
+        over_ui: bool,
+        lua: &str,
+        armed: bool,
+        covered: bool,
+        setup: impl FnOnce(&mut benilla_ui::script::UiScript),
+    ) -> WorldCursor {
         let mut app = App::new();
-        let script = benilla_ui::script::UiScript::new().unwrap();
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        setup(&mut script);
         script.run(lua).unwrap();
         app.insert_non_send_resource(script);
         app.insert_resource(if covered {
@@ -826,7 +853,7 @@ mod tests {
     fn a_custom_set_cursor_shows_mode_41_with_its_path() {
         let mut app = App::new();
         let mut script = benilla_ui::script::UiScript::new().unwrap();
-        script.set_texture_size_probe(Box::new(|p| (p == "Custom\\Arrow").then_some((32, 32))));
+        script.set_cursor_size_probe(Box::new(|p| (p == "Custom\\Arrow").then_some((32, 32))));
         script.run(r#"SetCursor("Custom\\Arrow")"#).unwrap();
         app.insert_non_send_resource(script);
         app.insert_resource(crate::loading_screen::LoadingScreen::default());
@@ -929,6 +956,48 @@ mod tests {
             frame_armed(GREY, WorldCursor::default(), true, "ResetCursor()", false),
             WorldCursor::default()
         );
+    }
+
+    /// Every no-cursor exit of the world classifier shows the base mode (`0x523d30`: open ground
+    /// `0x481875`, pick state 2's clears `0x4826cb`, `0x48272d`, `0x4828bd`, `0x4829cf`), so repair
+    /// mode (`0x4fbce3`) and an armed wrap (`0x5edebf`) keep their cursor over the world, while a
+    /// verdict of its own still shows.
+    #[test]
+    fn over_the_world_a_cleared_verdict_shows_the_base_mode() {
+        // Repair mode armed on an earlier frame, its own cursor write already taken.
+        let repair = |s: &mut benilla_ui::script::UiScript| {
+            s.set_merchant(Some(benilla_ui::script::MerchantState {
+                can_repair: true,
+                ..Default::default()
+            }));
+            s.run("ShowRepairCursor()").unwrap();
+            let _ = s.take_cursor_write();
+        };
+        let base = WorldCursor::default();
+        let repair_cursor = WorldCursor {
+            kind: CursorKind::Repair,
+            unable: false,
+        };
+        assert_eq!(
+            frame_with(base, base, false, "", false, false, repair),
+            repair_cursor,
+            "repair mode over open ground"
+        );
+        assert_eq!(
+            frame_with(base, SWORD, false, "", false, false, repair),
+            SWORD,
+            "a unit's own cursor still shows in repair mode"
+        );
+        let wrap = |s: &mut benilla_ui::script::UiScript| s.arm_gift_wrap(0, 1);
+        assert_eq!(
+            frame_with(base, base, false, "", false, false, wrap),
+            WorldCursor {
+                kind: CursorKind::Cast,
+                unable: false,
+            },
+            "an armed wrap over open ground"
+        );
+        assert_eq!(frame(SWORD, base, false, ""), base, "no mode: the pointer");
     }
 
     /// A UI element that writes no cursor does not invent one.

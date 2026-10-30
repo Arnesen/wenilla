@@ -27,6 +27,7 @@ fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Re
 fn shipped_gossip_frame_drives_end_to_end() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // `GossipResize` reads `GetTextHeight()` right after `SetText`, so the harness installs the
     // synchronous measurer the app always has; without one a row sizes from last frame's text.
@@ -178,11 +179,19 @@ fn shipped_gossip_frame_drives_end_to_end() {
     s.mouse_button(cx, cy, "LeftButton", true);
     s.mouse_button(cx, cy, "LeftButton", false);
     assert_eq!(s.take_gossip_selects(), vec![1]);
-    assert!(!s.take_gossip_close());
+    assert!(
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+            benilla_ui::script::GossipCall::Close
+        )) == 0
+    );
 
     // The close button hides the window; its OnHide calls `CloseGossip()` (`GossipFrame.xml:455`).
     s.run("GossipFrameCloseButton:Click()").unwrap();
-    assert!(s.take_gossip_close());
+    assert!(
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+            benilla_ui::script::GossipCall::Close
+        )) > 0
+    );
     assert!(!s.eval::<bool>("return GossipFrame:IsVisible()").unwrap());
     assert!(
         s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
@@ -197,6 +206,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
 fn shipped_gossip_frame_renders_quest_rows_above_options() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\Fonts.xml");
@@ -300,9 +310,9 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     );
 
     // Button 3, the active quest, calls `SelectGossipActiveQuest(1)`, its place in the active list
-    // (`GossipFrame.lua:53-61`); the binding maps it to menu position 1, the packet's order.
+    // (`GossipFrame.lua:53-61`), which the host finds among the message's rows.
     s.run("GossipTitleButton3:Click()").unwrap();
-    assert_eq!(s.take_gossip_quest_selects(), vec![1]);
+    assert_eq!(s.take_gossip_quest_selects(), vec![(true, 1)]);
     assert!(
         s.take_gossip_selects().is_empty(),
         "a quest-row click never queues SelectGossipOption"
@@ -316,6 +326,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
 fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // `GossipResize` reads `GetTextHeight()` right after `SetText`, so the harness installs the
     // synchronous measurer the app always has; without one a row sizes from last frame's text.
@@ -420,6 +431,7 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
 fn gossip_show_hide_plays_open_and_close_kits() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\Fonts.xml");
@@ -465,6 +477,7 @@ fn gossip_show_hide_plays_open_and_close_kits() {
 fn shipped_panel_slot_replaces_gossip_with_merchant() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         &[
@@ -550,6 +563,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
 fn displacing_an_npc_window_ends_the_displaced_session() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         &[
@@ -571,8 +585,12 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     // The vendor holds the left slot; drain what opening it queued.
     s.set_merchant(Some(MerchantState::default()));
     s.fire_event("MERCHANT_SHOW", vec![]);
-    let _ = s.take_merchant_close();
-    let _ = s.take_gossip_close();
+    let _ = s.take_calls_like(&benilla_ui::script::ScriptCall::Merchant(
+        benilla_ui::script::MerchantCall::Close,
+    ));
+    let _ = s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+        benilla_ui::script::GossipCall::Close,
+    ));
 
     // Gossip replaces the vendor; its OnHide calls `CloseMerchant()` (`MerchantFrame.lua:51-52`).
     s.set_gossip(Some(GossipMenu {
@@ -583,7 +601,9 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     s.fire_event("GOSSIP_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.take_merchant_close(),
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Merchant(
+            benilla_ui::script::MerchantCall::Close
+        )) > 0,
         "gossip displacing the vendor ends the vendor session (OnHide → CloseMerchant)"
     );
 
@@ -592,7 +612,9 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     s.fire_event("MERCHANT_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.take_gossip_close(),
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Gossip(
+            benilla_ui::script::GossipCall::Close
+        )) > 0,
         "the vendor displacing gossip ends the gossip session (OnHide → CloseGossip)"
     );
 }
@@ -603,6 +625,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
 fn shipped_panel_slot_pushable_promotes_to_center() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in crate::ui_script::test_ui::production_order(&[
         &[
@@ -697,6 +720,8 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
 
     let order_first = |bank_first: bool| {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.keep_calls();
         s.set_screen_size(1024.0, 768.0);
         load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
         load_xml(&s, "Interface\\FrameXML\\Fonts.xml");
@@ -767,6 +792,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
 fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     // `GossipResize` reads `GetTextHeight()` right after `SetText`, so the harness installs the
     // synchronous measurer the app always has; without one a row sizes from last frame's text.
@@ -905,6 +931,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
 fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\Fonts.xml");
@@ -1014,6 +1041,7 @@ fn the_panel_registry_rows_match_the_reference_bytes() {
 fn a_dead_player_opens_only_whiledead_windows() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");
@@ -1081,6 +1109,7 @@ fn a_dead_player_opens_only_whiledead_windows() {
 fn a_frame_arriving_at_center_puts_the_child_windows_away() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, r"Interface\FrameXML\GlobalStrings.lua");
     load_xml(&s, r"Interface\FrameXML\BasicControls.xml");

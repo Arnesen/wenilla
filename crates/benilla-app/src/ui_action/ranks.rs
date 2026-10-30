@@ -1,47 +1,44 @@
-//! Keeps each spell slot on the highest rank of its chain the book holds, and sends each move. A
-//! chain is `SkillLineAbility.dbc`'s `forward_spellid`, the column the server's supersede reads;
-//! caster ranks are unchained, so a deliberate down-rank is never moved. Deviation: this runs on
-//! every book or bar change, where the reference re-points slots in memory only on
-//! `SMSG_SUPERCEDED_SPELL` (`0x4e5e60`), because vmangos never rewrites stored slots on a rank-up
-//! (`Player::AddSpell`), drops superseded ranks from the book (`Player.cpp:3463`) and sends no
-//! supersede while loading (`Player.cpp:3704`), so a stored slot can name a spell the character
-//! no longer knows.
+//! Keeps each staged spell word on the highest rank of its chain the book holds, and sends each
+//! move. A chain is `SkillLineAbility.dbc`'s `forward_spellid`, the column the server's supersede
+//! reads; caster ranks are unchained, so a deliberate down-rank is never moved. Deviation: the
+//! book's and the bar's login packets run this over every staged spell word, where the reference re-points slots
+//! only at `SMSG_SUPERCEDED_SPELL`, old rank to new (`0x4e5e60`, [`super::spell_slots`]), because
+//! vmangos never rewrites stored slots on a rank-up (`Player::AddSpell`), drops superseded ranks
+//! from the book (`Player.cpp:3463`) and sends no supersede while loading (`Player.cpp:3704`), so
+//! a stored slot can name a spell the character no longer knows.
 
+use std::collections::BTreeSet;
+
+use benilla_formats::SkillLineCatalog;
+use benilla_protocol::messages::ACTION_KIND_SPELL;
 use bevy::prelude::*;
 
-use benilla_protocol::messages::ACTION_KIND_SPELL;
-
-use super::PlayerActions;
+use super::ActionSlots;
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_spellbook::SkillLines;
 
-/// Re-points each spell slot at the highest known rank of its chain and sends the move, so the
-/// server's stored copy is fixed too. Runs on `dirty`, before the feed consumes it.
-pub(crate) fn normalize_action_ranks(
-    mut actions: ResMut<PlayerActions>,
-    skill_lines: Option<Res<SkillLines>>,
-    commands: Res<NetCommands>,
+/// Re-points each staged spell word at the highest rank of its chain in `known` and sends the
+/// move, so the server's stored copy is fixed too; our player's arrival, behind the login's
+/// packets, loads the moved words, which the book knows, into the bar and the VM's copy
+/// (`super::recount::arrival_slot_pass`). An empty book yields no fixes, so a bar arriving first
+/// is harmless.
+pub(crate) fn normalize_ranks(
+    slots: &mut ActionSlots,
+    known: &BTreeSet<u32>,
+    skill_lines: &SkillLineCatalog,
+    commands: &NetCommands,
 ) {
-    let Some(skill_lines) = skill_lines else {
-        return;
-    };
-    if !actions.dirty {
-        return;
-    }
-    // Resolve, then write. An empty book yields no fixes, so a bar arriving first is harmless.
-    let fixes: Vec<(u8, u32)> = actions
-        .buttons
+    // Resolve, then write.
+    let fixes: Vec<(u8, u32)> = slots
+        .staged
         .values()
         .filter(|b| b.kind == ACTION_KIND_SPELL)
         .filter_map(|b| {
-            let top = skill_lines
-                .catalog
-                .highest_known_rank(b.action, &actions.spells)?;
+            let top = skill_lines.highest_known_rank(b.action, known)?;
             (top != b.action).then_some((b.slot, top))
         })
         .collect();
     for (slot, top) in fixes {
-        let Some(button) = actions.buttons.get_mut(&slot) else {
+        let Some(button) = slots.staged.get_mut(&slot) else {
             continue;
         };
         let was = button.action;
@@ -84,23 +81,17 @@ mod tests {
         data: &std::path::Path,
         buttons: &[ActionButton],
         spells: &[u32],
-    ) -> (PlayerActions, Vec<(u8, u32)>) {
+    ) -> (ActionSlots, Vec<(u8, u32)>) {
         let mut chain = benilla_formats::open_chain(data).expect("open chain");
         let catalog = benilla_formats::load_skill_line_catalog(&mut chain).expect("skill lines");
 
         let (tx, rx): (_, Receiver<ClientCommand>) = crossbeam_channel::unbounded();
-        let mut app = App::new();
-        app.insert_resource(PlayerActions {
-            buttons: buttons.iter().map(|b| (b.slot, *b)).collect(),
-            spells: spells.iter().copied().collect(),
-            openers: Vec::new(),
-            dirty: true,
-        })
-        .insert_resource(SkillLines { catalog })
-        .insert_resource(NetCommands(tx))
-        .add_systems(Update, normalize_action_ranks);
-        app.update();
-
+        let mut store = ActionSlots {
+            staged: buttons.iter().map(|b| (b.slot, *b)).collect(),
+            ..Default::default()
+        };
+        let known = spells.iter().copied().collect();
+        normalize_ranks(&mut store, &known, &catalog, &NetCommands(tx));
         let sent = rx
             .try_iter()
             .map(|c| match c {
@@ -108,7 +99,6 @@ mod tests {
                 _ => panic!("the rank pass sends nothing but SetActionButton"),
             })
             .collect();
-        let store = app.world_mut().remove_resource::<PlayerActions>().unwrap();
         (store, sent)
     }
 
@@ -116,8 +106,7 @@ mod tests {
     fn a_stale_rank_1_slot_moves_to_the_known_rank_and_persists() {
         let Some(data) = client_data() else { return };
         let (store, sent) = normalize(&data, &[spell_button(0, 1752)], &[11294]);
-        assert_eq!(store.buttons[&0].action, 11294, "slot 1 holds rank 8");
-        assert!(store.dirty, "the feed still re-resolves the slot");
+        assert_eq!(store.staged[&0].action, 11294, "slot 1 holds rank 8");
         assert_eq!(sent, vec![(0, 11294)]);
     }
 
@@ -132,7 +121,7 @@ mod tests {
         // Rank 4 (spell 1759) known: ranks 1-3 move up to it, ranks 5-8 down.
         let (store, sent) = normalize(&data, &buttons, &[1759]);
         for slot in 0..8u8 {
-            assert_eq!(store.buttons[&slot].action, 1759, "slot {slot}");
+            assert_eq!(store.staged[&slot].action, 1759, "slot {slot}");
         }
         assert_eq!(sent.len(), 7, "one send per moved slot (slot 3 was right)");
         assert!(!sent.iter().any(|(b, _)| *b == 3));
@@ -143,7 +132,7 @@ mod tests {
     fn an_unchained_caster_rank_is_left_alone() {
         let Some(data) = client_data() else { return };
         let (store, sent) = normalize(&data, &[spell_button(0, 133)], &[133, 143]);
-        assert_eq!(store.buttons[&0].action, 133);
+        assert_eq!(store.staged[&0].action, 133);
         assert!(sent.is_empty(), "nothing to persist");
     }
 
@@ -151,7 +140,7 @@ mod tests {
     fn an_unknown_chain_leaves_the_slot_untouched() {
         let Some(data) = client_data() else { return };
         let (store, sent) = normalize(&data, &[spell_button(0, 1752)], &[]);
-        assert_eq!(store.buttons[&0].action, 1752);
+        assert_eq!(store.staged[&0].action, 1752);
         assert!(sent.is_empty());
     }
 
@@ -171,8 +160,8 @@ mod tests {
             },
         ];
         let (store, sent) = normalize(&data, &buttons, &[11294]);
-        assert_eq!(store.buttons[&0].action, 1752);
-        assert_eq!(store.buttons[&1].action, 1752);
+        assert_eq!(store.staged[&0].action, 1752);
+        assert_eq!(store.staged[&1].action, 1752);
         assert!(sent.is_empty());
     }
 

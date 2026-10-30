@@ -105,8 +105,16 @@ struct Plate {
     bar: FrameHandle,
     /// `None` when the fill's file failed to load (`0x7831b4`).
     fill: Option<RegionHandle>,
+    /// The name's flash timer `+0x514`, in milliseconds: [`FLASH_MS`] when a hit arms it
+    /// (`0x7cba77`), 0 at every bind (`0x7cb80e`), counted down by the plate's update; a negative
+    /// timer is idle, and while it is above 0 the hover leaves the name red.
+    flash_ms: i32,
     /// Last frame's state, so [`Plate::drive`] writes only what moved; `None` while retired.
     last: Option<PlateState>,
+    /// `[plate+0x4e8]`, the unit last bound ([`PlateState::key`]): 0 from the constructor
+    /// (`0x7cb2a6`), written by each bind (`0x7cb6e0`) and left by the retire (`0x608a10`), so a
+    /// hidden pooled plate's click still names its last unit (`0x7cb91c`).
+    guid: u64,
     /// The geometry its anchors were written under, `None` before the first lay-out. Kept per
     /// plate, so a plate the pool grows later is laid out too.
     laid_out: Option<PlateGeometry>,
@@ -132,15 +140,10 @@ pub(crate) struct NamePlates {
     /// Plates this sync hid while they were in the built batch: re-shown in the same pass, they
     /// still draw from the records the batch copied (`0x772fd0`).
     retired_in_batch: std::collections::HashSet<FrameHandle>,
-    /// Completed clicks, drained by [`UiScript::take_nameplate_clicks`].
-    clicks: Vec<NamePlateClick>,
     /// The hit-test veto (`0x7cba30`). Not the mouse-enabled bit: it leaves `IsMouseEnabled()`
     /// true, where freelook (`0x60f830`) clears the bit.
     hit_test_vetoed: bool,
     geometry: Option<PlateGeometry>,
-    /// The verbs' writes to the two script bits, drained by
-    /// [`UiScript::take_nameplate_bit_writes`].
-    bit_writes: PlateBitWrites,
     /// The fills of the lit plates, which draw boosted ([`lit_fill_boost`]).
     lit_fills: std::collections::HashSet<RegionHandle>,
 }
@@ -156,20 +159,82 @@ impl NamePlates {
         self.by_frame.contains_key(&frame)
     }
 
+    /// The plate frames, for the update walk to visit: each runs [`update`] ahead of its
+    /// `OnUpdate` (`0x7cb950` → `0x76b2c0`).
+    pub(super) fn frames(&self) -> impl Iterator<Item = FrameHandle> + '_ {
+        self.by_frame.keys().copied()
+    }
+
     /// Whether the `0x7cba30` veto refuses `frame`: only a plate, only while the veto stands.
     pub(crate) fn vetoes(&self, frame: FrameHandle) -> bool {
         self.hit_test_vetoed && self.by_frame.contains_key(&frame)
     }
 }
 
-/// A completed click on a plate. The reference's click slot (`0x7cb910`) selects the unit on the
-/// left button (`0x4925d0`) and selects and interacts on the right (`0x492820`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NamePlateClick {
-    /// The unit whose plate was clicked ([`PlateState::key`]).
-    pub key: u64,
-    /// `"LeftButton"` or `"RightButton"`.
-    pub button: String,
+/// The flash a hit starts, in milliseconds (`0x7cba77`, `0x1388`).
+const FLASH_MS: i32 = 5000;
+
+/// The name colour while it flashes (`0x7cba88`, `0xffff0000`), and at rest: yellow while the glow
+/// shows, white otherwise (`0x7cb89e`, `0x7cb991`, `0x7cb8ed`).
+const FLASH_RED: crate::color::Rgba8 = crate::color::Rgba8::rgba(255, 0, 0, 255);
+const NAME_YELLOW: crate::color::Rgba8 = crate::color::Rgba8::rgba(255, 255, 0, 255);
+
+/// The plate's `OnUpdate` override (`0x7cb950`), the flash half: a timer at or above 0 loses
+/// `ftol(elapsed * 1000)` (`0x7cb962`-`0x7cb976`), and once it is 0 or less the name takes its
+/// resting colour, by whether the glow shows (`0x7cb97e`-`0x7cb9ac`). A negative timer does
+/// nothing, so the bind's 0 resets the name on the first update and then idles. It runs ahead of
+/// the plate's own `OnUpdate` script, which the override tail-calls (`0x76b2c0`).
+pub(super) fn update(model: &mut Model, frame: FrameHandle, elapsed: f32) {
+    let Some(&slot) = model.nameplates.by_frame.get(&frame) else {
+        return;
+    };
+    let plate = &mut model.nameplates.plates[slot];
+    if plate.flash_ms < 0 {
+        return;
+    }
+    plate.flash_ms -= super::binding_abi::ftol(f64::from(elapsed) * 1000.0);
+    if plate.flash_ms > 0 {
+        return;
+    }
+    let colour = if plate.last.as_ref().is_some_and(|l| l.hovered) {
+        NAME_YELLOW
+    } else {
+        crate::color::Rgba8::WHITE
+    };
+    let name = plate.name;
+    model
+        .region_data
+        .entry(name)
+        .or_default()
+        .set_vertex_color(Some(colour));
+}
+
+/// A plate's click as its slot (`CGNamePlateFrame::OnClick 0x7cb910`) hands it to
+/// `ClickObjectByAction` (`0x7cb92a` → `0x4949f0`), which the host applies inside the click
+/// ([`super::ScriptCall::PlateClick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlateClick {
+    /// The plate's unit, its guid at `[plate+0x4e8]` (`0x7cb91c`, [`PlateState::key`]).
+    pub guid: u64,
+    /// What the button's bit asks of `0x4949f0`.
+    pub action: PlateAction,
+    /// A Lua `Click()`, which passes the slot 1 (`0x7827b2`) where the mouse passes 0
+    /// (`0x779280`, `0x7793a4`): no press of the mouse latched the unit, so the right button's
+    /// interact classes it as it stands.
+    pub scripted: bool,
+    /// The gate's tag 2 (`0x6e5ba5`), asked where the click ran, for the select's bind to a
+    /// standing targeting cursor and for the casts the interact tries.
+    pub may_cast: bool,
+}
+
+/// The two button bits `0x4949f0` acts on (`0x494a15`, `0x494a2c`); any other does nothing
+/// (`0x494a3e`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlateAction {
+    /// Bit 1, the left button: `SelectObjectByClick` (`0x494a22` → `0x4925d0`).
+    Select,
+    /// Bit 4, the right button: `InteractWithObjectByClick` (`0x494a39` → `0x492820`).
+    Interact,
 }
 
 /// What a sync runs outside the model borrow: the plates' `Show`/`Hide`, whose transitions fire
@@ -188,9 +253,28 @@ pub const PLATE_BIT_ENEMY: u8 = 0x1;
 /// by `HideFriendNameplates` (setter `0x605510`).
 pub const PLATE_BIT_FRIEND: u8 = 0x8;
 
-/// The plate verbs' writes since the last drain. Each setter `or`s or `and`s its bit into the live
-/// dword in call order, so per bit the last write wins; bits `0x2` and `0x4` are the frame loop's
-/// own latches and no verb reaches them.
+/// One plate verb's write of its bit of `[0xc4da34]`, which the host applies inside the call
+/// ([`super::ScriptCall::Nameplates`]): the setter `or`s or `and`s the bit into the live dword.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlateBitWrite {
+    pub bit: u8,
+    pub on: bool,
+}
+
+impl PlateBitWrite {
+    /// `bits` with this write applied.
+    pub fn apply(self, bits: u8) -> u8 {
+        if self.on {
+            bits | self.bit
+        } else {
+            bits & !self.bit
+        }
+    }
+}
+
+/// The plate writes a harness's VM kept ([`UiScript::take_nameplate_bit_writes`]), folded in call
+/// order, so per bit the last write wins; bits `0x2` and `0x4` are the frame loop's own latches
+/// and no verb reaches them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlateBitWrites {
     set: u8,
@@ -213,7 +297,7 @@ impl PlateBitWrites {
         (bits | self.set) & !self.clear
     }
 
-    /// No verb ran since the last drain.
+    /// No verb ran since the last take.
     pub fn is_empty(self) -> bool {
         self.set | self.clear == 0
     }
@@ -237,8 +321,10 @@ pub(super) fn install_verbs(lua: &Lua) -> mlua::Result<()> {
             name,
             // The empty `MultiValue` returns zero values, which is not nil.
             lua.create_function(move |lua, _: mlua::MultiValue| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.nameplates.bit_writes.write(bit, on);
+                super::calls::submit(
+                    lua,
+                    super::ScriptCall::Nameplates(PlateBitWrite { bit, on }),
+                )?;
                 Ok(mlua::MultiValue::new())
             })?,
         )?;
@@ -247,11 +333,16 @@ pub(super) fn install_verbs(lua: &Lua) -> mlua::Result<()> {
 }
 
 impl UiScript {
-    /// Drain the plate verbs' writes for the engine's `[0xc4da34]`, which the app owns.
+    /// The plate writes a harness's VM kept ([`Self::keep_calls`]), folded in call order.
     pub fn take_nameplate_bit_writes(&mut self) -> PlateBitWrites {
-        let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        std::mem::take(&mut model.nameplates.bit_writes)
+        let mut writes = PlateBitWrites::default();
+        for write in self.take_calls_where(|c| match c {
+            super::ScriptCall::Nameplates(write) => Some(*write),
+            _ => None,
+        }) {
+            writes.write(write.bit, write.on);
+        }
+        writes
     }
 
     /// Drive the pool from the app's per-frame states, one per shown plate; a unit with no state
@@ -288,6 +379,29 @@ impl UiScript {
         }
     }
 
+    /// A hit on the unit `key`: `FlashNamePlate` (`0x6122e0` → `0x7cba70`) starts the flash on the
+    /// unit's plate, if it has one (`[unit+0xe60]`, `0x6122e6`): the timer to 5000 ms and the
+    /// name red, whatever the hover. Called for a health drop (`0x6046f0`), a direct spell hit
+    /// (`0x62cd80`) and environmental damage (`0x62aac0`).
+    pub fn flash_nameplate(&mut self, key: u64) {
+        let lua = self.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let Some(&slot) = model.nameplates.assigned.get(&key) else {
+            return;
+        };
+        let plate = &mut model.nameplates.plates[slot];
+        if plate.last.is_none() {
+            return;
+        }
+        plate.flash_ms = FLASH_MS;
+        let name = plate.name;
+        model
+            .region_data
+            .entry(name)
+            .or_default()
+            .set_vertex_color(Some(FLASH_RED));
+    }
+
     /// The unit whose plate is the hovered frame, the mouseover its OnEnter publishes (`0x7cb850`
     /// → `0x492890`, `[0xb4e2c8]`); an addon frame on a plate takes the hover from it.
     pub fn hovered_nameplate(&self) -> Option<u64> {
@@ -298,11 +412,10 @@ impl UiScript {
         model.nameplates.plates.get(slot)?.key()
     }
 
-    /// Drain the completed plate clicks, physical or `plate:Click()`, for the app to select from.
-    pub fn take_nameplate_clicks(&mut self) -> Vec<NamePlateClick> {
-        let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        std::mem::take(&mut model.nameplates.clicks)
+    /// Apply `click` through the host lent now, as the plate's slot does inside its click
+    /// ([`super::ScriptCall::PlateClick`]): for a test of the click's legs without the widget.
+    pub fn submit_plate_click(&mut self, click: PlateClick) {
+        submit(self.lua(), click);
     }
 
     /// The freelook toggle (`0x60f830`): entering camera freelook disables mouse input on every
@@ -361,22 +474,48 @@ fn apply_visibility(lua: &mlua::Lua, verbs: Vec<(FrameHandle, bool)>) {
     }
 }
 
-/// Record a click on `id` if it is a live plate; every button click comes here.
-pub(super) fn note_click(lua: &mlua::Lua, id: u32, button: &str) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let Some(frame) = model.id_to_frame.get(&id).copied() else {
-        return;
+/// A plate's click slot (`0x7cb910`) ahead of the button's own click: `0x4949f0` on the plate's
+/// unit (`0x7cb92a`), applied inside the click, so the plate's `OnClick` (`0x7cb936` →
+/// `0x779540`) and the line after a `Click()` read what it did. Every run of the slot comes here, a
+/// press's (`0x779285`) or a release's (`0x7793a9`), the mouse's or `Click()`'s, on an enabled
+/// plate or not: `RunClick`'s gate (`0x779552`) is past it, and on a retired plate, whose guid is
+/// still its last unit's. A frame that is no plate, a plate never bound, or any button but the
+/// left and the right, does nothing.
+pub(super) fn click(lua: &mlua::Lua, frame: FrameHandle, button: &str, scripted: bool) {
+    let action = match button {
+        "LeftButton" => PlateAction::Select,
+        "RightButton" => PlateAction::Interact,
+        _ => return,
     };
-    let Some(&slot) = model.nameplates.by_frame.get(&frame) else {
-        return;
+    let guid = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let Some(&slot) = model.nameplates.by_frame.get(&frame) else {
+            return;
+        };
+        match model.nameplates.plates.get(slot).map(|p| p.guid) {
+            Some(guid) if guid != 0 => guid,
+            _ => return,
+        }
     };
-    let Some(key) = model.nameplates.plates.get(slot).and_then(Plate::key) else {
-        return;
-    };
-    model.nameplates.clicks.push(NamePlateClick {
-        key,
-        button: button.to_string(),
-    });
+    let may_cast = super::protected::select_may_cast(lua);
+    submit(
+        lua,
+        PlateClick {
+            guid,
+            action,
+            scripted,
+            may_cast,
+        },
+    );
+}
+
+/// Hand `click` to the host, which applies it before this returns.
+fn submit(lua: &mlua::Lua, click: PlateClick) {
+    if let Err(e) = super::calls::submit(lua, super::ScriptCall::PlateClick(click)) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .record_lua_error(&e);
+    }
 }
 
 /// How many new plates [`sync`] builds for `states`: the units without a plate, less the free
@@ -563,7 +702,9 @@ impl Plate {
             raid,
             bar,
             fill,
+            flash_ms: 0,
             last: None,
+            guid: 0,
             laid_out: None,
         }
     }
@@ -743,17 +884,28 @@ impl Plate {
             // A new string clears the valid bit and invalidates (`0x771ea4`).
             model.clear_region_valid(name);
         }
+        // The bind stores the unit's guid (`0x7cb6e0`) and starts the flash timer at 0
+        // (`0x7cb80e`).
+        if last.is_none() {
+            let plate = &mut model.nameplates.plates[i];
+            plate.guid = state.key;
+            plate.flash_ms = 0;
+        }
         if last.as_ref().is_none_or(|l| l.hovered != state.hovered) {
-            let c = if state.hovered {
-                crate::color::Rgba8::rgba(255, 255, 0, 255)
-            } else {
-                crate::color::Rgba8::WHITE
-            };
-            model
-                .region_data
-                .entry(name)
-                .or_default()
-                .set_vertex_color(Some(c));
+            // The enter and leave notifies (`0x7cb883`, `0x7cb8d9`) set the name's colour only
+            // with the timer at 0 or less; a flash outlasts the hover.
+            if model.nameplates.plates[i].flash_ms <= 0 {
+                let c = if state.hovered {
+                    NAME_YELLOW
+                } else {
+                    crate::color::Rgba8::WHITE
+                };
+                model
+                    .region_data
+                    .entry(name)
+                    .or_default()
+                    .set_vertex_color(Some(c));
+            }
             // The glow really shows, as addons read mouseover from it; it only paints nothing.
             model.set_region_hidden(glow, !state.hovered);
         }
@@ -805,7 +957,8 @@ impl Plate {
     }
 
     /// Retire a plate: hide it, never destroy it (`0x608a10`), so it keeps its child-list index and
-    /// comes back as the same Lua object addons key their per-plate state by.
+    /// comes back as the same Lua object addons key their per-plate state by. Its guid stays: the
+    /// retire never writes `+0x4e8`.
     fn retire(model: &mut Model, i: usize, effects: &mut SyncEffects) {
         if model.nameplates.plates[i].last.is_none() {
             return;

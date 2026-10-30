@@ -8,13 +8,13 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast, channel, chat,
-    combat_log, death, duel, game_time, gameobject, gm_ticket, gossip, group, guild, instance,
-    items, loot, mail, meeting_stone, mirror_timer, monster_move, movement, opcode, page_text, pet,
-    petition, pose, progression, pvp, quest, social, spellbook, spells, stable, summon, tabard,
-    taxi, trade, trainer, tutorial, update_object, vendor, world_state, AddonRecord,
-    AttackSwingError, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket, SpeedKind,
-    SplineMode, WowTime,
+    account_data, action_bar, area_trigger, attack, auction, bank, battlefield, binder, broadcast,
+    channel, chat, combat_log, death, duel, game_time, gameobject, gm_ticket, gossip, group, guild,
+    instance, items, loot, mail, meeting_stone, mirror_timer, monster_move, movement, opcode,
+    page_text, pet, petition, pose, progression, pvp, quest, social, spellbook, spells, stable,
+    summon, tabard, taxi, trade, trainer, tutorial, update_object, vendor, world_state,
+    AddonRecord, AttackSwingError, Character, CreatureQueryInfo, JumpInfo, MoveMode, ServerPacket,
+    SpeedKind, SplineMode, WowTime,
 };
 
 /// Read a `SMSG_FORCE_*_SPEED_CHANGE` body: `[packed guid][u32 counter][f32 speed]` for all six
@@ -459,9 +459,13 @@ fn parse_server_body(
             }
         }
         // The ticket response opcodes share one 4-byte body; only the opcode names the verb.
-        opcode::SMSG_GMTICKET_GETTICKET => ServerPacket::GmTicketAnswer {
-            ticket: gm_ticket::read_gm_ticket(&mut r)?.map(Box::new),
-        },
+        opcode::SMSG_GMTICKET_GETTICKET => {
+            let (status, ticket) = gm_ticket::read_gm_ticket(&mut r)?;
+            ServerPacket::GmTicketAnswer {
+                status,
+                ticket: ticket.map(Box::new),
+            }
+        }
         opcode::SMSG_GMTICKET_CREATE => ServerPacket::GmTicketCreated {
             response: gm_ticket::read_gm_ticket_response(&mut r)?,
         },
@@ -566,6 +570,12 @@ fn parse_server_body(
         opcode::SMSG_MEETINGSTONE_JOIN_FAILED => {
             ServerPacket::MeetingStoneNotice(meeting_stone::read_meeting_stone_join_failed(&mut r)?)
         }
+        opcode::SMSG_ACCOUNT_DATA_MD5 => {
+            ServerPacket::AccountDataMd5(account_data::read_account_data_md5(&mut r)?)
+        }
+        opcode::SMSG_UPDATE_ACCOUNT_DATA => {
+            ServerPacket::UpdateAccountData(account_data::read_update_account_data(&mut r)?)
+        }
         opcode::SMSG_TUTORIAL_FLAGS => {
             ServerPacket::TutorialFlags(tutorial::read_tutorial_flags(&mut r)?)
         }
@@ -625,6 +635,10 @@ fn parse_server_body(
             let emote_id = read_u32_le(&mut r)?;
             let guid = read_u64_le(&mut r)?;
             ServerPacket::Emote { guid, emote_id }
+        }
+        opcode::SMSG_ITEM_NAME_QUERY_RESPONSE => {
+            let (entry, name) = items::read_item_name_query_response(&mut r)?;
+            ServerPacket::ItemNameQueryResponse { entry, name }
         }
         opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE => {
             let (entry, info) = items::read_item_query_response(&mut r)?;
@@ -1229,6 +1243,10 @@ fn parse_server_body(
         opcode::SMSG_SET_FACTION_VISIBLE => ServerPacket::SetFactionVisible {
             list_id: read_u32_le(&mut r)?,
         },
+        opcode::SMSG_SET_FACTION_ATWAR => ServerPacket::SetFactionAtWar {
+            list_id: read_u32_le(&mut r)?,
+            flags: read_u8(&mut r)?,
+        },
         opcode::SMSG_NAME_QUERY_RESPONSE => {
             let guid = read_u64_le(&mut r)?;
             let name = read_cstring(&mut r)?;
@@ -1283,8 +1301,8 @@ fn parse_server_body(
                 }
             }
         }
-        // `u32 petNumber, cstring name, u32 nameTimestamp` (`Pet.cpp:79-84`); the timestamp only
-        // ages the reference's on-disk pet-name cache.
+        // `u32 petNumber, cstring name, u32 nameTimestamp` (`Pet.cpp:79-84`); the timestamp is
+        // read and dropped.
         opcode::SMSG_PET_NAME_QUERY_RESPONSE => {
             let pet_number = read_u32_le(&mut r)?;
             let name = read_cstring(&mut r)?;
@@ -1311,6 +1329,20 @@ fn parse_server_body(
             let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
             ServerPacket::GameObjectDespawnAnim { guid }
         }
+        opcode::SMSG_GAMEOBJECT_PAGETEXT => ServerPacket::GameObjectPageText {
+            guid: gameobject::read_gameobject_page_text(&mut r)?,
+        },
+        opcode::SMSG_READ_ITEM_OK => ServerPacket::ReadItemOk {
+            guid: read_u64_le(&mut r)?,
+        },
+        opcode::SMSG_READ_ITEM_FAILED => {
+            let (guid, reason, milliseconds) = items::read_read_item_failed(&mut r)?;
+            ServerPacket::ReadItemFailed {
+                guid,
+                reason,
+                milliseconds,
+            }
+        }
         opcode::SMSG_OPEN_CONTAINER => ServerPacket::OpenContainer {
             item: items::read_open_container(&mut r)?,
         },
@@ -1328,6 +1360,7 @@ fn parse_server_body(
             instant: read_u8(&mut r)? != 0,
         },
         opcode::SMSG_LOGOUT_CANCEL_ACK => ServerPacket::LogoutCancelAck,
+        opcode::SMSG_CLEAR_FAR_SIGHT_IMMEDIATE => ServerPacket::ClearFarSightImmediate,
         opcode::SMSG_PONG => ServerPacket::Pong {
             sequence: read_u32_le(&mut r)?,
         },
@@ -1668,6 +1701,19 @@ fn parse_server_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SMSG_CLEAR_FAR_SIGHT_IMMEDIATE` (`0x20d`) has a handler: its jump-table entry leads to
+    /// `0x5e43f8`, which ends far sight on the active player and reads no body.
+    #[test]
+    fn the_clear_far_sight_packet_decodes_to_its_event() {
+        let (packet, tail) = parse_server_with_tail(opcode::SMSG_CLEAR_FAR_SIGHT_IMMEDIATE, &[])
+            .expect("an empty body decodes");
+        assert_eq!(tail, 0);
+        assert!(matches!(
+            crate::events::decode(packet).as_slice(),
+            [crate::SessionEvent::FarSightCleared]
+        ));
+    }
 
     /// `SMSG_AUTH_RESPONSE` as vmangos writes its four shapes: the admitting `AUTH_OK` and the first
     /// `AUTH_WAIT_QUEUE` with the billing group (`World.cpp:325-331`, `:374-381`), then the queue's

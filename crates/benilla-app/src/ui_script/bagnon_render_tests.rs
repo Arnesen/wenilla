@@ -70,7 +70,7 @@ const INSTALLED: &[&str] = &[
 enum Seat {
     /// The app's order: the roster row goes in ahead of `load_ingame_ui`.
     BeforeAddons,
-    /// Nothing writes `"player"` until `ui_unit::feed_units` sees the self descriptor.
+    /// Nothing writes `"player"` until the self descriptor is seen.
     AfterAddons,
 }
 
@@ -105,7 +105,7 @@ fn roster() -> crate::glue_session::roster::Roster {
     crate::glue_session::roster::Roster::with_pending_pick(vec![row], 7)
 }
 
-/// The `"player"` snapshot the self descriptor builds, as `ui_unit::feed_units` pushes it: the
+/// The `"player"` snapshot the self descriptor builds, as the host reads it: the
 /// roster seat plus what only the descriptor says (the unit exists, its level, health, a live
 /// object). The seat leaves those nil and 0, as the reference answers before the object exists.
 fn descriptor_snapshot(seat: &benilla_ui::script::UnitState) -> benilla_ui::script::UnitState {
@@ -1147,9 +1147,9 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         "the login scan records the occupied slot's short link"
     );
 
-    // An equipped bag: the inventory slot (20) first, then the container and its `BAG_UPDATE`,
-    // the order `feed_char.before(feed_containers)` holds. The size row reads the bag item's own
-    // count and link, so the other order records the bag without its link.
+    // An equipped bag: the inventory slot (20) and the container pushed, then its `BAG_UPDATE`,
+    // which the lanes' drain fires after every push. The size row reads the bag item's own count
+    // and link, so an event ahead of the inventory push records the bag without its link.
     let mut inv: benilla_ui::script::InventorySlots = Default::default();
     inv[20] = Some(benilla_ui::script::InvSlotView {
         item_id: 4497,
@@ -1179,15 +1179,7 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
         "an equipped bag's size row carries its own count and short link"
     );
 
-    // The logout boundary: the despawn frame (no self store), then the shutdown events.
-    let mut memory = crate::ui_items::feed::FeedMemory::default();
-    crate::ui_items::feed::apply_container_source(
-        &mut s,
-        &mut memory,
-        None,
-        Default::default(),
-        Vec::new(),
-    );
+    // The logout boundary: the shutdown events, which fire no `BAG_UPDATE`, so the records stand.
     s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
     s.fire_event("PLAYER_LOGOUT", Vec::new());
     let (size, item) = s

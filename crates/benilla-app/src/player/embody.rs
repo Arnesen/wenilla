@@ -15,9 +15,6 @@
 
 use bevy::prelude::*;
 
-use super::approach::Approach;
-use super::follow::FollowState;
-use super::state::Player;
 use crate::creature_anim::MovementState;
 use crate::net::{ActiveMover, Embodied, GuidIndex, RemoteMotion, SelfGuid, SelfPlayer};
 
@@ -25,9 +22,7 @@ use crate::net::{ActiveMover, Embodied, GuidIndex, RemoteMotion, SelfGuid, SelfP
 /// [`ActiveMover`] on it while it is ours to move; runs before the controller.
 pub(super) fn maintain_embodiment(
     mut commands: Commands,
-    mut player: ResMut<Player>,
-    mut follow: ResMut<FollowState>,
-    mut approach: ResMut<Approach>,
+    mut lock: ResMut<super::MoverLock>,
     guids: (Res<SelfGuid>, Res<GuidIndex>),
     self_body: Query<Entity, With<SelfPlayer>>,
     attached: Query<Entity, With<Embodied>>,
@@ -37,8 +32,8 @@ pub(super) fn maintain_embodiment(
     let (self_guid, index) = (&guids.0, &guids.1);
     // A claimed foreign mover is the body if streamed, else nobody; otherwise our own body. Lost
     // control is not a third answer: only [`ActiveMover`] comes off, below.
-    let want_guid = player.foreign_mover.or(self_guid.0);
-    let want = match player.foreign_mover {
+    let want_guid = lock.foreign_mover.or(self_guid.0);
+    let want = match lock.foreign_mover {
         Some(guid) => index.0.get(&guid).copied(),
         None => self_body.iter().next(),
     };
@@ -47,16 +42,15 @@ pub(super) fn maintain_embodiment(
         *held = want_guid;
         if want_guid.is_some() {
             // `Player` holds the old body's pose; the controller adopts the new one's first.
-            player.reseat = true;
-            // `SetActiveMover` `0x6006e0` cancels click-to-move and follow on the outgoing mover,
-            // through `0x6103a0` → `0x60fb60(0, 1)`.
-            follow.stop();
-            approach.stop();
+            lock.reseat = true;
+            // `SetActiveMover` `0x6006e0` cancels click-to-move and follow on the outgoing mover
+            // (`0x600742`), inside the control update's handler
+            // ([`crate::player::AutoMoveStop::stop_mover`]).
         }
     }
 
     // Steering has its own edges: a fear lands and lifts without a handover.
-    let steer = want.filter(|_| !player.control_lost);
+    let steer = want.filter(|_| !lock.control_lost);
     for e in &steering {
         if Some(e) != steer {
             // `MovementState` goes too: it is `unify`'s top-precedence leg, so a stale one would
@@ -87,14 +81,14 @@ pub(super) fn maintain_embodiment(
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::Player;
     use super::*;
     use crate::net::RemoteMotion;
 
     fn harness() -> (App, Entity) {
         let mut app = App::new();
         app.init_resource::<Player>()
-            .init_resource::<FollowState>()
-            .init_resource::<Approach>()
+            .init_resource::<super::super::MoverLock>()
             .init_resource::<SelfGuid>()
             .init_resource::<GuidIndex>()
             .add_systems(Update, maintain_embodiment);
@@ -144,7 +138,9 @@ mod tests {
         assert_eq!(mover(&mut app), Some(me), "no claim → our own body");
 
         // Claimed, but the creature has not streamed in.
-        app.world_mut().resource_mut::<Player>().foreign_mover = Some(0xBB);
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .foreign_mover = Some(0xBB);
         app.update();
         assert_eq!(
             mover(&mut app),
@@ -153,7 +149,7 @@ mod tests {
              creature's mover, and outbound moves carry no guid of their own"
         );
         assert!(
-            app.world().resource::<Player>().reseat,
+            app.world().resource::<super::super::MoverLock>().reseat,
             "and the controller is told to drive nothing until it has a pose to adopt"
         );
 
@@ -176,7 +172,9 @@ mod tests {
         );
 
         // Released.
-        app.world_mut().resource_mut::<Player>().foreign_mover = None;
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .foreign_mover = None;
         app.update();
         assert_eq!(mover(&mut app), Some(me), "the reins come home");
         assert!(
@@ -192,7 +190,9 @@ mod tests {
         app.update();
         assert!(app.world().entity(me).contains::<MovementState>());
 
-        app.world_mut().resource_mut::<Player>().foreign_mover = Some(0xBB);
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .foreign_mover = Some(0xBB);
         let boar = app.world_mut().spawn(replaying()).id();
         app.world_mut()
             .resource_mut::<GuidIndex>()
@@ -206,7 +206,9 @@ mod tests {
         );
         assert!(app.world().entity(boar).contains::<MovementState>());
 
-        app.world_mut().resource_mut::<Player>().foreign_mover = None;
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .foreign_mover = None;
         app.update();
         assert!(
             app.world().entity(me).contains::<MovementState>(),
@@ -221,7 +223,9 @@ mod tests {
     fn re_streaming_our_own_body_moves_the_marker_without_calling_it_a_handover() {
         let (mut app, me) = harness();
         app.update();
-        app.world_mut().resource_mut::<Player>().reseat = false;
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .reseat = false;
 
         app.world_mut().entity_mut(me).despawn();
         let reborn = app.world_mut().spawn(SelfPlayer).id();
@@ -237,7 +241,7 @@ mod tests {
             "the marker follows the entity"
         );
         assert!(
-            !app.world().resource::<Player>().reseat,
+            !app.world().resource::<super::super::MoverLock>().reseat,
             "but the mover GUID never changed, so this is not a handover: re-seizing here would \
              discard the worldport's own snap and re-run the settle"
         );
@@ -250,7 +254,9 @@ mod tests {
         assert_eq!(steered(&mut app), Some(me));
 
         // Feared, or mind-controlled: the server named us with allowMove = 0.
-        app.world_mut().resource_mut::<Player>().control_lost = true;
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .control_lost = true;
         app.update();
         assert_eq!(
             mover(&mut app),
@@ -266,7 +272,9 @@ mod tests {
         );
 
         // A possessed creature feared out of our control behaves the same way.
-        app.world_mut().resource_mut::<Player>().foreign_mover = Some(0xBB);
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .foreign_mover = Some(0xBB);
         let boar = app.world_mut().spawn(replaying()).id();
         app.world_mut()
             .resource_mut::<GuidIndex>()
@@ -277,7 +285,9 @@ mod tests {
         assert_eq!(steered(&mut app), None);
 
         // Control back.
-        app.world_mut().resource_mut::<Player>().control_lost = false;
+        app.world_mut()
+            .resource_mut::<super::super::MoverLock>()
+            .control_lost = false;
         app.update();
         assert_eq!(steered(&mut app), Some(boar));
     }

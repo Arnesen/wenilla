@@ -75,6 +75,13 @@ fn creature_line_law() {
         -- none of the nine prefixes reaches `luaL_error("Unknown unit name: %s")` and longjmps).
         -- This used to read `SetUnit("nosuch") == nil`, which was the refuted claim.
         assert(pcall(tt.SetUnit, tt, "nosuch") == false, "an unrecognised token raises")
+        -- A non-string raises the binding's own line (`0x534a4c`), never mlua's conversion text.
+        for _, v in { {}, true } do
+            local ok, e = pcall(tt.SetUnit, tt, v)
+            assert(not ok and string.find(e, 'Usage: SetUnit%("unit"%)'), tostring(e))
+        end
+        local ok, e = pcall(tt.SetUnit, tt)
+        assert(not ok and string.find(e, 'Usage: SetUnit%("unit"%)'), tostring(e))
     "#,
     )
     .unwrap();
@@ -760,23 +767,18 @@ fn world_hover_drive_and_health_watcher() {
                   "plate at the default corner, got " .. tostring(GameTooltip:GetRight()) .. "," .. tostring(GameTooltip:GetBottom()))"#,
     )
     .unwrap();
-    // A health push for the live token re-drives the bar without a rebuild.
+    // A push of the shown unit redraws nothing: the bar follows the object's health watch alone
+    // (`0x52a08d` → `0x529560`).
     let mut hurt = wolf();
     hurt.health = 12;
     s.set_unit("mouseover", Some(hurt));
+    s.run(r#"assert(GameTooltipStatusBar:GetValue() == 30, "a push redraws nothing")"#)
+        .unwrap();
+    // The watcher sets the range, re-firing the held 30, then the moved value.
+    s.tooltip_unit_health(wolf().guid, 12, 50);
     s.run(
-        r#"assert(GameTooltipStatusBar:GetValue() == 12, "the health watcher tracked the push")"#,
-    )
-    .unwrap();
-    // The watcher (`0x529560`) sets the range, re-firing the held 30, then the moved value; an
-    // unchanged push runs no watcher, and a maximum alone is not the watched field.
-    let mut same = wolf();
-    same.health = 12;
-    s.set_unit("mouseover", Some(same.clone()));
-    same.max_health = 60;
-    s.set_unit("mouseover", Some(same));
-    s.run(
-        r#"assert(table.getn(BarFires) == 3 and BarFires[2] == 30 and BarFires[3] == 12,
+        r#"assert(GameTooltipStatusBar:GetValue() == 12, "the health watcher")
+           assert(table.getn(BarFires) == 3 and BarFires[2] == 30 and BarFires[3] == 12,
                   "fired " .. table.getn(BarFires))"#,
     )
     .unwrap();
@@ -794,11 +796,13 @@ fn world_hover_drive_and_health_watcher() {
     "#,
     )
     .unwrap();
-    // The same unit pushed under another token still drives the bar.
-    let mut as_target = wolf();
-    as_target.health = 8;
-    s.set_unit("target", Some(as_target));
-    s.run(r#"assert(GameTooltipStatusBar:GetValue() == 8, "the watcher follows the guid")"#)
+    // The object's own health watch, with no token naming it: the watcher follows the guid, and
+    // another unit's health moves nothing.
+    s.tooltip_unit_health(wolf().guid, 5, 50);
+    s.run(r#"assert(GameTooltipStatusBar:GetValue() == 5, "the object's health watch")"#)
+        .unwrap();
+    s.tooltip_unit_health(wolf().guid + 1, 1, 50);
+    s.run(r#"assert(GameTooltipStatusBar:GetValue() == 5, "another unit's health")"#)
         .unwrap();
     s.tick(2.0);
     s.run(r#"assert(not GameTooltip:IsShown(), "faded out after the ramp")"#)
@@ -815,7 +819,7 @@ fn minimap_blip_tooltip_shows_follows_and_hides() {
     s.run(r#"CreateFrame("GameTooltip", "GameTooltip", nil, "TestTooltipTemplate")"#)
         .unwrap();
     assert!(
-        !s.minimap_tooltip("Stormwind", false),
+        !s.minimap_tooltip("Stormwind"),
         "no Minimap yet: the show refuses"
     );
     s.run(
@@ -828,7 +832,7 @@ fn minimap_blip_tooltip_shows_follows_and_hides() {
     )
     .unwrap();
     s.mouse_move(795.0, 500.0);
-    assert!(s.minimap_tooltip("Stormwind", false));
+    assert!(s.minimap_tooltip("Stormwind"));
     s.run(
         r#"
         assert(GameTooltipTextLeft1:GetText() == "Stormwind")
@@ -898,7 +902,7 @@ fn a_cursor_seated_plate_lands_on_the_cursor_under_the_ui_scale() {
         .unwrap()
     };
     s.mouse_move(400.0, 300.0);
-    assert!(s.minimap_tooltip("Stormwind", false));
+    assert!(s.minimap_tooltip("Stormwind"));
     let (x, y) = at(&mut s);
     assert!(
         (x - 400.0).abs() < 1e-3 && (y - 300.0).abs() < 1e-3,
@@ -1000,7 +1004,7 @@ fn a_minimap_blip_plate_hides_at_once_on_hover_loss() {
         "#,
     )
     .unwrap();
-    assert!(s.minimap_tooltip("Stormwind", false));
+    assert!(s.minimap_tooltip("Stormwind"));
     s.run(
         r#"
         assert(GameTooltip:IsShown())

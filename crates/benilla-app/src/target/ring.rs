@@ -300,9 +300,8 @@ pub(super) fn update_ring(
                     .zip(me)
                     .map_or(Reaction::Neutral as u8, |(u, me)| rel.reaction(&u, &me));
                 let is_player = net.is_some_and(|n| n.kind == EntityKind::Player);
-                let in_party = selection
-                    .guid
-                    .is_some_and(|g| targets.2.members.iter().any(|m| m.guid == g));
+                // `0x4e7f70`: us or one of the four party slots, never the raid roster.
+                let in_party = selection.guid.is_some_and(|g| rel.in_party(g));
                 let is_dead = store.is_some_and(|s| s.0.unit_is_dead());
                 if selection.guid != *logged_guid {
                     *logged_guid = selection.guid;
@@ -332,8 +331,8 @@ pub(super) fn update_ring(
                 // No ground in the box hides the ring: the reference skips the draw (`0x6d74b5`).
                 !projected
             }
-            // No longer an object: nothing to draw. The selection's own teardown is the net stage's
-            // (`track::follow_selection_object`).
+            // No longer an object: nothing to draw. The selection's own teardown is its release's
+            // (`super::release`).
             Err(_) => {
                 *logged_guid = None;
                 true
@@ -769,7 +768,7 @@ mod tests {
 
         /// The built client with our avatar and one selected live mob, the write channel captured.
         fn client_with_selected_mob() -> (App, Entity, Receiver<ClientCommand>) {
-            let mut app = crate::game_plugins::schedule_tests::headless_client();
+            let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
             let (tx, rx) = crossbeam_channel::unbounded();
             app.insert_resource(NetCommands(tx));
             let world = app.world_mut();
@@ -799,10 +798,7 @@ mod tests {
                 guid: Some(MOB),
                 ..Default::default()
             };
-            // Control: a live target keeps its selection through the tracker and a ring pass.
-            world
-                .run_system_once(super::super::super::track::follow_selection_object)
-                .expect("the tracker runs on the built client");
+            // Control: a live target keeps its selection through a ring pass.
             world
                 .run_system_once(super::super::update_ring)
                 .expect("the ring runs on the built client");
@@ -825,9 +821,6 @@ mod tests {
                 "the model outlives the object"
             );
             assert!(world.get::<DespawnFade>(mob).is_some(), "…and fades");
-            world
-                .run_system_once(super::super::super::track::follow_selection_object)
-                .expect("the tracker runs on the built client");
             let sel = world.resource::<Selection>();
             assert_eq!(
                 (sel.target, sel.guid),
@@ -865,7 +858,9 @@ mod tests {
                          mut sel: ResMut<Selection>,
                          mut seam: crate::creature_anim::AttackSeam,
                          errors: Res<crate::ui_action::UiErrorKeys>| {
-                            pick.target(None, true, &mut sel, &mut seam, &errors)
+                            let owed = pick.pick(None, true, &mut sel, &mut seam);
+                            owed.pay(&mut sel, &mut seam);
+                            pick.settle(&sel, &errors)
                         },
                     )
                     .expect("the scan runs on the built client")

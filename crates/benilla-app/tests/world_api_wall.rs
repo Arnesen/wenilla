@@ -88,12 +88,14 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("boot::tuned_default_plugins", "record"),
     ("build_id::BuildId", "record"),
     ("build_id::banner", "record"),
+    ("collision::BodyHit", "record"),
     ("collision::ColliderEpoch", "record"),
     ("collision::MoverTraceExclusions", "record"),
     ("collision::WorldCollision", "record"),
     ("decal::WorldDecal", "record"),
     ("dev_state::STILL_INPUTS_CHANGED", "record"),
     ("doodad_anim::AnimMatPart", "record"),
+    ("doodad_anim::CarrierAnimation", "record"),
     ("doodad_anim::DoodadAnimHost", "record"),
     ("doodad_anim::MatAnim", "record"),
     ("doodad_anim::MatAnimTick", "record"),
@@ -113,6 +115,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("frame_pace::FrameStep", "record"),
     ("instance_tint::InstanceTintMirrors", "record"),
     ("instance_tint::InstanceTints", "record"),
+    ("interact::DoodadOccluders", "wall"),
     ("interact::PickMesh", "record"),
     ("interact::WorldObject", "record"),
     ("interact::WorldPick", "record"),
@@ -156,6 +159,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("schedule::WorldLive", "record"),
     ("schedule::WorldStage", "record"),
     ("sky_order::Rung", "wall"),
+    ("sun::SunGlare", "record"),
     ("terrain_stream::SPAWN_XY", "wall"),
     ("terrain_stream::ViewFocus", "record"),
     ("terrain_stream::WorldLoadProgress", "wall"),
@@ -168,16 +172,20 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("view::Viewer", "wall"),
     ("view::WorldCamera", "record"),
     ("vis_chain::VisChainOnly", "record"),
+    ("water_fx::WaterRipples", "record"),
     ("weather::WeatherMessage", "record"),
     ("weather::WeatherState", "record"),
     ("wmo_portal::EntityOutdoors", "record"),
     ("wmo_portal::room_pvs_visible", "record"),
     ("world_census::CensusReport", "record"),
     ("world_census::WorldCensus", "record"),
+    ("world_flags::WorldFlags", "record"),
     ("world_map::CurrentMap", "record"),
     ("world_map::MapChange", "record"),
     ("world_plugins::WorldPlugins", "record"),
+    ("world_point::AreaUnderfoot", "wall"),
     ("world_point::Subject", "record"),
+    ("world_point::TerrainHeights", "wall"),
     ("world_point::WorldPoint", "record"),
     ("world_unit::ViewerUnit", "wall"),
     ("world_unit::WorldUnit", "wall"),
@@ -207,9 +215,6 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
     ("instance_tint::IDENTITY", "CLOSE/absorb"),
     ("instance_tint::pack", "CLOSE/absorb"),
     ("interact::PickBox", "CLOSE/absorb"),
-    ("interact::WorldClick", "CLOSE/move-game"),
-    ("interact::WorldRightClick", "CLOSE/move-game"),
-    ("interact::WorldRightPress", "CLOSE/move-game"),
     ("interact::cast_pick_ray_inflated", "CLOSE/absorb"),
     ("interior::BodyBakeCenter", "CLOSE/absorb"),
     ("interior::ContainmentAttach", "CLOSE/absorb"),
@@ -223,6 +228,10 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
     ("liquid::WaterChunkInfo", "CLOSE/absorb"),
     ("map_proj::WorldProj", "CLOSE/move-game"),
     ("map_proj::ZoneRect", "CLOSE/move-game"),
+    ("map_proj::continent_sheet_rect", "CLOSE/move-game"),
+    ("map_proj::world_uv", "CLOSE/move-game"),
+    ("map_proj::zone_uv", "CLOSE/move-game"),
+    ("map_proj::zone_world", "CLOSE/move-game"),
     ("mesh_tag::describe", "CLOSE/absorb"),
     ("mesh_tag::with_alpha", "CLOSE/invert"),
     ("model_fade::DespawnFade", "CLOSE/move-game"),
@@ -289,7 +298,7 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 ];
 
 /// The gate on the leak count. Lower it when a leak closes.
-const LEAK_CEILING: usize = 107;
+const LEAK_CEILING: usize = 111;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be
 /// lowered: one closure does not fail the gate, a whole stage of work cannot go unrecorded.
@@ -579,6 +588,9 @@ fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> 
     // (`mod tests;`, `use …;`) at its semicolon.
     let mut test_at: Option<i32> = None;
     let mut test_open = false;
+    // With the crate, a module the file imports (`use benilla_world::map_proj::{self}`,
+    // `use benilla_world::particles::buffer`, `view as camera_view`): its local name to its path.
+    let mut modules: BTreeMap<String, String> = BTreeMap::new();
     for (n, line) in logical_lines(text).iter().map(|(n, l)| (*n, l.as_str())) {
         let t = line.trim_start();
         if t.starts_with("#[cfg(test)]") {
@@ -646,6 +658,23 @@ fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> 
                     }
                 }
                 rest = &rest[i + prefix.len()..];
+            }
+            if split && want_engine {
+                let is_use = t.starts_with("use ") || t.starts_with("pub");
+                if let Some(tree) = line
+                    .find(prefix)
+                    .filter(|_| is_use)
+                    .map(|i| &line[i + prefix.len()..])
+                {
+                    modules.extend(imported_names(tree, ""));
+                }
+                for (name, module) in &modules {
+                    found.extend(
+                        paths_through(line, name)
+                            .into_iter()
+                            .map(|tail| (canon(&format!("{module}::{tail}")), n + 1)),
+                    );
+                }
             }
         }
         depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
@@ -722,7 +751,7 @@ fn expand(s: &str) -> Vec<String> {
                 break;
             }
             let tail = &after[2..];
-            // `interact::{WorldClick, WorldRightClick}`: a group hanging off a walked path.
+            // `interact::{CreaturePickPart, GoPickPart}`: a group hanging off a walked path.
             if tail.trim_start().starts_with('{') {
                 let head = out;
                 return expand(tail)
@@ -766,6 +795,66 @@ fn expand(s: &str) -> Vec<String> {
             }
             None => out.extend(expand(part)),
         }
+    }
+    out
+}
+
+/// The local names a `use` tree under `head` binds to a lowercase path, a module or a function:
+/// `self` in a group binds the group's last segment, `x as y` binds `y`.
+fn imported_names(tree: &str, head: &str) -> Vec<(String, String)> {
+    let join = |seg: &str| {
+        if head.is_empty() {
+            seg.to_string()
+        } else {
+            format!("{head}::{seg}")
+        }
+    };
+    let tree = tree.trim().trim_end_matches(';').trim();
+    if let Some(group) = tree.strip_prefix('{') {
+        let inner = &group[..group.rfind('}').unwrap_or(group.len())];
+        let mut depth = 0usize;
+        return split_top(inner, &mut depth)
+            .into_iter()
+            .flat_map(|part| {
+                let part = part.trim();
+                if part == "self" {
+                    let last = head.rsplit("::").next().unwrap_or(head);
+                    return vec![(last.to_string(), head.to_string())];
+                }
+                imported_names(part, head)
+            })
+            .collect();
+    }
+    let Some((seg, after)) = ident(tree) else {
+        return vec![];
+    };
+    if let Some(rest) = after.strip_prefix("::") {
+        return imported_names(rest, &join(&seg));
+    }
+    let local = after
+        .trim()
+        .strip_prefix("as ")
+        .and_then(|a| ident(a.trim()))
+        .map_or(seg.clone(), |(alias, _)| alias);
+    if seg.starts_with(char::is_uppercase) || local == "_" {
+        return vec![];
+    }
+    vec![(local, join(&seg))]
+}
+
+/// Every path tail named through `name::` on `line`, where `name` starts the path: not after
+/// `::` or inside a longer identifier.
+fn paths_through(line: &str, name: &str) -> Vec<String> {
+    let needle = format!("{name}::");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = line[from..].find(&needle).map(|i| i + from) {
+        let before = line[..i].chars().next_back();
+        let starts = before.is_none_or(|c| !is_ident(c) && c != ':');
+        if starts {
+            out.extend(expand(&line[i + needle.len()..]));
+        }
+        from = i + needle.len();
     }
     out
 }
@@ -845,6 +934,38 @@ fn a_use_group_spanning_lines_counts_every_member() {
             "interact::PickParts",
             "interact::ray_mesh_bounds",
             "interact::ray_posed_mesh"
+        ]
+    );
+}
+
+/// A module the file imports, by `self` in a group, by its own name or under another, counts
+/// every item named through it.
+#[test]
+fn a_path_through_an_imported_module_counts_its_item() {
+    let text = "use benilla_world::map_proj::{self, WorldProj};\n\
+                use benilla_world::{particles::buffer, view as camera_view};\n\
+                fn f() {\n    \
+                    let a = map_proj::world_uv(p, 1.0, 2.0);\n    \
+                    let b = buffer::EffectQuads::default();\n    \
+                    let c = camera_view::CAM_FAR;\n    \
+                    let d = benilla_world::map_proj::zone_uv(r, 1.0, 2.0);\n\
+                }\n";
+    let mut found: Vec<String> = paths_in(text, true, true)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    found.sort();
+    found.dedup();
+    assert_eq!(
+        found,
+        [
+            "map_proj::WorldProj",
+            "map_proj::world_uv",
+            "map_proj::zone_uv",
+            // The module itself, which `drop_module_paths` folds into its item.
+            "particles::buffer",
+            "particles::buffer::EffectQuads",
+            "view::CAM_FAR",
         ]
     );
 }

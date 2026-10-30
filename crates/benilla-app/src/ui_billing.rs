@@ -11,7 +11,6 @@ use bevy::prelude::*;
 
 use crate::net::SessionBilling;
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_script::UiFeed;
 
 /// The longest time left that arms the warning, 72 hours in minutes (`0x48f647`).
 const ARM_MAX_MINUTES: u32 = 4_320;
@@ -139,7 +138,9 @@ pub(crate) fn arm_at_world_entry(world: &mut World) {
 }
 
 /// The per-frame poll: each dialog is the stock `UIParent.lua` popup's event, each line a
-/// `CHAT_MSG_SYSTEM` of the template `GetText` picks by the minutes (`0x49575a`-`0x495775`).
+/// `CHAT_MSG_SYSTEM` of the template `GetText` picks by the minutes (`0x49575a`-`0x495775`). It
+/// runs in the tick's frame time (category 5 at `0x420d63`), after its packets and the signals
+/// they raised (`0x420d55`) and ahead of the `OnUpdate` walk (`0x420d6a`).
 fn poll_play_time(
     mut hosted_vm: crate::script_calls::HostedVm,
     mut warning: ResMut<PlayTimeWarning>,
@@ -159,17 +160,19 @@ fn poll_play_time(
                 ),
                 Nag::IgrDialog => script.fire_event("IGR_BILLING_NAG_DIALOG", vec![]),
                 Nag::Line(minutes) => {
-                    let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-                    let Some(template) =
-                        benilla_ui::strings::plural("BILLING_NAG_WARNING", Some(minutes), &get)
-                    else {
+                    let Some(template) = benilla_ui::strings::plural(
+                        "BILLING_NAG_WARNING",
+                        Some(minutes),
+                        benilla_ui::strings::Strings::Vm(script.lua()),
+                    ) else {
                         continue;
                     };
                     let text = benilla_ui::strings::fill(
                         &template,
                         &[benilla_ui::strings::Arg::D(i64::from(minutes))],
                     );
-                    chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+                    // Held while the display latch is set (`0x49577a` → `0x4957ad`).
+                    chat.push_display(ChatEvent::text_only(ChatEventKind::System, text));
                 }
             }
         }
@@ -186,7 +189,8 @@ impl Plugin for UiBillingPlugin {
             .add_systems(
                 Update,
                 poll_play_time
-                    .in_set(UiFeed)
+                    .after(crate::lanes::UiLanes)
+                    .before(crate::ui_script::UiTick)
                     .run_if(crate::ui_script::ingame_ui_up),
             );
     }

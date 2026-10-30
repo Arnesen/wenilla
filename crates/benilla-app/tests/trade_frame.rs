@@ -37,6 +37,7 @@ fn load_ui(script: &UiScript) {
 
 fn item(item_id: u32, name: &str, count: u32, quality: u32) -> TradeSlotItem {
     TradeSlotItem {
+        uncached_link: None,
         item_id,
         name: Some(name.to_string()),
         texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".to_string()),
@@ -53,6 +54,7 @@ fn item(item_id: u32, name: &str, count: u32, quality: u32) -> TradeSlotItem {
         charges: 0,
         durability: (0, 0),
         link: Some(format!("|cffffffff|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
+        roll: Default::default(),
     }
 }
 
@@ -248,12 +250,19 @@ fn closing_the_window_queues_the_cancel() {
     load_ui(&s);
     s.set_trade(Some(state()));
     s.fire_event("TRADE_SHOW", vec![]);
-    let _ = s.take_trade_close();
+    let _ = s.take_calls_like(&benilla_ui::script::ScriptCall::Trade(
+        benilla_ui::script::TradeCall::Close,
+    ));
 
     // The X hides the window, and its OnHide's `CloseTrade` queues the close.
     s.run("TradeFrameCloseButton:Click()").unwrap();
     assert!(!s.eval::<bool>("return TradeFrame:IsShown()").unwrap());
-    assert!(s.take_trade_close(), "closing queued the CloseTrade intent");
+    assert!(
+        s.take_calls_like(&benilla_ui::script::ScriptCall::Trade(
+            benilla_ui::script::TradeCall::Close
+        )) > 0,
+        "closing queued the CloseTrade intent"
+    );
     assert!(s.take_errors().is_empty());
 
     // A server-driven `TRADE_CLOSED` also hides it.
@@ -293,7 +302,7 @@ fn player_money_input_reflects_then_offers() {
     s.keep_calls();
     s.set_money(1_000_000); // SetTradeMoney is purse-gated
     load_ui(&s);
-    s.open_trade_window(); // our money getter tests the partner cell (`0x4c0706`)
+    s.open_trade_window(0x7); // our money getter tests the partner cell (`0x4c0706`)
     s.set_trade(Some(state())); // state().player.gold == 12345 (1g 23s 45c)
     s.fire_event("TRADE_SHOW", vec![]);
 

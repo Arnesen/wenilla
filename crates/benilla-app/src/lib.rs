@@ -19,6 +19,7 @@
 #[global_allocator]
 static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
+mod account_data;
 pub mod addon_harness;
 mod area;
 mod area_poi;
@@ -41,6 +42,20 @@ mod combat_text;
 mod console;
 #[cfg(not(target_arch = "wasm32"))]
 mod crash;
+
+/// wenilla: `crash::command_error_handler` in a page, where the crash report module is not built:
+/// a failed command is logged and the session goes on; every other error panics, Bevy's default.
+#[cfg(target_arch = "wasm32")]
+fn web_command_error_handler(
+    error: bevy::ecs::error::BevyError,
+    ctx: bevy::ecs::error::ErrorContext,
+) {
+    if matches!(ctx, bevy::ecs::error::ErrorContext::Command { .. }) {
+        bevy::log::warn!("{ctx}: {error}");
+    } else {
+        bevy::ecs::error::panic(error, ctx);
+    }
+}
 mod creature_anim;
 mod creature_type;
 mod cursor;
@@ -55,6 +70,7 @@ mod dev;
 mod devtools;
 mod doodad_events;
 mod entities;
+mod field_callbacks;
 mod field_watch;
 mod fishing_line;
 mod footprints;
@@ -64,6 +80,8 @@ mod go_anim;
 mod go_templates;
 #[cfg(feature = "dev")]
 mod hover_log;
+mod item_lane;
+mod item_names;
 mod item_watch;
 mod items;
 mod lanes;
@@ -98,7 +116,6 @@ mod script_calls;
 mod shaders;
 
 mod game_tip;
-mod name_persist;
 mod opaque2d;
 /// Where "the client is going down" is observed, in `Last`; every system that persists state on the
 /// way out registers through it.
@@ -134,7 +151,6 @@ mod ui_craft;
 mod ui_dialog_verbs;
 mod ui_dressup;
 mod ui_duel;
-mod ui_follow;
 mod ui_gamma;
 mod ui_gm_ticket;
 mod ui_gossip;
@@ -184,10 +200,12 @@ mod ui_trade;
 mod ui_tradeskill;
 mod ui_trainer;
 mod ui_unit;
+mod ui_world_enter;
 mod ui_world_map;
 mod video;
 mod vm_pass;
 mod vplates;
+mod wdb;
 mod weapon_trail;
 mod webbridge;
 /// The web build's env-var stand-in (a browser tab has no process environment) — see the
@@ -197,6 +215,7 @@ mod webbridge;
 pub mod webenv;
 mod webprogress;
 mod world_backdrop;
+mod world_console;
 mod world_state;
 mod world_state_ui;
 
@@ -239,8 +258,19 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
 /// What a crate on top of benilla adds to the built app ([`run_with`]).
 type Extension<'a> = Box<dyn FnOnce(&mut App) + 'a>;
 
+/// The main thread joins a single-threaded apartment before any window, as winit's `OleInitialize`
+/// for drag and drop needs; a hook that joined it to the MTA first would make window creation panic.
+#[cfg(windows)]
+fn main_apartment() {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    // SAFETY: no pointers; never balanced, so the apartment lasts the process; cpal's thread has its own.
+    let _ = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+}
+
 /// The one body behind [`run`] and [`run_with`], not generic, so a launcher compiles none of it.
 fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
+    #[cfg(windows)]
+    main_apartment();
     // `WOW_HOVER_LOG_REPORT=<csv>` and `WOW_CAPTURE=list` print and exit before any setup.
     if let Ok(path) = std::env::var("WOW_HOVER_LOG_REPORT") {
         dev::report_recorded_hover_log(&path);
@@ -280,6 +310,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // The browser entry installs console_error_panic_hook; filesystem reports are native.
     #[cfg(not(target_arch = "wasm32"))]
     crash::install(build);
+    // The zone is read once per process; reading it now spares the first `date` the wait.
+    benilla_ui::civil::warm();
 
     // Fonts, art and the stock interface all come from the install, so without one the client
     // ends here, before any window or plugin exists (`no_install`).
@@ -289,6 +321,11 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     };
 
     let mut app = App::new();
+    // A command on an entity a same-frame despawn removed logs instead of aborting the session.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.set_error_handler(crash::command_error_handler);
+    #[cfg(target_arch = "wasm32")]
+    app.set_error_handler(web_command_error_handler);
     // The panel footer and the build banner read the stamp back.
     app.insert_resource(build);
     // Static-scene transform tracking pinned on: the default threshold re-decides every frame with

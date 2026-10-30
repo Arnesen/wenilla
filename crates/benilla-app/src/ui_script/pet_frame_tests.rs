@@ -119,6 +119,9 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
         until_cancelled: false,
         channeled: false,
         raid_listed: false,
+        slot: 0,
+        until_cancelled_unknown: false,
+        vision_hidden: false,
     }
 }
 
@@ -151,7 +154,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
         .unwrap();
     assert!(ok, "the summoned pet's name, health and power all draw");
 
-    // The dismiss, as `feed_pet_unit` sends it: the token clears, then `UNIT_PET`.
+    // The dismiss: the token clears, then `UNIT_PET`.
     s.set_unit("pet", None);
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(!s.eval::<bool>("return PetFrame:IsVisible()").unwrap());
@@ -396,8 +399,10 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
     s.run("PetFrame_OnClick(\"LeftButton\")")
         .expect("the cursor-holds-an-item leg must not error");
     assert_eq!(
-        s.take_drop_item_on_unit(),
-        vec!["pet".to_string()],
+        s.take_script_calls(),
+        vec![benilla_ui::script::ScriptCall::DropItemOnUnit(
+            "pet".to_string()
+        )],
         "a held item + a pet click queues the drop"
     );
     // The drop leg alone: the reference's if/elseif is exclusive.

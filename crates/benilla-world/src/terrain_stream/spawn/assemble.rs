@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::Buffer;
 
 use crate::billboard::BillboardCard;
-use crate::doodad_anim::DoodadAnimHost;
+use crate::doodad_anim::{CarriedSphere, DoodadAnimHost};
 use crate::mesh_tag::alpha_bits;
 use crate::model_fade::DoodadFade;
 use crate::model_render::{model_material, MaterialCache, ShadeSel};
@@ -71,7 +71,7 @@ pub fn spawn_model_entities(
     interior_slot: Option<u16>,
     // The placement's draw-set gate, shared with its emitters, ribbons, lights and anim host: a
     // meshless prop's only verdict. `None` on the entity-hosted lane, as a mover has no baked
-    // world point to measure from; the mesh lane then builds a bare sphere from `radius`.
+    // world point to measure from; the host then judges a bare sphere of `radius` where it is.
     fade: Option<&crate::particles::EmitterFade>,
     radius: f32,
     local_center: Vec3,
@@ -101,7 +101,9 @@ pub fn spawn_model_entities(
         crate::static_gx::GxSite<'_>,
     )>,
 ) -> SpawnedModel {
-    // The caller's gate, else the bare sphere; every radius or centre read below goes through it.
+    // The caller's gate, else the bare sphere of a mover's prop, whose `transform` is parent-local:
+    // its host's gate re-centres it in world space each frame ([`CarriedSphere`]).
+    let carried = fade.is_none();
     let fade = match fade {
         Some(f) => f.clone(),
         None => {
@@ -474,6 +476,10 @@ pub fn spawn_model_entities(
             Some(slot) => MeshTag(crate::mesh_tag::probe_bits(slot)),
             None => MeshTag(alpha_bits(1.0)),
         };
+        // A static doodad's opaque batch occludes the mouse pick; a WMO's is the walk collider's.
+        let occluder = (kind == ModelKind::Doodad)
+            .then(|| crate::interact::PickOccluderPart::of(sub.blend))
+            .flatten();
         // A billboard card's transform is the billboard system's; it still fades with its doodad,
         // from its pivot, where the mesh is centred (`ZERO`).
         let (entity, fade_center) = if let Some(info) = &sub.billboard {
@@ -500,6 +506,9 @@ pub fn spawn_model_entities(
                 mesh_tag,
                 card,
             ));
+            if let Some(m) = occluder {
+                card_entity.insert(m);
+            }
             // The build-time Aabb, inserted here: `calculate_bounds` can race extraction of a
             // `RENDER_WORLD` form, and the exterior cull fails open without a bound.
             if let Some(aabb) = stat_aabb {
@@ -524,6 +533,9 @@ pub fn spawn_model_entities(
                 crate::interact::PickMesh(sub.geometry.clone()),
                 mesh_tag,
             ));
+            if let Some(m) = occluder {
+                part_entity.insert(m);
+            }
             // An animated placement's joints move the vertices away from the bind-pose bound, so
             // it widens to the authored all-animation box; a card, which follows its joint, needs
             // none. `NoAutoAabb` keeps the bound: `calculate_bounds` recomputes it on
@@ -629,6 +641,9 @@ pub fn spawn_model_entities(
             active: false,
             parked_at: now,
         });
+        if carried {
+            commands.entity(h.root).insert(CarriedSphere(local_center));
+        }
         // The lazy rig, only with skinnable parts: an emitter-only host never takes a slot.
         if !lazy_parts.is_empty() {
             commands.entity(h.root).insert(crate::doodad_anim::LazyRig {

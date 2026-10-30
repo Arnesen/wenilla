@@ -1,10 +1,12 @@
 //! The four summon globals the `CONFIRM_SUMMON` dialog calls (`StaticPopup.lua:1336-1357`); 1.12
 //! has no `CancelSummon`, as declining sends nothing. The reference resolves the summoner
-//! (`0xb4e358`), zone (`0xb4e354`) and deadline (`0xb4e350`) at call time; the app pushes the
-//! answers each frame, so a name still in flight reads `""` and fills in on a later tick.
+//! (`0xb4e358`), zone (`0xb4e354`) and deadline (`0xb4e350`) at call time, read through the host
+//! ([`super::SummonConfirmQuery`]), so a name still in flight reads `""` and fills in on a later
+//! call, and the summoner getter's miss asks inside its call ([`super::RecordAsk::Summoner`]).
 
 use mlua::Lua;
 
+use super::live::ask;
 use super::Model;
 
 /// The dialog's three reads, never nil: with nothing pending or resolved they are `""`, `""` and
@@ -20,8 +22,16 @@ pub struct SummonConfirmUiState {
     pub time_left_ms: u32,
 }
 
+/// The summon's verb the host applies inside its call ([`super::ScriptCall::Summon`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummonCall {
+    /// `ConfirmSummon()` (`0x48b770`): `CMSG_SUMMON_RESPONSE` with the latched summoner
+    /// (`0x48b7d0`).
+    Confirm,
+}
+
 impl super::UiScript {
-    /// Push the three resolved reads, each frame.
+    /// Set the three reads the getters answer with no host lent.
     pub fn set_summon_confirm(&mut self, state: SummonConfirmUiState) {
         let mut model = self.model_mut();
         if model.summon_confirm != state {
@@ -29,16 +39,18 @@ impl super::UiScript {
         }
     }
 
-    /// Drain the `ConfirmSummon()` calls, each a `CMSG_SUMMON_RESPONSE`.
+    /// The `ConfirmSummon()` calls a harness's VM kept ([`Self::keep_calls`]).
     pub fn take_summon_confirms(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().summon_confirms)
+        self.take_calls_like(&super::ScriptCall::Summon(SummonCall::Confirm)) as u32
     }
+}
 
-    /// `GetSummonConfirmSummoner()` calls since the last drain that answered no name; the app
-    /// looks the summoner up for them, as each call's lookup with a callback does (`0x48b6e1`).
-    pub fn take_summon_summoner_lookups(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().summon_summoner_lookups)
-    }
+/// The three reads at the call, through the host; with none, the VM's copy.
+fn confirm(lua: &Lua) -> SummonConfirmUiState {
+    ask(lua, &super::SummonConfirmQuery).unwrap_or_else(|| {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        model.summon_confirm.clone()
+    })
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -48,12 +60,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSummonConfirmSummoner",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // A miss is the lookup's ask (`0x48b6e1`, callback `0x48b710`), which the app makes.
-            if model.summon_confirm.summoner.is_empty() {
-                model.summon_summoner_lookups += 1;
+            let summoner = confirm(lua).summoner;
+            // A miss is the lookup's ask with the callback `0x48b710` (`0x48b6e1`), inside the
+            // call.
+            if summoner.is_empty() {
+                super::calls::ask(lua, super::RecordAsk::Summoner)?;
             }
-            lua.create_string(&model.summon_confirm.summoner)
+            lua.create_string(&summoner)
         })?,
     )?;
 
@@ -61,29 +74,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // GlobalString fallback, unlike the innkeeper question's chain (`0x5dfe5e`).
     g.set(
         "GetSummonConfirmAreaName",
-        lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            lua.create_string(&model.summon_confirm.area)
-        })?,
+        lua.create_function(|lua, ()| lua.create_string(confirm(lua).area))?,
     )?;
 
     // Whole seconds, truncated (`0x48b660`); the dialog reads it once in `OnShow` and counts down
     // locally from there.
     g.set(
         "GetSummonConfirmTimeLeft",
-        lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(f64::from(model.summon_confirm.time_left_ms / 1000))
-        })?,
+        lua.create_function(|lua, ()| Ok(f64::from(confirm(lua).time_left_ms / 1000)))?,
     )?;
 
     // The dialog's Accept, the only packet in the flow.
     g.set(
         "ConfirmSummon",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.summon_confirms += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Summon(SummonCall::Confirm))
         })?,
     )?;
 

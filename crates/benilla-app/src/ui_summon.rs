@@ -9,7 +9,9 @@
 //!   untouched. The test is `0x605f30`: health <= 0, or a player with the `PLAYER_FLAGS` ghost bit
 //!   (a ghost's health is 1). With no player object, it latches.
 //! - `GetSummonConfirmSummoner()` (`0x48b6a0`) answers `""` on a cache miss and queries the name
-//!   (`0x55f1fa`); the popup re-reads it every frame (`StaticPopup.lua:1746`) until it lands.
+//!   (`0x55f1fa`); the popup re-reads it every frame (`StaticPopup.lua:1746`) until it lands. The
+//!   three getters read the latch through the call host ([`crate::ui_dialog_verbs::DialogLive`]),
+//!   and `CONFIRM_SUMMON` fires on the dialogs' lane at the packet's place.
 //! - `ConfirmSummon()` (`0x48b770`) checks no deadline, so two Accepts are two packets; vmangos
 //!   ignores the guid and checks its own `m_summon_expire`.
 //!
@@ -24,10 +26,9 @@ use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::Ask;
-use crate::ui_script::UiFeed;
 
-/// The latched question, the reference's four globals: written by [`net::request`], read by
-/// [`feed_summon`] and [`drain_summon`].
+/// The latched question, the reference's four globals: written by [`net::request`], read by the
+/// getters through the host and by [`SummonSteps`].
 #[derive(Resource, Default)]
 pub(crate) struct SummonState {
     /// `[0xb4e358]`/`[0xb4e35c]`, echoed by Accept; 0 when nothing has asked this session.
@@ -37,20 +38,37 @@ pub(crate) struct SummonState {
     /// `[0xb4e350]`, an absolute ms stamp there; here `Time<Real>` seconds, as the server's window
     /// runs in real time. `None` is the zeroed deadline.
     expires_at: Option<f64>,
-    /// A dialog still owed, set per packet: the same warlock summoning twice is two dialogs.
-    ask: bool,
 }
 
 impl SummonState {
     /// The latch, `0x4963a0`.
-    fn latch(&mut self, summoner: u64, zone: u32, delay_ms: u32, now: f64) {
+    pub(crate) fn latch(&mut self, summoner: u64, zone: u32, delay_ms: u32, now: f64) {
         self.summoner = summoner;
         self.zone = zone;
         self.expires_at = Some(now + f64::from(delay_ms) / 1000.0);
-        self.ask = true;
     }
 
-    fn pending(&self) -> Option<u64> {
+    /// The three getters' answers at `now`: the summoner's cached name, only read, as the getter's
+    /// own lookup is its call's ask (`0x48b6e1`), `""` with none latched; the zone's row name; the
+    /// ms left.
+    pub(crate) fn confirm(
+        &self,
+        names: &NameCache,
+        areas: Option<&AreaTableRes>,
+        now: f64,
+    ) -> SummonConfirmUiState {
+        SummonConfirmUiState {
+            summoner: self
+                .pending()
+                .and_then(|guid| names.resolve_player(guid, Ask::Read))
+                .unwrap_or_default()
+                .to_string(),
+            area: area_name(self.zone, areas),
+            time_left_ms: self.time_left_ms(now),
+        }
+    }
+
+    pub(crate) fn pending(&self) -> Option<u64> {
         (self.summoner != 0).then_some(self.summoner)
     }
 
@@ -62,71 +80,6 @@ impl SummonState {
     }
 }
 
-/// Push the three getters' answers every frame, and fire `CONFIRM_SUMMON` (no arguments) for an
-/// owed question.
-fn feed_summon(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut summon: ResMut<SummonState>,
-    names: Res<NameCache>,
-    commands: Res<NetCommands>,
-    areas: Option<Res<AreaTableRes>>,
-    // Real: the deadline was stamped on this clock.
-    time: Res<Time<Real>>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-
-        // The getters' defaults already answer a zeroed bank. Not `pending()`: a zero-guid request
-        // still latches and fires in the reference, and must not leave `ask` owed.
-        if summon.summoner == 0 && !summon.ask {
-            return;
-        }
-
-        // The getter's calls are its lookups with the callback `0x48b710` (`0x48b6e1`): the popup's
-        // `OnUpdate` makes one a frame (`StaticPopup.lua:1746`), so a miss is asked while it shows
-        // and a refused name again, once per answer. The push itself only reads; a zero guid names
-        // nobody and is never asked about.
-        let looked_up = script.take_summon_summoner_lookups() > 0;
-        let summoner_name = match summon.pending() {
-            Some(guid) => names
-                .resolve_player(
-                    guid,
-                    if looked_up {
-                        Ask::Event(&commands)
-                    } else {
-                        Ask::Read
-                    },
-                )
-                .unwrap_or_default()
-                .to_string(),
-            None => String::new(),
-        };
-        script.set_summon_confirm(SummonConfirmUiState {
-            summoner: summoner_name,
-            area: area_name(summon.zone, areas.as_deref()),
-            time_left_ms: summon.time_left_ms(time.elapsed_secs_f64()),
-        });
-
-        if !summon.ask {
-            return;
-        }
-        summon.ask = false;
-        // The `summon` trace's middle link, between the packet and the response.
-        if benilla_assets::trace::enabled_for("summon") {
-            benilla_assets::trace::line(
-                "summon",
-                &format!(
-                    "fire CONFIRM_SUMMON summoner={:#x} zone={}",
-                    summon.summoner, summon.zone
-                ),
-            );
-        }
-        script.fire_event("CONFIRM_SUMMON", Vec::new());
-    })
-}
-
 /// `GetSummonConfirmAreaName()` (`0x48b720`): the summoner's bare `AreaTable.dbc` row name or
 /// `""`, with no parent walk and no GlobalString tail, unlike [`crate::ui_binder`]'s chain.
 fn area_name(zone: u32, areas: Option<&AreaTableRes>) -> String {
@@ -136,44 +89,28 @@ fn area_name(zone: u32, areas: Option<&AreaTableRes>) -> String {
         .to_string()
 }
 
-/// Turn each Accept into `CMSG_SUMMON_RESPONSE`, gated on a latched summoner, never the deadline.
-fn drain_summon(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    summon: Res<SummonState>,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        let confirms = script.take_summon_confirms();
-        if confirms == 0 {
-            return;
-        }
-        let Some(summoner) = summon.pending() else {
+/// `ConfirmSummon()` inside its call ([`benilla_ui::script::SummonCall`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SummonSteps<'w> {
+    summon: Option<Res<'w, SummonState>>,
+    net: Res<'w, NetCommands>,
+}
+
+impl SummonSteps<'_> {
+    /// `0x48b770`: `CMSG_SUMMON_RESPONSE` with the latched summoner (`0x48b7d0`), the deadline
+    /// unread; with nothing latched, nothing (the module's deviation).
+    pub(crate) fn confirm(&self) {
+        let Some(summoner) = self.summon.as_deref().and_then(SummonState::pending) else {
             debug!("ui_summon: ConfirmSummon() with nothing latched — nothing to answer with");
             return;
         };
         if benilla_assets::trace::enabled_for("summon") {
             benilla_assets::trace::line(
                 "summon",
-                &format!("SEND CMSG_SUMMON_RESPONSE summoner={summoner:#x} n={confirms}"),
+                &format!("SEND CMSG_SUMMON_RESPONSE summoner={summoner:#x}"),
             );
         }
-        for _ in 0..confirms {
-            let _ = commands.0.send(ClientCommand::SummonResponse { summoner });
-        }
-    })
-}
-
-/// The latch dies with the session (the module's deviation), on `DisconnectedMessage`, which a
-/// socket death, a kick and `/logout` all reach. A `/reload` keeps it, as the reference's does.
-fn end_session_summon(
-    mut msgs: MessageReader<crate::net::DisconnectedMessage>,
-    mut summon: ResMut<SummonState>,
-) {
-    if msgs.read().next().is_some() {
-        *summon = SummonState::default();
+        let _ = self.net.0.send(ClientCommand::SummonResponse { summoner });
     }
 }
 
@@ -188,7 +125,29 @@ pub(crate) mod net {
     use crate::net::{GuidIndex, ObjectStore, SelfGuid};
 
     pub(super) fn register(app: &mut App) {
-        app.net_handler(SessionEventKind::SummonRequest, on_request);
+        app.net_handler(SessionEventKind::SummonRequest, on_request)
+            .net_handler(SessionEventKind::Disconnected, on_session_end);
+    }
+
+    /// The latch dies with the session (the module's deviation), which a socket death, a kick and
+    /// `/logout` all end. A `/reload` keeps it, as the reference's does.
+    fn on_session_end(In(_): In<SessionEvent>, mut summon: ResMut<SummonState>) {
+        *summon = SummonState::default();
+    }
+
+    /// The latch's signal, `CONFIRM_SUMMON` with no argument (`0x4963ce`), inside the handler.
+    fn signal(summon: &SummonState, lane: &mut crate::ui_dialog_verbs::DialogLane) {
+        // The `summon` trace's middle link, between the packet and the response.
+        if benilla_assets::trace::enabled_for("summon") {
+            benilla_assets::trace::line(
+                "summon",
+                &format!(
+                    "fire CONFIRM_SUMMON summoner={:#x} zone={}",
+                    summon.summoner, summon.zone
+                ),
+            );
+        }
+        lane.event("CONFIRM_SUMMON", Vec::new());
     }
 
     /// `0x605f30` over the self object, not `unit_reads_dead` (`0x605f90`). An unstreamed self
@@ -196,6 +155,7 @@ pub(crate) mod net {
     fn on_request(
         In(ev): In<SessionEvent>,
         mut summon: ResMut<SummonState>,
+        mut lane: ResMut<crate::ui_dialog_verbs::DialogLane>,
         self_guid: Res<SelfGuid>,
         index: Res<GuidIndex>,
         stores: Query<&ObjectStore>,
@@ -212,19 +172,21 @@ pub(crate) mod net {
                 .and_then(|g| index.0.get(&g))
                 .and_then(|e| stores.get(*e).ok())
                 .is_some_and(|s| s.0.is_dead_or_ghost());
-            request(
+            if request(
                 summoner,
                 zone,
                 delay_ms,
                 dead_or_ghost,
                 real_clock.elapsed_secs_f64(),
                 &mut summon,
-            );
+            ) {
+                signal(&summon, &mut lane);
+            }
         }
     }
 
     /// `SMSG_SUMMON_REQUEST`: latch the offer unless `dead_or_ghost` (`0x605f30`), which touches
-    /// nothing, so a live question survives.
+    /// nothing, so a live question survives; whether it latched.
     pub(crate) fn request(
         summoner: u64,
         zone: u32,
@@ -232,7 +194,7 @@ pub(crate) mod net {
         dead_or_ghost: bool,
         now: f64,
         summon: &mut SummonState,
-    ) {
+    ) -> bool {
         // The `summon` trace's first link, with the gate's verdict: a refusal looks like a bug.
         if benilla_assets::trace::enabled_for("summon") {
             benilla_assets::trace::line(
@@ -245,9 +207,10 @@ pub(crate) mod net {
         }
         if dead_or_ghost {
             debug!("ui_summon: summon request from {summoner:#x} dropped — we are dead or a ghost");
-            return;
+            return false;
         }
         summon.latch(summoner, zone, delay_ms, now);
+        true
     }
 }
 
@@ -257,89 +220,28 @@ pub(crate) struct UiSummonPlugin;
 impl Plugin for UiSummonPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<SummonState>().add_systems(
-            Update,
-            (
-                // Before the feed, so the frame a session ends feeds nothing from it.
-                end_session_summon.before(feed_summon),
-                feed_summon.in_set(UiFeed),
-                drain_summon.in_set(crate::ui_script::UiDrain),
-            ),
-        );
+        crate::ui_dialog_verbs::add_dialog_lane(app);
+        app.init_resource::<SummonState>();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_ui::script::UiScript;
 
-    /// The getter's calls are the lookups (`0x48b6e1`, callback `0x48b710`), which the popup's
-    /// `OnUpdate` makes every frame: the packet and the frames without a call ask nothing, a call
-    /// asks once while the answer is pending, and the call after a refusal asks again.
+    /// The getters' answer only reads the summoner's name: the getter's own lookup asks a miss
+    /// inside its call (`0x48b6e1`, [`benilla_ui::script::RecordAsk::Summoner`]).
     #[test]
-    fn the_summoner_is_asked_by_each_getter_call_once_per_answer() {
+    fn the_answer_reads_the_summoner_and_asks_nothing() {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let mut app = App::new();
-        app.insert_resource(NetCommands(tx))
-            .init_resource::<SummonState>()
-            .init_resource::<NameCache>()
-            .init_resource::<Time<Real>>()
-            .add_systems(Update, feed_summon);
-        app.insert_non_send_resource(UiScript::new().unwrap());
-        let call = |app: &mut App| {
-            app.world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .run("GetSummonConfirmSummoner()")
-                .unwrap();
-            app.update();
-        };
-        app.world_mut()
-            .resource_mut::<SummonState>()
-            .latch(0x2a, 1519, 120_000, 0.0);
-        app.update();
-        assert!(
-            crate::query_cache::queries(&rx).is_empty(),
-            "the packet only reads"
-        );
-        call(&mut app);
-        assert_eq!(crate::query_cache::queries(&rx).len(), 1, "a call asks");
-        call(&mut app);
-        assert!(
-            crate::query_cache::queries(&rx).is_empty(),
-            "once while the answer is pending"
-        );
-        app.world_mut()
-            .resource_mut::<NameCache>()
-            .insert_player(0x2a, String::new(), None);
-        for _ in 0..600 {
-            app.update();
-        }
-        assert!(
-            crate::query_cache::queries(&rx).is_empty(),
-            "no frame without a call asks"
-        );
-        call(&mut app);
-        assert_eq!(
-            crate::query_cache::queries(&rx).len(),
-            1,
-            "the call after the refusal asks again"
-        );
-    }
-
-    /// A decline leaves the guid latched, so only a per-packet flag sees the second summon.
-    #[test]
-    fn asking_twice_owes_two_dialogs() {
+        let names = NameCache::default();
         let mut summon = SummonState::default();
-        assert_eq!(summon.pending(), None);
-
-        summon.latch(0x2a, 1519, 120_000, 100.0);
-        assert!(summon.ask);
-        summon.ask = false; // the feed fired the first dialog
-        assert_eq!(summon.pending(), Some(0x2a), "the guid outlives the fire");
-
-        summon.latch(0x2a, 1519, 120_000, 200.0);
-        assert!(summon.ask, "the same summoner asking again owes a dialog");
+        summon.latch(0x2a, 1519, 120_000, 0.0);
+        let _commands = NetCommands(tx);
+        let answer = summon.confirm(&names, None, 30.0);
+        assert_eq!(answer.summoner, "", "a miss reads empty");
+        assert_eq!(answer.time_left_ms, 90_000);
+        assert!(crate::query_cache::queries(&rx).is_empty(), "only read");
     }
 
     /// `0x4963e0`'s three cases: never armed, running, expired.
@@ -359,22 +261,22 @@ mod tests {
     #[test]
     fn a_summon_that_arrives_while_refused_latches_nothing() {
         let mut summon = SummonState::default();
-        net::request(0x2a, 1519, 120_000, true, 100.0, &mut summon);
+        assert!(!net::request(0x2a, 1519, 120_000, true, 100.0, &mut summon));
         assert_eq!(summon.pending(), None);
-        assert!(!summon.ask);
         assert_eq!(summon.time_left_ms(100.0), 0);
 
         // A live question, then a refused second request.
-        net::request(0x2a, 1519, 120_000, false, 100.0, &mut summon);
-        summon.ask = false;
-        net::request(0x99, 1, 120_000, true, 150.0, &mut summon);
+        assert!(net::request(0x2a, 1519, 120_000, false, 100.0, &mut summon));
+        assert!(
+            !net::request(0x99, 1, 120_000, true, 150.0, &mut summon),
+            "no second dialog"
+        );
         assert_eq!(
             summon.pending(),
             Some(0x2a),
             "the live offer is undisturbed"
         );
         assert_eq!(summon.zone, 1519);
-        assert!(!summon.ask, "and no second dialog is owed");
     }
 
     /// No parent-zone hop and no GlobalString tail, unlike [`crate::ui_binder`]'s chain.

@@ -7,6 +7,8 @@
 
 use benilla_ui::script::{BindingInput, FiredInput, HeldInput};
 
+pub(crate) use benilla_ui::script::ViewAxis;
+
 use super::BindingsState;
 
 /// One engine input a binding function drives: a held bit of `[InputControl+4]` or a one-shot.
@@ -28,14 +30,16 @@ pub(crate) enum Input {
     TurnOrAction,
     /// `CameraOrSelectOrMoveStart`/`Stop`, bit `0x2`.
     CameraOrSelectOrMove,
+    /// `PitchUpStart`/`Stop`, bit `0x400`.
+    PitchUp,
+    /// `PitchDownStart`/`Stop`, bit `0x800`.
+    PitchDown,
     /// `Jump()`.
     Jump,
     /// `ToggleRun()`, the walk toggle.
     ToggleRun,
     /// `ToggleAutoRun()`.
     ToggleAutoRun,
-    /// `SitOrStand()`.
-    SitOrStand,
     /// `ToggleSheath()`.
     ToggleSheath,
     /// `CameraZoomIn([yards])`, its yards in [`BindingsState::amount`].
@@ -55,6 +59,8 @@ fn held_input(input: HeldInput) -> Input {
         HeldInput::StrafeRight => Input::StrafeRight,
         HeldInput::TurnOrAction => Input::TurnOrAction,
         HeldInput::CameraOrSelectOrMove => Input::CameraOrSelectOrMove,
+        HeldInput::PitchUp => Input::PitchUp,
+        HeldInput::PitchDown => Input::PitchDown,
     }
 }
 
@@ -64,7 +70,6 @@ fn fired_input(input: FiredInput) -> (Input, f32) {
         FiredInput::Jump => (Input::Jump, 1.0),
         FiredInput::ToggleRun => (Input::ToggleRun, 1.0),
         FiredInput::ToggleAutoRun => (Input::ToggleAutoRun, 1.0),
-        FiredInput::SitOrStand => (Input::SitOrStand, 1.0),
         FiredInput::ToggleSheath => (Input::ToggleSheath, 1.0),
         FiredInput::CameraZoomIn(yards) => (Input::CameraZoomIn, yards),
         FiredInput::CameraZoomOut(yards) => (Input::CameraZoomOut, yards),
@@ -72,32 +77,104 @@ fn fired_input(input: FiredInput) -> (Input, f32) {
 }
 
 impl BindingsState {
-    /// Apply Lua's binding calls, in call order.
+    /// The binding pass begins: last frame's edges are spent, and the calls made after its
+    /// readers ran are this frame's.
+    pub(super) fn begin_pass(&mut self) {
+        self.edges = std::mem::take(&mut self.carry);
+        self.open = true;
+    }
+
+    /// The binding pass ends: the readers follow, so a call from here on is the next frame's.
+    pub(super) fn end_pass(&mut self) {
+        self.open = false;
+    }
+
+    /// Where the one-shot amounts stand, this frame's and the next's: a mark for
+    /// [`Self::scale_amounts_since`].
+    pub(crate) fn amounts_mark(&self) -> (usize, usize) {
+        (self.edges.amounts.len(), self.carry.amounts.len())
+    }
+
+    /// Scale the one-shot amounts the calls since `mark` fired by `by`: the web bridge's analog
+    /// press (`BindingLatches::synth_press`), a wheel's magnitude on a zoom.
+    pub(crate) fn scale_amounts_since(&mut self, mark: (usize, usize), by: f32) {
+        let edges = self.edges.amounts.iter_mut().skip(mark.0);
+        let carry = self.carry.amounts.iter_mut().skip(mark.1);
+        for a in edges.chain(carry) {
+            a.1 *= by;
+        }
+    }
+
+    /// Apply Lua's binding calls that waited for no host, in call order.
     pub(super) fn apply_script_input(&mut self, inputs: Vec<BindingInput>) {
         for input in inputs {
-            match input {
-                // The set helper `0x514840` early-outs on a bit already set, so a Start on a held
-                // bit is no new edge.
-                BindingInput::Start(held) => {
-                    let i = held_input(held);
-                    if !self.pressed(i) {
-                        self.just.push(i);
-                        self.held.push(i);
-                    }
+            self.apply(input, false);
+        }
+    }
+
+    /// One binding call inside its verb's call: the bit moves now, and its edge goes to this
+    /// frame's readers while the binding pass runs, else to the next frame's, whose head would
+    /// clear it unread. The edge is marked settled: the cast cancel and the autorun toggle its
+    /// `SetCommands` makes ran in the call. Whether the call is a new edge: a Start on a bit not
+    /// held, or a one-shot.
+    pub(crate) fn call(&mut self, input: BindingInput) -> bool {
+        self.apply(input, true)
+    }
+
+    /// Whether `input` is a Stop of a bit held now: the release `0x514b70` answers a change, so
+    /// its `SetCommands` runs the tick after it (`0x5151a0`).
+    pub(crate) fn releases(&self, input: BindingInput) -> bool {
+        matches!(input, BindingInput::Stop(held) if self.held.contains(&held_input(held)))
+    }
+
+    fn apply(&mut self, input: BindingInput, settled: bool) -> bool {
+        let edges = if settled && !self.open {
+            &mut self.carry
+        } else {
+            &mut self.edges
+        };
+        match input {
+            // The set helper `0x514840` early-outs on a bit already set, so a Start on a held
+            // bit is no new edge.
+            BindingInput::Start(held) => {
+                let i = held_input(held);
+                if self.held.contains(&i) {
+                    return false;
                 }
-                // `0x514b70` clears the bit whoever set it, so a second key still down on the
-                // same command stops too, and its release is a no-op second Stop.
-                BindingInput::Stop(held) => {
-                    let i = held_input(held);
-                    self.held.retain(|&h| h != i);
+                self.held.push(i);
+                edges.just.push(i);
+                if settled {
+                    edges.settled.push(i);
                 }
-                // A one-shot is its own press edge.
-                BindingInput::Fire(fired) => {
-                    let (i, amount) = fired_input(fired);
-                    self.fired.push(i);
-                    self.just.push(i);
-                    self.amounts.push((i, amount));
+                true
+            }
+            // `0x514b70` clears the bit whoever set it, so a second key still down on the
+            // same command stops too, and its release is a no-op second Stop.
+            BindingInput::Stop(held) => {
+                let i = held_input(held);
+                self.held.retain(|&h| h != i);
+                false
+            }
+            // A one-shot is its own press edge.
+            BindingInput::Fire(fired) => {
+                let (i, amount) = fired_input(fired);
+                edges.fired.push(i);
+                edges.just.push(i);
+                edges.amounts.push((i, amount));
+                if settled {
+                    edges.settled.push(i);
                 }
+                true
+            }
+            // The camera's axes are its own state (`[cam+0x128]`), not `[InputControl+4]`: a call
+            // with no host lent passes through in call order for the camera to apply.
+            BindingInput::ViewStart(axis) => {
+                edges.view_calls.push((axis, true));
+                false
+            }
+            BindingInput::ViewStop(axis) => {
+                edges.view_calls.push((axis, false));
+                false
             }
         }
     }
@@ -108,9 +185,7 @@ impl BindingsState {
     pub(crate) fn after_calls(earlier: Vec<BindingInput>, now: Vec<BindingInput>) -> Self {
         let mut state = Self::default();
         state.apply_script_input(earlier);
-        state.just.clear();
-        state.fired.clear();
-        state.amounts.clear();
+        state.edges = Default::default();
         state.apply_script_input(now);
         state
     }

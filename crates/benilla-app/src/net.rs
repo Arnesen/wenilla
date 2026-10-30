@@ -27,18 +27,25 @@ pub(crate) mod io;
 pub(crate) mod motion;
 mod objects;
 #[cfg(test)]
+pub(crate) use objects::answer_item;
+pub(crate) use objects::continue_refusal_walk;
+#[cfg(test)]
 pub(crate) use objects::wire;
 pub(crate) use objects::Listed;
 pub(crate) use objects::{release_unheld, ReleasePending};
+mod reputations;
 mod session;
+#[cfg(test)]
+pub(crate) use session::fire_worldport_timer;
+pub(crate) use session::{world_ported, PendingWorldports, WorldportTimer};
 mod world;
 
+pub(crate) use reputations::Reputations;
+
 pub(crate) use apply::apply_net_updates;
-pub(crate) use apply::enter_world_on_self_create;
-use apply::tag_self_player;
 #[cfg(test)]
 pub(crate) use game_time::GameTime;
-pub(crate) use game_time::{clock_tick, ServerTime};
+pub(crate) use game_time::{clock_tick, GameTimeLive, ServerTime};
 pub(crate) use handlers::NetHandlerApp;
 
 pub(crate) use io::LoginRequest;
@@ -67,10 +74,6 @@ pub(crate) struct NetOffline;
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
-        // The release-on-enter for the ask-once caches this plugin owns.
-        crate::query_cache::register::<crate::names::NameCache>(app);
-        crate::query_cache::register::<crate::go_templates::GameObjectTemplates>(app);
-        crate::query_cache::register::<crate::items::Items>(app);
         let handles = io::spawn_net(self.connect);
         if !self.connect {
             app.insert_resource(NetOffline);
@@ -114,15 +117,17 @@ impl Plugin for NetPlugin {
             .init_resource::<ServerWallClock>()
             .init_resource::<Reputations>()
             .init_resource::<HomeBind>()
-            .init_resource::<PlayedTimeAnswer>()
             .init_resource::<Proficiencies>()
             .init_resource::<crate::names::NameCache>()
             .init_resource::<crate::go_templates::GameObjectTemplates>()
             .init_resource::<crate::items::Items>()
             .init_resource::<crate::world_state::WorldStates>()
+            .init_resource::<crate::world_state::WorldStateLane>()
             .add_message::<TeleportMessage>()
             .add_message::<FieldChanged>()
-            .add_message::<crate::item_watch::ItemNotice>()
+            .add_message::<AuraFieldsChanged>()
+            .init_resource::<crate::item_lane::ItemLane>()
+            .init_resource::<crate::item_watch::BagCache>()
             .init_resource::<crate::field_watch::NoticeLane>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
@@ -144,7 +149,7 @@ impl Plugin for NetPlugin {
             .add_message::<CharRenameMessage>()
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
-            .add_message::<WorldEnterCascadeMessage>()
+            .init_resource::<MoverClaim>()
             .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
@@ -155,12 +160,9 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 (
-                    apply_net_updates,
-                    tag_self_player,
-                    enter_world_on_self_create,
-                    // The create gives control back (`0x5deb56`), in the Net stage ahead of
-                    // `control`'s read of the flags.
-                    crate::player::regain_control_on_arrival.in_set(crate::player::ControlRestore),
+                    // Our own create, a packet, gives control back inside it (`0x5deb56`),
+                    // ahead of `control`'s read of the flags.
+                    apply_net_updates.in_set(crate::player::ControlRestore),
                     sample_splines,
                     // Swim state from the water at the feet (the wire never carries it for
                     // creatures), before the clamp so a swimmer is exempt the same frame.
@@ -180,13 +182,14 @@ impl Plugin for NetPlugin {
                 // `apply_net_updates` and before `drive_display_facing`, so the `"npc"` token is
                 // current when a window's show handler reads it.
             )
-            // Not part of the movement chain above: the cascade's time query, after the self create
+            // Not part of the movement chain above: the hourly time query, after the self create
             // has claimed the mover.
+            .init_resource::<QueryTimeAsks>()
             .add_systems(
                 Update,
                 send_query_time
                     .in_set(WorldStage::Net)
-                    .after(enter_world_on_self_create),
+                    .after(apply_net_updates),
             )
             .add_systems(Update, population_pulse.in_set(WorldStage::Net));
     }
@@ -354,6 +357,15 @@ pub(crate) fn current_speed(s: &MoveSpeeds, flags: u32) -> f32 {
 pub(crate) struct ObjectStore(pub(crate) ObjectFields);
 
 impl ObjectStore {
+    /// `UNIT_FIELD_BYTES_0`'s race and class bytes (`+0x78`, `+0x79`), 0 while unstreamed: what
+    /// `FindSkillLineAbility` (`0x6de040`) indexes a unit's spells by.
+    pub(crate) fn race_class(&self) -> (u8, u8) {
+        (
+            self.0.unit_race().unwrap_or(0),
+            self.0.unit_class().unwrap_or(0),
+        )
+    }
+
     /// The object manager's unit lookup (`0x468460`, `ecx = 8`): a unit or a player, which share
     /// the unit block; a game object, corpse or item is not one.
     pub(crate) fn is_unit(&self) -> bool {
@@ -410,6 +422,58 @@ impl FieldChanged {
     }
 }
 
+/// The dwords the aura watcher `0x604d00` covers from `UNIT_FIELD_AURA`: the 48 slot ids and the
+/// 6 `UNIT_FIELD_AURAFLAGS` nibble words, fields 47 to 100 (registered at `0x604226`).
+pub(crate) const AURA_WATCH_SPAN: usize = 54;
+
+/// One call of the aura watcher `0x604d00` on a unit: once per notified block whose fields 47 to
+/// 100 moved, with the watch copy's old dwords and the descriptor's new ones, as the notify pass
+/// hands a range watcher its copy (`0x4655c7`). `at` is the watcher's place among what the packets
+/// queue, the stamp of the block's first edge in the range, where
+/// [`crate::field_watch::in_watch_order`] places them all. `health` is the descriptor's
+/// `UNIT_FIELD_HEALTH` as the watcher runs, which the loss line reads (`0x62b50e`).
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AuraFieldsChanged {
+    pub at: crate::lanes::Stamp,
+    pub entity: Entity,
+    pub guid: u64,
+    pub old: [u32; AURA_WATCH_SPAN],
+    pub new: [u32; AURA_WATCH_SPAN],
+    pub health: u32,
+}
+
+/// Whether a unit field lies in the aura watcher's range.
+pub(crate) fn in_aura_watch(index: u16) -> bool {
+    use benilla_protocol::field::FIELD_UNIT_AURA;
+    (FIELD_UNIT_AURA..FIELD_UNIT_AURA + AURA_WATCH_SPAN as u16).contains(&index)
+}
+
+/// The watch copy and the descriptor of the aura watcher's range for one block, or `None` when
+/// the block moved nothing in it: `fields` is the descriptor after the block, `moved` the block's
+/// `(index, old, new)` edges.
+pub(crate) fn aura_watch_span(
+    fields: &ObjectFields,
+    moved: impl IntoIterator<Item = (u16, u32, u32)>,
+) -> Option<([u32; AURA_WATCH_SPAN], [u32; AURA_WATCH_SPAN])> {
+    use benilla_protocol::field::FIELD_UNIT_AURA;
+    let slot = |index: u16| in_aura_watch(index).then(|| usize::from(index - FIELD_UNIT_AURA));
+    let mut new = [0u32; AURA_WATCH_SPAN];
+    for (index, value) in fields.raw_fields() {
+        if let Some(i) = slot(index) {
+            new[i] = value;
+        }
+    }
+    let mut old = new;
+    let mut any = false;
+    for (index, was, _) in moved {
+        if let Some(i) = slot(index) {
+            old[i] = was;
+            any = true;
+        }
+    }
+    any.then_some((old, new))
+}
+
 /// A block's write into a held store (`0x466590` with its copy flag clear): a create's delta
 /// replaces the store, clearing what it omits (`0x466582`); a values delta lands on top. The
 /// dwords it moved come back as `(index, old, new)`. A store no create made has no type to
@@ -459,7 +523,9 @@ pub(crate) fn apply_fields_for_test(world: &mut World, entity: Entity, delta: Ob
 }
 
 /// Our own character's entity (guid == [`SelfGuid`]): identity, not what we steer ([`Embodied`]).
+/// It carries what its own `ShowHelm` and `ShowCloak` calls left on its model.
 #[derive(Component)]
+#[require(crate::entities::WornPins)]
 pub(crate) struct SelfPlayer;
 
 /// The body this client is attached to: the reference's camera anchor (`camera+0x88`), written
@@ -482,11 +548,83 @@ pub(crate) struct Embodied;
 #[derive(Component)]
 pub(crate) struct ActiveMover;
 
+/// `IsClientControlled` (`0x5fa5f0`): bit 0x400 of the unit's `+0xc58`, which the control update
+/// sets or clears on its unit (`0x5fa62a`, `0x5fa631`, stored at `0x5fa636`) and only the
+/// constructor clears besides (`0x5fae7a`), so it outlives a release. Our own character's is read
+/// off [`crate::player::OwnControlLost`], which the same update writes beside it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct ClientControlled;
+
+/// The active-mover global (`0xc4da98`/`0xc4da9c`) as the claims read it: the guid the last
+/// `SetActiveMover` (`0x6006e0`) stored, or none. A claim of the guid it holds returns at once
+/// (`0x6006ee`-`0x6006fb` → `0x600852`), so `CMSG_SET_ACTIVE_MOVER` goes out only on a change.
+/// It is zeroed at every world entry (`CGUnit_C::Initialize`, `0x6039a9`, from
+/// `ClientInitializeGame` at `0x401639`), by the destructor of the unit it names
+/// (`0x5fb631`-`0x5fb655`), which a world load (`0x401bf7`) and the game's teardown (`0x402011`)
+/// run on every object through `ClntObjMgrDestroy` (`0x467700` → `0x467800`), by that unit's
+/// release (`0x5fbc26`-`0x5fbc3b` → `0x6006b0`), and by a control update that stops it
+/// (`0x5fa678`-`0x5fa696`).
+#[derive(Resource, Default)]
+pub(crate) struct MoverClaim(Option<u64>);
+
+impl MoverClaim {
+    /// `SetActiveMover(guid)`: whether the global moved, stored as it does (`0x600791`), with
+    /// `CMSG_SET_ACTIVE_MOVER` sent for a guid that is not zero (`0x6007a5`, `0x6007ae`).
+    pub(crate) fn claim(&mut self, guid: u64, net: &NetCommands) -> bool {
+        let guid = (guid != 0).then_some(guid);
+        if self.0 == guid {
+            return false;
+        }
+        self.0 = guid;
+        if let Some(guid) = guid {
+            let _ = net.0.send(ClientCommand::SetActiveMover { guid });
+        }
+        true
+    }
+
+    /// The guid the global names.
+    pub(crate) fn get(&self) -> Option<u64> {
+        self.0
+    }
+
+    /// Whether the global names `guid` (`0x6103a0`'s first test).
+    pub(crate) fn holds(&self, guid: u64) -> bool {
+        self.0 == Some(guid)
+    }
+
+    /// The unit `guid` gone or stopped: the global is zeroed when it names it.
+    pub(crate) fn forget(&mut self, guid: u64) {
+        if self.0 == Some(guid) {
+            self.0 = None;
+        }
+    }
+
+    /// The world entry's zeroing (`0x6039a9`).
+    pub(crate) fn reset(&mut self) {
+        self.0 = None;
+    }
+
+    /// A teardown that freed objects: the global is zeroed when its unit is no longer held.
+    pub(crate) fn forget_unless_held(&mut self, index: &GuidIndex) {
+        if self.0.is_some_and(|g| !index.0.contains_key(&g)) {
+            self.0 = None;
+        }
+    }
+}
+
 // ── ECS state: resources ─────────────────────────────────────────────────────────────────────────
 
 /// The inbound event channel, drained each frame by [`apply_net_updates`].
 #[derive(Resource)]
 pub(crate) struct NetEvents(Receiver<SessionEvent>);
+
+impl NetEvents {
+    /// The inbound channel as `rx` brings it, for a test that feeds the drain.
+    #[cfg(test)]
+    pub(crate) fn for_test(rx: Receiver<SessionEvent>) -> Self {
+        Self(rx)
+    }
+}
 
 /// The outbound command channel.
 #[derive(Resource, Debug)]
@@ -624,6 +762,14 @@ pub(crate) enum RealmRequest {
     /// select drops and the thread returns to the logon park, the realmd link as it was (closed
     /// since a world entry). Elsewhere, nothing.
     Leave,
+    /// `PINEntered`'s keys for the logon waiting at the keypad (`0x5ab5a0` → `0x5b3120`), for the
+    /// prompt numbered `prompt` alone ([`benilla_protocol::LoginStage::Pin`]), or no keys when no
+    /// screen can show the keypad, which fails the logon. Elsewhere, nothing. The keys never print
+    /// ([`benilla_ui::script::GluePin`]).
+    Pin {
+        prompt: u64,
+        keys: Option<benilla_ui::script::GluePin>,
+    },
 }
 
 /// The credentials channel to the IO thread's pre-logon park, sent by [`crate::glue_session::login`].
@@ -645,7 +791,7 @@ impl LoginAbandon {
 /// Guid to entity for every kind, items included, like the reference's one `ClntObjMgr` index.
 /// Written only by `net::objects`.
 #[derive(Resource, Default)]
-pub(crate) struct GuidIndex(pub(crate) HashMap<u64, Entity>);
+pub(crate) struct GuidIndex(pub(crate) bevy::platform::collections::HashMap<u64, Entity>);
 
 /// The streamed objects, whatever the kind, with their descriptor stores, our own player, and an
 /// item's countdown cells. Read-only. The by-guid lookups are `ClntObjMgrObjectPtr` (`0x468460`).
@@ -674,6 +820,11 @@ impl Objects<'_, '_> {
             .0
             .get(&guid)
             .and_then(|&e| self.stores.get(e).ok())
+    }
+
+    /// The store of `entity`, as the net stage left it.
+    pub(crate) fn store_of(&self, entity: Entity) -> Option<&ObjectStore> {
+        self.stores.get(entity).ok()
     }
 
     /// Every streamed object, items included.
@@ -787,73 +938,43 @@ impl ServerWallClock {
 /// `[0xbb749c]`, armed `now + 0xe10` at `0x4def11`).
 const RESYNC_AFTER: Duration = Duration::from_secs(3600);
 
-/// Ask for the server's wall clock at each world-enter cascade (the quest-log init `0x4de430`,
-/// called at `0x4909a1`, sends it at `0x4de45b`) and hourly after, which tracks a server
+/// When the wall clock was last asked for, and whether a cascade has seated us since the session
+/// began, which the hourly resync waits for.
+#[derive(Resource, Default)]
+pub(crate) struct QueryTimeAsks {
+    asked_at: Option<Instant>,
+    seated: bool,
+}
+
+/// Ask for the server's wall clock in each world-enter cascade's place (the quest-log init
+/// `0x4de430`, called at `0x4909a1`, sends it at `0x4de45b`, [`crate::ui_world_enter`]).
+pub(crate) fn query_time_at_world_enter(
+    asks: Option<ResMut<QueryTimeAsks>>,
+    commands: Res<NetCommands>,
+) {
+    if let Some(mut asks) = asks {
+        asks.asked_at = Some(Instant::now());
+        asks.seated = true;
+    }
+    let _ = commands.0.send(ClientCommand::QueryTime);
+}
+
+/// Ask for the server's wall clock hourly after a cascade asked it, which tracks a server
 /// re-clocked under us.
 pub(crate) fn send_query_time(
-    mut cascades: MessageReader<WorldEnterCascadeMessage>,
     commands: Res<NetCommands>,
     clock: Res<ServerWallClock>,
     status: Res<NetStatus>,
-    mut asked_at: Local<Option<Instant>>,
-    mut seated: Local<bool>,
+    mut asks: ResMut<QueryTimeAsks>,
 ) {
-    let entering = cascades.read().next().is_some();
     // `connected` rises at `CMSG_PLAYER_LOGIN`, before the server seats us, so the resync waits
     // for the first cascade; a logout or a disconnect clears `connected` and so the wait re-arms.
-    *seated = status.connected && (*seated || entering);
-    let due = *seated && clock.stale() && asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
-    if entering || due {
-        *asked_at = Some(Instant::now());
+    asks.seated &= status.connected;
+    let due =
+        asks.seated && clock.stale() && asks.asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
+    if due {
+        asks.asked_at = Some(Instant::now());
         let _ = commands.0.send(ClientCommand::QueryTime);
-    }
-}
-
-/// Our reputation state: the `(flags, standing)` per slot and the forced-reaction table.
-///
-/// `slots` is indexed by `Faction.dbc`'s `reputationIndex`. The standing excludes the DBC
-/// race/class base, which consumers add before ranking. Filled by `SMSG_INITIALIZE_FACTIONS`, kept
-/// current by `SMSG_SET_FACTION_STANDING` (which also reveals) and `SMSG_SET_FACTION_VISIBLE`.
-/// Flag bit `0x08` marks a pane header.
-///
-/// `forced` is `SMSG_SET_FORCED_REACTIONS` (`0x4d59a0`): `(Faction.dbc id, reaction rank)` per
-/// faction a `SPELL_AURA_FORCE_REACTION` aura forces, which answers with that rank whatever its
-/// templates or our standing say. Both halves live on one resource so a change to either wakes the
-/// unit feed and the questgiver-marker re-query that read reactions.
-#[derive(Resource, Default, Clone)]
-pub(crate) struct Reputations {
-    pub(crate) slots: Vec<(u8, i32)>,
-    pub(crate) forced: Vec<(u32, u32)>,
-    /// How many forced tables have arrived. The reference's handler fires `UNIT_FACTION` on every
-    /// arrival, a resend of the same table included, so a feed counts arrivals, not table diffs.
-    forced_arrivals: u64,
-}
-
-impl Reputations {
-    /// A store holding only `slots`, with nothing forced.
-    #[cfg(test)]
-    pub(crate) const fn from_slots(slots: Vec<(u8, i32)>) -> Self {
-        Self {
-            slots,
-            forced: Vec::new(),
-            forced_arrivals: 0,
-        }
-    }
-
-    /// `SMSG_SET_FORCED_REACTIONS`: the table replaces the last whole (`0x4d59a0`).
-    pub(crate) fn set_forced(&mut self, table: Vec<(u32, u32)>) {
-        self.forced = table;
-        self.forced_arrivals += 1;
-    }
-
-    /// Drops the table: the reference's teardown zeroes the count (`0x4d5419`).
-    pub(crate) fn clear_forced(&mut self) {
-        self.forced.clear();
-    }
-
-    /// The tables that have arrived so far.
-    pub(crate) fn forced_arrivals(&self) -> u64 {
-        self.forced_arrivals
     }
 }
 
@@ -861,11 +982,6 @@ impl Reputations {
 /// token names.
 #[derive(Resource, Default)]
 pub(crate) struct HomeBind(pub(crate) Option<u32>);
-
-/// The undelivered `/played` answer (`SMSG_PLAYED_TIME`): total seconds and seconds this level.
-/// One slot: the server sends one reply per request.
-#[derive(Resource, Default)]
-pub(crate) struct PlayedTimeAnswer(pub(crate) Option<(u32, u32)>);
 
 /// Equip proficiencies (`SMSG_SET_PROFICIENCY`): item class (2 weapon, 4 armor) to a subclass
 /// bitmask, the client's `0xc4d4a0[class]` store.
@@ -891,11 +1007,17 @@ pub(crate) enum MoveKind {
     FallLand,
     StartSwim,
     StopSwim,
+    /// The pitch keys' sends, the drain's tags 0xb, 0xc and 0xd (`0x61a240`, `0x61a2e0`).
+    StartPitchUp,
+    StartPitchDown,
+    StopPitch,
     /// The walk/run toggle: sent from the toggle handler (`ToggleRun 0x513d50` to `0x617de0`),
     /// not the move broadcaster, so it goes out standing still (`0x61a99d` gates the latter).
     SetWalkMode,
     SetRunMode,
     SetFacing,
+    /// The mouse-look pitch set, tag 0x11 drained through `0x615bc0`.
+    SetPitch,
     Heartbeat,
 }
 
@@ -916,9 +1038,13 @@ impl MoveKind {
             MoveKind::FallLand => op::MSG_MOVE_FALL_LAND,
             MoveKind::StartSwim => op::MSG_MOVE_START_SWIM,
             MoveKind::StopSwim => op::MSG_MOVE_STOP_SWIM,
+            MoveKind::StartPitchUp => op::MSG_MOVE_START_PITCH_UP,
+            MoveKind::StartPitchDown => op::MSG_MOVE_START_PITCH_DOWN,
+            MoveKind::StopPitch => op::MSG_MOVE_STOP_PITCH,
             MoveKind::SetWalkMode => op::MSG_MOVE_SET_WALK_MODE,
             MoveKind::SetRunMode => op::MSG_MOVE_SET_RUN_MODE,
             MoveKind::SetFacing => op::MSG_MOVE_SET_FACING,
+            MoveKind::SetPitch => op::MSG_MOVE_SET_PITCH,
             MoveKind::Heartbeat => op::MSG_MOVE_HEARTBEAT,
         }
     }
@@ -1105,6 +1231,11 @@ pub(crate) enum ClientCommand {
         pet_number: u32,
         guid: u64,
     },
+    /// `CMSG_ITEM_NAME_QUERY`, sent only by [`crate::item_names::ItemNames`]' lookups.
+    ItemNameQuery {
+        entry: u32,
+        guid: u64,
+    },
     /// `CMSG_ITEM_QUERY_SINGLE` (`guid` 0 for template-only), sent only by
     /// [`crate::items::Items`]' ask-once resolve.
     ItemQuery {
@@ -1125,6 +1256,13 @@ pub(crate) enum ClientCommand {
     /// gift instead changes entry in place with no window.
     OpenItem {
         bag_index: u8,
+        slot: u8,
+    },
+    /// `CMSG_READ_ITEM`: the bag (255 for the player's own slots, else the equipped bag's inventory
+    /// slot) and the slot; the server answers `SMSG_READ_ITEM_OK` or `SMSG_READ_ITEM_FAILED` on the
+    /// item's guid.
+    ReadItem {
+        bag: u8,
         slot: u8,
     },
     /// `CMSG_WRAP_ITEM`, the paper first as on the wire. The client filters nothing; the server
@@ -1265,6 +1403,8 @@ pub(crate) enum ClientCommand {
         spell_id: u32,
         enabled: bool,
     },
+    /// `CMSG_REQUEST_PET_INFO`: the world entry's ask for the pet bar it cleared (`0x4bc738`).
+    RequestPetInfo,
     /// `CMSG_PET_ABANDON`: the menu's Abandon only. Dismiss (`PetDismiss 0x4be4d0`) is a
     /// [`Self::PetAction`] with word `0x07000003`. Answered by a zero-guid `SMSG_PET_SPELLS`.
     PetAbandon {
@@ -1310,11 +1450,12 @@ pub(crate) enum ClientCommand {
     GossipHello {
         guid: u64,
     },
-    /// `CMSG_GOSSIP_SELECT_OPTION` with the line's `index`. No code is ever sent: coded options
-    /// are not selectable.
+    /// `CMSG_GOSSIP_SELECT_OPTION` with the line's `index`, and the code a coded option was
+    /// given.
     GossipSelectOption {
         guid: u64,
         option: u32,
+        code: Option<Vec<u8>>,
     },
     /// `CMSG_NPC_TEXT_QUERY`, asked once per `text_id` on menu receipt.
     NpcTextQuery {
@@ -1442,6 +1583,16 @@ pub(crate) enum ClientCommand {
     MeetingStoneLeave,
     /// The enter-world meeting-stone status query: `CMSG 0x296`.
     MeetingStoneStatusQuery,
+    // ── Account data ──
+    /// A section the server's digest says changed there: `CMSG_REQUEST_ACCOUNT_DATA`.
+    RequestAccountData {
+        section: u32,
+    },
+    /// A section changed here: `CMSG_UPDATE_ACCOUNT_DATA` with its file.
+    UpdateAccountData {
+        section: u32,
+        contents: Vec<u8>,
+    },
     // ── The tutorial system ──
     /// `FlagTutorial` or an auto-acknowledge: `CMSG_TUTORIAL_FLAG`, the 0-based id.
     TutorialFlag {
@@ -1818,7 +1969,7 @@ pub(crate) enum ClientCommand {
         target: u64,
     },
     /// `CMSG_BEGIN_TRADE`: accept a request; the server sends `OPEN_WINDOW` to both. Sent only by
-    /// [`crate::ui_trade::answer_trade_request`].
+    /// [`crate::ui_trade::answer_request`].
     BeginTrade,
     /// `CMSG_IGNORE_TRADE` (`0x119`): the refusal ladder's ignore leg (`0x4bf759` to `0x5d41c0`);
     /// vmangos answers the initiator `TRADE_STATUS_IGNORE_YOU`.
@@ -2356,12 +2507,6 @@ pub(crate) struct EnteredWorldMessage {
     pub(crate) tutorial_flags: Option<Vec<u8>>,
 }
 
-/// The reference's world-enter cascade (`0x4908c0`) ran: our own player's create, at login and
-/// every cross-map worldport ([`enter_world_on_self_create`]), or a `/reload`. Its sends wait for
-/// this, not [`EnteredWorldMessage`], which fires before the server has seated the player.
-#[derive(Message)]
-pub(crate) struct WorldEnterCascadeMessage;
-
 /// `SMSG_ADDON_INFO`: the addons the server hid from the Lua index space, or `None` if it did
 /// not answer. A resource, since it must exist before the world-entry UI load runs any addon;
 /// rewritten on every login from the reply its link got.
@@ -2423,14 +2568,18 @@ impl DisconnectedMessage {
     /// login env vars: a person's launch line sets them too, and a reconnect would take the
     /// account back from whoever displaced us.
     pub(crate) fn new(reason: String, end: benilla_protocol::SessionEnd) -> Self {
-        let session_over =
-            end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended();
         Self {
             reason,
             end,
-            session_over,
+            session_over: session_over(end),
         }
     }
+}
+
+/// Whether a session that ended with `end` is over, back at the account screen with nothing
+/// retried ([`DisconnectedMessage::session_over`]): a loss outside an unattended run.
+pub(crate) fn session_over(end: benilla_protocol::SessionEnd) -> bool {
+    end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended()
 }
 
 /// A login attempt failed before the roster; the IO thread is back at its pre-logon park.
@@ -2466,6 +2615,9 @@ pub(crate) struct SelfMoveMessage {
     /// The server's deck-local pose for us. Never re-derive it from the boat's transform, which
     /// [`crate::transport::tick_transports`] holds at the far pose across a map seam.
     pub(crate) transport: Option<benilla_protocol::TransportPose>,
+    /// `MSG_MOVE_TELEPORT`, whose apply is a teleport's (`0x6016e2` → `0x602f90` → `0x6186b0` →
+    /// `0x617e90`), where the other relays only place the mover.
+    pub(crate) teleport: bool,
 }
 
 /// `SMSG_CLIENT_CONTROL_UPDATE`, verbatim; the controller decides. `mover` is the unit spoken
@@ -2531,6 +2683,8 @@ pub(crate) struct PendingTransfer(pub(crate) Option<PendingTransferInfo>);
 pub(crate) struct PendingTransferInfo {
     pub(crate) map_id: u32,
     pub(crate) transport_entry: Option<u32>,
+    /// The map left, sent with the transport entry.
+    pub(crate) from_map: Option<u32>,
 }
 
 /// `SMSG_PLAY_SOUND`, `PLAY_MUSIC` or `PLAY_OBJECT_SOUND`: a SoundEntries id. An unstreamed

@@ -2,7 +2,6 @@
 //! its exits alone must grey `GetPetActionsUsable`, and must stop a press, an order, both autocast
 //! toggles and the drag's writes, while a pet that trips none of them takes all of it as before.
 
-use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
@@ -202,12 +201,9 @@ fn effects(rig: &Rig, sent: Vec<ClientCommand>) -> Vec<&'static str> {
     out
 }
 
+/// `f` on the VM with the call host lent, so each verb applies inside its call.
 fn ui<R>(rig: &mut Rig, f: impl FnOnce(&mut benilla_ui::script::UiScript) -> R) -> R {
-    let mut script = rig
-        .app
-        .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>();
-    f(&mut script)
+    crate::script_calls::with_hosted_vm(rig.app.world_mut(), |s| f(s.expect("a VM")))
 }
 
 /// `GetPetActionsUsable()` as the Lua reads it after the feed ran.
@@ -298,10 +294,6 @@ fn each_exit_alone_stops_the_bars_autocast_toggle() {
         let word = rig.app.world().resource::<PetBar>().spells.bar[0];
 
         ui(&mut rig, |s| s.run("TogglePetAutocast(1)").unwrap());
-        rig.app
-            .world_mut()
-            .run_system_once(super::drain::drain_pet_actions)
-            .expect("the drain runs");
 
         let sent = rig.sent();
         let flipped = rig.app.world().resource::<PetBar>().spells.bar[0] != word;
@@ -343,10 +335,6 @@ fn each_exit_alone_stops_the_pet_books_autocast_toggle() {
             .unwrap();
             s.eval::<i64>("return BAR_UPDATES").unwrap() == 1
         });
-        rig.app
-            .world_mut()
-            .run_system_once(crate::ui_pet_book::drain_pet_book)
-            .expect("the drain runs");
 
         let sent = rig.sent();
         let bar = rig.app.world().resource::<PetBar>();
@@ -386,10 +374,6 @@ fn each_exit_alone_stops_the_menus_dismiss() {
         rig.frame();
 
         ui(&mut rig, |s| s.run("PetDismiss()").unwrap());
-        rig.app
-            .world_mut()
-            .run_system_once(super::menu::drain_pet_menu)
-            .expect("the drain runs");
 
         let went = rig
             .sent()
@@ -420,10 +404,6 @@ fn each_exit_alone_stops_the_drags_writes() {
         ui(&mut rig, |s| {
             s.run("PickupPetAction(1) PickupPetAction(2)").unwrap();
         });
-        rig.app
-            .world_mut()
-            .run_system_once(super::drain::drain_pet_actions)
-            .expect("the drain runs");
 
         let sent = rig.sent();
         let bar = rig.app.world().resource::<PetBar>().spells.bar;
@@ -485,17 +465,9 @@ fn a_held_action_stays_held_while_the_pet_is_out_of_view() {
         .0
         .remove(&PET);
     rig.frame();
-    rig.app
-        .world_mut()
-        .run_system_once(super::drain::drain_pet_actions)
-        .expect("the drain runs");
     let _ = rig.sent();
 
     ui(&mut rig, |s| s.run("PickupPetAction(2)").unwrap());
-    rig.app
-        .world_mut()
-        .run_system_once(super::drain::drain_pet_actions)
-        .expect("the drain runs");
 
     assert!(
         matches!(
@@ -530,6 +502,20 @@ fn with_stock_ui(rig: &mut Rig) {
     let failures = crate::ui_script::load_default_ui(&script);
     assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
     rig.app.world_mut().insert_non_send_resource(script);
+    // The bar's own `PET_BAR_UPDATE`, as its packet signals it (`0x4bc90c`), on the bar pushed.
+    rig.feed.run(rig.app.world_mut());
+    ui(rig, |s| s.fire_event("PET_BAR_UPDATE", vec![]));
+}
+
+/// The pet's `UNIT_FIELD_FLAGS` watch, as an update packet's runs it: `UNIT_FLAGS("pet")`
+/// (`0x515e7a`), on which the stock bar repaints (`PetActionBarFrame.lua:45-47`).
+fn pet_flags_moved(rig: &mut Rig) {
+    ui(rig, |s| {
+        s.fire_event(
+            "UNIT_FLAGS",
+            vec![benilla_ui::script::ScriptValue::Str("pet".into())],
+        )
+    });
 }
 
 /// The feeds, then the VM's clock and layout, so the bar's slide and repaint have happened.
@@ -602,6 +588,7 @@ fn the_stock_bar_greys_a_stunned_pet_and_its_click_sends_nothing() {
     );
 
     set_pet(&mut rig, &[(FLAGS, 0x0004_0000)]);
+    pet_flags_moved(&mut rig);
     settle(&mut rig);
 
     assert!(icon_is_grey(&mut rig, ICON), "a stunned pet's bar greys");
@@ -615,6 +602,7 @@ fn the_stock_bar_greys_a_stunned_pet_and_its_click_sends_nothing() {
 
     // The same click again once the stun ends.
     set_pet(&mut rig, &[]);
+    pet_flags_moved(&mut rig);
     settle(&mut rig);
     assert!(!icon_is_grey(&mut rig, ICON));
     click_first_button(&mut rig);
@@ -723,17 +711,9 @@ fn the_verbs_bar_writes_are_signalled_once() {
         in_place(&mut rig, "TogglePetAutocast(1)"),
         ["PET_BAR_UPDATE"]
     );
-    rig.app
-        .world_mut()
-        .run_system_once(super::drain::drain_pet_actions)
-        .expect("the drain runs");
     assert!(rig.frame().is_empty(), "the feed owes no second signal");
 
     let seen = in_place(&mut rig, "PickupPetAction(1)");
     assert_eq!(seen.last().map(String::as_str), Some("PET_BAR_UPDATE"));
-    rig.app
-        .world_mut()
-        .run_system_once(super::drain::drain_pet_actions)
-        .expect("the drain runs");
     assert!(rig.frame().is_empty(), "the feed owes no second signal");
 }

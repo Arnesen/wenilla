@@ -18,7 +18,7 @@
 //! - **in:** a `queue` array of command objects the page pushes and the bridge drains every
 //!   frame: `hold`/`fire` a binding command **by name** (`MOVEFORWARD`, `JUMP`, `ACTIONBUTTON1`
 //!   — the names the Key Bindings window shows, whose `Bindings.xml` bodies run exactly as a
-//!   key's do, into the same [`BindingsState`] every engine system reads, so a page cannot do
+//!   key's do, into the same [`crate::bindings::BindingsState`] every engine system reads, so a page cannot do
 //!   anything a key cannot), `look`
 //!   (the scripted mouse-turn, `Player::turn_aim`), `lua` (evaluate a chunk, answered by a
 //!   `lua` event), `chat` (a line as if typed into the chat box, so `/say` and `/target` parse
@@ -36,7 +36,7 @@
 //! read once at build like every other env key.
 //!
 //! **The seams it stands on**, none of them dev-gated (this is a player-side plugin, compiled
-//! into the browser build the dev instruments are compiled out of): [`BindingsState::synth_press`]
+//! into the browser build the dev instruments are compiled out of): [`BindingLatches::synth_press`]
 //! and kin, the VM's event tap ([`UiScript::set_event_tap`]), the chat router's observer copy
 //! ([`ChatWindows::routed`]), the zone resolve's resource ([`crate::area::ZoneInfo`]), and the
 //! same snapshot builder the unit frames use ([`crate::ui_unit::snapshot`]).
@@ -61,7 +61,7 @@ use benilla_world::schedule::WorldStage;
 use benilla_world::world_map::MapChange;
 
 use crate::area::{ZoneFeed, ZoneInfo};
-use crate::bindings::{BindingSet, BindingsState};
+use crate::bindings::{BindingHead, BindingLatches, BindingTail};
 use crate::client_state::ClientState;
 use crate::player::Player;
 use crate::ui_chat::{event_name, ChatWindows};
@@ -314,7 +314,10 @@ impl Plugin for WebBridgePlugin {
                 (apply_synth_input, apply_synth_look)
                     .chain()
                     .in_set(UiInput)
-                    .after(BindingSet)
+                    // Inside the binding pass, as a key's records are, so a press's edges are
+                    // this frame's readers' ([`BindingsState::call`]).
+                    .after(BindingHead)
+                    .before(BindingTail)
                     .before(WorldStage::Input)
                     .run_if(in_state(ClientState::InWorld)),
             )
@@ -453,69 +456,66 @@ fn lua_result(id: u32, result: Result<Vec<PlainValue>, String>) -> PlainValue {
     PlainValue::Map(m)
 }
 
-/// The control seam: after the key dispatch ([`BindingSet`]) cleared this frame's edges, before
+/// The control seam: inside the binding pass, after its head cleared last frame's edges, before
 /// the controller reads them. Holds are re-asserted every frame (a VM swap drops their latches,
 /// and this re-presses them); a chat box with focus releases them like it stops keys (and, a
 /// named divergence, they resume when it loses focus — a stick has no re-press).
 fn apply_synth_input(
-    mut binds: ResMut<BindingsState>,
+    mut latches: ResMut<BindingLatches>,
+    mut vm: crate::bindings::SynthVm,
     mut input: ResMut<BridgeInput>,
     capture: Res<UiKeyboardCapture>,
-    mut script: Option<NonSendMut<UiScript>>,
     mut memo: ResMut<BridgeMemo>,
     mut out: ResMut<BridgeOutbox>,
-    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
     // The host is lent around every synthetic press and release, as the bindings pass lends it
     // around a key's: an `ACTIONBUTTON1` fired from the page runs `UseAction` inside the call,
-    // like the key's. Without it the body is refused ("no call host is lent").
-    crate::script_calls::hosted(&mut script, &mut host, |mut vm| {
-        if input.drop_holds {
-            input.drop_holds = false;
-            input.released.clear();
-            binds.synth_release_all(vm.as_deref_mut());
-            out.push(
-                "input",
-                PlainValue::Map(vec![("heldCleared".into(), PlainValue::Bool(true))]),
-            );
+    // like the key's.
+    if input.drop_holds {
+        input.drop_holds = false;
+        input.released.clear();
+        latches.synth_release_all(&mut vm);
+        out.push(
+            "input",
+            PlainValue::Map(vec![("heldCleared".into(), PlainValue::Bool(true))]),
+        );
+    }
+    for c in std::mem::take(&mut input.released) {
+        latches.synth_release(&mut vm, &c);
+    }
+    for c in std::mem::take(&mut input.tap_prev) {
+        if !input.held.contains(&c) {
+            latches.synth_release(&mut vm, &c);
         }
-        for c in std::mem::take(&mut input.released) {
-            binds.synth_release(vm.as_deref_mut(), &c);
+    }
+    if !vm.has_vm() {
+        input.taps.clear();
+        return;
+    }
+    if capture.typing {
+        latches.synth_release_all(&mut vm);
+        input.taps.clear();
+        return;
+    }
+    let held: Vec<String> = input.held.iter().cloned().collect();
+    for c in held {
+        if !latches.synth_press(&mut vm, &c, 1.0) {
+            input.held.remove(&c);
+            unknown_command(&c, &mut memo, &mut out);
         }
-        for c in std::mem::take(&mut input.tap_prev) {
-            if !input.held.contains(&c) {
-                binds.synth_release(vm.as_deref_mut(), &c);
-            }
+    }
+    let mut pressed = Vec::new();
+    for (c, amount) in std::mem::take(&mut input.taps) {
+        if latches.synth_latched(&c) {
+            continue; // held, or tapped twice this frame
         }
-        match vm {
-            Some(_) if capture.typing => {
-                binds.synth_release_all(vm);
-                input.taps.clear();
-            }
-            Some(vm) => {
-                let held: Vec<String> = input.held.iter().cloned().collect();
-                for c in held {
-                    if !binds.synth_press(vm, &c, 1.0) {
-                        input.held.remove(&c);
-                        unknown_command(&c, &mut memo, &mut out);
-                    }
-                }
-                let mut pressed = Vec::new();
-                for (c, amount) in std::mem::take(&mut input.taps) {
-                    if binds.synth_latched(&c) {
-                        continue; // held, or tapped twice this frame
-                    }
-                    if binds.synth_press(vm, &c, amount) {
-                        pressed.push(c);
-                    } else {
-                        unknown_command(&c, &mut memo, &mut out);
-                    }
-                }
-                input.tap_prev = pressed;
-            }
-            None => input.taps.clear(),
+        if latches.synth_press(&mut vm, &c, amount) {
+            pressed.push(c);
+        } else {
+            unknown_command(&c, &mut memo, &mut out);
         }
-    });
+    }
+    input.tap_prev = pressed;
 }
 
 /// The page's look deflection, after the presses: its own system, since the host the presses
@@ -531,12 +531,11 @@ fn apply_synth_look(mut input: ResMut<BridgeInput>, player: Option<ResMut<Player
 
 /// Drop every synthetic assertion and everything queued for one, on both edges of the world.
 fn release_synth_input(
-    mut binds: ResMut<BindingsState>,
+    mut latches: ResMut<BindingLatches>,
+    mut vm: crate::bindings::SynthVm,
     mut input: ResMut<BridgeInput>,
-    mut script: Option<NonSendMut<UiScript>>,
-    mut host: Option<crate::script_calls::ScriptCallHost>,
 ) {
-    crate::script_calls::hosted(&mut script, &mut host, |vm| binds.synth_release_all(vm));
+    latches.synth_release_all(&mut vm);
     input.held.clear();
     input.released.clear();
     input.taps.clear();

@@ -14,7 +14,16 @@
 //! The reference's turn-away cancel (160°-220°, `0x80c604`, `0x80c600`) runs only while drunk,
 //! gated at `0x610a3d` on the drunk fraction, armed as the turn converges and disarmed at random
 //! (`0x61092e`); it is not built. The start gate (who may be followed) is
-//! [`crate::target::by_name`]'s.
+//! [`crate::target::by_name`]'s, and the start signals `AUTOFOLLOW_BEGIN` inside its call
+//! (`0x610071`, [`crate::script_calls::ScriptCallHost`]).
+//!
+//! Every end goes through the canceller `0x60fb60`, which signals `AUTOFOLLOW_END` for a follow
+//! first (`0x60fb76`-`0x60fb84`), where the end runs ([`end`]): the packet handlers' ends at their
+//! packets ([`super::AutoMoveStop`]), the input's and the steer's at their place in the frame.
+//!
+//! Deviation: every end signals `END`, because the reference's three silent ends are a bug: two
+//! writers reset the follow mode cell `0xc4d888` directly (`0x5fb646`, `0x60396f`), leaving a
+//! stale guid at `0xc4d980`, and the canceller's early-out (`0x60fb70`) fires nothing.
 
 use std::f32::consts::PI;
 
@@ -22,7 +31,6 @@ use bevy::prelude::*;
 
 use crate::net::GuidIndex;
 
-use super::camera::{CameraControl, LookButton};
 use super::state::{MoveSpeed, Player};
 
 /// Follow's turn rate in rad/s, its own (`0xc4d93c`, seeded at `0x6111f9`), not the keyboard's.
@@ -51,6 +59,10 @@ pub(crate) struct FollowState {
     pub(crate) name: String,
     /// The band's latch: the synthesized forward input is held.
     moving: bool,
+    /// A packet's auto-move stop owes its forward release (`0x60e7f0`): it clears autorun
+    /// (`0x514630`, [`super::press::CallAutorun::clear`]) behind its `AUTOFOLLOW_END`, and the
+    /// frame's steer ([`steer_follow`]) applies the bit the calls left before the controller's step.
+    release_owed: bool,
     /// `WOW_FOLLOW_TRACE` bookkeeping: the last trace line's time and position.
     traced_at: f64,
     traced_pos: Option<Vec3>,
@@ -66,6 +78,17 @@ impl FollowState {
         self.traced_pos = None;
     }
 
+    /// Owe the forward release of an auto-move a packet stopped ([`super::end_auto_move`]).
+    pub(crate) fn owe_release(&mut self) {
+        self.release_owed = true;
+    }
+
+    /// Whether a stop owes the frame its release, for a test.
+    #[cfg(test)]
+    pub(crate) fn owes_release(&self) -> bool {
+        self.release_owed
+    }
+
     /// Stop following; `true` if we were.
     pub(crate) fn stop(&mut self) -> bool {
         self.moving = false;
@@ -73,9 +96,27 @@ impl FollowState {
     }
 }
 
-/// A start-following request: the chat input's `/follow`, or the UI's `FollowUnit`/`FollowByName`.
-/// A name finds players only; the start gate refuses a creature either way.
-#[derive(bevy::ecs::message::Message, Clone, Debug)]
+/// The canceller's follow leg (`0x60fb60`): a follow in flight signals `AUTOFOLLOW_END` (`0x60fb84`)
+/// on the notice lane at the caller's place, then ends (`0x60fc1e`); `true` if one ended. With no
+/// lane, in a harness without the unit feed, it ends silently.
+pub(crate) fn end(
+    follow: &mut FollowState,
+    lane: Option<&mut crate::field_watch::NoticeLane>,
+) -> bool {
+    if follow.guid.is_none() {
+        return false;
+    }
+    if let Some(lane) = lane {
+        lane.write(crate::field_watch::FieldNotice::Global {
+            id: crate::field_watch::id::AUTOFOLLOW_END,
+        });
+    }
+    follow.stop()
+}
+
+/// A start-following request: `FollowUnit` or `FollowByName`. A name finds players only; the start
+/// gate refuses a creature either way.
+#[derive(Clone, Debug)]
 pub(crate) enum FollowRequest {
     /// `FollowUnit(unit)`; a bare `/follow` is `FollowUnit("target")`.
     Unit(String),
@@ -104,15 +145,17 @@ fn should_move(was_moving: bool, distance: f32, speed: f32) -> bool {
 }
 
 /// `move_start` and `autorun_engaged` are key-down edges (the stop emitters and autorun's off edge,
-/// `0x60dc90`, have no guard call); `mouse_look` is a level, re-entering the guard every frame.
+/// `0x60dc90`, have no guard call); `hand_off` is the mouse's hand-off to the body, whose facing
+/// write reaches the guard (`0x5103e0` → `0x5152e0` → `0x60de30` → `0x60e990(1, 1)`) on each
+/// motion that turns the body: behind the TurnOrAction bit (`0x5145fa`), not the look.
 fn follow_cancelled(
     move_start: bool,
     autorun_engaged: bool,
     both_engaged: bool,
-    mouse_look: bool,
+    hand_off: bool,
     lost_mover: bool,
 ) -> bool {
-    move_start || autorun_engaged || both_engaged || mouse_look || lost_mover
+    move_start || autorun_engaged || both_engaged || hand_off || lost_mover
 }
 
 /// Wrap an angle into `[-π, π)`.
@@ -150,18 +193,20 @@ pub(super) struct FollowInput<'w, 's> {
     buttons: Res<'w, ButtonInput<MouseButton>>,
     /// The movement commands' press edges, wherever bound; typing in chat does not reach them.
     binds: Res<'w, crate::bindings::BindingsState>,
-    /// The mouse-look level, read a frame behind `control`, so its cancel lands a frame after the
-    /// reference's; the world's mouse buttons are current ([`super::camera::latch_world_mouse`]
-    /// runs first).
-    rig: Res<'w, CameraControl>,
+    /// The mouse's hand-off to the body this frame ([`super::LookSample`]), written by the look
+    /// session ahead of this; absent in a harness without the mouse, which hands nothing off.
+    sample: Option<Res<'w, super::LookSample>>,
     /// The mover's descriptor block, for the cancel terms that are state: health and stun.
     mover: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::Embodied>>,
-    /// What the camera orbits, for the far-sight term; possibly a frame behind its publisher.
-    view_subject: Res<'w, super::view_subject::ViewSubject>,
+    /// The far-sight latch, the input tick's far-sight term (`0x514540`).
+    far_sight: Res<'w, super::view_subject::FarSight>,
+    /// Whether we drive our own body.
+    lock: Res<'w, super::MoverLock>,
 }
 
 impl FollowInput<'_, '_> {
-    /// The press edge of any of the six movement commands; turn and strafe both cancel.
+    /// The press edge of any of the six movement commands; turn and strafe both cancel. A call's
+    /// own edge ran its start's stop inside it ([`super::press::TickLegs`]).
     fn move_start(&self) -> bool {
         use crate::bindings::Input;
         [
@@ -173,7 +218,7 @@ impl FollowInput<'_, '_> {
             Input::StrafeRight,
         ]
         .iter()
-        .any(|&c| self.binds.just_pressed(c))
+        .any(|&c| self.binds.just_pressed(c) && !self.binds.settled(c))
     }
 
     /// The cancel set, the start emitters' `0x60e990` and the input tick's teardown, which end any
@@ -181,17 +226,20 @@ impl FollowInput<'_, '_> {
     pub(super) fn cancels(&self, player: &Player) -> bool {
         // The world's buttons, not the device's: the both-button run is two bindings held, and a
         // press a UI frame captured dispatches neither.
-        let both_engaged = self.rig.world_mouse.both() && self.rig.world_mouse.rose();
+        let both_engaged = super::input::both_engaged(&self.binds);
         follow_cancelled(
             self.move_start(),
-            // The on edge: `control` toggles `autorun` after this, so the flag is the pre-toggle
-            // value.
-            self.buttons.just_pressed(MouseButton::Forward) && !player.autorun,
+            // The on edge only, as the start reaches the guard (`0x60dc60` → `0x60e990`) and the
+            // stop does not (`0x60dc90`): the press toggled `autorun` first ([`super::press`]),
+            // so the flag is the post-toggle value.
+            self.buttons.just_pressed(MouseButton::Forward)
+                && player.autorun
+                && !self.binds.settled(crate::bindings::Input::ToggleAutoRun),
             both_engaged,
-            self.rig.look == Some(LookButton::Right),
+            self.sample.as_deref().is_some_and(|s| s.hands_off),
             // The teardown leg, or the body handed to a server spline; the ride term is not one of
             // the reference's conjuncts (`0x5144e0`), and its reference side is untraced.
-            self.input_torn_down(player.modes.rooted, player.foreign_mover.is_none())
+            self.input_torn_down(player.modes.rooted, self.lock.foreign_mover.is_none())
                 || player.server_riding(),
         )
     }
@@ -203,10 +251,7 @@ impl FollowInput<'_, '_> {
         self.mover.single().is_ok_and(|s| {
             super::state::MoverInput {
                 dead: s.0.unit_is_dead(),
-                view_is_out: super::state::view_is_out(
-                    driving_own_body,
-                    self.view_subject.remote.is_some(),
-                ),
+                view_is_out: super::state::view_is_out(driving_own_body, self.far_sight.on()),
             }
             .torn_down(rooted, s.0.unit_flags() & super::UNIT_FLAG_STUNNED != 0)
         })
@@ -215,7 +260,9 @@ impl FollowInput<'_, '_> {
 
 /// Cancel, re-resolve the followee, steer, and set [`Player::auto_forward`] for `control`. The
 /// cancel comes first, as the reference's start emitters run ahead of the axis math (`0x5150a7` vs
-/// the emitter tail `0x5151a0`).
+/// the emitter tail `0x5151a0`). Each end here is frame time's (`0x5146d6`, `0x6106b0`), after the
+/// packets, and signals behind them ([`end`]).
+#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn steer_follow(
     time: Res<Time>,
     mut follow: ResMut<FollowState>,
@@ -224,14 +271,17 @@ pub(super) fn steer_follow(
     index: Res<GuidIndex>,
     transforms: Query<&Transform>,
     input: FollowInput,
+    mut lane: Option<ResMut<crate::field_watch::NoticeLane>>,
+    called: Option<Res<super::press::CallAutorun>>,
 ) {
     player.auto_forward = false;
+    release_owed(&mut follow, &mut player, called.as_deref());
     if follow.guid.is_none() {
         return;
     }
     if input.cancels(&player) {
         info!("follow: cancelled by the player's own movement input");
-        follow.stop();
+        end(&mut follow, lane.as_deref_mut());
         return;
     }
     let Some(guid) = follow.guid else { return };
@@ -243,14 +293,14 @@ pub(super) fn steer_follow(
         .map(|t| t.translation)
     else {
         info!("follow: the followee is gone — follow ends");
-        follow.stop();
+        end(&mut follow, lane.as_deref_mut());
         return;
     };
     let delta = target - player.pos;
     // On the full 3D delta, before the bearing flattens it.
     if vertically_degenerate(delta) {
         info!("follow: the followee is within 1° of straight overhead — follow ends");
-        follow.stop();
+        end(&mut follow, lane.as_deref_mut());
         return;
     }
     let flat = Vec3::new(delta.x, 0.0, delta.z);
@@ -292,21 +342,122 @@ pub(super) fn steer_follow(
     player.auto_forward = moving;
 }
 
+/// The forward release a stop owed (`0x60e7f0`): autorun as the calls left it after the stop's
+/// clear (`0x514630`), clear with no store for it (a harness). The synthesized forward is the
+/// steer's own, rewritten each frame.
+pub(super) fn release_owed(
+    follow: &mut FollowState,
+    player: &mut Player,
+    called: Option<&super::press::CallAutorun>,
+) {
+    if std::mem::take(&mut follow.release_owed) {
+        player.autorun = called.is_some_and(|c| c.bit(false));
+    }
+}
+
+/// [`steer_follow`]'s release of what a packet's stop owed, for a test.
+#[cfg(test)]
+pub(crate) fn release_owed_for_test(world: &mut World) {
+    world.resource_scope(|world, mut follow: Mut<FollowState>| {
+        world.resource_scope(|world, mut player: Mut<Player>| {
+            release_owed(
+                &mut follow,
+                &mut player,
+                world.get_resource::<super::press::CallAutorun>(),
+            );
+        });
+    });
+}
+
 /// Whether `WOW_FOLLOW_TRACE` is set, read once.
 fn follow_trace_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_FOLLOW_TRACE").is_some())
 }
 
-/// Register the follow state and its request message.
+/// Register the follow state.
 pub(super) fn plugin(app: &mut App) {
-    app.init_resource::<FollowState>()
-        .add_message::<FollowRequest>();
+    app.init_resource::<FollowState>();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Far sight on, its object gone: the render's update (`0x483054` → `0x5ee290`) finds the field
+    /// naming no held object, puts the camera back on the player and returns with the bit still
+    /// set (`0x5ee324`-`0x5ee360`), so the input tick's teardown leg still ends a follow
+    /// (`0x514540`, `0x5146d6`), though the camera is home.
+    #[test]
+    fn a_lost_far_sight_object_still_ends_a_follow() {
+        use super::super::view_subject::{publish_view_subject, FarSight, ViewSubject};
+        use crate::net::{Embodied, NetCommands, ObjectStore, SelfPlayer};
+        /// `PLAYER_FARSIGHT`, the guid's low word.
+        const FARSIGHT: u16 = 712;
+        const EYE: u64 = 0xF130_0000_0000_0043;
+        const LEADER: u64 = 0x52;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FollowState>()
+            .init_resource::<Player>()
+            .init_resource::<super::super::MoverLock>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<crate::bindings::BindingsState>()
+            .init_resource::<super::super::camera::CameraControl>()
+            .init_resource::<ViewSubject>()
+            .init_resource::<FarSight>()
+            .insert_resource(NetCommands(tx))
+            .insert_resource(MoveSpeed {
+                value: 7.0,
+                env_override: false,
+            })
+            .add_systems(Update, (publish_view_subject, steer_follow).chain());
+        let world = app.world_mut();
+        world.spawn((
+            SelfPlayer,
+            Embodied,
+            Transform::default(),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (22, 100),
+                (28, 100),
+                (FARSIGHT, EYE as u32),
+                (FARSIGHT + 1, (EYE >> 32) as u32),
+            ])),
+        ));
+        let eye = world.spawn(Transform::from_xyz(30.0, 0.0, 0.0)).id();
+        let leader = world.spawn(Transform::from_xyz(10.0, 0.0, 0.0)).id();
+        let mut index = world.resource_mut::<GuidIndex>();
+        index.0.insert(EYE, eye);
+        index.0.insert(LEADER, leader);
+        let world = app.world();
+        let index = world.resource::<GuidIndex>();
+        world.resource::<FarSight>().start(
+            Some(EYE),
+            |g| index.0.contains_key(&g),
+            world.resource::<NetCommands>(),
+        );
+        app.world_mut().resource_mut::<GuidIndex>().0.remove(&EYE);
+        app.update();
+        let world = app.world();
+        let far_sight = world.resource::<FarSight>();
+        assert!(far_sight.on() && far_sight.camera().is_none());
+        assert!(
+            world.resource::<ViewSubject>().remote.is_none(),
+            "the camera is home"
+        );
+
+        app.world_mut()
+            .resource_mut::<FollowState>()
+            .start(LEADER, "Leader".into());
+        app.update();
+        assert_eq!(
+            app.world().resource::<FollowState>().guid,
+            None,
+            "the bit still tears the input down"
+        );
+    }
 
     #[test]
     fn the_band_is_three_and_four_point_five_yards_at_normal_speed() {

@@ -17,12 +17,24 @@ type Handler = (SystemId<In<SessionEvent>>, &'static str);
 #[derive(Resource, Default)]
 pub(crate) struct NetHandlers {
     by_kind: HashMap<SessionEventKind, Vec<Handler>>,
-    /// Each handler's declared access, by name, for the tests that ask what the handlers write.
+    /// Every handler in registration order, for [`measure`].
     #[cfg(test)]
-    pub(crate) accesses: Vec<(&'static str, bevy::ecs::query::FilteredAccessSet)>,
+    registered: Vec<Handler>,
+    /// Each handler's declared access, by name, in registration order, once [`measure`] ran.
+    #[cfg(test)]
+    accesses: Option<Vec<(&'static str, bevy::ecs::query::FilteredAccessSet)>>,
 }
 
 impl NetHandlers {
+    /// Each handler's declared access, by name, in registration order, for the tests that ask what
+    /// the handlers write. Panics before [`measure`].
+    #[cfg(test)]
+    pub(crate) fn accesses(&self) -> &[(&'static str, bevy::ecs::query::FilteredAccessSet)] {
+        self.accesses
+            .as_deref()
+            .expect("the handlers' accesses are read after `net::handlers::measure`")
+    }
+
     /// Every kind with a handler, and the handlers' names in registration order.
     #[cfg(test)]
     pub(crate) fn census(&self) -> std::collections::BTreeMap<SessionEventKind, Vec<&'static str>> {
@@ -124,28 +136,121 @@ fn register<M>(
     ahead: bool,
 ) -> &mut App {
     let name = std::any::type_name_of_val(&handler);
-    // Initialized here, its access kept: the run initializes it again, on the same state.
-    #[cfg(test)]
-    let (handler, access) = {
-        let mut system = IntoSystem::into_system(handler);
-        let access = bevy::ecs::system::System::initialize(&mut system, app.world_mut());
-        (system, access)
-    };
     let id = app.world_mut().register_system(handler);
     let mut handlers = app.world_mut().get_resource_or_init::<NetHandlers>();
     handlers.push(kind, (id, name), ahead);
     #[cfg(test)]
-    handlers.accesses.push((name, access));
+    handlers.registered.push((id, name));
     app
 }
 
-/// One drain's dispatch in wire order, each handler's commands applied before the next event.
+/// Reads every handler's declared access, for [`NetHandlers::accesses`]: each is initialized, its
+/// access kept, and registered again, where its first run initializes it again on the same state.
+/// Done on a test's asking, not at registration: a handler that lends the call host is most of a
+/// plugin's build to initialize, and most tests run few handlers or none.
+#[cfg(test)]
+pub(crate) fn measure(world: &mut World) {
+    world.resource_scope(|world, mut handlers: Mut<NetHandlers>| {
+        if handlers.accesses.is_some() {
+            return;
+        }
+        let mut accesses = Vec::new();
+        for i in 0..handlers.registered.len() {
+            let (id, name) = handlers.registered[i];
+            let mut system = world
+                .unregister_system(id)
+                .expect("a registered handler")
+                .system();
+            accesses.push((name, system.initialize(world)));
+            let again = world.register_boxed_system(system);
+            handlers.registered[i].0 = again;
+            for list in handlers.by_kind.values_mut() {
+                for entry in list.iter_mut().filter(|(at, _)| *at == id) {
+                    entry.0 = again;
+                }
+            }
+        }
+        handlers.accesses = Some(accesses);
+    });
+}
+
+/// What runs after each packet of a dispatch, its handlers done, with a stamp taken ahead of
+/// them, so a state the packet moved can be logged ahead of what the packet raised
+/// ([`crate::lanes`]). A log's start is read where the span of packets begins
+/// ([`crate::lanes::LaneApp::add_span_start`]).
+type PacketEnd = fn(&mut World, crate::lanes::Stamp);
+
+/// Every [`PacketEnd`], in registration order.
+#[derive(Resource, Default, Clone)]
+struct PacketEnds(Vec<PacketEnd>);
+
+/// Register a [`PacketEnd`].
+pub(crate) fn add_packet_end(app: &mut App, end: PacketEnd) {
+    app.world_mut()
+        .get_resource_or_init::<PacketEnds>()
+        .0
+        .push(end);
+}
+
+/// One drain's dispatch in wire order, each handler's commands applied before the next event,
+/// and each packet's lanes fired once its handlers are done ([`crate::lanes::flush`]): the
+/// reference's poll runs each packet's handler whole before the next (`0x5384d0`, `0x537ae5`),
+/// and what a handler signals runs every listener before the signal returns (`0x703e50`). What
+/// the input records and the last tick stamped fires first, as the window input runs ahead of the
+/// packets (`0x420d23`, `0x420d55`); the span's starts follow, and each packet's ends after its
+/// handlers.
 pub(crate) fn dispatch(world: &mut World, events: Vec<SessionEvent>) {
-    let handlers = world.remove_resource::<NetHandlers>().unwrap_or_default();
-    for ev in events {
-        handlers.run(world, ev);
+    if events.is_empty() {
+        return;
     }
+    let handlers = world.remove_resource::<NetHandlers>().unwrap_or_default();
+    let ends = world
+        .get_resource::<PacketEnds>()
+        .cloned()
+        .unwrap_or_default();
+    if !crate::lanes::flush(world) {
+        crate::lanes::span_starts(world);
+    }
+    crate::lanes::at_packets(|| {
+        for ev in events {
+            let last = ends_its_packet(&ev);
+            let at = (!ends.0.is_empty()).then(crate::lanes::stamp);
+            handlers.run(world, ev);
+            if let Some(at) = at {
+                for end in &ends.0 {
+                    end(world, at);
+                }
+            }
+            if last {
+                crate::lanes::flush(world);
+            }
+        }
+    });
     world.insert_resource(handlers);
+}
+
+/// Whether `ev` is the last event its packet decodes to (`benilla_protocol::decode`): an update
+/// packet's blocks run until its [`SessionEvent::ObjectUpdateEnd`], as its handler writes every
+/// block before its notify pass (`0x46520e`, `0x465222`, `0x465277`), a `MSG_MOVE_SET_*_SPEED`
+/// decodes to its pose, the one [`benilla_protocol::messages::RelayVerb::Pose`] move, then its
+/// speed, and a saved store's answer sends its bytes ahead of its record
+/// ([`crate::net::io::inbound`]).
+pub(crate) fn ends_its_packet(ev: &SessionEvent) -> bool {
+    !matches!(
+        ev,
+        SessionEvent::SavedAnswer { .. }
+            | SessionEvent::ObjectCreate { .. }
+            | SessionEvent::ItemCreate { .. }
+            | SessionEvent::ObjectValues { .. }
+            | SessionEvent::ObjectsRemoved(_)
+            | SessionEvent::ObjectsNear(_)
+            | SessionEvent::ObjectMove { .. }
+            | SessionEvent::ObjectNotify { .. }
+            | SessionEvent::UnitMove {
+                verb: benilla_protocol::messages::RelayVerb::Pose,
+                ..
+            }
+    )
 }
 
 #[cfg(test)]
@@ -236,7 +341,7 @@ mod tests {
     /// A kind with no handler is a decoded packet dropped in silence, as the reference does.
     #[test]
     fn every_session_event_kind_has_one_owner() {
-        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let table = app.world_mut().resource::<NetHandlers>().census();
         let unowned: Vec<String> = SessionEventKind::all()
             .filter(|k| !table.contains_key(k))
@@ -255,7 +360,7 @@ mod tests {
     /// never in a smoke run; this fetches them all once, with an event each handler ignores.
     #[test]
     fn every_registered_handler_can_run_on_the_built_client() {
-        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let world = app.world_mut();
         let handlers = world
             .remove_resource::<NetHandlers>()
@@ -355,7 +460,7 @@ mod tests {
                 }
             }
         }
-        let registered: usize = crate::game_plugins::schedule_tests::headless_client()
+        let registered: usize = crate::game_plugins::schedule_tests::headless_client_unrun()
             .world()
             .resource::<NetHandlers>()
             .census()
@@ -386,6 +491,77 @@ mod tests {
             failed[0].contains("needs_what_nobody_inserted"),
             "{failed:?}"
         );
+    }
+
+    /// Each packet's last event alone ends it: an update packet's blocks run to its
+    /// `ObjectUpdateEnd`, and a speed change's pose to its speed (`benilla_protocol::decode`), so
+    /// the dispatch fires the lanes between packets, never between one packet's events.
+    #[test]
+    fn only_a_packets_last_event_ends_it() {
+        use benilla_protocol::messages::{opcode, parse_server};
+        let hex = |s: &str| -> Vec<u8> {
+            s.as_bytes()
+                .chunks(2)
+                .map(|h| u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+                .collect()
+        };
+        // Two values blocks, the first a first-pass guid's, which leaves its notify place.
+        let update = hex("020000000000814260010800000013000000\
+            0001aa010800000012000000");
+        let mut speed = hex("012a");
+        speed.extend([0; 28]);
+        speed.extend(7.0f32.to_le_bytes());
+        for (op, body) in [
+            (opcode::SMSG_UPDATE_OBJECT, update),
+            (opcode::MSG_MOVE_SET_RUN_SPEED, speed),
+            (opcode::SMSG_LOGOUT_COMPLETE, Vec::new()),
+        ] {
+            let events = benilla_protocol::decode(parse_server(op, &body).unwrap());
+            let ends: Vec<bool> = events.iter().map(ends_its_packet).collect();
+            let mut want = vec![false; ends.len().saturating_sub(1)];
+            want.push(true);
+            assert_eq!(ends, want, "{op:#06x}: {events:?}");
+        }
+    }
+
+    fn raises_in_a_handler(_: In<SessionEvent>, world: &mut World) {
+        let mut ui = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        ui.fire_event("PLAYER_MONEY", Vec::new());
+    }
+
+    fn raises_at_a_packets_end(world: &mut World, _: crate::lanes::Stamp) {
+        let mut ui = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        ui.fire_event("PLAYER_MONEY", Vec::new());
+    }
+
+    /// One packet's dispatch, a pong, in each frame.
+    fn dispatch_a_pong(world: &mut World) {
+        dispatch(world, vec![SessionEvent::Pong { sequence: 0 }]);
+    }
+
+    /// The raise check armed over a frame that dispatches a pong.
+    fn armed() -> App {
+        let mut app = App::new();
+        crate::ui_script::raise_origin::arm_each_frame(&mut app);
+        app.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("a VM"))
+            .add_systems(Update, dispatch_a_pong);
+        app
+    }
+
+    /// A handler's raise inside the dispatch passes, its packet's own (`0x703e50`); a packet end's,
+    /// which runs in the dispatch outside every handler and lane firing, fails.
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
+    fn a_handlers_raise_passes_and_a_packet_ends_fails() {
+        let mut handled = armed();
+        handled.net_handler(SessionEventKind::Pong, raises_in_a_handler);
+        handled.update();
+        let mut ended = armed();
+        add_packet_end(&mut ended, raises_at_a_packets_end);
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ended.update()))
+            .expect_err("the packet end's raise passed");
+        let message = failed.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(message.contains("`PLAYER_MONEY`"), "{message}");
     }
 
     /// `//` comments out, so a variant named in prose does not count as an arm.

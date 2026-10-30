@@ -16,6 +16,8 @@ flate2 = "1.0"
 # The transport seam's reads are `async` so the browser body can suspend on the JS event loop; the
 # native sequencer drives the very same futures to completion with `block_on` on its own thread.
 futures-lite = "2.6.1"
+# The logon challenge's time-zone bias: `localtime_r` on unix, the CRT's zone on Windows.
+libc = "0.2"
 # The logon's draw among a realmlist's addresses.
 rand = "0.8.6"
 sha1.workspace = true

@@ -214,10 +214,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The race/sex refusal voice lines (`0x457877`), `SoundOptionsFrame.lua:3`; the master enable
     // greys it.
     same("EnableErrorSpeech", "1"),
-    // Not a 1.12 CVar or checkbox; the later-era name. The reference mutes on losing focus, music
-    // included (`WM_ACTIVATE` to `0x7a4860`'s `FSOUND_SetMute(-3, active ? 0 : 1)`), so "0" is its
-    // behaviour. The knob is `SoundConfig::background_sound`.
-    same("Sound_EnableSoundWhenGameIsInBG", "0"),
+    // The knob is `SoundConfig::background_sound`.
+    ours(
+        "Sound_EnableSoundWhenGameIsInBG",
+        "0",
+        "1.12 registers no such CVar and has no box for it: it mutes on losing focus, music \
+         included (`WM_ACTIVATE` to `0x7a4860`'s `FSOUND_SetMute(-3, !active)`), so OFF is the \
+         reference's own behaviour; the name is the later era's",
+    ),
     // Registered "1" (`0x4573be`); `SoundConfig::reverb` carries the evidence for shipping "0".
     deviates(
         "SoundReverb",
@@ -471,6 +475,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x50c000` → `0x50b330` refuses values outside [0.1, 360] rather than clamping.
     same("cameraYawMoveSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
     same("cameraPitchMoveSpeed", "90.0").checked(benilla_ui::script::check_camera_rate),
+    // The distance axis's yards a second (`0x50b7f3`, read at `0x5113d9`): the wheel's glide and
+    // `MoveViewIn`/`Out`. Its validator `0x50c040` refuses a value out of range.
+    same("cameraDistanceMoveSpeed", "8.33").checked(benilla_ui::script::check_camera_decay),
     // MOUSE_SENSITIVITY (`UIOptionsFrame.lua:87`): FrameXML's spelling of the binary's `mouseSpeed`
     // (`0x402c7b`); lookups are case-insensitive (`CVar::Lookup 0x63de30`), here as there. The
     // reference's default is `SPI_GETMOUSESPEED × 0.1`, "1.0" on stock Windows, and its record
@@ -497,6 +504,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // validator `0x50c000` refuses outside [0.1, 360] and the follow reader (`0x512d75`) uses the
     // stored value as is; 90 to 270 is only the stock slider's range.
     same("cameraYawSmoothSpeed", "180.0").checked(benilla_ui::script::check_camera_rate),
+    // `cameraCustomViewSmoothing` (`0x50bad0`, read at `0x50fc33`): with it set, a customised view
+    // still takes the auto-return.
+    same("cameraCustomViewSmoothing", "0"),
     // `UIOptionsFrame.lua:353` names `cameraPitchSmoothSpeed`, registered "45.0" (`0x50b90b`) with
     // the same validator, and `SetCVar` raises on a name no CVar has (`0x488c53`). `FollowRig` has
     // one rate, so nothing reads it.
@@ -579,6 +589,11 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
     // world (`0x495599`), [`crate::ui_memory`].
     same("scriptMemory", "49152"),
+    // `widescreen` (`0x63a74f`: name `0x837050`, "1", flags 0, record `[0xc4ec08]`): off, the
+    // resolution list is the four fixed sizes (`0x48bcac`, [`crate::video`]) and the glue's and
+    // the interface's aspect is 4/3 (`0x46ab40`, `0x4901e0`; `crate::ui_script::glue`,
+    // [`crate::portrait::GxAspect`]).
+    same("widescreen", "1"),
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
     // (`0x63a3c4`, `0x842a5c`). Here it reports the wgpu backend (`wgpu::Backend::to_str`), pushed
@@ -602,14 +617,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // and macOS offer no mode-set and X11's leaves the desktop changed after a crash
     // ([`crate::video`]).
     same_by_locale("gxWindow", "0", &[(ZH_CN, "1")]).latched(),
-    // `gxResolution`, a string row parsed by `video::on_cvar`. Here it is only the windowed size:
-    // fullscreen is the monitor's own and no mode list is offered.
+    // `gxResolution` (`0x63a7c1`, "640x480", flags 3, callback `0x63aa00`), a string row parsed by
+    // `video::on_cvar` into the windowed size. In fullscreen it answers the borderless window's
+    // device pixels, the size the screen runs at, over that windowed size, which is what it saves
+    // (`video::show_screen_size`).
     deviates(
         "gxResolution",
         "1600x900",
         "640x480",
-        "narrowed to the WINDOWED size only — fullscreen is the monitor's own and we expose \
-         no mode list, and 640x480 is not a window anyone would ship a client at",
+        "the saved value is the WINDOWED size, as fullscreen is the borderless window over the \
+         monitor, whose size the row answers while it holds; and 640x480 is not a window anyone \
+         would ship a client at",
     )
     .latched(),
     // benilla's own: a body pane's doll renders at half the frame rate while the pane is open; the
@@ -662,7 +680,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // Not one of `hwDetect`'s sixteen (`[0x639a60, 0x639b80)` never reads `0xc7f2e4`), so the
     // registered "1", off, stands.
-    same("anisotropic", "1"),
+    same("anisotropic", "1").checked(benilla_ui::script::check_anisotropic),
     // The four video CVars the stock window's verbs read and write (`benilla_ui` `video_pairs`);
     // benilla has no mechanism behind any of them. `shadowLevel` (`0x6885bc`, "1", flags 1,
     // callback `0x688c10`, record `[0xc7f350]`) is behind `Get/SetTerrainMip` as `1 − level`: the
@@ -679,8 +697,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("texLodBias", "0.0").checked(benilla_ui::script::check_tex_lod_bias),
     // `baseMip` (`0x6887aa`, "0", flags 1, callback `0x689090`, record `[0xc7f2f0]`), behind
     // `Get/SetBaseMip` as `1 − level`: the callback refuses outside [0, 1] ("BaseMip must be 0 or
-    // 1") and sets the device's first uploaded mip level (`0x589bf0`, read at `0x59f6ce`). benilla
-    // uploads every level; the write is kept and has no effect. `hwDetect` leaves it at 0.
+    // 1") and sets the device's first uploaded mip level (`0x589bf0`, read at `0x59f6d1`, on
+    // Direct3D `0x5a08fc`). benilla uploads every level; the write is kept and has no effect.
+    // `hwDetect` leaves it at 0.
     same("baseMip", "0").checked(benilla_ui::script::check_base_mip),
     // `spellEffectLevel` (`0x688900`: name `0x869324`, default `0x843068` "2", flags 1, callback
     // `0x689510`, record `[0xc7f2a4]`), the Spell Detail slider (`OptionsFrame.lua:32`). The
@@ -703,7 +722,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
          `SET weatherDensity \"3\"` (K = 1.0) — so 3 is the value a benilla-vs-reference \
          side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against \
          the only client we compare with. The slider is how a player takes it back down",
-    ),
+    )
+    .checked(benilla_ui::script::check_weather_density),
     // `gamma` (`0x402d70`: name `0x82e924` "Gamma", default `0x82e92c` "1.0", flags 0, callback
     // `0x4034d0`). The reference uploads `pow(i/255, gamma)` (`0x591680`) through
     // `SetDeviceGammaRamp`, except when windowed (`byte[dev+0x20b]`). Deviation: benilla, which
@@ -723,16 +743,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ── The stock Video Options window's other boxes (`OptionsFrame.lua:5-22`) ───────────────────
     //
     // `ffx` (`0x6ccfe3`: name `0x86f2ac`, record `[0xce8a04]`), `ffxGlow` (`0x6cc17d`, name
-    // `0x86f200`) and `ffxDeath` (`0x6cc6d1`, name `0x86f238`): each "1", flags 1, with the echo stub
-    // `0x6cde30` as callback, and each record's integer read every frame. The FFX begin/end pair
+    // `0x86f200`) and `ffxDeath` (`0x6cc6d1`, name `0x86f238`): each "1", flags 1, with the echo
+    // callback `0x6cde30` ([`benilla_ui::script::check_ffx_echo`]), and each record's integer read
+    // every frame. The FFX begin/end pair
     // (`0x6cd890`/`0x6cda70`) runs the active pass only while `ffx` (`0x6cd8a6`), `pixelShaders`
     // (`0x6cd8b6`) and that pass's own enable hold: `CFFXGlow` (`0x6cc5a0`) reads `ffxGlow` at
     // `0x6cc5a8`, `CFFXDeath` (`0x6cded0`) reads `ffxDeath` at `0x6cdf10`. The stock Okay writes
     // `ffx` as Enable All Shaders (`OptionsFrame.lua:202-204`). The knob is
     // [`benilla_world::ffx_glow::FfxSwitches`].
-    same("ffx", "1"),
-    same("ffxGlow", "1"),
-    same("ffxDeath", "1"),
+    same("ffx", "1").checked(benilla_ui::script::check_ffx_echo),
+    same("ffxGlow", "1").checked(benilla_ui::script::check_ffx_echo),
+    same("ffxDeath", "1").checked(benilla_ui::script::check_ffx_echo),
     // `pixelShaders` (`0x688712`: name `0x869560`, "0", flags 1, callback `0x688f40`, record
     // `[0xc7f360]`) and `specular` (`0x6886a0`: name `0x8695d8`, "0", flags 1, callback `0x688e20`,
     // record `[0xc7f2cc]`), Enable All Shaders and Terrain Highlights. Both callbacks act only on a
@@ -766,9 +787,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // World LOD: bit 2 of `[0xc7b2a4]`, which gates the doodad LOD distance test at `0x6afb11`. No
     // effect here: benilla has no doodad LOD swap, as `lodDist` above has no row.
     same("lod", "1"),
+    // `movie` (`0x402bf5`: name `0x82e74c`, "1", flags 0, record `[0x8826e0]`), Show movie on
+    // startup: the startup puts the intro movies up while it is 1, setting it to "0"
+    // (`0x402b3b`-`0x402b65`, `ui_script::glue::startup_screen`).
+    same("movie", "1"),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
-    // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
-    // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.
+    // Subtitles: the pre-rendered movies' subtitles, which the glue's `GetMovieSubtitles`
+    // (`0x46dbc0`) hands the movie frame's `EnableSubtitles` (`MovieFrame.lua:35`).
     same("movieSubtitle", "0"),
     // `useWeatherShaders` (`0x67b81d`: name `0x868598`, "1", flags 0, no callback, record
     // `[0xc7b588]`), Weather Shaders: read in each precipitation effect's constructor (`0x67480f`,

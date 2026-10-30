@@ -199,10 +199,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetChatTypeIndex",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name else {
-                return Ok(0);
-            };
+        lua.create_function(|lua, name: Value| {
+            // `is-number-or-string` else `Usage: GetChatTypeIndex(type)` (`0x844d54`, `0x4a0a9c`).
+            let name = binding_abi::string_arg(lua, name, "Usage: GetChatTypeIndex(type)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(position(&model.chat_colors, &name).map_or(0, |i| i as i64 + 1))
         })?,
@@ -218,7 +217,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let r = binding_abi::float_arg(lua, r, USAGE)?;
             let g = binding_abi::float_arg(lua, g, USAGE)?;
             let b = binding_abi::float_arg(lua, b, USAGE)?;
-            let written = {
+            let rgb = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let Some(i) = position(&model.chat_colors, &name) else {
                     return Ok(());
@@ -226,9 +225,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let rgb = [to_byte(r), to_byte(g), to_byte(b)];
                 model.chat_colors[i].rgb = rgb;
                 model.chat_colors_changed = true;
-                (model.chat_colors[i].name.clone(), rgb)
+                rgb
             };
-            let (name, rgb) = written;
+            // The event carries the caller's string, not the entry's spelling (`0x4a0850` keeps
+            // `lua_tostring(1)`, `0x4a094a` pushes it as the `%s` of `0x703f50`).
             super::tick::fire_event_into(
                 lua,
                 "UPDATE_CHAT_COLOR",
@@ -302,7 +302,6 @@ mod tests {
             "extras are 95… — count_before_match + 0x5f"
         );
         assert_eq!(s.eval::<i64>("return GetChatTypeIndex('NOPE')").unwrap(), 0);
-        assert_eq!(s.eval::<i64>("return GetChatTypeIndex()").unwrap(), 0);
     }
 
     #[test]
@@ -319,8 +318,8 @@ mod tests {
         assert_eq!(say.rgb, [127, 255, 254], "truncate, never round");
         assert_eq!(
             s.eval::<String>("return SEEN[1]").unwrap(),
-            "SAY",
-            "the registry's spelling, not the caller's"
+            "say",
+            "the caller's spelling, not the registry's"
         );
         let heard = s.eval::<f64>("return SEEN[2]").unwrap();
         assert!(
@@ -329,6 +328,8 @@ mod tests {
         );
         assert!(s.take_chat_color_changes());
         assert!(!s.take_chat_color_changes(), "the cue is one-shot");
+        s.run("ChangeChatColor('SaY', 0, 0, 0)").unwrap();
+        assert_eq!(s.eval::<String>("return SEEN[1]").unwrap(), "SaY");
     }
 
     #[test]

@@ -63,6 +63,10 @@ pub(crate) struct GoAnim {
     /// The requested id currently armed (`[block0+0xf8]`, written by op4 `0x71252f`, read by
     /// `0x712090(model, -1)`), which the already-playing skip compares.
     armed_id: Option<u16>,
+    /// The substate slot 34 was last asked for (`[handler+0x10]`, stored at `0x5f3c19` ahead of
+    /// the arm), as its `AnimationData.dbc` id: the motion or rest pose the state resolved to,
+    /// before the missing-sequence remap and the already-playing skip.
+    substate: Option<u16>,
 }
 
 /// The dispatch `0x5f3cb0` ran on this entity; its first act (`0x5f3cc8 call 0x5f40c0`) releases
@@ -231,6 +235,22 @@ pub(crate) fn go_state(anim: Option<&GoAnim>, store: &ObjectStore) -> u32 {
         .unwrap_or(GO_STATE_ACTIVE)
 }
 
+/// The handler's substate `[handler+0x10]` as its `AnimationData.dbc` id (`0x8607e4`: substate 1
+/// Closed 147, 3 Opened 149): the one last asked for, else the rest pose of the stored state. A
+/// static object's handler rests on its state's pose.
+pub(crate) fn substate_anim(anim: Option<&GoAnim>, store: &ObjectStore) -> Option<u16> {
+    match anim {
+        Some(a) => a
+            .substate
+            .or_else(|| a.shown.or(a.state).and_then(rest_anim)),
+        None => rest_anim(go_state(None, store)),
+    }
+}
+
+/// `AnimationData.dbc` 147 Closed and 149 Opened, the rest poses of substates 1 and 3.
+pub(crate) const ANIM_CLOSED: u16 = 0x93;
+pub(crate) const ANIM_OPENED: u16 = 0x95;
+
 /// The inspector's readout: the armed id (the newest arm, the smallest seek), whether it is a
 /// transient, and its repeat mode; `None` for a static mesh or before any arm.
 pub(crate) fn armed_anim(
@@ -332,9 +352,9 @@ fn remap_missing(anims: &ModelAnimations, id: u16) -> (u16, bool) {
 /// The held rest pose for a wire `GAMEOBJECT_STATE` (`0x5f3c30`).
 fn rest_anim(state: u32) -> Option<u16> {
     match state {
-        0 => Some(0x95), // ACTIVE  → Opened (held open)
-        1 => Some(0x93), // READY   → Closed (held closed)
-        2 => Some(0x97), // ALT     → Destroyed
+        0 => Some(ANIM_OPENED), // ACTIVE  → Opened (held open)
+        1 => Some(ANIM_CLOSED), // READY   → Closed (held closed)
+        2 => Some(0x97),        // ALT     → Destroyed
         _ => None,
     }
 }
@@ -430,7 +450,8 @@ fn close_go_lid(
 /// a motion advances to its rest pose (2 Open → 3 Opened, 4 Close → 1 Closed, 5 Destroy →
 /// 6 Destroyed, 7 Rebuild → 1 Closed); Spawn (0) and Custom0..3 (8..11) re-run the machine at the
 /// current state (`0x5f4190`); a rest pose (1/3/6) re-arms itself with a fresh roll (`0x5f4167`,
-/// calling `0x5f3930` past slot 34's change guard), every window for ever.
+/// calling `0x5f3930` past slot 34's change guard), every window for ever; Despawn (12) arms
+/// nothing.
 ///
 /// Clearing `shown` makes [`drive_go_anim`], next in the chain, re-resolve the state that frame.
 /// Reads never deref-mut, so a quiet object stays out of the `Changed` stream.
@@ -455,6 +476,11 @@ fn retire_transient_anim(
                 // A Spawn or Custom whose object's release is pending dispatches nothing
                 // (`0x5f4190` → `0x614f40`): the model keeps the play's end until the release.
                 if pending && completion_redispatches(t.id) {
+                    continue;
+                }
+                // Despawn, substate 12, is past slot 14's `cmp 0xb; ja` (`0x5f4134`): its end
+                // only unpins (`0x5f41ae`), and the model keeps the clip's end.
+                if t.id == ANIM_DESPAWN {
                     continue;
                 }
                 // Forget the shown pose: the state arm re-resolves it as a silent rest snap.
@@ -541,6 +567,7 @@ fn drive_go_anim(
                     go.transient = None;
                     break 'state;
                 };
+                go.substate = Some(play.anim_id());
                 // Remap an unowned id, so a lidless model holds a real pose, not bind.
                 let (want, frozen) = remap_missing(anims, play.anim_id());
                 // The already-playing skip (`0x5f39fa: cmp esi,eax; je 0x5f3b32`) holds only on
@@ -600,6 +627,8 @@ fn drive_go_anim(
         if go.one_shot.is_some() {
             let id = go.one_shot.take().expect("checked is_some");
             if anims.owns(id) {
+                // Owned (`0x5f4245`), slot 15 asks slot 34 for the substate (`0x5f4253`).
+                go.substate = Some(id);
                 // Slot 15 arms through the same `0x5f3930`, so it rolls a variation too.
                 let roll = rng.draw();
                 if let Some(clip) = anims.pick_variation(id, roll) {
@@ -1364,6 +1393,34 @@ mod tests {
         assert!(!will_hold(&app, go), "no clip played: the unhold follows");
     }
 
+    /// Slot 34 stores the substate it is asked for (`0x5f3c19`) ahead of the arm and its
+    /// missing-sequence remap (`0x5f3c21` → `0x5f3930`), so a door whose model lacks Open (148)
+    /// and plays Opened in its place (`0x5f3b40`) is still in substate 2, Open, while it swings;
+    /// once the play ends it rests at 3, Opened.
+    #[test]
+    fn the_substate_is_the_one_asked_for_not_the_clip_the_remap_plays() {
+        let (mut app, go) = model_app(&[(0x93, 0.167, 0), (0x95, 0.100, 0)]);
+        app.update();
+        let store = ObjectStore::default();
+        let substate = |app: &App| substate_anim(app.world().get::<GoAnim>(go), &store);
+        assert_eq!(substate(&app), Some(ANIM_CLOSED), "at rest, closed");
+        app.world_mut()
+            .get_mut::<GoAnim>(go)
+            .unwrap()
+            .set_wire_state(GO_STATE_ACTIVE);
+        app.update();
+        assert_eq!(
+            armed(&app, go).map(|a| a.0),
+            Some(0x95),
+            "the remap plays Opened"
+        );
+        assert_eq!(
+            substate(&app),
+            Some(0x94),
+            "the substate is Open, mid-swing"
+        );
+    }
+
     fn will_hold(app: &App, go: Entity) -> bool {
         let world = app.world();
         world
@@ -1374,7 +1431,8 @@ mod tests {
 
     /// `SendObjectDeSpawnAnim` is on `WorldObject`, and two vmangos boss scripts send it for
     /// living objects (Sapphiron for himself): with no release pending the window ends and the
-    /// object stays.
+    /// object stays. Despawn is substate 12 (`0x80b0e0[6]`), past slot 14's `cmp 0xb; ja`
+    /// (`0x5f4126`, `0x5f4134`): its end only unpins (`0x5f41ae`), so nothing re-arms.
     #[test]
     fn an_announcement_without_a_release_despawns_nothing() {
         let (mut app, go) = crate_app(&[(157, 2.667, 0)]);
@@ -1389,9 +1447,10 @@ mod tests {
         assert!(app.world().get_entity(go).is_ok(), "no release, no despawn");
         assert_eq!(
             armed(&app, go),
-            Some((0x93, RepeatAnimation::Never)),
-            "and the window hands back to the state pose, like any other one-shot"
+            Some((157, RepeatAnimation::Never)),
+            "and the model keeps the Despawn clip's end"
         );
+        assert!(!app.world().get::<GoAnim>(go).unwrap().holds());
     }
 
     /// A Custom that ends while its object's release is pending dispatches nothing and arms

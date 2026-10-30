@@ -64,6 +64,8 @@ fn harness_with_bags() -> UiScript {
 fn seed_items(s: &mut UiScript) {
     let mut inv: InventorySlots = Default::default();
     inv[1] = Some(InvSlotView {
+        roll: Default::default(),
+        uncached_link: None,
         duration_ms: None,
         field_duration: 0,
         already_bound: false,
@@ -123,6 +125,7 @@ fn seed_items(s: &mut UiScript) {
     slots.insert(
         1,
         ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
@@ -205,6 +208,8 @@ fn doll_hover_renders_the_live_instance() {
     // A broken helm: instance pair (0, 40), the template at full.
     let mut inv: InventorySlots = Default::default();
     inv[1] = Some(InvSlotView {
+        roll: Default::default(),
+        uncached_link: None,
         duration_ms: None,
         field_duration: 0,
         already_bound: false,

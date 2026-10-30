@@ -16,6 +16,14 @@ impl WorldWriter {
         )
     }
 
+    /// `CMSG_ITEM_NAME_QUERY`: an item's name by entry; `guid` is the asker's, 0 for none.
+    pub fn item_name_query(&mut self, entry: u32, guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_ITEM_NAME_QUERY,
+            &messages::item_name_query(entry, guid),
+        )
+    }
+
     /// `CMSG_USE_ITEM`: use the item at a bag position; a GameObject `target` is how a key opens a
     /// locked door. Refused with `SMSG_CAST_RESULT`.
     pub fn use_item(
@@ -38,6 +46,12 @@ impl WorldWriter {
             opcode::CMSG_OPEN_ITEM,
             &messages::open_item(bag_index, slot),
         )
+    }
+
+    /// `CMSG_READ_ITEM`: read a book; the server answers `SMSG_READ_ITEM_OK` or
+    /// `SMSG_READ_ITEM_FAILED` on the item's guid.
+    pub fn read_item(&mut self, bag: u8, slot: u8) -> Result<()> {
+        self.send(opcode::CMSG_READ_ITEM, &messages::read_item(bag, slot))
     }
 
     /// `CMSG_WRAP_ITEM`: wrap an item in the `ITEM_FLAG_WRAPPER` paper; success is silent and

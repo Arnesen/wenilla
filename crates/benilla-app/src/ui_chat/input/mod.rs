@@ -1,14 +1,18 @@
 //! The submitted-line side of the chat: [`drain_chat_input`] executes what [`parse`] resolved and
 //! the `ConsoleExec` lines the VM queues; [`send`] applies `SendChatMessage`, `RandomRoll`,
-//! `UninviteByName`, `SendAddonMessage` and the channel verbs inside their calls, and [`emote`]
-//! `DoEmote` (`0x5ef560`): the eligibility gate, the asleep gate, the stow, the posture, then
-//! `CMSG_TEXT_EMOTE`. Own sends are never echoed locally; the server echoes them.
+//! `RequestTimePlayed`, `UninviteByName`, `SendAddonMessage` and the channel verbs inside their
+//! calls, and [`emote`] `DoEmote` (`0x5ef560`): the eligibility gate, the asleep gate, the stow,
+//! the posture, then `CMSG_TEXT_EMOTE`. Own sends are never echoed locally; the server echoes
+//! them.
 
 use crate::query_cache::Ask;
+use benilla_ui::script::SessionRequest;
 use bevy::prelude::*;
 
 /// The channel verbs' slot writes and packets.
 mod channel;
+/// The drunk transform a drunk player's line goes through.
+mod drunk;
 /// `DoEmote`, applied inside its call.
 mod emote;
 mod parse;
@@ -21,9 +25,9 @@ pub(crate) use emote::EmoteDoer;
 #[cfg(test)]
 pub(super) use parse::lua_quoted_string;
 pub(super) use parse::{parse_line, ParsedChat};
-pub(crate) use send::ChatSender;
 #[cfg(test)]
 pub(crate) use send::{chat_world, run_chat};
+pub(crate) use send::{ChatSender, ChatStep};
 
 use crate::creature_anim::MovementState;
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
@@ -91,34 +95,14 @@ pub(super) struct ChatProbes<'w, 's> {
 }
 
 /// What the drain hands to another subsystem's setter, bundled for the same ceiling. Chat never
-/// writes [`Selection`]: [`crate::target`]'s resolver commits through the click's path.
+/// writes [`Selection`]: a line's selection runs the stock verb, whose call commits it.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct ChatOut<'w, 's> {
-    /// A `/console` line runs against the world at the next sync point.
-    console: Commands<'w, 's>,
-    target: MessageWriter<'w, crate::target::TargetByNameRequest>,
-    assist: MessageWriter<'w, crate::target::AssistRequest>,
-    follow: MessageWriter<'w, crate::player::FollowRequest>,
-    /// `/partytest ping` seats a group member's ping through the wire arm's `seat`.
+pub(super) struct ChatOut<'w> {
+    /// `/partytest ping` stores and signals a group member's ping as the wire's handler does.
     ping: ResMut<'w, crate::minimap::MinimapPing>,
     /// The red error line by GlobalStrings key. The system's only `UiErrorKeys` access: a second
     /// one panics on the first frame.
     ui_errors: Res<'w, crate::ui_action::UiErrorKeys>,
-}
-
-/// The `ConsoleExec` lines the VM queued, as [`ParsedChat::Console`] values, so one executor
-/// serves them and a probe's `/console`. They wait for the drain, where every other chat verb
-/// applies inside its call: a console command runs against the whole world
-/// ([`crate::console::run`]), which no call host holds.
-fn engine_verbs(script: &mut benilla_ui::script::UiScript) -> Vec<(String, ParsedChat)> {
-    script
-        .take_console_lines()
-        .into_iter()
-        // `ConsoleExec` already ran the commands that write a CVar; what reaches here is a
-        // console command (`detailDoodadAlpha`, registered by `0x63f9e0`, never persists), a bare
-        // CVar name to print, or an unknown word.
-        .map(|line| (line.clone(), ParsedChat::Console { line }))
-        .collect()
 }
 
 #[allow(clippy::type_complexity)] // a Bevy system's full input set
@@ -129,7 +113,9 @@ pub(super) fn drain_chat_input(
         ResMut<'static, crate::names::NameCache>,
         MessageWriter<'static, crate::creature_anim::CastEvent>,
         ResMut<'static, crate::creature_anim::PlaySeq>,
-        ChatOut<'static, 'static>,
+        ChatOut<'static>,
+        // The dev probes read the relation inputs a call can write.
+        ChatProbes<'static, 'static>,
     )>,
     chat_log: Res<super::feed::ChatLog>,
     commands: Res<NetCommands>,
@@ -137,13 +123,13 @@ pub(super) fn drain_chat_input(
     self_player: Query<(Entity, &MovementState, &GlobalTransform), With<SelfPlayer>>,
     mut go_targets: MessageWriter<crate::creature_anim::SpellGoTargets>,
     table: Res<super::commands::SlashCommands>,
-    probes: ChatProbes,
 ) {
     // The lines are taken in turns, and a line's Lua runs between them with the host lent, so a
     // call it makes applies inside its verb, before the next line is taken.
     let mut lines: Option<std::vec::IntoIter<(String, ParsedChat)>> = None;
     while let Some(work) = vm.turn(|script, parts| {
-        let (selection, mut group, mut names, mut cast_events, mut play_seq, mut chat_out) = parts;
+        let (selection, mut group, mut names, mut cast_events, mut play_seq, mut chat_out, probes) =
+            parts;
         let ChatProbes {
             camera: world_camera,
             clock,
@@ -158,7 +144,7 @@ pub(super) fn drain_chat_input(
         } = &probes;
         let script = script?;
         let lines = lines.get_or_insert_with(|| {
-            let mut queue = engine_verbs(script);
+            let mut queue = Vec::new();
             // The dev instruments, from their host `SlashCmdList` rows once the stock
             // `ChatEdit_ParseText` has found no built-in (dev builds), and probe lines.
             for raw in script.take_chat_input() {
@@ -402,7 +388,7 @@ pub(super) fn drain_chat_input(
                             "reaction: faction {} is FORCED to rank {rank} by the server's table \
                              ({} entries); the faction rules below are not reached",
                             tpl.faction,
-                            reputations.forced.len(),
+                            reputations.forced().len(),
                         ))
                     })() {
                         lines.push(line);
@@ -519,7 +505,10 @@ pub(super) fn drain_chat_input(
                             let w = benilla_assets::coords::bevy_to_wow(tf.translation());
                             // +x is north, -y is east.
                             let at = (w[0] + 24.75, w[1] - 24.75);
-                            chat_out.ping.seat(at, 0xF001);
+                            chat_out
+                                .ping
+                                .member(at, 0xF001, self_guid.0, Some(&group))
+                                .fire(script);
                             format!(
                                 "partytest: Alice pinged ({:.0}, {:.0}) — 35 yd NE, party1, 5 s",
                                 at.0, at.1
@@ -576,7 +565,7 @@ pub(super) fn drain_chat_input(
                         script.promote_by_name(&name);
                     }
                 }
-                // The duel verbs join the intent queue `StartDuel` and `CancelDuel` feed: the stock
+                // The duel verbs make the calls `StartDuel` and `CancelDuel` make: the stock
                 // handlers are one-line calls to them.
                 ParsedChat::Duel { name } => {
                     if let Some(name) =
@@ -586,37 +575,43 @@ pub(super) fn drain_chat_input(
                     }
                 }
                 ParsedChat::Forfeit => {
-                    script.queue_duel_request(benilla_ui::script::DuelRequest::Cancel);
+                    script.duel_call(benilla_ui::script::DuelRequest::Cancel);
                 }
-                // `crate::target`'s resolver (the reference's `0x493aa0`) commits through the one
-                // SetSelection path. A bare `/target` takes `GetSlashCmdTarget`'s fallback: a no-op
-                // re-select of a player target, nothing for a creature.
+                // The stock handler's verb (`ChatFrame.lua:748-751`), `TargetByName` (`0x489d60`),
+                // which selects inside its call, before the next line is taken. A bare `/target`
+                // takes `GetSlashCmdTarget`'s fallback: a no-op re-select of a player target,
+                // nothing for a creature.
                 ParsedChat::Target { name } => {
                     if let Some(name) =
                         name.or_else(|| target_player_name(&selection, &names, &commands))
                     {
-                        chat_out
-                            .target
-                            .write(crate::target::TargetByNameRequest { name });
+                        return Some(LineWork::Lua(LineLua::Handler(format!(
+                            "TargetByName({})",
+                            parse::lua_quoted_string(&name)
+                        ))));
                     }
                 }
-                // Deviation: a probe's bare `/assist` assists the live selection, where the stock
-                // handler (`ChatFrame.lua:740`) resolves a selected player's name through
-                // `AssistByName`, because a name resolve can land on a different player.
+                // Deviation: a probe's bare `/assist` assists the live selection, `AssistByName("")`
+                // (`0x489c89`), where the stock handler (`ChatFrame.lua:740`) resolves a selected
+                // player's name through `AssistByName`, because a name resolve can land on a
+                // different player.
                 ParsedChat::Assist { name } => {
-                    chat_out.assist.write(crate::target::AssistRequest { name });
+                    return Some(LineWork::Lua(LineLua::Handler(format!(
+                        "AssistByName({})",
+                        parse::lua_quoted_string(name.as_deref().unwrap_or_default())
+                    ))));
                 }
                 // Bare is `FollowUnit("target")`, where the stock handler (`ChatFrame.lua:754`)
                 // first tries a selected player's name; named is `FollowByName(name)` with no exact
-                // flag, so prefix matching.
+                // flag, so prefix matching. Each starts the follow inside its call (`0x60fed0`).
                 ParsedChat::Follow { name } => {
-                    chat_out.follow.write(match name {
-                        Some(name) => crate::player::FollowRequest::Name { name, exact: false },
-                        None => crate::player::FollowRequest::Unit("target".into()),
-                    });
+                    return Some(LineWork::Lua(LineLua::Handler(match name {
+                        Some(name) => format!("FollowByName({})", parse::lua_quoted_string(&name)),
+                        None => "FollowUnit(\"target\")".to_string(),
+                    })));
                 }
-                // `SlashCmdList["PVP"]` is `TogglePVP()`, the popup row's intent queue.
-                ParsedChat::Pvp => script.queue_pvp_toggle(),
+                // `SlashCmdList["PVP"]` is `TogglePVP()`, the same call.
+                ParsedChat::Pvp => script.toggle_pvp(),
                 ParsedChat::Help => {
                     // benilla's own summary, for a line that skipped the edit box; a typed `/help`
                     // runs the stock `ChatFrame_DisplayHelpText`.
@@ -674,8 +669,6 @@ pub(super) fn drain_chat_input(
                                 entity,
                                 spell_id,
                                 kind,
-                                cast_flags: 0,
-                                item_cast: false,
                                 seq: play_seq.next(),
                             });
                             // A selected caster's GO hits us, so a missile flies end to end; a
@@ -693,7 +686,9 @@ pub(super) fn drain_chat_input(
                                         spell_id,
                                         hits: Vec::new(),
                                         misses: Vec::new(),
+                                        source: None,
                                         dest,
+                                        target_mask: 0x40,
                                         ammo_display_id: None,
                                         seq: play_seq.next(),
                                     });
@@ -703,7 +698,9 @@ pub(super) fn drain_chat_input(
                                         spell_id,
                                         hits: vec![me],
                                         misses: Vec::new(),
+                                        source: None,
                                         dest: None,
+                                        target_mask: 0x2,
                                         // A real GO carries the caster's ammo; this flies the
                                         // Rough Arrow, display id 5996.
                                         ammo_display_id: Some(5996),
@@ -723,22 +720,11 @@ pub(super) fn drain_chat_input(
                         .ok()
                         .filter(|t| !t.is_empty())
                 }),
-                // `SlashCmdList["LOGOUT"]` is `Logout()`, the game menu's route: `crate::ui_logout`
-                // sends the request and narrates the answer with the CAMP countdown.
-                ParsedChat::Logout => {
-                    script.queue_session_request(benilla_ui::script::SessionRequest::Logout)
-                }
-                // `Quit()`, the game menu Exit button's queue, countdown and confirmation.
-                ParsedChat::Quit => {
-                    script.queue_session_request(benilla_ui::script::SessionRequest::Quit)
-                }
-                // Deferred to the world, since a command is `fn(&mut World, &str)`; its lines go to
-                // the log, never to chat ([`crate::console::run`]).
-                ParsedChat::Console { line } => {
-                    chat_out
-                        .console
-                        .queue(move |world: &mut World| crate::console::run(world, &line));
-                }
+                // `SlashCmdList["LOGOUT"]` is `Logout()` and `SlashCmdList["QUIT"]` is `Quit()`,
+                // the game menu's routes: the call sends the request as the turn ends, and
+                // `crate::ui_logout` narrates the answer with the CAMP or QUIT countdown.
+                ParsedChat::Logout => session(script, SessionRequest::Logout),
+                ParsedChat::Quit => session(script, SessionRequest::Quit),
                 // The reference's handler body, run in the VM.
                 ParsedChat::Lua { body } => return Some(LineWork::Lua(LineLua::Body(body))),
                 ParsedChat::Unknown => {
@@ -763,8 +749,13 @@ pub(super) fn drain_chat_input(
                 }
             }),
             LineWork::Emote { text_id, arg } => {
-                if let Some(host) = vm.parts().1.p1().as_mut() {
-                    host.emote(text_id, arg.as_deref());
+                if let (Some(script), set) = vm.parts() {
+                    if let Some(host) = set.p1().as_mut() {
+                        // The engine half runs as a turn, what it signals held, then its
+                        // listeners run with the host lent, as inside `DoEmote`'s call.
+                        script.host_out(|script| host.emote(script, text_id, arg));
+                        script.hosted(host, |_| ());
+                    }
                 }
             }
         }
@@ -838,6 +829,13 @@ impl LineLua {
 
 /// `/chattest`: one synthetic line of every renderable form (kinds, flags, the language header,
 /// channel prefixes, notices, item and player links) through the real event pipeline.
+/// A slash command's session verb, as its `SlashCmdList` handler calls it.
+fn session(script: &mut benilla_ui::script::UiScript, request: SessionRequest) {
+    if let Err(e) = script.session_call(request) {
+        warn!("chat: {request:?} was refused: {e}");
+    }
+}
+
 fn chattest_battery(log: &super::feed::ChatLog, get: &dyn Fn(&str) -> Option<String>) {
     use super::event::{ChatEvent, ChatEventKind as K};
     let player = |kind: K, text: &str, sender: &str| {

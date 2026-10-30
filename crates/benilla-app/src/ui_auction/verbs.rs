@@ -29,9 +29,33 @@ pub(crate) struct AuctionVerbs<'w, 's> {
     items: Res<'w, Items>,
     objects: crate::net::Objects<'w, 's>,
     sink: MessageSink<'w>,
+    /// The name cache `GetAuctionItemInfo` asks, and the house lane its name waits are kept on;
+    /// each absent in a harness without it.
+    names: Option<Res<'w, crate::names::NameCache>>,
+    lane: Option<ResMut<'w, super::net::HouseLane>>,
 }
 
 impl AuctionVerbs<'_, '_> {
+    /// The name cache's record for `guid`, read only, for a harness's host.
+    #[cfg(test)]
+    pub(crate) fn player_name(&self, guid: u64) -> Option<String> {
+        let names = self.names.as_deref()?;
+        names.resolve_player(guid, Ask::Read).map(str::to_string)
+    }
+
+    /// `GetAuctionItemInfo`'s name lookup inside its call
+    /// ([`benilla_ui::script::RecordAsk::AuctionName`]): the cache asks a miss, and the list's
+    /// callback waits on the name, once per name and list (`0x55f080`'s dedupe flag 1). The getter
+    /// makes it only on a miss, having read the cache first ([`benilla_ui::script::PlayerNameQuery`]).
+    pub(crate) fn wait_for_name(&mut self, guid: u64, list: usize) {
+        if let Some(names) = self.names.as_deref() {
+            let _ = names.resolve_player(guid, Ask::Event(&self.commands));
+        }
+        if let Some(lane) = self.lane.as_deref_mut() {
+            lane.wait_for_name(guid, list);
+        }
+    }
+
     /// Apply one auction call.
     pub(crate) fn apply(&mut self, script: &mut UiScript, call: AuctionCall) {
         let Self {
@@ -41,6 +65,7 @@ impl AuctionVerbs<'_, '_> {
             items,
             objects,
             sink,
+            ..
         } = self;
         let Some(auction) = auction.as_deref_mut() else {
             debug!("ui_auction: no auction house in this world; {call:?} dropped");
@@ -48,7 +73,7 @@ impl AuctionVerbs<'_, '_> {
         };
         match call {
             AuctionCall::Query(query) => {
-                send_query(auction, commands, time.elapsed_secs_f64(), script, query);
+                send_query(auction, commands, time.elapsed_secs_f64(), query);
             }
             // The binding returns with no auctioneer or a clear flag (`0x4cec8e`, `0x4cec97`),
             // and its sender tests the flag again (`0x4cd686`).
@@ -115,20 +140,37 @@ impl AuctionVerbs<'_, '_> {
                     }
                 }
             }
+            // The driver promotes the column in the engine's stack with a session or without,
+            // as the drivers run with none (`0x4cd850`); a sort sends nothing.
+            AuctionCall::Sort { list, column } => {
+                if let Some(stack) = auction.sorts.0.get_mut(list) {
+                    stack.promote(column);
+                }
+            }
+            // The close core needs the latch, which the host lends beside this.
+            AuctionCall::Close => {}
         }
+    }
+
+    /// The auctioneer's cell `[0xb725f8]`.
+    pub(crate) fn auctioneer(&self) -> Option<u64> {
+        self.auction.as_deref().and_then(|a| a.auctioneer)
+    }
+
+    /// The close core's clear (`0x4cd613`-`0x4cd629`): the auctioneer, the house and the flags,
+    /// with the lists left standing, in the VM too.
+    pub(crate) fn clear_auctioneer(&mut self, script: &mut UiScript) {
+        if let Some(auction) = self.auction.as_deref_mut() {
+            auction.clear();
+        }
+        script.close_auction_session();
     }
 }
 
 /// `QueryAuctionItems` past its arguments: with an auctioneer (`0x4ce99c`) and the throttle open
 /// (`0x4ce9a2`-`0x4ce9c0`), the packet, then the throttle armed five seconds out (`0x4cec42`-
 /// `0x4cec4c`), which `CanSendAuctionQuery` reads on the script's next line.
-fn send_query(
-    auction: &mut AuctionOpen,
-    commands: &NetCommands,
-    now: f64,
-    script: &mut UiScript,
-    q: AuctionQuery,
-) {
+fn send_query(auction: &mut AuctionOpen, commands: &NetCommands, now: f64, q: AuctionQuery) {
     let Some(auctioneer) = auction.auctioneer else {
         return;
     };
@@ -145,12 +187,11 @@ fn send_query(
         // Already ids: the binding maps menu positions as `0x4ce980` does.
         main_category: q.class.unwrap_or(auction_filter::ANY),
         sub_category: q.sub_class.unwrap_or(auction_filter::ANY),
-        quality: q.quality.unwrap_or(auction_filter::ANY),
-        usable: u8::from(q.usable_only),
+        quality: q.quality,
+        usable: q.usable,
     });
     auction.query_gate = Some(now + QUERY_THROTTLE_SECS);
     auction.wire.browse_sent += 1;
-    script.set_auction_can_query(false);
 }
 
 /// `PlaceAuctionBid` past its row: nothing with no player or no auctioneer (`0x4cf740`,
