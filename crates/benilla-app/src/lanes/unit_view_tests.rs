@@ -881,7 +881,7 @@ fn flush_cost() {
                 );
                 let world = app.world_mut();
                 if !flush {
-                    world.insert_resource(crate::ui_script::PendingEntryUiLoad);
+                    world.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
                 }
                 let (f0, k0) = crate::lanes::tally();
                 let at = std::time::Instant::now();

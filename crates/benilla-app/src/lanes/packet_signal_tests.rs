@@ -331,7 +331,7 @@ fn the_session_end_and_a_sweep_drop_the_item_text_lane() {
     };
     let page_text_held = |app: &mut App| {
         let world = app.world_mut();
-        world.insert_resource(crate::ui_script::PendingEntryUiLoad);
+        world.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
         crate::net::handlers::dispatch(
             world,
             vec![SessionEvent::GameObjectPageText { guid: TABLET }],

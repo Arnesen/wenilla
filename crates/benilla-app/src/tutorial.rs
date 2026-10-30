@@ -1204,7 +1204,7 @@ mod tests {
     fn the_world_enter_tutorials_are_not_fired_into_a_ui_less_vm() {
         let mut app = plugin_app();
         // The deferral window: in the world on the wire, the entry load still owed.
-        app.insert_resource(crate::ui_script::PendingEntryUiLoad);
+        app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
         {
             let t = app.world().resource::<Tutorials>();
             t.lock().apply_flags(&[0u8; 32]);

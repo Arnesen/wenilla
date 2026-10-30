@@ -827,7 +827,9 @@ mod tests {
         tail.extend_from_slice(&pin_salt());
         let packet = challenge_with(&tail);
         let mut r = packet.as_slice();
-        let reply = read_challenge_reply(&mut r).unwrap().unwrap();
+        let reply = futures_lite::future::block_on(read_challenge_reply(&mut r))
+            .unwrap()
+            .unwrap();
         assert!(r.is_empty(), "{} bytes left", r.len());
         assert_eq!(
             reply.pin,
@@ -846,7 +848,9 @@ mod tests {
         tail.extend_from_slice(&pin_salt());
         let packet = challenge_with(&tail);
         let mut r = packet.as_slice();
-        let reply = read_challenge_reply(&mut r).unwrap().unwrap();
+        let reply = futures_lite::future::block_on(read_challenge_reply(&mut r))
+            .unwrap()
+            .unwrap();
         assert!(r.is_empty());
         assert_eq!(reply.pin.map(|p| (p.flags, p.grid_seed)), Some((0x02, 1)));
     }
@@ -855,7 +859,9 @@ mod tests {
     fn a_zero_security_byte_has_no_pin() {
         let packet = challenge_with(&[0]);
         let mut r = packet.as_slice();
-        let reply = read_challenge_reply(&mut r).unwrap().unwrap();
+        let reply = futures_lite::future::block_on(read_challenge_reply(&mut r))
+            .unwrap()
+            .unwrap();
         assert!(r.is_empty());
         assert_eq!(reply.pin, None);
     }

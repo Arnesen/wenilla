@@ -175,12 +175,25 @@ impl BindingLatches {
             return true;
         }
         let mark = vm.own().amounts_mark();
-        match vm.run(|script| script.map(|s| s.execute_binding(command, true))) {
-            None | Some(Ok(false)) => return false,
-            Some(Ok(true)) => {}
-            Some(Err(e)) => warn!("bindings({command}): {e}"),
+        let ran = vm.run(|script| {
+            script.map(|s| {
+                let ran = s.execute_binding(command, true);
+                // With no host lent the body's calls waited; they apply here, as a key's would at
+                // the pass's head, so the press is this frame's either way.
+                (ran, s.take_binding_input())
+            })
+        });
+        let Some((ran, unhosted)) = ran else {
+            return false;
+        };
+        match ran {
+            Ok(false) => return false,
+            Ok(true) => {}
+            Err(e) => warn!("bindings({command}): {e}"),
         }
-        vm.own().scale_amounts_since(mark, amount);
+        let mut state = vm.own();
+        state.apply_script_input(unhosted);
+        state.scale_amounts_since(mark, amount);
         self.synth.push(command.to_owned());
         true
     }
@@ -192,13 +205,15 @@ impl BindingLatches {
             return;
         };
         self.synth.remove(i);
-        vm.run(|script| {
-            if let Some(s) = script {
+        let unhosted = vm.run(|script| {
+            script.map(|s| {
                 if let Err(e) = s.execute_binding(command, false) {
                     warn!("bindings({command}): {e}");
                 }
-            }
+                s.take_binding_input()
+            })
         });
+        vm.own().apply_script_input(unhosted.unwrap_or_default());
     }
 
     /// Release every synthetic latch: world exit, the typing edge, the bridge letting go.
@@ -3129,5 +3144,82 @@ mod tests {
         );
         assert!(!diff.contains("SITORSTAND"), "no later binding: {diff}");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ── The synthetic seam (`BindingLatches::synth_*`, the web bridge's door) ──
+
+    /// Run `f` over the latches and the bindings pass's VM pair, as the bridge's system holds them.
+    fn synth<R: 'static>(
+        app: &mut App,
+        f: impl FnOnce(&mut BindingLatches, &mut SynthVm) -> R + Send + Sync + 'static,
+    ) -> R {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut f = Some(f);
+        app.world_mut()
+            .run_system_once(move |mut latches: ResMut<BindingLatches>, mut vm: SynthVm| {
+                (f.take().expect("runs once"))(&mut latches, &mut vm)
+            })
+            .expect("the synthetic seam runs")
+    }
+
+    fn latches(app: &App) -> &BindingLatches {
+        app.world().resource::<BindingLatches>()
+    }
+
+    #[test]
+    fn a_synthetic_hold_runs_the_body_once_and_survives_the_sweep() {
+        let mut app = harness();
+        app.update();
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "MOVEFORWARD", 1.0)));
+        assert!(state(&app).pressed(Input::MoveForward));
+        assert!(
+            state(&app).just_pressed(Input::MoveForward),
+            "the press edge"
+        );
+        // Idempotent: a second assert neither re-runs the body nor re-latches.
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "MOVEFORWARD", 1.0)));
+        assert_eq!(latches(&app).synth.len(), 1);
+        // The stuck-latch sweep reads keys; a synthetic latch has none to read up.
+        app.update();
+        assert!(state(&app).pressed(Input::MoveForward));
+        assert!(!state(&app).just_pressed(Input::MoveForward));
+        synth(&mut app, |l, vm| l.synth_release(vm, "MOVEFORWARD"));
+        assert!(
+            !state(&app).pressed(Input::MoveForward),
+            "the up-half ran its Stop"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_fire_scales_the_bodys_amount() {
+        let mut app = harness();
+        app.update();
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "CAMERAZOOMIN", 2.5)));
+        assert!(state(&app).fired(Input::CameraZoomIn));
+        assert_eq!(state(&app).amount(Input::CameraZoomIn), 2.5);
+        app.update();
+        assert!(
+            !state(&app).fired(Input::CameraZoomIn),
+            "an edge lasts one frame"
+        );
+    }
+
+    #[test]
+    fn an_unknown_synthetic_command_runs_nothing_and_says_so() {
+        let mut app = harness();
+        app.update();
+        assert!(!synth(&mut app, |l, vm| l.synth_press(vm, "NOSUCHCOMMAND", 1.0)));
+        assert!(latches(&app).synth.is_empty());
+    }
+
+    #[test]
+    fn a_vm_swap_drops_the_synthetic_latches_without_their_up_halves() {
+        let mut app = harness();
+        app.update();
+        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "ACTIONBUTTON1", 1.0)));
+        assert_eq!(lua_str(&app, "AB1"), "down");
+        app.insert_non_send_resource(core_script());
+        app.update();
+        assert!(latches(&app).synth.is_empty());
     }
 }

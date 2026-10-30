@@ -4861,7 +4861,7 @@ mod tests {
         let world = f.app.world_mut();
         crate::webbridge::leave_world_once(world);
         assert!(!world
-            .resource::<crate::bindings::BindingsState>()
+            .resource::<crate::bindings::BindingLatches>()
             .synth_latched("SMARTRES"));
     }
 

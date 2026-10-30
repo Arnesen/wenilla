@@ -2570,7 +2570,7 @@ fn the_stock_login_reaches_the_login_engine_and_shows_its_status() {
 fn the_stock_keypad_shows_the_grid_and_sends_the_keys_pressed() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, rx, _) = stock_app();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded();
     app.insert_resource(crate::net::RealmChoice(crate::net::ParkSender::Park(
         park_tx,
         std::marker::PhantomData,
@@ -2632,7 +2632,7 @@ fn the_stock_keypad_shows_the_grid_and_sends_the_keys_pressed() {
 fn wow_pin_presses_the_stock_keypad_and_it_hides() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, rx, _) = stock_app();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded();
     app.insert_resource(crate::net::RealmChoice(crate::net::ParkSender::Park(
         park_tx,
         std::marker::PhantomData,

@@ -674,7 +674,7 @@ fn the_session_end_drops_the_cast_and_house_lanes() {
     world
         .resource_mut::<crate::ui_cast::CastReports>()
         .bar(crate::ui_cast::CastBarEdge::Stop);
-    world.insert_resource(crate::ui_script::PendingEntryUiLoad);
+    world.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
     crate::net::handlers::dispatch(world, vec![outbid()]);
     assert!(heard(&mut app).is_empty(), "held while the UI loads");
     let world = app.world_mut();
