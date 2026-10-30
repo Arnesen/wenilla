@@ -139,9 +139,13 @@ mod zone {
 mod zone {
     pub(super) fn standard_offset_east() -> Option<i64> {
         let year = js_sys::Date::new_0().get_full_year();
-        let west = |month: i32| js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset();
+        let west = |month: i32| {
+            js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset()
+        };
         let standard_west = west(0).max(west(6));
-        standard_west.is_finite().then(|| (-standard_west * 60.0) as i64)
+        standard_west
+            .is_finite()
+            .then(|| (-standard_west * 60.0) as i64)
     }
 }
 
@@ -688,8 +692,7 @@ mod tests {
         packet.extend_from_slice(&body);
         packet.extend_from_slice(&0u16.to_le_bytes()); // footer padding
 
-        let realms =
-            futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
+        let realms = futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
         assert_eq!(realms.len(), 1);
         let r = &realms[0];
         assert_eq!(r.name, "Onyxia");

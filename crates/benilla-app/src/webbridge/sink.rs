@@ -21,9 +21,9 @@ pub(crate) use imp::{
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
+    use super::super::act::{parse_guid, ActOp};
     use super::*;
     use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
-    use super::super::act::{parse_guid, ActOp};
     use js_sys::{Array, Function, Object, Reflect};
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};

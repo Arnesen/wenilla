@@ -561,10 +561,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 let mut pending = world
                     .remove_resource::<PendingEntryUiLoad>()
                     .expect("the load is pending");
-                let core = pending
-                    .core
-                    .take()
-                    .expect("the core is resolved at Armed");
+                let core = pending.core.take().expect("the core is resolved at Armed");
                 let more = next < core.toc.files.len();
                 if more {
                     // Each file runs with a call host lent, as the one-shot load's do. Failures

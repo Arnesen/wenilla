@@ -989,7 +989,12 @@ mod net {
         mut lane: ResMut<DialogLane>,
     ) {
         if let SessionEvent::RaidGroupOnly { delay_ms, reason } = ev {
-            boot.apply(delay_ms, reason, bevy::platform::time::Instant::now(), &mut lane);
+            boot.apply(
+                delay_ms,
+                reason,
+                bevy::platform::time::Instant::now(),
+                &mut lane,
+            );
         }
     }
 

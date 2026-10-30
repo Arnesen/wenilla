@@ -24,8 +24,8 @@
 use bevy::prelude::*;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
-use benilla_world::collision::WorldCollision;
 use benilla_ui::script::plain::PlainValue;
+use benilla_world::collision::WorldCollision;
 
 use crate::net::GuidIndex;
 use crate::player::{AutoMove, Player, StandStateRequest};
@@ -40,12 +40,18 @@ pub(crate) enum ActOp {
     /// `auto_loot`: open a body or a container with 1.12's auto-loot (the Shift-click), so the
     /// client takes everything — the only way a script loots, since a scripted `LootButton`
     /// click is refused as the reference refuses it.
-    Interact { guid: u64, auto_loot: bool },
+    Interact {
+        guid: u64,
+        auto_loot: bool,
+    },
     /// A WoW-coordinate point (+X north, +Y west, +Z up).
     MoveTo([f32; 3]),
     Stop,
     /// A path from the player to a WoW-coordinate point, searching at most `budget` cells.
-    Path { to: [f32; 3], budget: usize },
+    Path {
+        to: [f32; 3],
+        budget: usize,
+    },
 }
 
 impl ActOp {
@@ -81,7 +87,9 @@ pub(super) fn run_object_ops(
             *frames -= 1;
         }
     }
-    for (id, op) in take(&mut input.act, |op| matches!(op, ActOp::Target(_) | ActOp::Interact { .. })) {
+    for (id, op) in take(&mut input.act, |op| {
+        matches!(op, ActOp::Target(_) | ActOp::Interact { .. })
+    }) {
         let result = match op {
             // `select_unit` commits only a unit the object manager holds; a held non-unit (a
             // chest, a corpse) is a silent no-op there, which the next frame's `target` shows.
@@ -96,7 +104,9 @@ pub(super) fn run_object_ops(
             ActOp::Interact { guid, auto_loot } => match index.0.get(&guid) {
                 Some(&entity) => {
                     if auto_loot {
-                        let was = input.auto_loot_restore.map_or(loot_cfg.auto_loot, |(w, _)| w);
+                        let was = input
+                            .auto_loot_restore
+                            .map_or(loot_cfg.auto_loot, |(w, _)| w);
                         loot_cfg.auto_loot = true;
                         input.auto_loot_restore = Some((was, 3));
                     }
@@ -118,7 +128,9 @@ pub(super) fn run_move_ops(
     mut walk: AutoMove,
     mut stand: MessageWriter<StandStateRequest>,
 ) {
-    for (id, op) in take(&mut input.act, |op| matches!(op, ActOp::MoveTo(_) | ActOp::Stop)) {
+    for (id, op) in take(&mut input.act, |op| {
+        matches!(op, ActOp::MoveTo(_) | ActOp::Stop)
+    }) {
         let result = match op {
             ActOp::MoveTo(pos) => {
                 // The option gates the player's right-click; the page's walk runs regardless, and
@@ -153,7 +165,9 @@ pub(super) fn run_path_ops(
     player: Res<Player>,
 ) {
     for (id, op) in take(&mut input.act, |op| matches!(op, ActOp::Path { .. })) {
-        let ActOp::Path { to, budget } = op else { unreachable!() };
+        let ActOp::Path { to, budget } = op else {
+            unreachable!()
+        };
         let probe = super::path::WorldProbe::new(&world);
         let found = super::path::find(&probe, player.pos, wow_to_bevy(to), budget);
         let payload = match found {
@@ -187,7 +201,9 @@ pub(super) fn run_path_ops(
 
 /// The queued verbs `pick` selects, removed from the queue in order; the rest stay.
 fn take(queue: &mut Vec<(u32, ActOp)>, pick: impl Fn(&ActOp) -> bool) -> Vec<(u32, ActOp)> {
-    let (picked, rest) = std::mem::take(queue).into_iter().partition(|(_, op)| pick(op));
+    let (picked, rest) = std::mem::take(queue)
+        .into_iter()
+        .partition(|(_, op)| pick(op));
     *queue = rest;
     picked
 }
@@ -231,7 +247,10 @@ mod tests {
 
     #[test]
     fn guids_parse_from_the_snapshots_hex_and_from_decimal() {
-        assert_eq!(parse_guid("0xf130000000000001"), Some(0xf130_0000_0000_0001));
+        assert_eq!(
+            parse_guid("0xf130000000000001"),
+            Some(0xf130_0000_0000_0001)
+        );
         assert_eq!(parse_guid(" 0X1a "), Some(0x1a));
         assert_eq!(parse_guid("42"), Some(42));
         assert_eq!(parse_guid("0x0"), None);

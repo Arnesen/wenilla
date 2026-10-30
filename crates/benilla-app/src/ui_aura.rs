@@ -972,7 +972,10 @@ impl crate::script_calls::live::LiveFamily for AuraLive<'_, '_> {
 /// The stamps' clock, in seconds, at `at`: the paced clock steps with the wall clock it stands
 /// at ([`benilla_world::frame_pace::FrameStep`]), so its reading at an earlier step's instant is
 /// its reading now less the time between.
-fn stamp_clock_at(step: &benilla_world::frame_pace::FrameStep, at: bevy::platform::time::Instant) -> f64 {
+fn stamp_clock_at(
+    step: &benilla_world::frame_pace::FrameStep,
+    at: bevy::platform::time::Instant,
+) -> f64 {
     let now = step.elapsed_secs_f64();
     match step.at.checked_duration_since(at) {
         Some(behind) => now - behind.as_secs_f64(),

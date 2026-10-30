@@ -458,7 +458,11 @@ fn land_glue_loads(
 ) {
     let music = &mut *music;
     if let Some(landed) = music.pending_theme.as_mut().and_then(|p| p.take()) {
-        let path = music.pending_theme.take().map(|p| p.path.clone()).unwrap_or_default();
+        let path = music
+            .pending_theme
+            .take()
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
         match landed {
             Ok(data) => {
                 let amp = config.category_amp(SoundCategory::Music) * GLUE_MUSIC_VOLUME;
@@ -475,7 +479,11 @@ fn land_glue_loads(
         }
     }
     if let Some(landed) = music.pending_credits.as_mut().and_then(|p| p.take()) {
-        let path = music.pending_credits.take().map(|p| p.path.clone()).unwrap_or_default();
+        let path = music
+            .pending_credits
+            .take()
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
         let amp = config.category_amp(SoundCategory::Music) * CREDITS_VOLUME;
         let started = match landed {
             Ok(data) => {

@@ -3156,9 +3156,11 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut f = Some(f);
         app.world_mut()
-            .run_system_once(move |mut latches: ResMut<BindingLatches>, mut vm: SynthVm| {
-                (f.take().expect("runs once"))(&mut latches, &mut vm)
-            })
+            .run_system_once(
+                move |mut latches: ResMut<BindingLatches>, mut vm: SynthVm| {
+                    (f.take().expect("runs once"))(&mut latches, &mut vm)
+                },
+            )
             .expect("the synthetic seam runs")
     }
 
@@ -3170,14 +3172,22 @@ mod tests {
     fn a_synthetic_hold_runs_the_body_once_and_survives_the_sweep() {
         let mut app = harness();
         app.update();
-        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "MOVEFORWARD", 1.0)));
+        assert!(synth(&mut app, |l, vm| l.synth_press(
+            vm,
+            "MOVEFORWARD",
+            1.0
+        )));
         assert!(state(&app).pressed(Input::MoveForward));
         assert!(
             state(&app).just_pressed(Input::MoveForward),
             "the press edge"
         );
         // Idempotent: a second assert neither re-runs the body nor re-latches.
-        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "MOVEFORWARD", 1.0)));
+        assert!(synth(&mut app, |l, vm| l.synth_press(
+            vm,
+            "MOVEFORWARD",
+            1.0
+        )));
         assert_eq!(latches(&app).synth.len(), 1);
         // The stuck-latch sweep reads keys; a synthetic latch has none to read up.
         app.update();
@@ -3194,7 +3204,11 @@ mod tests {
     fn a_synthetic_fire_scales_the_bodys_amount() {
         let mut app = harness();
         app.update();
-        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "CAMERAZOOMIN", 2.5)));
+        assert!(synth(&mut app, |l, vm| l.synth_press(
+            vm,
+            "CAMERAZOOMIN",
+            2.5
+        )));
         assert!(state(&app).fired(Input::CameraZoomIn));
         assert_eq!(state(&app).amount(Input::CameraZoomIn), 2.5);
         app.update();
@@ -3208,7 +3222,11 @@ mod tests {
     fn an_unknown_synthetic_command_runs_nothing_and_says_so() {
         let mut app = harness();
         app.update();
-        assert!(!synth(&mut app, |l, vm| l.synth_press(vm, "NOSUCHCOMMAND", 1.0)));
+        assert!(!synth(&mut app, |l, vm| l.synth_press(
+            vm,
+            "NOSUCHCOMMAND",
+            1.0
+        )));
         assert!(latches(&app).synth.is_empty());
     }
 
@@ -3216,7 +3234,11 @@ mod tests {
     fn a_vm_swap_drops_the_synthetic_latches_without_their_up_halves() {
         let mut app = harness();
         app.update();
-        assert!(synth(&mut app, |l, vm| l.synth_press(vm, "ACTIONBUTTON1", 1.0)));
+        assert!(synth(&mut app, |l, vm| l.synth_press(
+            vm,
+            "ACTIONBUTTON1",
+            1.0
+        )));
         assert_eq!(lua_str(&app, "AB1"), "down");
         app.insert_non_send_resource(core_script());
         app.update();

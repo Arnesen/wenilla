@@ -16,8 +16,8 @@ use benilla_ui::script::UnitState;
 use benilla_world::world_map::CurrentMap;
 
 use crate::area::ZoneInfo;
-use crate::client_state::ClientState;
 use crate::chr_classes::{ChrClassTable, ChrRaceTable};
+use crate::client_state::ClientState;
 use crate::creature_anim::select::{move_flags, MovementState};
 use crate::entities::mount::MountChild;
 use crate::names::NameCache;
@@ -285,12 +285,10 @@ impl BridgeReadout<'_, '_> {
     }
 
     fn peek_name(&self, guid: u64) -> Option<String> {
-        self.names
-            .as_ref()
-            .and_then(|n| {
-                n.resolve_unit(guid, None, crate::query_cache::Ask::Read)
-                    .map(str::to_string)
-            })
+        self.names.as_ref().and_then(|n| {
+            n.resolve_unit(guid, None, crate::query_cache::Ask::Read)
+                .map(str::to_string)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -366,7 +364,9 @@ impl BridgeReadout<'_, '_> {
                 guid,
                 net.kind,
                 store,
-                self.quest.as_ref().and_then(|q| q.statuses().get(&guid).copied()),
+                self.quest
+                    .as_ref()
+                    .and_then(|q| q.statuses().get(&guid).copied()),
             ));
         }
         u.push(("pos".into(), pos_payload(transform.translation)));
@@ -405,10 +405,32 @@ const DYNFLAG_TAPPED: u32 = 0x4;
 const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
 /// `GAMEOBJECT_TYPE_ID` names, 1.12's `GameobjectTypes` (herbs and veins are chests with a lock).
 const GO_TYPES: [&str; 26] = [
-    "door", "button", "questgiver", "chest", "binder", "generic", "trap", "chair", "spellfocus",
-    "text", "goober", "transport", "areadamage", "camera", "mapobject", "motransport",
-    "duelarbiter", "fishingnode", "ritual", "mailbox", "auctionhouse", "guardpost", "spellcaster",
-    "meetingstone", "flagstand", "fishinghole",
+    "door",
+    "button",
+    "questgiver",
+    "chest",
+    "binder",
+    "generic",
+    "trap",
+    "chair",
+    "spellfocus",
+    "text",
+    "goober",
+    "transport",
+    "areadamage",
+    "camera",
+    "mapobject",
+    "motransport",
+    "duelarbiter",
+    "fishingnode",
+    "ritual",
+    "mailbox",
+    "auctionhouse",
+    "guardpost",
+    "spellcaster",
+    "meetingstone",
+    "flagstand",
+    "fishinghole",
 ];
 
 /// What a row adds for automation: the template entry, an NPC's services and overhead quest
@@ -443,8 +465,14 @@ fn object_fields(
                         .collect(),
                 ),
             ));
-            u.push(("lootable".into(), PlainValue::Bool(dynamic & DYNFLAG_LOOTABLE != 0)));
-            u.push(("tapped".into(), PlainValue::Bool(dynamic & DYNFLAG_TAPPED != 0)));
+            u.push((
+                "lootable".into(),
+                PlainValue::Bool(dynamic & DYNFLAG_LOOTABLE != 0),
+            ));
+            u.push((
+                "tapped".into(),
+                PlainValue::Bool(dynamic & DYNFLAG_TAPPED != 0),
+            ));
             u.push((
                 "skinnable".into(),
                 PlainValue::Bool(s.unit_flags() & UNIT_FLAG_SKINNABLE != 0),

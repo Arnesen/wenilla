@@ -240,7 +240,8 @@ impl Scheduler {
     /// Render one chunk of the mix and start it at the cursor.
     fn schedule_chunk(&mut self) -> Result<(), JsValue> {
         self.renderer.on_start_processing();
-        self.renderer.process(&mut self.interleaved, self.channels as u16);
+        self.renderer
+            .process(&mut self.interleaved, self.channels as u16);
         let buffer = match self.free.pop() {
             Some(buffer) => buffer,
             None => self
