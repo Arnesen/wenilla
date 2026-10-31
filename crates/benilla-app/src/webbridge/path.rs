@@ -40,6 +40,7 @@ const BODY_RADIUS: f32 = 0.35;
 const BODY_FOOT: f32 = 0.6;
 const BODY_HEAD: f32 = 1.9;
 /// Search budget: cells expanded before the search gives up and answers the nearest point.
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))] // browser default and test budget
 pub(super) const MAX_EXPANSIONS: usize = 12_000;
 /// Arrival: within this many yards of the goal (horizontally) and this of its height.
 const GOAL_RADIUS: f32 = 1.5;

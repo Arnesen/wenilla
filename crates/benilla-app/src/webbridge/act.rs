@@ -35,6 +35,7 @@ use super::{BridgeInput, BridgeOutbox};
 
 /// One queued world verb, with the page's id for its `act` answer.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the page's queue builds them
 pub(crate) enum ActOp {
     Target(u64),
     /// `auto_loot`: open a body or a container with 1.12's auto-loot (the Shift-click), so the
@@ -232,6 +233,7 @@ fn answer_fields(id: u32, op: &str, result: Result<(), &str>) -> Vec<(String, Pl
 }
 
 /// A guid as the page sends it: the snapshot's own hex string (`"0xf130…"`), or decimal.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn parse_guid(s: &str) -> Option<u64> {
     let s = s.trim();
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {

@@ -48,11 +48,7 @@ pub fn read() -> Memory {
         m.total_mb = total / 1024;
         m.available_mb = avail / 1024;
         m.used_mb = m.total_mb.saturating_sub(m.available_mb);
-        m.used_pct = if m.total_mb > 0 {
-            m.used_mb * 100 / m.total_mb
-        } else {
-            0
-        };
+        m.used_pct = (m.used_mb * 100).checked_div(m.total_mb).unwrap_or(0);
         m.swap_total_mb = stotal / 1024;
         m.swap_used_mb = stotal.saturating_sub(sfree) / 1024;
     }
@@ -89,7 +85,7 @@ pub fn read() -> Memory {
             }
         }
         m.processes = by_name;
-        m.processes.sort_by(|a, b| b.1.cmp(&a.1));
+        m.processes.sort_by_key(|a| std::cmp::Reverse(a.1));
     }
     m
 }
