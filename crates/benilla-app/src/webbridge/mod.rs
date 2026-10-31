@@ -75,8 +75,10 @@ pub(crate) use snapshot::BridgeReadout;
 /// `commands` event follows the VM's binding table.
 pub(crate) const VERSION: u32 = 2;
 
-/// The inbound half: the queue drain and the VM-side ops, after this frame's wire and before
-/// the VM ticks (a `lua` op that queues a cast is serviced by the drains after [`UiInput`]).
+/// The inbound half: the queue drain and the VM-side ops, ahead of the frame's input records
+/// ([`UiInput`]), which run before the net drain: the page's asks are input like a key's, and
+/// read the world as the last frame left it (a `lua` op that queues a cast is serviced by the
+/// drains after [`UiInput`]). Ordering this after `WorldStage::Net` would close a cycle.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct BridgeIn;
 
@@ -289,7 +291,7 @@ impl Plugin for WebBridgePlugin {
             .init_resource::<BridgeOutbox>()
             .init_resource::<BridgeMemo>()
             .init_non_send_resource::<sink::WakeHook>()
-            .configure_sets(Update, BridgeIn.after(WorldStage::Net).before(UiInput))
+            .configure_sets(Update, BridgeIn.before(UiInput))
             .configure_sets(
                 Update,
                 BridgeOut.after(UiInput).after(UnitFeed).after(ZoneFeed),
