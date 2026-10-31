@@ -286,6 +286,17 @@ mod platform;
 #[cfg(windows)]
 mod platform {
     pub(super) fn tzset() {
+        // Rust changes the Win32 environment; the CRT owns a separate copy for `_tzset`.
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            extern "C" {
+                fn _putenv_s(name: *const libc::c_char, value: *const libc::c_char) -> libc::c_int;
+            }
+            let tz = std::ffi::CString::new(std::env::var("TZ").unwrap_or_default())
+                .expect("a test zone without NUL");
+            // SAFETY: both strings are NUL-terminated, and `_putenv_s` copies their contents.
+            assert_eq!(unsafe { _putenv_s(c"TZ".as_ptr(), tz.as_ptr()) }, 0);
+        }
         // SAFETY: `_tzset` takes nothing and only reads the zone.
         unsafe { libc::tzset() };
     }
@@ -299,7 +310,7 @@ mod platform {
     }
 
     /// The runtime's own `_timezone` and `_dstbias`.
-    pub(super) fn biases(_: &[super::Span]) -> (i32, i32) {
+    pub(super) fn biases(spans: &[super::Span]) -> (i32, i32) {
         // `long` is 32 bits on Windows.
         let (mut zone, mut bias): (libc::c_long, libc::c_long) = (0, 0);
         // SAFETY: each writes the one long it is handed.
@@ -307,7 +318,8 @@ mod platform {
             libc::get_timezone(&mut zone);
             libc::get_dstbias(&mut bias);
         }
-        (zone, bias)
+        // A fixed-offset zone has no daylight adjustment, even if the CRT retains its default.
+        (zone, if spans.iter().any(|s| s.dst) { bias } else { 0 })
     }
 
     pub(super) fn name(isdst: bool) -> Vec<u8> {
@@ -429,9 +441,13 @@ mod tests {
     /// A zone with daylight time: each change of offset found to the second.
     #[test]
     fn the_zone_changes_at_its_second() {
-        let _zone = ZoneGuard::set("CET-1CEST,M3.5.0,M10.5.0/3");
-        // 2024-03-31 01:00 UTC, when 02:00 CET becomes 03:00 CEST.
-        let at = 1_711_846_800;
+        // The Windows CRT accepts no POSIX transition suffix and uses US daylight rules.
+        let (tz, at) = if cfg!(windows) {
+            ("CET-1CEST", 1_710_032_400)
+        } else {
+            ("CET-1CEST,M3.5.0,M10.5.0/3", 1_711_846_800)
+        };
+        let _zone = ZoneGuard::set(tz);
         assert_eq!(local(at - 1).0.hour, 1);
         assert!(!local(at - 1).1);
         assert_eq!(local(at).0.hour, 3);

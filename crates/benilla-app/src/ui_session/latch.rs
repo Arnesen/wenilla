@@ -292,6 +292,7 @@ pub(crate) fn dispatch(world: &mut World) {
 
 /// [`dispatch`], then the check that at most `left` windows still hold the guid it released.
 fn walk(world: &mut World, left: usize) {
+    let _caller = benilla_ui::script::origin::caller(&walk);
     let Some(guid) = world
         .get_resource_mut::<InteractLatch>()
         .and_then(|mut l| l.guid.take())

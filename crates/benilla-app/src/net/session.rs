@@ -1836,7 +1836,13 @@ mod login_ask_tests {
         );
         frame(&mut app, vec![requested()]);
         // The world session's packets wait for the entry load (`net::apply::InboundHold`).
-        for _ in 0..3 {
+        for _ in 0..32 {
+            if !app
+                .world()
+                .contains_resource::<crate::ui_script::PendingEntryUiLoad>()
+            {
+                break;
+            }
             app.update();
         }
         assert!(

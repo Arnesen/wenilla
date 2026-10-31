@@ -360,6 +360,10 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
 /// dispatch reads what the last build left, as 1.12.1's does. They stay.
 #[rustfmt::skip]
 pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
+    ("::area::feed_zone_events", &["net::ObjectStore"],
+        "the tenth-tick area poll (`0x5db900`), after the packets, commits zone text through \
+         `0x494780`; wenilla's browser snapshot publishes the same commit and reads our faction \
+         template for its PvP type, without replacing the getters' live reads"),
     // With `widescreen`, which seats the cursor-anchored plate on the interface's screen.
     ("::ui_tooltip::drive_mouseover_tooltip", &["go_templates::GameObjectTemplates",
         "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",

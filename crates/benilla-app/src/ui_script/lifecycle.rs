@@ -55,6 +55,7 @@ pub(crate) fn strings_vm(world: &mut World) -> Option<UiScript> {
 /// startup, `0x402090` back from the world). It holds what the glue state holds and nothing of a
 /// boot VM's: no `GlobalStrings.lua`, no emote tokens.
 fn install_glue_vm(world: &mut World, screen: Option<&str>) -> bool {
+    let _caller = benilla_ui::script::origin::caller(&install_glue_vm);
     let Some(mut script) = new_vm(world, UiScript::new_glue) else {
         return false;
     };
@@ -729,6 +730,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
 
 /// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has.
 fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
+    let _caller = benilla_ui::script::origin::caller(&load_ingame_ui_seated);
     // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI; its
     // place in the load is unseen here, as the new VM reads the death snapshot only after it.
     crate::death::zero_release_timer(world);
@@ -923,6 +925,7 @@ fn entry_prepare(world: &mut World, script: &mut UiScript, seat: LoadSeat) -> En
 /// `VARIABLES_LOADED` handler makes applies inside its verb, as the reference's do; the world
 /// reads between them are the load's own.
 fn entry_finish(world: &mut World, script: &mut UiScript, inputs: &EntryInputs) {
+    let _caller = benilla_ui::script::origin::caller(&entry_finish);
     // The new VM's zoom cells from the persisted CVars, which the reference's statics hold across
     // the load; the world entry's minimap initializer reseeds them from the CVars again.
     let zoom = {
@@ -1309,6 +1312,7 @@ pub(crate) fn install_session_glue(world: &mut World) {
 /// The shutdown a logout and a reload share, up to the new VM: the shutdown tail, the folds and
 /// the host values reset.
 fn close_ui_session(world: &mut World, root: ShutdownRoot) {
+    let _caller = benilla_ui::script::origin::caller(&close_ui_session);
     // The front runs before the unpark, so a VM still parked (the load never ran) hears none of
     // it; the sweep's latch is spent at the root, so of this edge and the worldport's, the first
     // to a departure owns it.

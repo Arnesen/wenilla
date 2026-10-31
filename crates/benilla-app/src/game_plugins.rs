@@ -1744,6 +1744,10 @@ pub(crate) mod schedule_tests {
          "no system: a leg the arrival lane's firing runs, inside the drain, which runs only with the interface up"),
         ("ui_world_enter.rs", "fire_signal", Because::Deliberate,
          "no system: the arrival lane's firing runs it for each of the arrival's signals, inside the drain, which runs only with the interface up"),
+        ("webbridge/mod.rs", "run_vm_ops", Because::Deliberate,
+         "browser-only: its queues are page requests, answered against the current VM (glue or in-game), with an explicit error when none exists; the tap and command list rebind per VM, so gating on the in-game UI would strand glue-screen requests"),
+        ("webbridge/mod.rs", "publish_frame", Because::Deliberate,
+         "browser-only: it drains the current VM's observer tap and routed chat for the page, not the interface; an absent page deliberately discards them, and a new VM reinstalls its tap"),
     ];
 
     /// `ui_chat/feed.rs` → `ui_chat::feed`; `target/mod.rs` → `target`; `lib.rs` → ``.

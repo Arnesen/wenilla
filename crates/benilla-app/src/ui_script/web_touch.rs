@@ -14,6 +14,7 @@ pub(super) struct TouchFeed<'w, 's> {
     primary: Query<'w, 's, Entity, With<bevy::window::PrimaryWindow>>,
     egui: Res<'w, super::EguiPointerOver>,
     buttons: Res<'w, ButtonInput<MouseButton>>,
+    cover: Option<Res<'w, crate::loading_screen::LoadingScreen>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -48,7 +49,9 @@ impl TouchFeed<'_, '_> {
         let context = TouchContext {
             window: self.primary.single().ok(),
             screen,
-            available: window.focused && !self.egui.0,
+            available: window.focused
+                && !self.egui.0
+                && !self.cover.as_ref().is_some_and(|cover| cover.covering()),
             mouse_busy: self.buttons.get_pressed().next().is_some()
                 || self.buttons.get_just_pressed().next().is_some()
                 || self.buttons.get_just_released().next().is_some(),

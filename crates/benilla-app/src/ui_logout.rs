@@ -342,6 +342,7 @@ pub(crate) fn set_in_world(
 pub(crate) fn leave_world(
     mut vm: crate::script_calls::VmWith<Option<ResMut<'static, LogoutState>>>,
 ) {
+    let _caller = benilla_ui::script::origin::caller(&leave_world);
     let called_off = vm.own().is_some_and(|mut logout| {
         logout.world_handle = false;
         std::mem::take(&mut logout.pending)

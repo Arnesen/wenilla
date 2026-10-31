@@ -560,6 +560,7 @@ mod tests {
             let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let old = std::env::var_os("TZ");
             std::env::set_var("TZ", tz);
+            sync_crt_zone();
             Self { old, _lock: lock }
         }
     }
@@ -570,6 +571,20 @@ mod tests {
                 Some(v) => std::env::set_var("TZ", v),
                 None => std::env::remove_var("TZ"),
             }
+            sync_crt_zone();
+        }
+    }
+
+    fn sync_crt_zone() {
+        #[cfg(windows)]
+        {
+            extern "C" {
+                fn _putenv_s(name: *const libc::c_char, value: *const libc::c_char) -> libc::c_int;
+            }
+            let tz = std::ffi::CString::new(std::env::var("TZ").unwrap_or_default())
+                .expect("a test zone without NUL");
+            // SAFETY: `_putenv_s` copies both NUL-terminated strings into the CRT's environment.
+            assert_eq!(unsafe { _putenv_s(c"TZ".as_ptr(), tz.as_ptr()) }, 0);
         }
     }
 

@@ -32,7 +32,7 @@ fn family(rel: &str) -> Family {
         Family::Probe
     } else if file == "tests.rs" || file.ends_with("_tests.rs") || rel.contains("/tests/") {
         Family::Test
-    } else if rel.starts_with("ui_") {
+    } else if rel.starts_with("ui_") || rel.starts_with("webbridge/") {
         Family::Feed
     } else {
         Family::Game

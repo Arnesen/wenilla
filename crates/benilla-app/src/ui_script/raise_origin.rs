@@ -53,6 +53,11 @@ pub(crate) const RAISES_AT_THEIR_OWN_PLACE: &[Allow] = &[
               (`0x49156a`), outside any packet",
     },
     Allow {
+        frame: "ui_script::lifecycle::entry_finish",
+        why: "the same interface load's final phases, including `VARIABLES_LOADED` (`0x49156a`), \
+              shared by the synchronous load and the browser's frame-sliced entry load",
+    },
+    Allow {
         frame: "ui_script::lifecycle::close_ui_session",
         why: "the interface's shutdown (`0x490bd0`) signals `PLAYER_LEAVING_WORLD` (`0x490b4d`) \
               and `PLAYER_LOGOUT` (`0x490c2a`) itself, at a logout's, a disconnect's or a \
@@ -192,8 +197,7 @@ mod tests {
             .expect_err("the raise passed");
         let message = failed.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(
-            message.contains("`PLAYER_MONEY`")
-                && message.contains("raise_origin::tests::raises_at_frame_time"),
+            message.contains("`PLAYER_MONEY`") && message.contains("raise_origin.rs:"),
             "{message}"
         );
     }

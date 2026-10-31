@@ -741,6 +741,7 @@ fn feed_minimap_inside(
     mut inside_res: ResMut<MinimapInside>,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
+    let _caller = benilla_ui::script::origin::caller(&feed_minimap_inside);
     hosted_vm.run(|script| {
         let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
         inside_res.0 = inside;
