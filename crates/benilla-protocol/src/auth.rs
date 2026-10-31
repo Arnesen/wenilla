@@ -139,9 +139,13 @@ mod zone {
 mod zone {
     pub(super) fn standard_offset_east() -> Option<i64> {
         let year = js_sys::Date::new_0().get_full_year();
-        let west = |month: i32| js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset();
+        let west = |month: i32| {
+            js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset()
+        };
         let standard_west = west(0).max(west(6));
-        standard_west.is_finite().then(|| (-standard_west * 60.0) as i64)
+        standard_west
+            .is_finite()
+            .then(|| (-standard_west * 60.0) as i64)
     }
 }
 
@@ -556,6 +560,7 @@ mod tests {
             let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let old = std::env::var_os("TZ");
             std::env::set_var("TZ", tz);
+            sync_crt_zone();
             Self { old, _lock: lock }
         }
     }
@@ -566,6 +571,20 @@ mod tests {
                 Some(v) => std::env::set_var("TZ", v),
                 None => std::env::remove_var("TZ"),
             }
+            sync_crt_zone();
+        }
+    }
+
+    fn sync_crt_zone() {
+        #[cfg(windows)]
+        {
+            extern "C" {
+                fn _putenv_s(name: *const libc::c_char, value: *const libc::c_char) -> libc::c_int;
+            }
+            let tz = std::ffi::CString::new(std::env::var("TZ").unwrap_or_default())
+                .expect("a test zone without NUL");
+            // SAFETY: `_putenv_s` copies both NUL-terminated strings into the CRT's environment.
+            assert_eq!(unsafe { _putenv_s(c"TZ".as_ptr(), tz.as_ptr()) }, 0);
         }
     }
 
@@ -688,8 +707,7 @@ mod tests {
         packet.extend_from_slice(&body);
         packet.extend_from_slice(&0u16.to_le_bytes()); // footer padding
 
-        let realms =
-            futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
+        let realms = futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
         assert_eq!(realms.len(), 1);
         let r = &realms[0];
         assert_eq!(r.name, "Onyxia");

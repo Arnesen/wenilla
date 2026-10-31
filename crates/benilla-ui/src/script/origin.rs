@@ -4,8 +4,9 @@
 //! raise here is right inside a script call (a verb segment, a handler, the host's apply of a
 //! call), a lane's firing or the VM's own tick. One made anywhere else is a system raising at its
 //! own place in the frame, which the source scans cannot see when it goes through a helper in
-//! another module: it fails, naming its caller, unless a frame of its stack is on the host's allow
-//! list with its reason. Each raise is judged where it enters the VM, at one of its two doors: the
+//! another module: it fails, naming its caller, unless its caller is on the host's allow list
+//! with its reason. Hosted closures retain their type's function path even when optimization
+//! removes that function from the backtrace. Each raise is judged at one of its two doors: the
 //! fire (`tick::fire_event_into`) or the push onto the host queue (`Model::queue_event`); a queued
 //! one fires later inside the tick, and a held one inside the host's drain.
 //!
@@ -26,8 +27,8 @@ pub enum Origin {
     Tick,
 }
 
-/// An origin outside the three [`Origin`]s that may raise: a stack frame's function path, matched
-/// as a suffix of a frame's symbol (`ui_world_map::feed_landmarks`), with why it may.
+/// An origin outside the three [`Origin`]s that may raise: an executing callable's function path
+/// or stack symbol, matched by suffix (`ui_world_map::feed_landmarks`), with why it may.
 #[derive(Clone, Copy, Debug)]
 pub struct Allow {
     /// The function, by a suffix of its path.
@@ -59,6 +60,8 @@ mod imp {
     thread_local! {
         /// The origins open on this thread, innermost last.
         static OPEN: RefCell<Vec<Origin>> = const { RefCell::new(Vec::new()) };
+        /// The actual closures being run by a host boundary, independent of debug symbols.
+        static CALLERS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         /// The host's allow list and failure while the check is armed.
         static ARMED: Cell<ArmedState> = const { Cell::new(None) };
         /// The sites reported so far ([`Failure::Report`]).
@@ -81,6 +84,14 @@ mod imp {
         OPEN.with_borrow(|open| open.last().copied())
     }
 
+    pub(super) fn push_caller(name: &'static str) {
+        CALLERS.with_borrow_mut(|callers| callers.push(name));
+    }
+
+    pub(super) fn pop_caller() {
+        CALLERS.with_borrow_mut(|callers| callers.pop());
+    }
+
     pub(super) fn set_armed(armed: ArmedState) -> ArmedState {
         ARMED.replace(armed)
     }
@@ -95,6 +106,9 @@ mod imp {
         }
         // A Rust function a script called: what it raises is the script call's.
         if lua.is_some_and(|lua| lua.inspect_stack(0, |_| ()).is_some()) {
+            return;
+        }
+        if CALLERS.with_borrow(|callers| allow.iter().any(|a| allowed(a.frame, callers))) {
             return;
         }
         let trace = std::backtrace::Backtrace::force_capture().to_string();
@@ -190,6 +204,31 @@ mod imp {
         }
         ours.truncate(16);
         ours.join(" < ")
+    }
+}
+
+/// Retain the identity of the actual callable `f` while a host runs it. Only a matching entry
+/// in the armed allow list permits a raise; an unlisted caller gains no permission. The type
+/// name retains a closure's enclosing function without depending on backtrace debug information.
+#[must_use = "the caller is retained while the guard lives"]
+pub fn caller<F: ?Sized>(_: &F) -> Caller {
+    #[cfg(debug_assertions)]
+    imp::push_caller(std::any::type_name::<F>());
+    Caller {
+        _thread: std::marker::PhantomData,
+    }
+}
+
+/// [`caller`]'s scope, removed on normal return and unwind; empty without debug assertions.
+pub struct Caller {
+    // A thread-local scope must close on the thread that opened it.
+    _thread: std::marker::PhantomData<*mut ()>,
+}
+
+impl Drop for Caller {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        imp::pop_caller();
     }
 }
 
@@ -364,6 +403,79 @@ mod tests {
         let s = UiScript::new().unwrap();
         let _armed = arm(ALLOW, Failure::Panic);
         fire_event_into(&s.lua, "PLAYER_MONEY", Vec::new());
+    }
+
+    // This factory returns before its closure runs, so it cannot appear as a stack frame.
+    fn allowed_body() -> impl FnOnce(&mut UiScript) {
+        |s| s.fire_event("PLAYER_MONEY", Vec::new())
+    }
+
+    const ALLOWED_BODY: &[Allow] = &[Allow {
+        frame: "origin::tests::allowed_body",
+        why: "the returned closure's factory, absent from the stack",
+    }];
+
+    struct NoCalls;
+
+    impl crate::script::host::CallHost for NoCalls {
+        fn apply(
+            &mut self,
+            _: &mut UiScript,
+            _: crate::script::ScriptCall,
+        ) -> Option<crate::script::host::CallTail> {
+            panic!("this fixture makes no script calls")
+        }
+    }
+
+    /// A host keeps the actual closure's origin even with its enclosing function off the stack.
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
+    fn a_hosted_closure_keeps_its_allowed_origin_without_debug_symbols() {
+        let mut s = UiScript::new().unwrap();
+        let _armed = arm(ALLOWED_BODY, Failure::Panic);
+        s.hosted(&mut NoCalls, allowed_body());
+    }
+
+    /// A harness with no engine host retains the same caller without declaring a script origin.
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
+    fn a_hostless_closure_keeps_its_allowed_origin() {
+        let mut s = UiScript::new().unwrap();
+        let _armed = arm(ALLOWED_BODY, Failure::Panic);
+        s.refusing(allowed_body());
+    }
+
+    /// Retaining a caller never permits a function absent from the allow list.
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
+    fn an_unlisted_hosted_closure_still_fails() {
+        let mut s = UiScript::new().unwrap();
+        let _armed = arm(&[], Failure::Panic);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            s.hosted(&mut NoCalls, allowed_body());
+        }));
+        assert!(result.is_err(), "an unlisted hosted caller was allowed");
+    }
+
+    /// A caller grants nothing after its scope ends, including an unwind.
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
+    fn caller_scopes_close_on_return_and_unwind() {
+        let mut s = UiScript::new().unwrap();
+        let _armed = arm(ALLOWED_BODY, Failure::Panic);
+        for unwind in [false, true] {
+            let body = allowed_body();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _caller = caller(&body);
+                s.fire_event("PLAYER_MONEY", Vec::new());
+                assert!(!unwind, "unwind the caller scope");
+            }));
+            assert_eq!(result.is_err(), unwind);
+            let outside = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                s.fire_event("PLAYER_MONEY", Vec::new());
+            }));
+            assert!(outside.is_err(), "the caller leaked beyond its scope");
+        }
     }
 
     #[test]

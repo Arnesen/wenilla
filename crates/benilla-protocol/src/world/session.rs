@@ -269,12 +269,8 @@ impl WorldSession {
 
     /// Read + decrypt + parse one server packet.
     pub async fn recv_async(&mut self) -> Result<ServerPacket> {
-        let packet = recv_packet(
-            &mut self.conn,
-            Some(self.crypto.decrypter()),
-            &self.traffic,
-        )
-        .await?;
+        let packet =
+            recv_packet(&mut self.conn, Some(self.crypto.decrypter()), &self.traffic).await?;
         // `SMSG_ADDON_INFO` can reach any of the handshake's read loops, so it is caught here.
         match &packet {
             ServerPacket::AddonInfo { records } => self.link.addon_info = Some(records.clone()),
@@ -951,7 +947,10 @@ impl WorldSession {
         self.conn
             .set_read_timeout(None)
             .context("clearing handshake read timeout")?;
-        let (reader, writer) = self.conn.split().context("splitting the world connection")?;
+        let (reader, writer) = self
+            .conn
+            .split()
+            .context("splitting the world connection")?;
         let (encrypter, decrypter) = self.crypto.split();
         Ok((
             WorldReader {

@@ -40,6 +40,7 @@ const BODY_RADIUS: f32 = 0.35;
 const BODY_FOOT: f32 = 0.6;
 const BODY_HEAD: f32 = 1.9;
 /// Search budget: cells expanded before the search gives up and answers the nearest point.
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))] // browser default and test budget
 pub(super) const MAX_EXPANSIONS: usize = 12_000;
 /// Arrival: within this many yards of the goal (horizontally) and this of its height.
 const GOAL_RADIUS: f32 = 1.5;
@@ -145,8 +146,18 @@ pub(super) fn find(probe: &impl Probe, from: Vec3, to: Vec3, budget: usize) -> O
     let mut nodes: HashMap<Key, Node> = HashMap::new();
     let mut open = BinaryHeap::new();
     let start_key = key_of(start);
-    nodes.insert(start_key, Node { pos: start, g: 0.0, parent: None });
-    open.push(Open { f: flat_dist(start, goal), key: start_key });
+    nodes.insert(
+        start_key,
+        Node {
+            pos: start,
+            g: 0.0,
+            parent: None,
+        },
+    );
+    open.push(Open {
+        f: flat_dist(start, goal),
+        key: start_key,
+    });
     let mut best = (flat_dist(start, goal), start_key);
     let mut closed = std::collections::HashSet::new();
     let mut expanded = 0;
@@ -169,7 +180,16 @@ pub(super) fn find(probe: &impl Probe, from: Vec3, to: Vec3, budget: usize) -> O
         if expanded >= budget {
             break;
         }
-        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+        for (dx, dz) in [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ] {
             let x = (key.x + dx) as f32 * CELL;
             let z = (key.z + dz) as f32 * CELL;
             let Some(y) = probe.floor(x, z, node.pos.y) else {
@@ -191,8 +211,18 @@ pub(super) fn find(probe: &impl Probe, from: Vec3, to: Vec3, budget: usize) -> O
             if !probe.clear(node.pos, pos) {
                 continue;
             }
-            nodes.insert(nkey, Node { pos, g, parent: Some(key) });
-            open.push(Open { f: g + flat_dist(pos, goal), key: nkey });
+            nodes.insert(
+                nkey,
+                Node {
+                    pos,
+                    g,
+                    parent: Some(key),
+                },
+            );
+            open.push(Open {
+                f: g + flat_dist(pos, goal),
+                key: nkey,
+            });
         }
     }
 
@@ -282,7 +312,11 @@ mod tests {
             if lo > 5.0 + BODY_RADIUS || hi < 5.0 - BODY_RADIUS {
                 return true;
             }
-            let t = if (b.x - a.x).abs() < 1e-6 { 0.0 } else { (5.0 - a.x) / (b.x - a.x) };
+            let t = if (b.x - a.x).abs() < 1e-6 {
+                0.0
+            } else {
+                (5.0 - a.x) / (b.x - a.x)
+            };
             let z = a.z + (b.z - a.z) * t.clamp(0.0, 1.0);
             !(-10.0 - BODY_RADIUS..=10.0 + BODY_RADIUS).contains(&z)
         }
@@ -290,10 +324,19 @@ mod tests {
 
     #[test]
     fn a_path_goes_around_a_wall_and_is_pulled_tight() {
-        let p = find(&Walled, Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), MAX_EXPANSIONS)
-            .expect("a floor");
+        let p = find(
+            &Walled,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            MAX_EXPANSIONS,
+        )
+        .expect("a floor");
         assert!(!p.partial, "the far side is reachable");
-        assert!(p.points.len() >= 3, "it bends round the wall: {:?}", p.points);
+        assert!(
+            p.points.len() >= 3,
+            "it bends round the wall: {:?}",
+            p.points
+        );
         assert!(p.points.len() <= 5, "and is pulled tight: {:?}", p.points);
         for w in p.points.windows(2) {
             assert!(Walled.clear(w[0], w[1]), "every leg is walkable: {w:?}");
@@ -304,8 +347,13 @@ mod tests {
 
     #[test]
     fn an_open_line_is_one_leg() {
-        let p = find(&Walled, Vec3::new(0.0, 0.0, 20.0), Vec3::new(10.0, 0.0, 20.0), MAX_EXPANSIONS)
-            .unwrap();
+        let p = find(
+            &Walled,
+            Vec3::new(0.0, 0.0, 20.0),
+            Vec3::new(10.0, 0.0, 20.0),
+            MAX_EXPANSIONS,
+        )
+        .unwrap();
         assert_eq!(p.points.len(), 2);
     }
 
@@ -325,6 +373,9 @@ mod tests {
         let p = find(&Pit, Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 400).unwrap();
         assert!(p.partial);
         let end = *p.points.last().unwrap();
-        assert!(end.x <= 3.0 && end.x >= 1.5, "stops at the pit's edge: {end:?}");
+        assert!(
+            end.x <= 3.0 && end.x >= 1.5,
+            "stops at the pit's edge: {end:?}"
+        );
     }
 }

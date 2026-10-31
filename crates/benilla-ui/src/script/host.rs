@@ -413,6 +413,7 @@ impl UiScript {
         let lua = self.lua().clone();
         let r = lend(&lua, host, || {
             super::calls::drain(&lua);
+            let _caller = super::origin::caller(&f);
             f(self)
         });
         if !open(&lua) {
@@ -472,6 +473,7 @@ impl UiScript {
     /// is dropped as `f` returns, as with [`Self::refuse_waiting`].
     pub fn refusing<R>(&mut self, f: impl FnOnce(&mut UiScript) -> R) -> R {
         let lua = self.lua().clone();
+        let _caller = super::origin::caller(&f);
         let r = open_unheld(&lua, || f(self));
         self.refuse_waiting();
         r

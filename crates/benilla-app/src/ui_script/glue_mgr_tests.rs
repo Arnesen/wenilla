@@ -2381,11 +2381,7 @@ fn a_call_before_the_seat_runs_on_the_seating_frame() {
 
 /// An app with the manager, the login engine's glue asks and the stock glue VM on the login
 /// screen. Returns it, the credentials channel and the abandon generation.
-fn stock_app() -> (
-    App,
-    async_channel::Receiver<LoginRequest>,
-    Arc<AtomicU64>,
-) {
+fn stock_app() -> (App, async_channel::Receiver<LoginRequest>, Arc<AtomicU64>) {
     let (tx, rx) = async_channel::unbounded();
     let abandon = Arc::new(AtomicU64::new(0));
     let mut app = App::new();

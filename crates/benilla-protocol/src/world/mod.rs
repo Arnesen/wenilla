@@ -46,8 +46,9 @@ pub(super) async fn read_frame_async(
     mut decrypter: Option<&mut DecrypterHalf>,
     traffic: &LinkTraffic,
 ) -> Result<(u16, Vec<u8>)> {
-    let (size, opcode) =
-        read_header(r, &mut decrypter).await.map_err(|e| anyhow!("reading world header: {e}"))?;
+    let (size, opcode) = read_header(r, &mut decrypter)
+        .await
+        .map_err(|e| anyhow!("reading world header: {e}"))?;
     let body_len = size.saturating_sub(2);
     let mut body = vec![0u8; body_len];
     r.read_exact_async(&mut body)

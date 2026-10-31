@@ -121,6 +121,7 @@ pub(super) fn seed_ui_fixture(
     progress: Res<WorldLoadProgress>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
 ) {
+    let _caller = benilla_ui::script::origin::caller(&seed_ui_fixture);
     let icons = icons.as_deref();
     // The seed's Lua (its pushes, chunks and hovers) runs once the turn's world writes are in,
     // with the host lent: what it fires runs in place, and what it calls applies inside the verb.
@@ -1777,6 +1778,7 @@ fn open_character_fixture(
     mut vm: crate::script_calls::HostedVm,
     names: crate::ui_unit::NameTables,
 ) {
+    let _caller = benilla_ui::script::origin::caller(&open_character_fixture);
     let names = names.get();
     let named =
         |pair: Option<(&str, &str)>| pair.map(|(name, file)| (name.to_string(), file.to_string()));

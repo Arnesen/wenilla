@@ -2,8 +2,8 @@
 //! ([`build_collider_task`]) and [`finish_colliders`] attaches the results under a per-frame
 //! budget, since a streamed burst finishes together and each attach is main-thread work.
 
-use std::time::Duration;
 use bevy::platform::time::Instant;
+use std::time::Duration;
 
 use avian3d::prelude::{Collider, CollisionLayers, RigidBody};
 use benilla_assets::coords::wow_to_bevy;

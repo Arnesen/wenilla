@@ -278,6 +278,7 @@ pub(crate) fn arm_leaving_world_on_self_create(
 /// teardown, ahead of the objects' leg ([`crate::net::WorldportTimer`]). It precedes the new
 /// world's create, which the server sends after the teardown's acknowledgement.
 pub(crate) fn sweep_on_worldport(world: &mut World) {
+    let _caller = benilla_ui::script::origin::caller(&sweep_on_worldport);
     if world
         .get_resource::<crate::net::PendingWorldports>()
         .is_some_and(|p| p.is_posted())

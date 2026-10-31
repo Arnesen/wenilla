@@ -472,17 +472,17 @@ fn restore_chat_looks_again(world: &mut World, script: &mut UiScript, again: boo
         *file.identity.get(script) = Some(id);
         *file.dirty.get(script) = false;
         file.last_change = None;
-        let text = file
-            .path
-            .as_ref()
-            .and_then(|path| match crate::local_state::read_to_string(path) {
-                Ok(t) => Some(t),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => {
-                    warn!("chat cache: cannot read {}: {e}", path.display());
-                    None
-                }
-            });
+        let text =
+            file.path
+                .as_ref()
+                .and_then(|path| match crate::local_state::read_to_string(path) {
+                    Ok(t) => Some(t),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => {
+                        warn!("chat cache: cannot read {}: {e}", path.display());
+                        None
+                    }
+                });
         let had_file = text.is_some();
         // No marker: its `ZONECHANNELS` words may come from an empty roster. Repaired below, once.
         let damaged = text

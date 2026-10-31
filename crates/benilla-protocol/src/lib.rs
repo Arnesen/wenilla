@@ -25,10 +25,10 @@ pub use world::{
     WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::net::SocketAddr;
 use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::SocketAddr;
 
 use crate::transport::Conn;
 

@@ -85,6 +85,7 @@ impl NetHandlers {
 }
 
 fn call(world: &mut World, id: SystemId<In<SessionEvent>>, name: &str, ev: SessionEvent) {
+    let _caller = benilla_ui::script::origin::caller(&call);
     if let Err(e) = world.run_system_with(id, ev) {
         // A plugin bug (most likely a missing resource), logged loud so the smoke gate sees it.
         error!("net: handler `{name}` did not run: {e}");

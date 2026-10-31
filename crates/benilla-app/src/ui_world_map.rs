@@ -511,6 +511,7 @@ pub(crate) fn project_on_displayed(
 
 /// Hand the engine `GetWorldLocMapPosition`'s projection (`0x4a7360`) over a copy of the catalog.
 fn install_world_loc_projector(script: &mut UiScript, data: &WorldMapUiData) {
+    let _caller = benilla_ui::script::origin::caller(&install_world_loc_projector);
     let copy = data.clone();
     script.set_world_loc_projector(Box::new(move |selection, map, x, y| {
         project_on_displayed(&copy, selection, map, x, y)
@@ -808,6 +809,7 @@ fn feed_world_map(
     areas: Option<Res<crate::area::AreaTableRes>>,
     mut memo: Local<crate::ui_script::VmMemo<FeedMemos>>,
 ) {
+    let _caller = benilla_ui::script::origin::caller(&feed_world_map);
     vm.run(|script| {
         let (Some(script), Some(data), Some(map), Some(areas)) = (script, data, map, areas) else {
             return;

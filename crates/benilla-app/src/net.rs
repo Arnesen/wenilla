@@ -664,7 +664,10 @@ pub(crate) struct ParkGone;
 /// the IO task can await it on wasm; unbounded, so `try_send` fails only once the IO side is gone.
 pub(crate) enum ParkSender<T> {
     /// The shared, ordered channel the IO thread reads.
-    Park(async_channel::Sender<ParkRequest>, std::marker::PhantomData<fn(T)>),
+    Park(
+        async_channel::Sender<ParkRequest>,
+        std::marker::PhantomData<fn(T)>,
+    ),
     /// A channel of that kind alone, for a test that reads the requests itself.
     #[cfg(test)]
     Direct(async_channel::Sender<T>),

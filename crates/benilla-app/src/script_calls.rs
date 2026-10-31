@@ -1419,6 +1419,7 @@ pub(crate) fn hosted<R>(
     host: &mut Option<ScriptCallHost>,
     f: impl FnOnce(Option<&mut UiScript>) -> R,
 ) -> R {
+    let _caller = benilla_ui::script::origin::caller(&f);
     match script.as_deref_mut() {
         Some(script) => lent(script, host.as_mut(), |script| f(Some(script))),
         None => f(None),
@@ -1469,10 +1470,7 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
     /// outside, so what a call does to it is there for the next [`Self::own`].
     pub(crate) fn run<R>(&mut self, f: impl FnOnce(Option<&mut UiScript>) -> R) -> R {
         let mut host = self.set.p1();
-        match self.script.as_deref_mut() {
-            Some(script) => lent(script, host.as_mut(), |script| f(Some(script))),
-            None => f(None),
-        }
+        hosted(&mut self.script, &mut host, f)
     }
 
     /// Run `f` on the VM and `P` together as an engine turn ([`UiScript::host_out`]): a call the

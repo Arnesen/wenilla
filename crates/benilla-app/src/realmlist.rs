@@ -173,6 +173,19 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
         .map(|_| &s[prefix.len()..])
 }
 
+/// The address a fresh install dials: [`DEFAULT_REALMLIST`] natively; on the page, the origin
+/// that served it (see `crate::webenv::default_wow_host`).
+fn default_realmlist() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::webenv::default_wow_host()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DEFAULT_REALMLIST.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,18 +305,5 @@ mod tests {
         };
         r.set("logon.example.org");
         assert_eq!(r.address(), "logon.example.org");
-    }
-}
-
-/// The address a fresh install dials: [`DEFAULT_REALMLIST`] natively; on the page, the origin
-/// that served it (see `crate::webenv::default_wow_host`).
-fn default_realmlist() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::webenv::default_wow_host()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        DEFAULT_REALMLIST.to_string()
     }
 }

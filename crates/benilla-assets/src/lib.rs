@@ -118,7 +118,9 @@ impl MpqAssetReader {
         );
         wasm_fetch(&url).await.map_err(|e| match e {
             WasmFetchError::NotFound => AssetReaderError::NotFound(path.to_path_buf()),
-            WasmFetchError::Other(msg) => AssetReaderError::Io(Arc::new(std::io::Error::other(msg))),
+            WasmFetchError::Other(msg) => {
+                AssetReaderError::Io(Arc::new(std::io::Error::other(msg)))
+            }
         })
     }
 }
