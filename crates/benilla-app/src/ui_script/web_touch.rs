@@ -228,11 +228,12 @@ mod tests {
         script
             .run(
                 r#"
-                clicks, downs, ups, stops, starts, worldClicks, leaves = 0, 0, 0, 0, 0, 0, 0
+                clicks, downs, ups, stops, starts, worldEdges, leaves = 0, 0, 0, 0, 0, 0, 0
                 WorldFrame = CreateFrame("WorldFrame", "WorldFrame")
                 WorldFrame:SetAllPoints()
                 WorldFrame:SetFrameStrata("BACKGROUND")
-                WorldFrame:SetScript("OnClick", function() worldClicks = worldClicks + 1 end)
+                WorldFrame:SetScript("OnMouseDown", function() worldEdges = worldEdges + 1 end)
+                WorldFrame:SetScript("OnMouseUp", function() worldEdges = worldEdges + 1 end)
                 TestButton = CreateFrame("Button", "TestButton")
                 TestButton:SetPoint("BOTTOMLEFT", 100, 200)
                 TestButton:SetWidth(100) TestButton:SetHeight(60)
@@ -272,7 +273,7 @@ mod tests {
         assert_eq!(count(&script, "ups"), 1);
         assert_eq!(count(&script, "clicks"), 1);
         assert_eq!(count(&script, "leaves"), 1);
-        assert_eq!(count(&script, "worldClicks"), 0);
+        assert_eq!(count(&script, "worldEdges"), 0);
         assert!(touch.contact.is_none());
         assert!(script.errors().is_empty(), "{:?}", script.errors());
     }
@@ -307,13 +308,15 @@ mod tests {
             let result = touch.feed(&mut script, context, events.iter());
             assert_eq!(result.handled, !widescreen);
             assert_eq!(count(&script, "clicks"), i64::from(!widescreen));
-            assert_eq!(count(&script, "worldClicks"), 0);
+            assert_eq!(count(&script, "worldEdges"), 0);
         }
     }
 
     #[test]
     fn a_world_contact_does_not_hover_click_or_acquire_ui_when_it_moves_over_it() {
         let mut script = ui();
+        let world = script.hit_test(500.0, 268.0).expect("world touch target");
+        assert!(script.is_world_frame(world));
         let mut touch = TouchState::default();
         let events = [
             event(1, TouchPhase::Started, 500.0, 500.0),
@@ -323,7 +326,7 @@ mod tests {
         let result = touch.feed(&mut script, context(), events.iter());
         assert!(!result.handled && result.owner.is_none());
         assert_eq!(count(&script, "downs"), 0);
-        assert_eq!(count(&script, "worldClicks"), 0);
+        assert_eq!(count(&script, "worldEdges"), 0);
         assert_eq!(count(&script, "leaves"), 0);
     }
 
@@ -421,7 +424,7 @@ mod tests {
             [event(1, TouchPhase::Ended, 150.0, 538.0)].iter(),
         );
         assert_eq!(count(&script, "clicks"), 0);
-        assert_eq!(count(&script, "worldClicks"), 0);
+        assert_eq!(count(&script, "worldEdges"), 0);
         assert!(touch.contact.is_none());
     }
 
