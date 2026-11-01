@@ -11,7 +11,7 @@
 //! Each CVar is also a command under its own name (`0x63dde0`): a bare name prints
 //! `CVar "%s" is "%s"` here, looked up after the registered commands; with a value it was a write,
 //! which `ConsoleExec` ran. The built-ins here are `ConsoleVar.cpp`'s `cvarlist` and the registry's
-//! `help`, which also lists the commands `ConsoleExec` runs (`CVAR_COMMANDS`).
+//! `help`, which also lists the commands `ConsoleExec` runs (`VM_COMMANDS`).
 //!
 //! What a command prints goes to the log ([`ConsoleSteps::run`]): the reference's `ConsoleWrite` (`0x63cb50`)
 //! only links a line into the console screen's list, which opens only with `-console`
@@ -19,6 +19,8 @@
 
 use std::collections::HashMap;
 
+use bevy::app::MainScheduleOrder;
+use bevy::ecs::schedule::{ExecutorKind, ScheduleLabel};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
@@ -58,6 +60,97 @@ pub(crate) struct ConsoleSteps<'w, 's> {
     pub(crate) reload: Option<ResMut<'w, crate::ui_script::ReloadUiPending>>,
     /// The queue the commands that run against the world wait in.
     world: Option<Res<'w, crate::creature_anim::UnitEdits>>,
+    /// `repeat`'s count and stored line.
+    repeat: Option<ResMut<'w, ConsoleRepeat>>,
+}
+
+/// The console screen's pending `repeat` (`0x639250`): the count at `0xc4eabc` and the 64-byte
+/// command at `0xc4e960`, which the per-frame handler (`0x63bd50`) runs ([`run_repeat`]).
+#[derive(Resource, Default, Debug, PartialEq, Eq)]
+pub(crate) struct ConsoleRepeat {
+    count: u32,
+    command: String,
+}
+
+/// The command buffer of `repeat` (`push 0x40`, `0x6392c3`): 63 bytes of text.
+const REPEAT_BYTES: usize = 0x3f;
+
+impl ConsoleRepeat {
+    /// `repeat`'s handler (`0x639250`) on its argument tail. No argument clears the count
+    /// (`0x6392e4`). Else the tail is cut at its first space or tab (`0x639292`-`0x6392a4`), the
+    /// text before it read with `SStrToUnsigned` (`0x6392a9`: leading decimal digits, wrapping,
+    /// 0 for none) and the rest after that one separator copied into the buffer (`0x6392ca`).
+    /// A zero count, or no rest, changes nothing (`0x6392b2`, `0x6392b6`, `0x6392b8`).
+    fn set(&mut self, args: &str) {
+        if args.is_empty() {
+            self.count = 0;
+            return;
+        }
+        let (word, rest) = match args.find([' ', '\t']) {
+            Some(at) => (&args[..at], &args[at + 1..]),
+            None => (args, ""),
+        };
+        let count = word
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .fold(0u32, |n, d| {
+                n.wrapping_mul(10).wrapping_add(u32::from(d - b'0'))
+            });
+        if count != 0 && !rest.is_empty() {
+            self.command = rest.to_string();
+            cut_to_bytes(&mut self.command, REPEAT_BYTES);
+            self.count = count;
+        }
+    }
+}
+
+/// `repeat` (`0x639250`, category 2, help `Repeats a command`), registered by
+/// `ConsoleScreenInitialize` (`0x63b460`) at every context start.
+fn repeat(steps: &mut ConsoleSteps, args: &str) -> Vec<String> {
+    if let Some(state) = steps.repeat.as_deref_mut() {
+        state.set(args);
+    }
+    Vec::new()
+}
+
+/// The frame step of [`run_repeat`]: a schedule of its own after `Update`, run on the thread that
+/// runs the frame, which holds the VM (as `ui_script::raise_origin`'s are), because the line it
+/// runs may reach any of the call host's state.
+#[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+struct ConsoleRepeatFrame;
+
+fn add_repeat_frame(app: &mut App) {
+    if app.world().get_resource::<MainScheduleOrder>().is_none() {
+        return;
+    }
+    let mut schedule = Schedule::new(ConsoleRepeatFrame);
+    schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+    schedule.add_systems(run_repeat);
+    app.add_schedule(schedule);
+    app.world_mut()
+        .resource_mut::<MainScheduleOrder>()
+        .insert_after(Update, ConsoleRepeatFrame);
+}
+
+/// The slide handler's `repeat` leg (`0x63bd50`, `0x63bdb2`-`0x63bdd0`), once a frame whether or not
+/// the console is shown: with a count and a command it runs the line through the executor
+/// (`0x63ce00`, no history) and lowers the count, as read after the line ran, so a line that is
+/// itself a `repeat` is counted down from what it set, and a count of 0 it left wraps.
+pub(crate) fn run_repeat(world: &mut World) {
+    let Some(line) = world
+        .get_resource::<ConsoleRepeat>()
+        .filter(|r| r.count != 0 && !r.command.is_empty())
+        .map(|r| r.command.clone())
+    else {
+        return;
+    };
+    crate::script_calls::with_hosted_vm(world, |script| {
+        if let Some(Err(e)) = script.map(|s| s.console_exec(&line)) {
+            warn!("console: repeat {line:?}: {e}");
+        }
+    });
+    let mut state = world.resource_mut::<ConsoleRepeat>();
+    state.count = state.count.wrapping_sub(1);
 }
 
 /// Where a console line reads the CVars: the calling VM's mirror inside a `ConsoleExec` call,
@@ -318,29 +411,36 @@ fn register<'a>(
     app
 }
 
-/// `ConsoleVar.cpp`'s commands that write a CVar, which `ConsoleExec` runs on the VM's mirror
-/// inside the call (`benilla_ui::script`'s `console_exec`): listed by `help`, never run here.
-/// Registered in category 5 with these helps (`0x63d3d0`-`0x63d40d`).
-const CVAR_COMMANDS: [(&str, &str); 3] = [
-    ("set", "Set the value of a CVar"),
+/// The commands `ConsoleExec` runs inside the call on the VM's state, listed by `help` and never
+/// run here: `ConsoleVar.cpp`'s three that write a CVar (`0x63d3d0`-`0x63d40d`, category 5 with
+/// these helps), `gxRestart` (`0x63b360`-`0x63b36e`, category 1, no help) and `bind` (`0x4b6050`,
+/// category 5, no help).
+const VM_COMMANDS: [(&str, ConsoleCategory, Option<&str>); 5] = [
+    ("set", DEFAULT, Some("Set the value of a CVar")),
     (
         "cvar_reset",
-        "Set the value of a CVar to it's startup value",
+        DEFAULT,
+        Some("Set the value of a CVar to it's startup value"),
     ),
     (
         "cvar_default",
-        "Set the value of a CVar to it's coded default value",
+        DEFAULT,
+        Some("Set the value of a CVar to it's coded default value"),
     ),
+    ("gxRestart", GRAPHICS, None),
+    ("bind", DEFAULT, None),
 ];
 
 /// The built-ins: `ConsoleVar.cpp`'s `cvarlist` (`0x63d423`), then `RegisterBuiltinCommands`'
 /// four (`0x6400e0`, from `InitializeGlobal` at `0x40236b`): `help`, and `quit`, `ver` and
-/// `setmap` in category 5 with no help.
+/// `setmap` in category 5 with no help; then the console screen's `repeat`.
 pub(crate) struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ConsoleCommands>();
+        app.init_resource::<ConsoleCommands>()
+            .init_resource::<ConsoleRepeat>();
+        add_repeat_frame(app);
         let listing = |run| ConsoleRun::InCall(run);
         register(
             app,
@@ -360,7 +460,8 @@ impl Plugin for ConsolePlugin {
         )
         .console_command("quit", DEFAULT, None, quit)
         .console_command_in_call("ver", DEFAULT, None, ver)
-        .console_command_in_call("setmap", DEFAULT, None, setmap);
+        .console_command_in_call("setmap", DEFAULT, None, setmap)
+        .console_command_in_call("repeat", CONSOLE, Some("Repeats a command"), repeat);
     }
 }
 
@@ -465,15 +566,16 @@ const HELP_COMMAND_LINE: usize = 0xc4;
 /// - Anything else prints nothing.
 ///
 /// Deviation: a line of eight names is not left with its trailing `, ` and a list of a multiple
-/// of eight names is not followed by `NONE`, two slips of the reference's loop (`0x63ffed`,
-/// `0x64004d`). The commands list in registration order, then the CVars in the registry's list
-/// order, where the reference's one table interleaves them as start-up registers them.
+/// of eight names is not followed by `NONE`, because those are two slips of the reference's loop
+/// (`0x63ffed`, `0x64004d`). The commands list in registration order, then the CVars in the
+/// registry's list order, where the reference's one table interleaves them as start-up registers
+/// them.
 ///
 /// Deviation: a CVar lists under its registration's category with its registration's help, even
-/// when `config.toml` held it at boot. In the reference such a record was made by the config
-/// line's `set` (`0x63d569`-`0x63d582`), which registered its command in category 5 with the help
-/// `""` (`0x63ddc9`), and the later registration finds the record and returns without registering
-/// again (`0x63dc1a`-`0x63dc87`), so what `help` says would hang on what the file held.
+/// when `config.toml` held it at boot, because in the reference such a record was made by the
+/// config line's `set` (`0x63d569`-`0x63d582`), which registered its command in category 5 with the
+/// help `""` (`0x63ddc9`), and the later registration finds the record and returns without
+/// registering again (`0x63dc1a`-`0x63dc87`), so what `help` says would hang on what the file held.
 fn help(steps: &mut ConsoleSteps, args: &str) -> Vec<String> {
     if args.is_empty() {
         return vec![
@@ -498,10 +600,10 @@ fn help(steps: &mut ConsoleSteps, args: &str) -> Vec<String> {
             .filter(|c| c.category == category)
             .map(|c| c.name)
             .chain(
-                CVAR_COMMANDS
+                VM_COMMANDS
                     .iter()
-                    .filter(|_| category == DEFAULT)
-                    .map(|(name, _)| *name),
+                    .filter(|(_, c, _)| *c == category)
+                    .map(|(name, ..)| *name),
             );
         let rows = cvars
             .0
@@ -520,11 +622,11 @@ fn help(steps: &mut ConsoleSteps, args: &str) -> Vec<String> {
     }
     let help = if let Some(command) = table.get(args) {
         Some(command.help)
-    } else if let Some((_, help)) = CVAR_COMMANDS
+    } else if let Some((.., help)) = VM_COMMANDS
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(args))
+        .find(|(name, ..)| name.eq_ignore_ascii_case(args))
     {
-        Some(Some(*help))
+        Some(*help)
     } else {
         cvars
             .row(args)
@@ -722,7 +824,10 @@ mod tests {
         );
         assert_eq!(
             run(&mut app, "help CONSOLE"),
-            ["Commands registered for the category CONSOLE:", "help"]
+            [
+                "Commands registered for the category CONSOLE:",
+                "help, repeat"
+            ]
         );
         assert_eq!(
             run(&mut app, "help gm"),
@@ -806,6 +911,106 @@ mod tests {
             .map(|c| c.window)
             .collect();
         assert_eq!(asked, [window], "the primary window is asked to close");
+    }
+
+    /// `gxRestart` (category 1) and `bind` (category 5) register with no help (`0x63b36e`,
+    /// `0x4b6050`), so `help` lists and answers them though `ConsoleExec` runs them.
+    #[test]
+    fn help_knows_gx_restart_and_bind() {
+        let mut app = console_app();
+        let listed = |app: &mut App, category: &str, name: &str| {
+            run(app, &format!("help {category}"))[1..]
+                .iter()
+                .any(|l| l.split(", ").any(|n| n == name))
+        };
+        assert!(listed(&mut app, "graphics", "gxRestart"));
+        assert!(listed(&mut app, "default", "bind"));
+        assert!(!listed(&mut app, "default", "gxRestart"));
+        assert_eq!(
+            run(&mut app, "help bind"),
+            ["Help for command bind:", "     bind No help yet"]
+        );
+        assert_eq!(
+            run(&mut app, "help GXRESTART"),
+            ["Help for command GXRESTART:", "     GXRESTART No help yet"]
+        );
+    }
+
+    fn pending(app: &App) -> (u32, String) {
+        let r = app.world().resource::<ConsoleRepeat>();
+        (r.count, r.command.clone())
+    }
+
+    /// `repeat` (`0x639250`) cuts its tail at the first space or tab, reads the count with
+    /// `SStrToUnsigned` and stores the rest in 63 bytes. No tail clears the count; a zero count
+    /// or no rest changes nothing.
+    #[test]
+    fn repeat_stores_a_count_and_the_rest_of_the_line() {
+        let mut app = console_app();
+        run(&mut app, "repeat 3 ver");
+        assert_eq!(pending(&app), (3, "ver".into()));
+        run(&mut app, "repeat 7");
+        run(&mut app, "repeat 0 setmap");
+        run(&mut app, "repeat many setmap");
+        assert_eq!(pending(&app), (3, "ver".into()), "nothing to store");
+        run(&mut app, "repeat 2\tset x   y");
+        assert_eq!(pending(&app), (2, "set x   y".into()), "a tab cuts it too");
+        run(&mut app, "repeat 5  ver");
+        assert_eq!(
+            pending(&app),
+            (5, " ver".into()),
+            "one separator is dropped"
+        );
+        run(&mut app, "repeat 4294967297 ver");
+        assert_eq!(pending(&app).0, 1, "the count wraps");
+        run(&mut app, "repeat 12ab ver");
+        assert_eq!(pending(&app).0, 12, "leading digits");
+        run(&mut app, &format!("repeat 2 {}", "x".repeat(100)));
+        assert_eq!(pending(&app), (2, "x".repeat(63)), "63 bytes and a NUL");
+        run(&mut app, "repeat");
+        assert_eq!(
+            pending(&app),
+            (0, "x".repeat(63)),
+            "no tail clears the count"
+        );
+    }
+
+    /// `repeat` is category 2 with the help `Repeats a command` (`0x639250`, the table at
+    /// `0x8645ac`).
+    #[test]
+    fn repeat_is_a_console_command() {
+        let mut app = console_app();
+        assert_eq!(
+            run(&mut app, "help repeat"),
+            ["Help for command repeat:", "     repeat Repeats a command"]
+        );
+        assert!(run(&mut app, "help console")[1..]
+            .iter()
+            .any(|l| l.split(", ").any(|n| n == "repeat")));
+    }
+
+    /// The per-frame handler (`0x63bd50`) runs the stored line once a frame and lowers the count
+    /// (`0x63bdb2`-`0x63bdd0`): `bind` writes the live key table, which is read back between frames.
+    #[test]
+    fn a_pending_repeat_runs_once_a_frame_and_counts_down() {
+        let mut app = console_app();
+        crate::script_calls::insert_test_vm(app.world_mut());
+        let action = |app: &App| -> String {
+            crate::script_calls::eval_in_vm(app.world(), "return GetBindingAction('F')")
+        };
+        let rebind = |app: &App, to: &str| {
+            crate::script_calls::eval_in_vm::<()>(app.world(), &format!("SetBinding('F', {to:?})"))
+        };
+        run(&mut app, "repeat 2 bind F SITORSTAND");
+        rebind(&app, "NOTHING");
+        run_repeat(app.world_mut());
+        assert_eq!((action(&app), pending(&app).0), ("SITORSTAND".into(), 1));
+        rebind(&app, "NOTHING");
+        run_repeat(app.world_mut());
+        assert_eq!((action(&app), pending(&app).0), ("SITORSTAND".into(), 0));
+        rebind(&app, "NOTHING");
+        run_repeat(app.world_mut());
+        assert_eq!(action(&app), "NOTHING", "a spent count runs nothing");
     }
 
     #[test]

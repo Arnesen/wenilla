@@ -408,11 +408,6 @@ pub(crate) struct Model {
     /// or the targeting cursor made while it was out, and the handlers an engine step fired then
     /// ([`super::host::holding`]), for it to run as soon as it is back.
     pub(crate) script_calls: Vec<super::calls::Waiting>,
-    /// What deferred stretches left waiting, parked by key until the app runs them
-    /// ([`super::UiScript::park_since`]).
-    pub(crate) parked: HashMap<u64, Vec<super::calls::Waiting>>,
-    /// The next key [`Self::parked`] hands out.
-    pub(crate) next_parked: u64,
     /// How many drains of [`Self::script_calls`] are running, each inside a call the one outside
     /// it applied ([`super::calls::submit`]).
     pub(crate) call_depth: u8,
@@ -463,6 +458,9 @@ pub(crate) struct Model {
     /// `SetLookingForGroup` writes and `GetLookingForGroup` reads; the reference's slots stay 0.
     pub(crate) lfg_slots: [u32; 3],
     pub(crate) lfg_comment: String,
+    /// The looking-for-group result list `MSG_LOOKING_FOR_GROUP`'s reply writes, and its title
+    /// waits.
+    pub(crate) lfg_store: super::lfg::LfgStore,
     /// Guild roster, ranks, MOTD and info, sorted and filtered by the app, which holds the toggles.
     pub(crate) guild: guild::GuildState,
     /// The roster module's own cells and the rank editor's unsaved edits, apart from `guild` so a
@@ -481,6 +479,8 @@ pub(crate) struct Model {
     pub(crate) known_languages: Vec<String>,
     /// `Languages.dbc`'s `(ID, Name_lang)` rows in file order, whatever the character knows.
     pub(crate) language_table: Vec<(u32, String)>,
+    /// The `ChrRaces` and `ChrClasses` rows an item's race and class lines walk.
+    pub(crate) item_req_names: super::tooltip_item::names::ItemReqNames,
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
     /// other word to 1). Boots at 1, as the reference writes `AUTO` for an untouched option.
@@ -917,9 +917,6 @@ pub(crate) struct Model {
     pub(crate) quest_blip: Option<quest_log::QuestBlip>,
     /// Item id to its tooltip view.
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
-    /// Item ids asked for and missing, for the app to answer: a lookup with a callback, which
-    /// asks the server.
-    pub(crate) item_stat_asks: HashSet<u32>,
     /// Item ids `GetItemInfo` read and missing: its lookup passes no callback (`0x48e185`), so
     /// the app answers from its cache only.
     pub(crate) item_stat_reads: HashSet<u32>,
@@ -1028,6 +1025,10 @@ pub(crate) struct Model {
 
     /// `GetBillingTimeRested()` (`0x48ec50`) in minutes from `SMSG_AUTH_RESPONSE`, unconverted.
     pub(crate) billing_time_rested: u32,
+    /// `GetBillingTimeRemaining()`'s minutes (`+0x1af4`, `0x46dbf0`) from the same group.
+    pub(crate) billing_time_remaining: u32,
+    /// The plan flags (`+0x1afc`) `GetBillingPlan()` decodes (`0x46dc40`).
+    pub(crate) billing_plan_flags: u8,
     /// `InCinematic()`. While set, `StaticPopup_Show` refuses any dialog without
     /// `interruptCinematic` (`StaticPopup.lua:1454`).
     pub(crate) in_cinematic: bool,
@@ -1109,6 +1110,8 @@ pub(crate) struct Model {
     pub(crate) worldmap: super::worldmap::WorldMapState,
     /// Nameplate `Button`s under `WorldFrame`, never shrunk, visible to `GetChildren()`.
     pub(crate) nameplates: super::nameplate::NamePlates,
+    /// The units' watch lists in link order ([`super::unit_watch`]).
+    pub(crate) unit_watches: super::unit_watch::UnitWatches,
     /// Chat bubble `Frame`s under `WorldFrame`, pooled the same way.
     pub(crate) chat_bubbles: super::chat_bubble::ChatBubbles,
     /// The world-state readout's rows, gated and resolved by the app.
@@ -1442,8 +1445,6 @@ impl Model {
             unit_guids: Default::default(),
             tracking: None,
             script_calls: Vec::new(),
-            parked: HashMap::new(),
-            next_parked: 0,
             call_depth: 0,
             kept_calls: None,
             call_raises: Default::default(),
@@ -1466,6 +1467,7 @@ impl Model {
             lfg_dungeons: Vec::new(),
             lfg_slots: [0; 3],
             lfg_comment: String::new(),
+            lfg_store: Default::default(),
             guild: guild::GuildState::default(),
             guild_cells: guild::GuildCells::default(),
             petition: petition::PetitionState::default(),
@@ -1476,6 +1478,7 @@ impl Model {
             chat_colors_changed: false,
             known_languages: Vec::new(),
             language_table: Vec::new(),
+            item_req_names: Default::default(),
             zone_channel_catalog: Vec::new(),
             guild_recruitment_mode: 1,
             guild_recruitment_cascade: false,
@@ -1650,7 +1653,6 @@ impl Model {
             random_properties: HashMap::new(),
             enchant_names: HashMap::new(),
             known_spells: HashSet::new(),
-            item_stat_asks: HashSet::new(),
             item_stat_reads: HashSet::new(),
             player_req: PlayerReqState::default(),
             lock_rows: HashMap::new(),
@@ -1680,6 +1682,7 @@ impl Model {
             shown_chat_lines: Vec::new(),
             worldmap: super::worldmap::WorldMapState::default(),
             nameplates: super::nameplate::NamePlates::default(),
+            unit_watches: Default::default(),
             chat_bubbles: super::chat_bubble::ChatBubbles::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
@@ -1711,6 +1714,8 @@ impl Model {
             partial_play_time: false,
             no_play_time: false,
             billing_time_rested: 0,
+            billing_time_remaining: 0,
+            billing_plan_flags: 0,
             in_cinematic: false,
             exhaustion: [
                 (1, ("Rested".to_string(), 2.0)),

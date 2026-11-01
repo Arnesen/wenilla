@@ -38,12 +38,24 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::SpellLearned, on_spell_learned)
         .net_handler(K::SpellRemoved, on_spell_removed)
         .net_handler(K::SpellSuperceded, on_spell_superceded)
+        .init_resource::<ChainedCast>()
+        // `HandleCastResult`'s legs in its order, each after the edits the one before it queued
+        // have applied: the failure's precast end (`0x6e1c8e`), whose tail releases our loot; the
+        // rest of the report, the revert and the slot's pop; then the `modalNextSpell` chain's
+        // cast (`0x6e74aa`).
         .net_handler(K::CastResult, on_cast_result)
+        .net_handler(K::CastResult, on_cast_result_report)
+        .net_handler(K::CastResult, on_cast_result_chain)
         .net_handler(K::SpellStart, on_spell_start)
         .net_handler(K::SpellGo, on_spell_go)
-        // `HandleSpellGo`'s tail in its order: the repeat hook (`0x6e81e7`), then the cooldown
-        // inserts (`0x6e8425`-`0x6e8570`).
+        // `HandleSpellGo`'s tail in its order, each after the edits the one before it queued have
+        // applied, the precast end's loot close among them: the repeat hook (`0x6e81e7`), the
+        // chest's loot target (`0x6e831b`), the deferred attack start (`0x6e8402`), then the
+        // cooldown inserts (`0x6e8425`-`0x6e8570`).
+        .init_resource::<GoAttackStart>()
         .net_handler(K::SpellGo, on_go_repeat)
+        .net_handler(K::SpellGo, on_go_loot_target)
+        .net_handler(K::SpellGo, on_go_attack_start)
         .net_handler(K::SpellGo, on_go_cooldowns)
         .net_handler(K::SpellChainTargets, on_spell_chain_targets)
         .net_handler(K::SpellFailedOther, on_spell_failed_other)
@@ -334,17 +346,44 @@ pub(crate) struct Reply<'w, 's> {
     items: Option<Res<'w, crate::items::Items>>,
 }
 
-/// `HandleCastResult 0x6e7330`, the one handler that casts: a reply whose spell names a
-/// `modalNextSpell` (column 38) chains it through the ladder in the same call (`0x6e74aa call
-/// 0x6e5a90` → `TryCast 0x6e4b60`), so it arms the in-flight slot before the next packet.
-///
-/// The chained cast goes out at the null target guid (`0x6e74a6 push ebx; push ebx`, `ebx = 0`),
-/// so it binds through `ArmCast 0x6e5250`'s ordinary walk ([`CastTargeting::context`]) and takes
-/// every rung a press takes.
+/// `HandleCastResult 0x6e7330` through a failure's precast end ([`cast_result_head`]), whose tail
+/// releases our loot as the edits apply, ahead of the report's sends.
 fn on_cast_result(
     In(ev): In<SessionEvent>,
+    edits: Res<crate::creature_anim::UnitEdits>,
+    self_guid: Res<SelfGuid>,
+    index: Res<GuidIndex>,
+    mut cooldowns: ResMut<Cooldowns>,
+    spells: Option<Res<Spells>>,
+) {
+    if let SessionEvent::CastResult {
+        spell_id,
+        success,
+        reason,
+        arg,
+    } = ev
+    {
+        cast_result_head(
+            spell_id,
+            success,
+            reason,
+            arg,
+            &edits,
+            &self_guid,
+            &index,
+            &mut cooldowns,
+            spells.as_deref(),
+        );
+    }
+}
+
+/// The rest of `HandleCastResult` up to its chain ([`cast_result_rest`]): the report past its
+/// precast end, the revert, the slot's pop, and the spell a reply chains, which
+/// [`on_cast_result_chain`] casts once this leg's edits have applied.
+fn on_cast_result_report(
+    In(ev): In<SessionEvent>,
     mut ladder: CastLadder,
-    targeting: CastTargeting,
+    mut chain: ResMut<ChainedCast>,
     mut r: Reply,
 ) {
     if let SessionEvent::CastResult {
@@ -362,7 +401,7 @@ fn on_cast_result(
             net: &ladder.commands,
             tutorials: ladder.tutorials.as_deref(),
         };
-        let chained = cast_result(
+        let chained = cast_result_rest(
             spell_id,
             success,
             reason,
@@ -380,10 +419,31 @@ fn on_cast_result(
             &ladder.commands,
             r.play_seq.next(),
         );
-        if let Some(next) = chained {
-            let ctx = targeting.context();
-            ladder.send(next, &ctx, CastCommit::Spell);
-        }
+        chain.0 = chained;
+    }
+}
+
+/// The spell a `SMSG_CAST_RESULT` chains, from its handler to the chain's.
+#[derive(Resource, Default)]
+struct ChainedCast(Option<u32>);
+
+/// `HandleCastResult`'s chain, the one handler leg that casts: a reply whose spell names a
+/// `modalNextSpell` (column 38) chains it through the ladder in the same packet (`0x6e74aa call
+/// 0x6e5a90` → `TryCast 0x6e4b60`), so it arms the in-flight slot before the next packet, after
+/// the report's precast end released our loot (`0x6e73ac` → `0x6e1c8e`).
+///
+/// The chained cast goes out at the null target guid (`0x6e74a6 push ebx; push ebx`, `ebx = 0`),
+/// so it binds through `ArmCast 0x6e5250`'s ordinary walk ([`CastTargeting::context`]) and takes
+/// every rung a press takes.
+fn on_cast_result_chain(
+    In(ev): In<SessionEvent>,
+    mut ladder: CastLadder,
+    targeting: CastTargeting,
+    mut chain: ResMut<ChainedCast>,
+) {
+    if let (SessionEvent::CastResult { .. }, Some(next)) = (ev, chain.0.take()) {
+        let ctx = targeting.context();
+        ladder.send(next, &ctx, CastCommit::Spell);
     }
 }
 
@@ -435,27 +495,13 @@ fn on_spell_start(
     }
 }
 
-/// The GO, then its deferred auto-attack start (`0x6e8402` → `0x6131a0`): the player's Attack at
-/// the hit unit, whose validator (`0x612df0`, `0x6131aa`) refuses on the actor's state or the
-/// target with its line and no swing, selects the hit whatever is selected and signals in place,
-/// behind the GO's reports, then swings at the selection it re-read (`0x6130c1`)
-/// ([`crate::script_calls::ScriptCallHost::engine_attack`]).
-#[allow(clippy::type_complexity)] // a Bevy system's full input set
+/// The GO's legs, and the attack its tail defers ([`GoAttackStart`]), which
+/// [`on_go_attack_start`] makes at its place.
 fn on_spell_go(
     In(ev): In<SessionEvent>,
-    mut set: crate::script_calls::disjoint::Pair<
-        (Lifecycle<'static>, Scene<'static, 'static>),
-        crate::script_calls::VmWith<
-            'static,
-            'static,
-            crate::script_calls::disjoint::Pair<
-                'static,
-                'static,
-                crate::ui_action::AttackPress<'static, 'static>,
-                Option<crate::spell::PickBind<'static, 'static>>,
-            >,
-        >,
-    >,
+    mut l: Lifecycle,
+    mut sc: Scene,
+    mut start: ResMut<GoAttackStart>,
 ) {
     let mark = crate::lanes::mark();
     if let SessionEvent::SpellGo {
@@ -482,7 +528,6 @@ fn on_spell_go(
         // No hit leaves the start at the packet's target, the `Deviation:` in [`spell_go`].
         let no_hit = hits.is_empty();
         let deferred = {
-            let (mut l, mut sc) = set.p0();
             let engaged = sc
                 .self_player
                 .single()
@@ -506,43 +551,106 @@ fn on_spell_go(
                 &l.self_guid,
                 &sc.stores,
                 &mut sc.go_lid,
-                &mut sc.loot_latch,
                 l.spells.as_deref(),
                 (&sc.edits, engaged),
                 l.play_seq.next(),
             )
         };
+        start.0 = deferred.map(|guid| (guid, no_hit, mark));
+    }
+}
+
+/// The attack a GO defers to its tail ([`spell_go`]): the guid, whether the packet had no hit, and
+/// the mark the GO's handler began at, from the handler to its start's leg.
+#[derive(Resource, Default)]
+struct GoAttackStart(Option<(u64, bool, crate::lanes::Mark)>);
+
+/// The GO's deferred auto-attack start (`0x6e8402` → `0x6131a0`), after its chest's loot target
+/// and the precast end's loot release (`0x6e7fc5`), which the legs' edits made as they returned:
+/// the player's Attack at the hit unit, whose validator (`0x612df0`, `0x6131aa`) refuses on the
+/// actor's state or the target with its line and no swing, selects the hit whatever is selected
+/// and signals in place, behind the GO's reports, then swings at the selection it re-read
+/// (`0x6130c1`) ([`crate::script_calls::ScriptCallHost::engine_attack`]). Its signals fire in
+/// place, so what the GO's earlier legs raised fires first, as each fired inside its call: the
+/// lanes flush ahead of the start ([`crate::lanes::flush`]), the precast end's `LOOT_CLOSED`
+/// (`0x6e7fc5` → `0x4c1dac`) among them.
+fn on_go_attack_start(In(ev): In<SessionEvent>, world: &mut World) {
+    if !matches!(ev, SessionEvent::SpellGo { .. }) || world.resource::<GoAttackStart>().0.is_none()
+    {
+        return;
+    }
+    crate::lanes::flush(world);
+    if let Err(e) = world.run_system_cached_with(go_attack_start, ev) {
+        debug!("net: the GO's attack start did not run: {e}");
+    }
+}
+
+/// [`on_go_attack_start`]'s start, past the flush.
+fn go_attack_start(
+    In(ev): In<SessionEvent>,
+    mut start: ResMut<GoAttackStart>,
+    mut set: crate::script_calls::VmWith<
+        crate::script_calls::disjoint::Pair<
+            crate::ui_action::AttackPress<'static, 'static>,
+            Option<crate::spell::PickBind<'static, 'static>>,
+        >,
+    >,
+) {
+    if let (SessionEvent::SpellGo { .. }, Some((guid, no_hit, mark))) = (ev, start.0.take()) {
         // The fallback starts only at a unit the validator keeps, so its pick never runs the
         // nearest-enemy cycle (`0x6130b5`) for a target the player is friendly toward.
-        let deferred = deferred.filter(|&guid| !no_hit || set.p1().own().p0().keeps(guid));
-        if let Some(guid) = deferred {
-            set.p1().engine_attack(guid, mark, |mut press| {
-                // With no listeners, the validator's select is paid at once, after its bind.
-                let Some(owed) = press.p0().pick_attack_at(Some(guid), true) else {
-                    return;
-                };
-                if let Some(mut bind) = press.p1() {
-                    bind.bind();
-                }
-                let mut press = press.p0();
-                press.pay(owed);
-                if let Some(target) = press.settle_attack() {
-                    press.start_attack(target);
-                }
-            });
+        if no_hit && !set.own().p0().keeps(guid) {
+            return;
         }
+        set.engine_attack(guid, mark, |mut press| {
+            // With no listeners, the validator's select is paid at once, after its bind.
+            let Some(owed) = press.p0().pick_attack_at(Some(guid), true) else {
+                return;
+            };
+            if let Some(mut bind) = press.p1() {
+                bind.bind();
+            }
+            let mut press = press.p0();
+            press.pay(owed);
+            if let Some(target) = press.settle_attack() {
+                press.start_attack(target);
+            }
+        });
     }
 }
 
 /// The go's tradeskill repeat hook ([`crate::ui_tradeskill::repeat_hook_at_go`]), between its
-/// legs and its cooldown inserts.
+/// legs and its chest's loot target.
 fn on_go_repeat(In(ev): In<SessionEvent>, world: &mut World) {
     if let ev @ SessionEvent::SpellGo { .. } = ev {
         crate::ui_tradeskill::repeat_hook_at_go(ev, world);
     }
 }
 
-/// The go's cooldown inserts ([`go_cooldown_inserts`]), after its repeat hook.
+/// The go's chest loot target ([`arm_chest_loot_target`]), after its repeat hook and the precast
+/// end's loot close, which the legs' edits made as they returned.
+fn on_go_loot_target(In(ev): In<SessionEvent>, l: Lifecycle, mut sc: Scene) {
+    if let SessionEvent::SpellGo {
+        caster,
+        spell_id,
+        go_target,
+        ..
+    } = ev
+    {
+        arm_chest_loot_target(
+            caster,
+            spell_id,
+            go_target,
+            &l.self_guid,
+            &l.index,
+            &sc.stores,
+            l.spells.as_deref(),
+            &mut sc.loot_latch,
+        );
+    }
+}
+
+/// The go's cooldown inserts ([`go_cooldown_inserts`]), after its chest's loot target.
 fn on_go_cooldowns(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
     if let SessionEvent::SpellGo {
         caster,
@@ -1088,12 +1196,14 @@ fn superceded_spell(
     learn_line(new_spell_id, spells)
 }
 
-/// The server's verdict on our cast (`SMSG_CAST_RESULT`, `HandleCastResult 0x6e7330`).
+/// The server's verdict on our cast (`SMSG_CAST_RESULT`, `HandleCastResult 0x6e7330`), whole: its
+/// head, then its rest, as the two legs run it with the head's edits applied between.
 ///
 /// A failure goes through the reporter first (`0x6e73ac` → `ReportCastFailure 0x6e1a00` with its
 /// server flag set): the tradeskill check, the auto-repeat cancel, the GCD clear, the line and its
 /// log line, then its tail ([`super::CastCore::report`]), which cancels the spell in flight with
 /// its failed flag and no packet, or fires the failure's event when nothing is in flight.
+#[cfg(test)]
 fn cast_result(
     spell_id: u32,
     success: bool,
@@ -1112,7 +1222,91 @@ fn cast_result(
     net: &crate::net::NetCommands,
     seq: u64,
 ) -> Option<u32> {
+    cast_result_head(
+        spell_id, success, reason, arg, edits, self_guid, index, cooldowns, spells,
+    );
+    cast_result_rest(
+        spell_id,
+        success,
+        reason,
+        arg,
+        edits,
+        self_guid,
+        index,
+        casting,
+        cast_events,
+        core,
+        cooldowns,
+        auto_repeat,
+        spells,
+        items,
+        net,
+        seq,
+    )
+}
+
+/// A failure's report up to its player cleanup's precast end (`0x6e73ac` → `0x6e1a00`, through
+/// `0x6e1c8e`): the NOT_READY record clear, then the precast of the failed spell ended with its
+/// tail, whatever the reason (`0x6e1c7f`), whose loot release (`0x60d10b`) goes out as the edits
+/// apply, ahead of the auto-repeat stop's send (`0x6e1cea`) and the line's item ask (`0x6e1ea4`).
+fn cast_result_head(
+    spell_id: u32,
+    success: bool,
+    reason: Option<u8>,
+    arg: Option<u32>,
+    edits: &crate::creature_anim::UnitEdits,
+    self_guid: &SelfGuid,
+    index: &GuidIndex,
+    cooldowns: &mut Cooldowns,
+    spells: Option<&Spells>,
+) {
     debug!("net: cast result — spell {spell_id} success={success} reason={reason:?}");
+    if success {
+        return;
+    }
+    let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
+    // NOT_READY with a first dword of 0, the server holding no cooldown of its own
+    // (`0x6e1af1`): a held record of the spell on our list (`0x6e1690`, `0x6e1b02`) goes with
+    // all its records (`0x6e3050(spell, 0, 0, 1)`, `0x6e1b13`). An absent dword reads -1.
+    if reason == Some(0x3c) && arg == Some(0) {
+        if let Some(d) = spells.and_then(|s| s.catalog.get(spell_id)) {
+            if cooldowns.has_on_hold_record(spell_id, 0, d.category) {
+                cooldowns.clear_spell(spell_id);
+            }
+        }
+    }
+    // The report's player cleanup ends the precast of the failed spell, with its tail, whatever
+    // the reason (`0x6e1c7f`, `0x6e1c8e`), ahead of the auto-repeat stop (`0x6e1cea`), the GCD
+    // clear and the line, so its loot close signals at this place.
+    if let Some(e) = self_e {
+        edits.push(crate::creature_anim::UnitEdit::EndPrecast {
+            entity: e,
+            spell_id: Some(spell_id),
+            tail: true,
+        });
+    }
+}
+
+/// The rest of the verdict past [`cast_result_head`]: the report from its auto-repeat stop on, the
+/// bit-25 revert, the cast state's end, the slot's pop and the `modalNextSpell` chain.
+fn cast_result_rest(
+    spell_id: u32,
+    success: bool,
+    reason: Option<u8>,
+    arg: Option<u32>,
+    edits: &crate::creature_anim::UnitEdits,
+    self_guid: &SelfGuid,
+    index: &GuidIndex,
+    casting: &Query<&Casting>,
+    cast_events: &mut MessageWriter<CastEvent>,
+    core: &mut super::CastCore,
+    cooldowns: &mut Cooldowns,
+    auto_repeat: &mut AutoRepeatActive,
+    spells: Option<&Spells>,
+    items: Option<&crate::items::Items>,
+    net: &crate::net::NetCommands,
+    seq: u64,
+) -> Option<u32> {
     let now = Instant::now();
     if !success {
         // `HandleCastFailed 0x6e1a00` clears the GCD armed at send (`0x6e1d83 → 0x6e1630`), and the
@@ -1127,16 +1321,6 @@ fn cast_result(
         // spell still in flight. vmangos sends 0x17 for real aborts.
         let dont_report = reason == Some(0x17);
         let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
-        // NOT_READY with a first dword of 0, the server holding no cooldown of its own
-        // (`0x6e1af1`): a held record of the spell on our list (`0x6e1690`, `0x6e1b02`) goes with
-        // all its records (`0x6e3050(spell, 0, 0, 1)`, `0x6e1b13`). An absent dword reads -1.
-        if reason == Some(0x3c) && arg == Some(0) {
-            if let Some(d) = spells.and_then(|s| s.catalog.get(spell_id)) {
-                if cooldowns.has_on_hold_record(spell_id, 0, d.category) {
-                    cooldowns.clear_spell(spell_id);
-                }
-            }
-        }
         if auto_repeat.0 == Some(spell_id) && !dont_report {
             crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, core);
         }
@@ -1170,7 +1354,7 @@ fn cast_result(
             info!("cast-trace: RECV CAST_RESULT failure — spell {spell_id} reason={reason:?}; reaches_tail={reaches}");
         }
         // Our cast died (vmangos never sends `SMSG_SPELL_FAILURE`): end the self avatar's cast
-        // state and precast hold, keyed by spell id.
+        // state, keyed by spell id; its precast ended above.
         if let Some(e) = self_e {
             if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
                 edits.push(crate::creature_anim::UnitEdit::ReapCasting {
@@ -1178,18 +1362,12 @@ fn cast_result(
                     spell_id,
                 });
             }
-            // The report's player cleanup ends the precast of the failed spell (`0x6e1c7f`,
-            // `0x6e1c8e`), with its tail.
-            edits.push(crate::creature_anim::UnitEdit::EndPrecast {
-                entity: e,
-                spell_id: Some(spell_id),
-                tail: true,
-            });
             cast_events.write(CastEvent {
                 entity: e,
                 spell_id,
                 kind: CastEventKind::Fail,
                 seq,
+                at: Some(crate::lanes::stamp()),
             });
         }
     }
@@ -1210,7 +1388,8 @@ fn cast_result(
     // - Equal to the running repeat means re-arm, not re-cast (`0x6e745b` → `0x6e745d`), so a
     //   second sting never resets the swing timer; the record is refilled with the player as its
     //   caster (`0x6e748f`) and nothing is sent.
-    // The chained spell is returned; `on_cast_result` hands it to the ladder in the same call.
+    // The chained spell is returned; [`on_cast_result_chain`] hands it to the ladder in the same
+    // packet, once the report's edits have applied.
     //
     // The handler's own `SPELLCAST_STOP` (0x152), at its two sites, never from the GO (`0x6e7a70`
     // calls neither):
@@ -1369,12 +1548,50 @@ fn spell_start(
         spell_id,
         kind: CastEventKind::Start,
         seq,
+        at: Some(crate::lanes::stamp()),
     });
 }
 
 /// `GAMEOBJECT_TYPE_ID` 3, `CHEST`: the only GameObject type whose `OPEN_LOCK` cast arms the
 /// loot-target latch (`0x6e830c`).
 const GO_TYPE_CHEST: i32 = 3;
+
+/// The GO's player tail arms a chest as the loot target, at this packet, not at the loot response:
+/// `HandleSpellGo 0x6e7a70` reaches `0x6e831b call SetLootTarget 0x5ed5f0`, which writes
+/// `[player+0x1d28]` and plays Loot 50. Gates: a spell with a record (`0x6e7cf7`), the local player
+/// cast it (`0x6e81b6`), the spell has `OPEN_LOCK` (0x21) or `OPEN_LOCK_ITEM` (0x3b)
+/// (`0x6e81f9`/`0x6e8202`), and the target is a CHEST (`0x6e82df`–`0x6e830c`). The reference reads
+/// the target off a one-entry hit list (`0x6e82c1`); vmangos sends a GameObject target in
+/// `SpellCastTargets`, so this reads `go_target`, a single guid: the same condition. It comes after
+/// the precast end's loot close (`0x6e7fc5`) and the repeat hook (`0x6e81e7`), so a close of the
+/// chest's own window leaves the latch this arms. The pose needs no kick:
+/// [`crate::ui_loot::LootKneel`] recomputes every frame.
+fn arm_chest_loot_target(
+    caster: u64,
+    spell_id: u32,
+    go_target: Option<u64>,
+    self_guid: &SelfGuid,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
+    spells: Option<&Spells>,
+    loot_latch: &mut crate::ui_loot::LootLatch,
+) {
+    let (Some(go_guid), true) = (go_target, self_guid.0 == Some(caster)) else {
+        return;
+    };
+    let is_open_lock = spells
+        .and_then(|s| s.catalog.get(spell_id))
+        .is_some_and(|display| display.open_lock.is_some());
+    let is_chest = index
+        .0
+        .get(&go_guid)
+        .and_then(|&e| stores.get(e).ok())
+        .is_some_and(|store| store.0.gameobject_type_id() == GO_TYPE_CHEST);
+    if is_open_lock && is_chest {
+        debug!("net: spell go — chest {go_guid:#x} becomes the loot target (kneel arm)");
+        loot_latch.0 = Some(go_guid);
+    }
+}
 
 /// `SMSG_SPELL_GO`: the cast launched. The server schedules damage off `Spell.dbc` Speed; the
 /// packet carries the hit and miss lists and the ammo display id, and the flight is rebuilt from
@@ -1400,8 +1617,6 @@ fn spell_go(
     self_guid: &SelfGuid,
     stores: &Query<&mut ObjectStore>,
     go_lid: &mut MessageWriter<crate::go_anim::GoLidOpen>,
-    // The loot-target latch, armed here for a chest (`0x6e831b`).
-    loot_latch: &mut crate::ui_loot::LootLatch,
     spells: Option<&Spells>,
     // The precast edits, the attack lock the GO-deferred auto-attack start gates on (`Engaged`,
     // the reference's `[player+0xc48]`, `0x6e83e7`), and the cast core.
@@ -1442,28 +1657,6 @@ fn spell_go(
     let (edits, engaged) = attack_ctx;
     // The guid the GO-deferred auto-attack starts at, for the caller to run StartAttack at.
     let mut deferred = None;
-    // A chest becomes the loot target at this packet, not at the loot response: `HandleSpellGo
-    // 0x6e7a70` reaches `0x6e831b call SetLootTarget 0x5ed5f0`, which writes `[player+0x1d28]` and
-    // plays Loot 50. Gates: the local player cast it (`0x6e81b6`), the spell has `OPEN_LOCK`
-    // (0x21) or `OPEN_LOCK_ITEM` (0x3b) (`0x6e81f9`/`0x6e8202`), and the target is a CHEST
-    // (`0x6e82df`–`0x6e830c`). The reference reads the target off a one-entry hit list
-    // (`0x6e82c1`); vmangos sends a GameObject target in `SpellCastTargets`, so this reads
-    // `go_target`, a single guid: the same condition. The pose needs no kick:
-    // [`crate::ui_loot::LootKneel`] recomputes every frame.
-    if self_guid.0 == Some(caster) {
-        if let Some(go_guid) = go_target {
-            let is_open_lock = display.open_lock.is_some();
-            let is_chest = index
-                .0
-                .get(&go_guid)
-                .and_then(|&e| stores.get(e).ok())
-                .is_some_and(|store| store.0.gameobject_type_id() == GO_TYPE_CHEST);
-            if is_open_lock && is_chest {
-                debug!("net: spell go — chest {go_guid:#x} becomes the loot target (kneel arm)");
-                loot_latch.0 = Some(go_guid);
-            }
-        }
-    }
     // Our own launch. The bar's STOP is not fired here: `0x6e7a70` reaches neither 0x152 site,
     // and the cast result ahead of the GO fired it ([`cast_result`]).
     if self_guid.0 == Some(caster) {
@@ -1510,6 +1703,8 @@ fn spell_go(
         })
         .collect();
 
+    // The GO's place among the packets, one for every leg it plays: the cast kit, the impacts.
+    let at = crate::lanes::stamp();
     // The caster slot is the second guid looked up as a unit (`0x6e7f8b`, mask 8): a game object's
     // cast writes it 0, so it finds none and skips every leg that needs one.
     let unit = index
@@ -1532,6 +1727,7 @@ fn spell_go(
                 target_mask: mask,
                 ammo_display_id,
                 seq,
+                at: Some(at),
             });
         }
         return deferred;
@@ -1559,6 +1755,7 @@ fn spell_go(
         spell_id,
         kind: CastEventKind::Go,
         seq,
+        at: Some(at),
     });
     // A pure point cast (ground AoE, empty lists) rides the same message: the point is a target.
     let source = source.map(benilla_assets::coords::wow_to_bevy);
@@ -1574,6 +1771,7 @@ fn spell_go(
             target_mask: mask,
             ammo_display_id,
             seq,
+            at: Some(at),
         });
     }
     deferred
@@ -1623,6 +1821,7 @@ fn spell_failed_other(
             spell_id,
             kind: CastEventKind::Fail,
             seq,
+            at: Some(crate::lanes::stamp()),
         });
     }
 }
@@ -1648,9 +1847,10 @@ fn spell_delayed(caster: u64, delay_ms: u32, self_guid: &SelfGuid, reports: &mut
 ///
 /// vmangos sends it on every player autorepeat interrupt (`SpellCaster.cpp:1826`), which is how
 /// the server stops a volley whose target died (`Unit::_UpdateAutoRepeatSpell` →
-/// `CheckCast(true)` fails → `InterruptSpell`); the client stops it itself when its selection
-/// dies (`0x605906`), so this one finds the key clear. Moving interrupts only Category 351, the
-/// wand, so Auto Shot stays armed across a run.
+/// `CheckCast(true)` fails → `InterruptSpell`) and a wand's when another spell starts
+/// (`SpellCaster.cpp:1677`). The client stops it itself when its selection dies (`0x605906`), so
+/// that one finds the key clear. Moving and another spell interrupt only Category 351, the wand,
+/// so Auto Shot stays armed across a run and through a cast.
 fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
@@ -2532,7 +2732,6 @@ mod tests {
                             &self_guid,
                             &stores,
                             &mut go_lid,
-                            &mut crate::ui_loot::LootLatch::default(),
                             spells.as_deref(),
                             (&edits, false),
                             1,
@@ -2827,11 +3026,43 @@ mod tests {
     }
 
     /// The GO's end runs its tail as `0x6e4870` answers for the record and the cast flags
-    /// (`0x6e7fa1`, pushed at `0x6e7fbd`), its last step our loot's release; a failure's always
-    /// runs it (`0x6e8e8c` and `0x6e1c8e` push `b` 1).
+    /// (`0x6e7fa1`, pushed at `0x6e7fbd`), its last step our loot's release, at rest the full
+    /// close, which takes a lockbox's window; a failure's always runs it (`0x6e8e8c` and
+    /// `0x6e1c8e` push `b` 1). Each closes inside its packet, as the handler's edits apply.
     #[test]
     fn the_go_releases_our_loot_as_its_attribute_test_answers_and_a_failure_always() {
+        use crate::ui_loot::{LootLatch, LootState};
         use benilla_formats::{SpellCatalog, SpellDisplay};
+        const LOCKBOX: u64 = 0x4000_0000_0000_0007;
+        /// Whether `packet` closes a lockbox's window open ahead of it, released: on the lane
+        /// behind its own unlock (`0x48f2bd`, `0x48f311`).
+        fn closes(s: &mut CastSeq, packet: impl FnOnce(&mut CastSeq)) -> bool {
+            let world = s.app.world_mut();
+            let mut loot = world.resource_mut::<LootState>();
+            loot.clear_session();
+            loot.open(
+                LOCKBOX,
+                benilla_protocol::messages::loot_type::CORPSE,
+                5,
+                vec![],
+            );
+            world.resource_mut::<LootLatch>().0 = Some(LOCKBOX);
+            let _ = s.sent.try_iter().count();
+            packet(s);
+            let closed = s.app.world().resource::<LootState>().source().is_none();
+            let sent = s.sent.try_iter().any(
+                |c| matches!(c, crate::net::ClientCommand::LootRelease { guid } if guid == LOCKBOX),
+            );
+            let queued = s
+                .app
+                .world_mut()
+                .resource_mut::<LootState>()
+                .take_queued_releases()
+                .contains(&LOCKBOX);
+            let released = sent || queued;
+            assert_eq!(closed, released, "a close is released at its packet");
+            closed
+        }
         let mut s = CastSeq::new();
         let me = s.self_e;
         let world = s.app.world_mut();
@@ -2849,32 +3080,31 @@ mod tests {
             ..Spells::empty_for_tests()
         });
         world.insert_resource(crate::player::Player::with_move_flags(0));
-        world.init_resource::<crate::ui_loot::LootMoveStart>();
-        world.init_resource::<crate::ui_loot::LootCloseAtRest>();
-        let owed = |s: &mut CastSeq| {
-            let world = s.app.world_mut();
-            assert!(
-                !world.resource::<crate::ui_loot::LootMoveStart>().0,
-                "at rest"
-            );
-            std::mem::take(&mut world.resource_mut::<crate::ui_loot::LootCloseAtRest>().0)
-        };
+        world.init_resource::<LootState>();
+        world.init_resource::<LootLatch>();
         s.give_precast(me, FIREBALL);
-        s.go_flagged(FIREBALL, 0x100);
-        assert!(owed(&mut s), "a plain record's GO");
+        assert!(
+            closes(&mut s, |s| s.go_flagged(FIREBALL, 0x100)),
+            "a plain record's GO"
+        );
         s.give_precast(me, FROSTBOLT);
-        s.go_flagged(FROSTBOLT, 0x100);
+        assert!(
+            !closes(&mut s, |s| s.go_flagged(FROSTBOLT, 0x100)),
+            "with no tail"
+        );
         assert_eq!(s.precast(me), None, "an `AttributesEx & 0x400` GO ends it");
-        assert!(!owed(&mut s), "with no tail");
         s.give_precast(me, FIREBALL);
-        s.go_flagged(FIREBALL, 0x1);
-        assert!(!owed(&mut s), "flag bit 0");
+        assert!(
+            !closes(&mut s, |s| s.go_flagged(FIREBALL, 0x1)),
+            "flag bit 0"
+        );
         s.give_precast(me, FIREBALL);
-        s.failed_other(FIREBALL);
-        assert!(owed(&mut s), "its failure");
+        assert!(closes(&mut s, |s| s.failed_other(FIREBALL)), "its failure");
         s.give_precast(me, FIREBALL);
-        s.result(FIREBALL, Some(0x23));
-        assert!(owed(&mut s), "its failed result");
+        assert!(
+            closes(&mut s, |s| s.result(FIREBALL, Some(0x23))),
+            "its failed result"
+        );
     }
 
     /// vmangos sends, for every non-triggered cast, `SMSG_SPELL_START` at `Spell::prepare`
@@ -3456,7 +3686,6 @@ mod tests {
                         &self_guid,
                         &stores,
                         &mut go_lid,
-                        &mut crate::ui_loot::LootLatch::default(),
                         Some(&spells),
                         (&edits, false),
                         1,
@@ -3651,7 +3880,6 @@ mod tests {
                         &self_guid,
                         &stores,
                         &mut go_lid,
-                        &mut crate::ui_loot::LootLatch::default(),
                         Some(&spells),
                         (&edits, false),
                         1,
@@ -4019,7 +4247,6 @@ mod tests {
                             &self_guid,
                             &stores,
                             &mut go_lid,
-                            &mut crate::ui_loot::LootLatch::default(),
                             Some(&spells),
                             (&edits, engaged),
                             1,

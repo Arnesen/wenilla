@@ -308,6 +308,17 @@ impl ParticleEmitter {
         self.on_owner_loss = OwnerLoss::Drain;
     }
 
+    /// Switch to [`OwnerLoss::Free`]: the effect is released with its model, whose destructor
+    /// frees its emitters at once (`0x6210e0` → `0x61f520`), its live particles with them.
+    pub fn free_on_owner_loss(&mut self) {
+        self.on_owner_loss = OwnerLoss::Free;
+    }
+
+    /// What losing the owner does to this pool ([`Self::drain_on_owner_loss`]).
+    pub fn on_owner_loss(&self) -> OwnerLoss {
+        self.on_owner_loss
+    }
+
     /// The cloud's live world anchor, the census probe's distance subject.
     pub fn anchor_world(&self) -> Vec3 {
         self.anchor_pos
@@ -907,7 +918,6 @@ pub(crate) mod tests {
             handle: Handle::default(),
             world_from_local: bevy::math::Affine3A::IDENTITY,
             name_set: 0,
-            liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
             visible: vec![true, false, false],
             interior_fog: vec![false; 3],

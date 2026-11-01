@@ -1171,3 +1171,121 @@ fn a_unit_with_no_maximum_health_draws_an_empty_tooltip_bar() {
     assert_eq!(fill(&s), Some(([0.0, 0.0, 0.0, 1.0], 0.0)), "empty across");
     assert!(s.take_errors().is_empty());
 }
+
+/// The tooltip's health watcher and the unit's own watchers run in the order they were linked on
+/// the unit's list (`0x467f00`, `0x467f65`): hovered, the build links the tooltip's (`0x52a0a8`),
+/// then targeted, the selection's token flag links the unit-field watchers (`0x493540` →
+/// `0x60c4a0` → `0x51bbb0`), so on a health change the tooltip's bar moves first and the
+/// `UNIT_HEALTH("target")` handler reads the new value there. A build after the target links the
+/// tooltip's behind them, and the handler reads the bar's old value.
+#[test]
+fn a_units_tooltip_and_bridge_run_in_the_order_they_were_linked() {
+    let mut s = health_tooltip();
+    s.set_unit("mouseover", Some(wolf()));
+    let guid = wolf().guid;
+    let read = |s: &mut UiScript, health: u32| -> f64 {
+        let watch = HealthWatch {
+            bar: None,
+            tooltip: Some((health, 50)),
+        };
+        let mut seen = None;
+        s.unit_health_watchers(guid, watch, |s| {
+            seen = s.eval::<f64>("return GameTooltipStatusBar:GetValue()").ok();
+        });
+        seen.expect("the bridge ran")
+    };
+    assert!(s.publish_world_mouseover(Some(guid)));
+    assert!(s.world_tooltip_unit("mouseover"), "the hover shows");
+    s.set_unit_guids(&UnitGuids {
+        target: guid,
+        mouseover: guid,
+        held: [(guid, 0)].into_iter().collect(),
+        ..Default::default()
+    });
+    s.unit_token_flags(guid, TokenChange::Add(TOKEN_TARGET));
+    assert_eq!(read(&mut s, 20), 20.0, "hovered, then targeted");
+    assert!(s.world_tooltip_unit("mouseover"), "built again");
+    assert_eq!(
+        read(&mut s, 10),
+        30.0,
+        "targeted, then built: the build's own seed"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// A `GameTooltip` with its `GameTooltipStatusBar`, seated by its default anchor as the stock XML
+/// seats it, over an 800 by 600 screen.
+fn health_tooltip() -> UiScript {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"UIParent = CreateFrame("Frame", "UIParent"); UIParent:SetAllPoints()
+        local tt = CreateFrame("GameTooltip", "GameTooltip", nil, "TestTooltipTemplate")
+        tt:Hide()
+        tt:SetScript("OnTooltipSetDefaultAnchor", function()
+            GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+        end)
+        local bar = CreateFrame("StatusBar", "GameTooltipStatusBar", tt)
+        bar:SetWidth(100); bar:SetHeight(8)"#,
+    )
+    .unwrap();
+    s
+}
+
+/// A build over a unit the object manager does not hold, a party member out of sight that its
+/// record shows, links no watcher: the registration looks the object up and links nothing without
+/// it (`0x467e70` at `0x467e86`, `0x467e8f`). Its health moving leaves the bar as the build left
+/// it.
+#[test]
+fn a_tooltip_on_a_unit_not_held_links_no_health_watcher() {
+    let mut s = health_tooltip();
+    let absent = UnitState {
+        has_object: false,
+        ..wolf()
+    };
+    s.set_unit("target", Some(absent));
+    s.run(r#"GameTooltip:SetOwner(UIParent, "ANCHOR_NONE") GameTooltip:SetUnit("target")"#)
+        .unwrap();
+    let built: f64 = s.eval("return GameTooltipStatusBar:GetValue()").unwrap();
+    s.tooltip_unit_health(wolf().guid, 10, 50);
+    assert_eq!(
+        s.eval::<f64>("return GameTooltipStatusBar:GetValue()")
+            .unwrap(),
+        built,
+        "no watcher on a unit not held"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// The walk reads each next watcher off the list after the one before returns (`0x4655dc` →
+/// `0x4655df`-`0x4655e6`), so a watcher an earlier one unlinked never runs: targeted before the
+/// build, the unit's own watchers run first, and a `UNIT_HEALTH` handler that hides the tooltip
+/// clears it and unlinks its watcher (`0x53007c`), whose bar keeps the build's seed.
+#[test]
+fn a_watcher_an_earlier_one_unlinked_does_not_run() {
+    let mut s = health_tooltip();
+    s.set_unit("target", Some(wolf()));
+    let guid = wolf().guid;
+    s.set_unit_guids(&UnitGuids {
+        target: guid,
+        held: [(guid, 0)].into_iter().collect(),
+        ..Default::default()
+    });
+    s.unit_token_flags(guid, TokenChange::Add(TOKEN_TARGET));
+    s.run(r#"GameTooltip:SetOwner(UIParent, "ANCHOR_NONE") GameTooltip:SetUnit("target")"#)
+        .unwrap();
+    let watch = HealthWatch {
+        bar: None,
+        tooltip: Some((10, 50)),
+    };
+    s.unit_health_watchers(guid, watch, |s| {
+        s.run("GameTooltip:Hide()").unwrap();
+    });
+    assert_eq!(
+        s.eval::<f64>("return GameTooltipStatusBar:GetValue()")
+            .unwrap(),
+        30.0,
+        "the hidden tooltip's watcher was unlinked before its turn"
+    );
+    assert!(s.take_errors().is_empty());
+}

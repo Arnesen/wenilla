@@ -43,9 +43,16 @@ pub(crate) struct PendingCast {
     caster_is_player: bool,
     record_spell: u32,
     record_target: Option<u64>,
+    /// The bits a bind that left the word standing or-ed into the record's mask (`0xceac5c`,
+    /// `0x6e5e13`, `0x6e5fc7`), which the send writes beside the last bind's (`0x7e4e10`).
+    record_mask: u16,
     /// The record's source (`0xceac48 + 0x00`) when it is an item, which the item's deactivate
     /// compares ([`Self::record_item`]).
     record_item: Option<u64>,
+    /// The record as `SendCast` sends it ([`Self::record_send`]).
+    record_send: Option<super::cast_send::CastSend>,
+    /// How many fills the record has had ([`Self::fills`]).
+    fills: u32,
 }
 
 struct PendingCastState {
@@ -110,16 +117,29 @@ impl PendingCast {
     /// `ITEM_FLAG_PLAYERCAST` and a queued strike included, though neither holds this slot.
     pub(crate) fn fill_record(&mut self) {
         self.caster_is_player = true;
-        self.record_target = None;
-        self.record_item = None;
+        self.refill();
     }
 
     /// [`Self::fill_record`] for a caster other than the active player (the pet bar's presses
     /// through `0x6e4b60`, `0x4bd385`): the caster word names that unit, so no cancel event fires.
     pub(crate) fn fill_unit_record(&mut self) {
         self.caster_is_player = false;
+        self.refill();
+    }
+
+    /// The fill's zero of the record (`rep stos` at `0x6e4f80`).
+    fn refill(&mut self) {
         self.record_target = None;
+        self.record_mask = 0;
         self.record_item = None;
+        self.record_send = None;
+        self.fills = self.fills.wrapping_add(1);
+    }
+
+    /// A count of the record's fills, which tells an attempt whether a listener's attempt has
+    /// filled it since its own ([`super::cast_send::ArmPark`]).
+    pub(crate) fn fills(&self) -> u32 {
+        self.fills
     }
 
     /// The attempt's source write (`0x6e4f8f`-`0x6e4fa1`): the casting item's guid when the
@@ -137,9 +157,14 @@ impl PendingCast {
 
     /// The gate of `AbortCast 0x6e4940`'s events: `SPELLCAST_STOP`, `_FAILED` or `_INTERRUPTED`
     /// fires only while the caster word is the active player's (`0x6e4a04`–`0x6e4a1e`), and firing
-    /// clears it (`0x6e4a5a`), so one record fires at most once whatever pops after it.
+    /// clears it (`0x6e4a5a`), so one record fires at most once whatever pops after it. A send
+    /// the record still owes finds no caster then and leaves unsent (`0x6e5572` → `0x6e59b0`).
     pub(crate) fn take_caster_event(&mut self) -> bool {
-        std::mem::take(&mut self.caster_is_player)
+        let caster = std::mem::take(&mut self.caster_is_player);
+        if caster {
+            self.record_send = None;
+        }
+        caster
     }
 
     /// The record's spell (`0xceac48 + 0x10`), written by the attempt (`0x6e4f88`) and the
@@ -161,10 +186,38 @@ impl PendingCast {
         self.record_target
     }
 
+    /// The record as an attempt or a cursor's bind completed it for `SendCast 0x6e54f0`, which
+    /// reads it past the signals ahead of it; a refill or a cancel since leaves none.
+    pub(crate) fn record_send(&self) -> Option<&super::cast_send::CastSend> {
+        self.record_send.as_ref()
+    }
+
+    /// The record completed for its send ([`Self::record_send`]).
+    pub(crate) fn set_record_send(&mut self, send: super::cast_send::CastSend) {
+        self.record_send = Some(send);
+    }
+
     /// `BindTarget 0x6e5b40`'s write of the bound unit, game object or corpse (`0x6e5cdc`,
     /// `0x6e5f77`, `0x6e5fbe`), or the arm's parked guid (`0x6e5454`); an item goes to `+0x20`.
     pub(crate) fn bind_target(&mut self, guid: u64) {
         self.record_target = Some(guid);
+    }
+
+    /// A bind that left the word standing (`0x6e60c1`): its object written into the record's
+    /// target, as [`Self::bind_target`], and its bit into the mask.
+    pub(crate) fn hold_target(&mut self, guid: u64, mask_bit: u16) {
+        self.record_target = Some(guid);
+        self.record_mask |= mask_bit;
+    }
+
+    /// The bits held binds wrote into the record's mask, 0 when none has.
+    pub(crate) fn record_mask(&self) -> u16 {
+        self.record_mask
+    }
+
+    /// The mask a refused bind's restore puts back (`0x6e609d`), over a refill.
+    pub(crate) fn restore_mask(&mut self, mask: u16) {
+        self.record_mask = mask;
     }
 }
 
@@ -389,8 +442,9 @@ impl ActiveChannel {
 }
 
 /// The live auto-repeat spell, the client's `0xceac30`: set at cast send (`0x6e54f0`) for
-/// `AttributesEx2 & 0x20`, cleared by `SMSG_CANCEL_AUTO_REPEAT` (`0x6ea080`) and a matching cast
-/// failure. `IsAutoRepeatAction` and the button flash read it; the sticky
+/// `AttributesEx2 & 0x20`, cleared by the stop `0x6ea080`
+/// ([`crate::creature_anim::cancel_auto_repeat_local`]), whichever of its callers runs it.
+/// `IsAutoRepeatAction` and the button flash read it; the sticky
 /// `creature_anim::AutoRepeatArmed` is the idle gate.
 #[derive(Resource, Default)]
 pub(crate) struct AutoRepeatActive(pub Option<u32>);

@@ -49,6 +49,7 @@ fn a_spell_with_no_record_writes_no_line() {
         enchants: None,
         items: None,
         gameobjects: None,
+        net: None,
         ranges: &ranges,
         periodic: true,
     };
@@ -120,6 +121,7 @@ mod emitters {
     use super::super::ChatCtx;
 
     mod dispel;
+    mod gate;
     mod lines;
     mod words;
 
@@ -260,6 +262,10 @@ mod emitters {
             };
             bench.hold(&player(ME, HUMAN));
             bench.hold(&creature(MOB, ORC));
+            // Linen Cloth, which the item lines name, cached, so they write at their packet.
+            bench
+                .items
+                .insert_template(2589, Some(crate::items::test_template("Linen Cloth")));
             bench
         }
 
@@ -312,6 +318,16 @@ mod emitters {
             poses: &P,
             emit: impl FnOnce(&ChatCtx, &HashMap<Entity, ObjectStore>, &P, &ChatLog) -> R,
         ) -> ChatLog {
+            self.run_posed_on(ChatLog::default(), poses, emit)
+        }
+
+        /// [`Self::run_posed`] onto `log`, as it stands.
+        fn run_posed_on<P: Poses, R>(
+            &self,
+            log: ChatLog,
+            poses: &P,
+            emit: impl FnOnce(&ChatCtx, &HashMap<Entity, ObjectStore>, &P, &ChatLog) -> R,
+        ) -> ChatLog {
             let (self_guid, reputations, ranges) = (
                 SelfGuid(Some(ME)),
                 Reputations::default(),
@@ -329,10 +345,11 @@ mod emitters {
                 enchants: Some(&self.enchants),
                 items: Some(&self.items),
                 gameobjects: Some(&self.gameobjects),
+                net: None,
                 ranges: &ranges,
                 periodic: true,
             };
-            let mut log = ChatLog::default();
+            let mut log = log;
             let _ = emit(&ctx, &self.stores, poses, &mut log);
             log
         }
@@ -855,6 +872,26 @@ mod emitters {
         Bench::new().lines(|ctx, st, po, log| super::super::enchantment_log(s, ctx, st, po, log))
     }
 
+    /// `0x628ea0` takes the first guid as the owner, the target of either line. vmangos writes a
+    /// fade's empty caster first (`Objects/Player.cpp:12053`), which arrives as an add aimed at
+    /// guid 0, and `0x626630` refuses that (`0x626690`-`0x6266a6`).
+    #[test]
+    fn an_empty_first_guid_writes_no_line() {
+        let mut body = vec![0u8; 8];
+        body.extend_from_slice(&MOB.to_le_bytes());
+        body.extend_from_slice(&2589u32.to_le_bytes());
+        body.extend_from_slice(&CRUSADER.to_le_bytes());
+        body.push(0);
+        let parsed = benilla_protocol::messages::parse_server(
+            benilla_protocol::messages::opcode::SMSG_ENCHANTMENTLOG,
+            &body,
+        );
+        let Ok(benilla_protocol::ServerPacket::EnchantmentLog(s)) = parsed else {
+            panic!("an enchantment log");
+        };
+        assert!(enchant(s.caster, s.owner, s.enchant_id).is_empty());
+    }
+
     /// The packet's id names a `SpellItemEnchantment` row through `0xc0d7d8` (`0x62922d`,
     /// `0x6290d3`), never a spell; a row with `Flags & 0x2` writes nothing (`0x62923e`,
     /// `0x6290e4`). The word carries the enchantment's name when the item is yours (`0x62937a`,
@@ -902,6 +939,76 @@ mod emitters {
         let lines =
             bench.lines(|ctx, st, po, log| super::super::enchantment_log(fade, ctx, st, po, log));
         assert!(lines.is_empty(), "a fade's owner held as no unit");
+    }
+
+    /// The enchantment's formatter looks its item up ahead of every test (`0x628f83`), so a fade
+    /// off a unit out of range still asks and waits; its record's callback runs the formatter
+    /// again (`0x62952f` → `0x628f40`), gates and all, so the fade is written when its unit is in
+    /// range there and not when it moved out (`0x6290b6`). The durability line's writer tests
+    /// the range again too (`0x629941`), past its caller's test at the packet (`0x62e0cd`).
+    #[test]
+    fn a_waiting_line_meets_its_formatters_gates_at_its_record() {
+        use crate::items::RecordCallback::CombatLog;
+        use crate::ui_chat::combat::ItemLog;
+        const BLADE: u32 = 4_242;
+        let mut bench = Bench::new();
+        let (me, mob) = (bench.index.0[&ME], bench.index.0[&MOB]);
+        let at = |yards: f32| At([(me, Vec3::ZERO), (mob, Vec3::new(yards, 0.0, 0.0))].into());
+        let (near, far) = (at(5.0), at(500.0));
+        let fade = benilla_protocol::messages::EnchantmentLog {
+            caster: 0,
+            owner: MOB,
+            item_entry: BLADE,
+            enchant_id: CRUSADER,
+            show_affiliation: false,
+        };
+        let worn = SpellLogExecute {
+            caster: MOB,
+            spell_id: FIREBALL,
+            effects: vec![(
+                111,
+                vec![ExecuteLog::DurabilityDamage {
+                    target: MOB,
+                    item_entry: BLADE as i32,
+                    slot: 0,
+                }],
+            )],
+        };
+        let enchanted = |log, poses: &At| {
+            bench.run_posed_on(log, poses, |ctx, st, po, log| {
+                super::super::enchantment_log(fade, ctx, st, po, log)
+            })
+        };
+        // Out of range at the packet: the lookup asked all the same, and the line waits.
+        let log = enchanted(ChatLog::default(), &far);
+        assert!(log.pending_combat().is_empty());
+        assert!(bench.items.waiting(BLADE, CombatLog(ItemLog::Enchantment)));
+        // In range at the packet, and the durability line too.
+        let log = enchanted(log, &near);
+        let log = bench.run_posed_on(log, &near, |ctx, st, po, log| {
+            super::super::spell_log_execute(&worn, ctx, st, po, log)
+        });
+        assert!(log.pending_combat().is_empty());
+        assert!(bench.items.waiting(BLADE, CombatLog(ItemLog::Durability)));
+        bench
+            .items
+            .insert_template(BLADE, Some(crate::items::test_template("Blade")));
+        let answer = |log, poses: &At, kind| {
+            bench.run_posed_on(log, poses, |ctx, st, po, log| {
+                super::super::item_answered(kind, BLADE, true, ctx, st, po, log)
+            })
+        };
+        // Each callback runs a fade's formatter again with the mob where it is then.
+        let log = answer(log, &far, ItemLog::Enchantment);
+        assert!(log.pending_combat().is_empty(), "moved out of range");
+        let log = answer(log, &near, ItemLog::Enchantment);
+        assert_eq!(stems(&log.pending_combat()), ["ITEMENCHANTMENTREMOVE"]);
+        let log = answer(log, &far, ItemLog::Durability);
+        assert_eq!(
+            log.pending_combat().len(),
+            1,
+            "the durability line moved out of range"
+        );
     }
 
     // ── `UNIT_COMBAT`: its gates and flags, and its place against the line ──

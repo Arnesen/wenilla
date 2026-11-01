@@ -12,7 +12,7 @@ use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
 
-use super::unit_view_tests::{created, wire_packets};
+use super::unit_view_tests::{created, values, wire_packets};
 use crate::net::ClientCommand;
 use crate::ui_loot::{LootLatch, LootState};
 
@@ -585,4 +585,592 @@ fn a_listeners_close_leaves_a_later_removal_unsignalled() {
         vec![SessionEvent::LootRemoved { slot: 1 }],
     ]);
     assert_eq!(c.seen(), ["LOOT_OPENED:nil", "LOOT_CLOSED:nil"]);
+}
+
+/// Fireball, which our precast holds.
+const FIREBALL: u32 = 133;
+
+/// The corpse's window open, read in full, and a listener of the monster's line that reads the
+/// window's row count as it fires, after the spy's own line; what the frames heard and sent
+/// taken.
+fn looting_the_corpse() -> Client {
+    let mut c = client();
+    c.ask_loot(CORPSE);
+    c.frame(vec![vec![response(CORPSE, 0, &[LINEN])]]);
+    assert_eq!(c.seen(), ["LOOT_OPENED:nil"]);
+    c.eval::<()>(
+        false,
+        r#"local g = CreateFrame("Frame")
+        g:RegisterEvent("CHAT_MSG_MONSTER_SAY")
+        g:SetScript("OnEvent", function()
+            table.insert(Seen, "items:" .. GetNumLootItems())
+        end)"#,
+    );
+    c.sent();
+    c
+}
+
+/// Our precast of [`FIREBALL`], with its record held, as a send or a start left it.
+fn precasting(c: &mut Client) {
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+            FIREBALL,
+            Default::default(),
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::creature_anim::Precast {
+        spell_id: FIREBALL,
+        busy: true,
+    });
+}
+
+/// `packet` ends our precast with its tail, whose loot close (`0x60d040` → `0x48f200` at
+/// `0x60d10b`) runs inside it: its release goes out there and its `LOOT_CLOSED` fires there, so the
+/// next packet's listener in the same frame hears it fired and reads the window shut.
+fn closes_inside_its_packet(c: &mut Client, packet: SessionEvent) {
+    c.frame(vec![vec![packet], vec![boar_says("b")]]);
+    assert_eq!(
+        c.seen(),
+        ["LOOT_CLOSED:nil", "CHAT_MSG_MONSTER_SAY:b", "items:0"]
+    );
+    let sent = c.sent();
+    assert_eq!(
+        sent.iter()
+            .filter(|s| s.starts_with("LootRelease") && s.contains(&format!("{CORPSE}")))
+            .count(),
+        1,
+        "released once, in its frame: {sent:?}"
+    );
+    assert_eq!(c.app.world().resource::<LootState>().source(), None);
+    c.frame(vec![]);
+    assert!(c.seen().is_empty(), "nothing fires after");
+}
+
+/// Our cast's GO ends its precast (`0x6e7fc5`), the tail run as `0x6e4870` answers for a plain
+/// record.
+#[test]
+fn a_go_closes_our_loot_inside_its_packet() {
+    let mut c = looting_the_corpse();
+    precasting(&mut c);
+    closes_inside_its_packet(
+        &mut c,
+        SessionEvent::SpellGo {
+            caster: ME,
+            spell_id: FIREBALL,
+            cast_flags: 0x100,
+            hits: vec![],
+            misses: vec![],
+            target: None,
+            go_target: None,
+            target_mask: 0,
+            source: None,
+            dest: None,
+            ammo_display_id: None,
+            item_caster: None,
+            unit_caster: ME,
+        },
+    );
+}
+
+/// `SMSG_SPELL_FAILED_OTHER` on our cast ends its precast with `b` set (`0x6e8e8c`).
+#[test]
+fn a_spell_failure_closes_our_loot_inside_its_packet() {
+    let mut c = looting_the_corpse();
+    precasting(&mut c);
+    closes_inside_its_packet(
+        &mut c,
+        SessionEvent::SpellFailedOther {
+            caster: ME,
+            spell_id: FIREBALL,
+        },
+    );
+}
+
+/// A failed `SMSG_CAST_RESULT` reports the failure, whose player leg ends the precast of the
+/// spell with its tail (`0x6e1c7f`-`0x6e1c8e`), whatever the reason.
+#[test]
+fn a_failed_cast_result_closes_our_loot_inside_its_packet() {
+    let mut c = looting_the_corpse();
+    precasting(&mut c);
+    closes_inside_its_packet(
+        &mut c,
+        SessionEvent::CastResult {
+            spell_id: FIREBALL,
+            success: false,
+            reason: Some(0x23),
+            arg: None,
+        },
+    );
+}
+
+/// The health watcher's death of our selection: `OnDied`'s deselect is refused while we are
+/// charmed (`0x49359c`), so the selection is still the dead unit (`0x6047c7`) and the active
+/// player's precast ends with its own spell and its tail (`0x6047e7`), inside the update packet.
+#[test]
+fn a_selection_that_dies_and_stays_selected_closes_our_loot_inside_its_packet() {
+    /// A living mark, selected.
+    const MARK: u64 = 0xF130_0000_0000_00AD;
+    /// `UNIT_FIELD_CHARMEDBY`, its low dword.
+    const CHARMEDBY: u16 = 0x0a;
+    let mut c = looting_the_corpse();
+    c.frame(vec![
+        vec![created(MARK, EntityKind::Unit, &[(FIELD_UNIT_HEALTH, 100)])],
+        vec![values(ME, &[(CHARMEDBY, 0x99), (CHARMEDBY + 1, 0)])],
+    ]);
+    let world = c.app.world_mut();
+    let mark = world.resource::<crate::net::GuidIndex>().0[&MARK];
+    let mut selection = world.resource_mut::<crate::target::Selection>();
+    selection.guid = Some(MARK);
+    selection.target = Some(mark);
+    c.frame(vec![]);
+    c.seen();
+    c.sent();
+    assert_eq!(c.app.world().resource::<LootState>().source(), Some(CORPSE));
+    closes_inside_its_packet(&mut c, values(MARK, &[(FIELD_UNIT_HEALTH, 0)]));
+    assert_eq!(
+        c.app.world().resource::<crate::target::Selection>().guid,
+        Some(MARK),
+        "the charmed deselect refused"
+    );
+}
+
+/// A spline move on our own player ends its precast whatever it is (`0x6020e8`), the tail's
+/// close read off the path it installed: moving, the move-start close, which takes a corpse's.
+#[test]
+fn a_monster_move_closes_our_loot_inside_its_packet() {
+    let mut c = looting_the_corpse();
+    closes_inside_its_packet(
+        &mut c,
+        SessionEvent::MonsterMove {
+            guid: ME,
+            transport: None,
+            start: [0.0; 3],
+            spline_id: 7,
+            path: vec![[0.0; 3], [10.0, 0.0, 0.0]],
+            facing: benilla_protocol::MonsterMoveFacing::None,
+            stop: false,
+            duration_ms: 1000,
+            flying: false,
+            run_mode: true,
+        },
+    );
+}
+
+/// A chest, `GAMEOBJECT_TYPE_ID` 3.
+const CHEST: u64 = 0xF110_0000_0000_00AE;
+/// Opening, an `OPEN_LOCK` spell.
+const OPENING: u32 = 3365;
+
+/// Our Opening's GO on the chest whose window we hold: the precast end's close takes that window
+/// and its latch as the go's legs return (`0x6e7fc5`), then the player tail arms the chest as the
+/// loot target (`0x6e831b` → `SetLootTarget 0x5ed5f0`), so the latch the GO arms is the one that
+/// stands for the response it asks.
+#[test]
+fn a_go_on_the_chest_we_loot_keeps_the_latch_it_arms() {
+    use benilla_protocol::messages::ObjectType;
+    let mut c = client();
+    c.frame(vec![vec![SessionEvent::ObjectCreate {
+        guid: CHEST,
+        kind: EntityKind::GameObject,
+        display_id: None,
+        position: [0.0; 3],
+        orientation: 0.0,
+        scale: 1.0,
+        speeds: None,
+        mover: None,
+        transport_progress: None,
+        transport: None,
+        spline: None,
+        fields: benilla_protocol::ObjectFields::from_pairs(&[(2, 0x21), (21, 3)])
+            .into_created(ObjectType::GameObject),
+    }]]);
+    c.ask_loot(CHEST);
+    c.frame(vec![vec![response(CHEST, 0, &[LINEN])]]);
+    assert_eq!(c.seen(), ["LOOT_OPENED:nil"]);
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+            OPENING,
+            benilla_formats::SpellDisplay {
+                open_lock: Some(benilla_formats::OpenLock {
+                    lock_type: 1,
+                    effect: 0,
+                }),
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::creature_anim::Precast {
+        spell_id: OPENING,
+        busy: true,
+    });
+    c.sent();
+    c.frame(vec![vec![SessionEvent::SpellGo {
+        caster: ME,
+        spell_id: OPENING,
+        cast_flags: 0x100,
+        hits: vec![],
+        misses: vec![],
+        target: None,
+        go_target: Some(CHEST),
+        target_mask: 0,
+        source: None,
+        dest: None,
+        ammo_display_id: None,
+        item_caster: None,
+        unit_caster: ME,
+    }]]);
+    assert_eq!(c.seen(), ["LOOT_CLOSED:nil"]);
+    let sent = c.sent();
+    assert_eq!(
+        sent.iter()
+            .filter(|s| s.starts_with("LootRelease") && s.contains(&format!("{CHEST}")))
+            .count(),
+        1,
+        "the window released at the GO: {sent:?}"
+    );
+    assert_eq!(c.app.world().resource::<LootState>().source(), None);
+    assert_eq!(
+        c.app.world().resource::<LootLatch>().0,
+        Some(CHEST),
+        "the chest stays the loot target"
+    );
+}
+
+/// Silk, whose record the client lacks.
+const SILK: u32 = 4306;
+
+/// A response that lands while we run, on a body with a row whose record the client lacks: its
+/// copier returns with the fetch outstanding (`0x4c1ea6`), signalling nothing, and the response's
+/// tail closes the window all the same (`0x5ebc3a`-`0x5ebc51`), inside its packet: released there,
+/// `LOOT_CLOSED` there, and the teardown cancels the row's fetch (`0x4c1d4f`), so the record's
+/// answer behind it in the frame copies nothing and `LOOT_OPENED` never fires.
+#[test]
+fn a_response_on_the_run_waiting_on_a_record_closes_inside_its_packet() {
+    let mut c = client();
+    c.eval::<()>(
+        false,
+        r#"local g = CreateFrame("Frame")
+        g:RegisterEvent("CHAT_MSG_MONSTER_SAY")
+        g:SetScript("OnEvent", function()
+            table.insert(Seen, "items:" .. GetNumLootItems())
+        end)"#,
+    );
+    c.app
+        .world_mut()
+        .insert_resource(crate::player::Player::with_move_flags(
+            crate::creature_anim::move_flags::FORWARD,
+        ));
+    c.ask_loot(CORPSE);
+    c.frame(vec![
+        vec![response(CORPSE, 0, &[SILK])],
+        vec![SessionEvent::ItemTemplate {
+            entry: SILK,
+            info: Some(Box::new(crate::items::test_template("Silk Cloth"))),
+        }],
+        vec![boar_says("b")],
+    ]);
+    assert_eq!(
+        c.seen(),
+        ["LOOT_CLOSED:nil", "CHAT_MSG_MONSTER_SAY:b", "items:0"]
+    );
+    let sent = c.sent();
+    assert_eq!(
+        sent.iter()
+            .filter(|s| s.starts_with("LootRelease") && s.contains(&format!("{CORPSE}")))
+            .count(),
+        1,
+        "released once, at the response: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|s| s.starts_with("AutostoreLootItem")),
+        "{sent:?}"
+    );
+    assert_eq!(c.app.world().resource::<LootState>().source(), None);
+    c.frame(vec![]);
+    assert!(c.seen().is_empty(), "nothing fires after");
+}
+
+/// Our cast's GO, which ends a precast of `spell_id` with its tail, hitting `hits`.
+fn our_go(spell_id: u32, hits: Vec<u64>) -> SessionEvent {
+    SessionEvent::SpellGo {
+        caster: ME,
+        spell_id,
+        cast_flags: 0x100,
+        hits,
+        misses: vec![],
+        target: None,
+        go_target: None,
+        target_mask: 0,
+        source: None,
+        dest: None,
+        ammo_display_id: None,
+        item_caster: None,
+        unit_caster: ME,
+    }
+}
+
+/// Where the first sent command starting with each of `heads` went, in `sent`.
+fn sent_at(sent: &[String], head: &str) -> Option<usize> {
+    sent.iter().position(|s| s.starts_with(head))
+}
+
+/// An auto-looted body: the copier ends inside the response with the sweep (`0x4c1ed3` →
+/// `AutoLootAll 0x4c1fa0`), its coin and row requests sent there (`0x4c1ffc`, `0x4c2936`), so a
+/// packet behind it in the frame that closes the window finds them sent: a GO that ends our precast
+/// releases after them (`0x60d10b`), and the server's release answer, which vmangos sends whenever
+/// we move (`MovementHandler.cpp:1104-1110`), takes a window already swept.
+#[test]
+fn an_auto_loot_response_sweeps_inside_its_packet_ahead_of_a_later_close() {
+    for (what, later) in [
+        ("a GO", our_go(FIREBALL, vec![])),
+        (
+            "a release answer",
+            SessionEvent::LootReleaseResponse {
+                guid: CORPSE,
+                result: 1,
+            },
+        ),
+    ] {
+        let mut c = client();
+        precasting(&mut c);
+        c.app
+            .world_mut()
+            .resource_mut::<crate::ui_loot::AutoLootByte>()
+            .0 = true;
+        c.ask_loot(CORPSE);
+        c.frame(vec![vec![response(CORPSE, 500, &[LINEN])], vec![later]]);
+        let sent = c.sent();
+        let (money, row) = (
+            sent_at(&sent, "LootMoney"),
+            sent_at(&sent, "AutostoreLootItem"),
+        );
+        assert!(money.is_some() && row.is_some(), "{what}: swept: {sent:?}");
+        if let Some(release) = sent_at(&sent, "LootRelease") {
+            assert!(
+                money < Some(release) && row < Some(release),
+                "{what}: {sent:?}"
+            );
+        }
+        assert_eq!(
+            c.app.world().resource::<LootState>().source(),
+            None,
+            "{what}"
+        );
+    }
+}
+
+/// `SMSG_STANDSTATE_UPDATE` applies in its packet (`0x603e50` → `0x6127b0` → `0x5f0790`): a sit
+/// closes our loot there (`0x5f07d5`), so a later packet's listener in the frame reads the window
+/// shut, and the stand behind it, which closes nothing (`0x5f07a9`), does not hide the sit.
+#[test]
+fn a_server_sit_closes_our_loot_inside_its_packet() {
+    let mut c = looting_the_corpse();
+    c.frame(vec![
+        vec![SessionEvent::StandStateUpdate { state: 1 }],
+        vec![boar_says("b")],
+        vec![SessionEvent::StandStateUpdate { state: 0 }],
+    ]);
+    assert_eq!(
+        c.seen(),
+        ["LOOT_CLOSED:nil", "CHAT_MSG_MONSTER_SAY:b", "items:0"]
+    );
+    let sent = c.sent();
+    assert_eq!(
+        sent.iter()
+            .filter(|s| s.starts_with("LootRelease") && s.contains(&format!("{CORPSE}")))
+            .count(),
+        1,
+        "released once, at the sit: {sent:?}"
+    );
+}
+
+/// A living mark our GO hits.
+const MARK: u64 = 0xF130_0000_0000_00AD;
+/// Cheap Shot, whose GO starts the swing (`AttributesEx2 & 0x100000`, `0x6e83c0`).
+const CHEAP_SHOT: u32 = 1833;
+
+/// The chest's window open, a living [`MARK`] beside it, and our precast of [`CHEAP_SHOT`], whose
+/// GO starts the swing at what it hits; what the frames heard and sent taken. The window is a
+/// chest's, which the start's select teardown does not close (`0x493959`).
+fn cheap_shot_beside_the_open_chest() -> Client {
+    use benilla_protocol::messages::ObjectType;
+    /// `UNIT_FIELD_MAXHEALTH`.
+    const MAXHEALTH: u16 = 28;
+    let mut c = client();
+    c.frame(vec![
+        vec![created(
+            MARK,
+            EntityKind::Unit,
+            &[(FIELD_UNIT_HEALTH, 100), (MAXHEALTH, 100)],
+        )],
+        vec![SessionEvent::ObjectCreate {
+            guid: CHEST,
+            kind: EntityKind::GameObject,
+            display_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: None,
+            transport: None,
+            spline: None,
+            fields: benilla_protocol::ObjectFields::from_pairs(&[(2, 0x21), (21, 3)])
+                .into_created(ObjectType::GameObject),
+        }],
+    ]);
+    c.ask_loot(CHEST);
+    c.frame(vec![vec![response(CHEST, 0, &[LINEN])]]);
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+            CHEAP_SHOT,
+            benilla_formats::SpellDisplay {
+                attributes_ex2: 0x0010_0000,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::creature_anim::Precast {
+        spell_id: CHEAP_SHOT,
+        busy: true,
+    });
+    c.seen();
+    c.sent();
+    c
+}
+
+/// The GO's precast end releases our loot at `0x6e7fc5`, ahead of its deferred attack start
+/// (`0x6e8402` → `0x6131a0`), whose validator selects the hit (`0x613100`), so the release goes out
+/// before the start's sends.
+#[test]
+fn a_gos_release_goes_out_before_its_deferred_attack_starts_sends() {
+    let mut c = cheap_shot_beside_the_open_chest();
+    c.frame(vec![vec![our_go(CHEAP_SHOT, vec![MARK])]]);
+    let sent = c.sent();
+    let release = sent_at(&sent, "LootRelease");
+    let select = sent
+        .iter()
+        .position(|s| *s == format!("SetSelection {{ guid: {MARK} }}"));
+    assert!(release.is_some() && select.is_some(), "{sent:?}");
+    assert!(release < select, "{sent:?}");
+    if let Some(swing) = sent_at(&sent, "AttackSwing") {
+        assert!(release < Some(swing), "{sent:?}");
+    }
+}
+
+/// The GO's precast end signals `LOOT_CLOSED` inside its close (`0x6e7fc5` → `0x4c1dac`), ahead of
+/// its deferred attack start's select (`0x6e8402` → `0x6131a0` → `0x613100`), whose
+/// `PLAYER_TARGET_CHANGED` (`0x49389c`) a listener hears after it.
+#[test]
+fn a_gos_loot_close_signals_before_its_deferred_attack_starts_select() {
+    let mut c = cheap_shot_beside_the_open_chest();
+    c.eval::<()>(
+        false,
+        r#"local g = CreateFrame("Frame")
+        g:RegisterEvent("PLAYER_TARGET_CHANGED")
+        g:SetScript("OnEvent", function() table.insert(Seen, event) end)"#,
+    );
+    c.frame(vec![vec![our_go(CHEAP_SHOT, vec![MARK])]]);
+    let seen = c.seen();
+    let closed = seen.iter().position(|s| s == "LOOT_CLOSED:nil");
+    let selected = seen.iter().position(|s| s == "PLAYER_TARGET_CHANGED");
+    assert!(closed.is_some() && selected.is_some(), "{seen:?}");
+    assert!(closed < selected, "{seen:?}");
+}
+
+/// A sting whose column 38 names the next spell (`modalNextSpell`).
+const STING: u32 = 1978;
+/// What the sting chains, a plain spell.
+const CHAINED: u32 = 5019;
+
+/// A failed result of our precast spell ends the precast inside its report, releasing our loot
+/// (`0x6e73ac` → `0x6e1a00`, `0x6e1c8e`), ahead of the `modalNextSpell` chain's cast
+/// (`0x6e74aa` → `0x6e5a90`), which reason 0x17 leaves in reach (`0x6e1ce4`).
+#[test]
+fn a_cast_results_release_goes_out_before_its_chained_cast() {
+    let mut c = looting_the_corpse();
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([
+            (
+                STING,
+                benilla_formats::SpellDisplay {
+                    modal_next_spell: CHAINED,
+                    ..Default::default()
+                },
+            ),
+            (CHAINED, benilla_formats::SpellDisplay::default()),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    world
+        .resource_mut::<crate::spell::PendingCast>()
+        .push(STING, None, std::time::Instant::now());
+    let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::creature_anim::Precast {
+        spell_id: STING,
+        busy: true,
+    });
+    c.seen();
+    c.sent();
+    c.frame(vec![vec![SessionEvent::CastResult {
+        spell_id: STING,
+        success: false,
+        reason: Some(0x17),
+        arg: None,
+    }]]);
+    let sent = c.sent();
+    let (release, cast) = (sent_at(&sent, "LootRelease"), sent_at(&sent, "CastSpell"));
+    assert!(release.is_some() && cast.is_some(), "{sent:?}");
+    assert!(release < cast, "{sent:?}");
+}
+
+/// Auto Shot, our auto-repeat spell.
+const AUTO_SHOT: u32 = 75;
+
+/// A failed result of our auto-repeat spell ends its precast inside the report, releasing our loot
+/// (`0x6e1a00`, `0x6e1c8e` → `0x60d10b`), ahead of the report's auto-repeat stop, whose
+/// `CMSG_CANCEL_AUTO_REPEAT_SPELL` goes out after it (`0x6e1cea` → `0x6ea080`, `0x6ea0c6`); a
+/// reason but 0x17 reaches the stop (`0x6e1ce4`).
+#[test]
+fn a_failed_auto_shots_release_goes_out_before_its_auto_repeat_stop() {
+    let mut c = looting_the_corpse();
+    let world = c.app.world_mut();
+    world.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from([(
+            AUTO_SHOT,
+            Default::default(),
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    world.insert_resource(crate::spell::AutoRepeatActive(Some(AUTO_SHOT)));
+    let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::creature_anim::Precast {
+        spell_id: AUTO_SHOT,
+        busy: true,
+    });
+    c.seen();
+    c.sent();
+    c.frame(vec![vec![SessionEvent::CastResult {
+        spell_id: AUTO_SHOT,
+        success: false,
+        reason: Some(0x23),
+        arg: None,
+    }]]);
+    let sent = c.sent();
+    let (release, stop) = (
+        sent_at(&sent, "LootRelease"),
+        sent_at(&sent, "CancelAutoRepeat"),
+    );
+    assert!(release.is_some() && stop.is_some(), "{sent:?}");
+    assert!(release < stop, "{sent:?}");
 }

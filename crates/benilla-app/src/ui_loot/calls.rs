@@ -51,9 +51,11 @@ pub(super) enum Then {
     /// The coin click after its `LOOT_SLOT_CLEARED` (`0x4c286a`-`0x4c287c`): the close with
     /// release when nothing is left.
     CloseIfEmpty,
-    /// A close's two unlocks (`0x48f2bd`, `0x4c1d36`), after the line its flag shows
-    /// (`0x48f27b`).
-    Unlocks,
+    /// The next of a close's two unlocks (`0x48f2bd`, `0x4c1d36`), the first after the line its
+    /// flag shows (`0x48f27b`).
+    Unlock,
+    /// A close's release past its own unlock's listeners (`0x48f311`).
+    Release,
     /// A close's teardown after its unlocks' signals: the source zeroed and `LOOT_CLOSED`
     /// (`0x4c1da0`, `0x4c1dac`).
     Announce,
@@ -61,6 +63,9 @@ pub(super) enum Then {
     Deselect(u64),
     /// `OpenItem` past its `SetAutoLoot` (`0x5edcbb` on), once a sweep that made has run.
     OpenItem(OpenItem),
+    /// `OpenItem`'s `CMSG_OPEN_ITEM` past its lock's `ITEM_LOCK_CHANGED` (`0x5edd26` after
+    /// `0x495415`).
+    SendOpenItem(OpenItem),
 }
 
 /// The loot window's state and what its functions send and signal through: the engine half of
@@ -74,7 +79,7 @@ pub(crate) struct LootSteps<'w, 's> {
     pub(super) dead: DeadUnitDeselect<'w, 's>,
     pub(super) objects: crate::net::Objects<'w, 's>,
     pub(super) byte: ResMut<'w, AutoLootByte>,
-    items: Res<'w, Items>,
+    pub(super) items: Res<'w, Items>,
     group: Res<'w, GroupState>,
     pickup: MessageWriter<'w, crate::sound::LootPickupSound>,
     errors: Res<'w, UiErrorKeys>,
@@ -85,19 +90,60 @@ pub(crate) struct LootSteps<'w, 's> {
 }
 
 impl LootSteps<'_, '_> {
-    /// A stand state change's loot close inside its call, `0x48f200(1, 1, 0)` at `0x5f07d5`: the
-    /// movement start's close ([`super::LootMoveStart`]), its release sent now.
+    /// A probe line's stand state change's loot close, `0x48f200(1, 1, 0)` at `0x5f07d5`, with
+    /// nobody to signal between its steps: the movement start's close ([`super::MoveStartClose`]),
+    /// its release sent now; nothing with no loot target latched ([`super::loot_target_held`]).
     pub(crate) fn close_for_stand(&mut self) {
-        let closed = super::close_on_move_start(&mut self.loot, &mut self.latch, &self.net);
+        if !super::loot_target_held(&self.latch) {
+            return;
+        }
+        let closed = super::close_on_move_start(
+            &mut self.loot,
+            &mut self.latch,
+            &self.net,
+            Some(&self.items),
+        );
         self.dead.after_close(closed);
     }
 
-    /// A movement start's close inside its call, `0x48f200(1, 1, 0)` at `0x60e9dd`: what `dl`
-    /// keeps stays ([`super::move_start_keeps`]), anything else closes as `CloseLoot` closes it,
-    /// its release now and `LOOT_CLOSED` in the call's tail, before the script's next line.
+    /// A stand state change's loot close inside its call, `0x48f200(1, 1, 0)` at `0x5f07d5`: nothing
+    /// with no loot target latched ([`super::loot_target_held`]); what `dl` keeps stays
+    /// ([`super::move_start_keeps`]), anything else closes as `CloseLoot` closes it, its release now
+    /// and the rest owed past `depth`, the depth returned, for the caller to run step by step
+    /// ([`Self::then_past`]) ahead of the stand's attack stop (`0x5f07e7`).
+    pub(crate) fn close_for_stand_here(&mut self, script: &mut UiScript) -> usize {
+        let depth = self.loot.then.len();
+        if !super::loot_target_held(&self.latch) {
+            return depth;
+        }
+        if let Some(source) = self.loot.source() {
+            if !super::move_start_keeps(&self.loot, source) {
+                self.end_window(script, false);
+            }
+        }
+        depth
+    }
+
+    /// The next step owed past `depth` ([`Self::then`]), as [`LootCall::Resume`] runs it, for the
+    /// caller to run its signals' listeners before the next: whether one ran.
+    pub(crate) fn then_past(&mut self, script: &mut UiScript, depth: usize) -> bool {
+        if self.loot.then.len() <= depth {
+            return false;
+        }
+        let Some(then) = self.loot.then.pop() else {
+            return false;
+        };
+        self.then(script, then);
+        true
+    }
+
+    /// A movement start's close inside its call, `0x48f200(1, 1, 0)` at `0x60e9dd`: nothing with no
+    /// loot target latched ([`super::loot_target_held`]); what `dl` keeps stays
+    /// ([`super::move_start_keeps`]), anything else closes as `CloseLoot` closes it, its release now
+    /// and `LOOT_CLOSED` in the call's tail, before the script's next line.
     pub(crate) fn close_for_move(&mut self, script: &mut UiScript) -> Option<CallTail> {
         let source = self.loot.source()?;
-        if super::move_start_keeps(&self.loot, source) {
+        if !super::loot_target_held(&self.latch) || super::move_start_keeps(&self.loot, source) {
             return None;
         }
         let depth = self.loot.then.len();
@@ -155,30 +201,40 @@ impl LootSteps<'_, '_> {
 
     /// `OpenItem 0x5edc80` from its `SetAutoLoot` (`0x5edcb6`) on, the call having chosen the
     /// item: the byte from Shift as the call saw it, which with a window open sweeps it, then,
-    /// once that sweep's listeners have run, the item held as the loot target, its lock and
-    /// `CMSG_OPEN_ITEM` ([`Self::send_open_item`]).
+    /// once that sweep's listeners have run (its `LOOT_OPENED`, `0x4c2240`), the item held as the
+    /// loot target, its lock and `CMSG_OPEN_ITEM` (`0x5edcd9`, `0x5edd26`;
+    /// [`Self::lock_open_item`]), in the call's tail whenever a signal ran.
     pub(crate) fn open_item(&mut self, script: &mut UiScript, open: OpenItem) -> Option<CallTail> {
         let owed = self.loot.then.len();
         self.loot.then.push(Then::OpenItem(open));
         let byte = interaction_byte(&self.cfg, script.shift_key_down());
+        let sweeps = byte && self.latch.0.is_some();
         self.set_auto_loot(script, byte);
-        if self.loot.then.len() == owed + 1 {
+        if !sweeps && self.loot.then.len() == owed + 1 {
             self.loot.then.pop();
-            self.send_open_item(script, open);
-            return None;
+            self.lock_open_item(script, open);
         }
         self.resume_tail(owed)
     }
 
     /// `OpenItem`'s end: the item becomes the loot target (`0x5edcc0`), which the type-1 answer's
-    /// admission asks for (`0x5ebb3f`), it locks (`0x5edcd9`; `LockItem` signals nothing for a
-    /// guid that is no item object, `0x495407`), and `CMSG_OPEN_ITEM` goes out.
-    fn send_open_item(&mut self, script: &mut UiScript, open: OpenItem) {
+    /// admission asks for (`0x5ebb3f`), and it locks (`0x5edcd9`), whose `ITEM_LOCK_CHANGED`
+    /// (`0x495415`) runs its listeners before `CMSG_OPEN_ITEM` goes out (`0x5edd26`), so the send
+    /// is owed past them ([`Then::SendOpenItem`]); `LockItem` signals nothing for a guid that is
+    /// no item object (`0x495407`), and the send goes at once.
+    fn lock_open_item(&mut self, script: &mut UiScript, open: OpenItem) {
         debug!("ui_loot: open item {:#x}", open.guid);
         self.latch.0 = Some(open.guid);
         if self.objects.object(open.guid).is_some_and(|f| f.is_item()) {
             script.lock_item(open.guid);
+            self.loot.then.push(Then::SendOpenItem(open));
+            return;
         }
+        self.send_open_item(open);
+    }
+
+    /// `OpenItem`'s `CMSG_OPEN_ITEM` (`0x5edd26`).
+    fn send_open_item(&self, open: OpenItem) {
         let _ = self.net.0.send(ClientCommand::OpenItem {
             bag_index: open.bag_index,
             slot: open.slot,
@@ -269,23 +325,27 @@ impl LootSteps<'_, '_> {
     /// window's: nothing with no window (`0x48f23f`); a disenchant window with contents is swept
     /// with the flag (`0x48f24f`, `0x48f264`); else `ERR_LOOT_NO_UI` for a set flag (`0x48f27b`),
     /// the release and the teardown. The line, which a call signals as it returns, comes before
-    /// the unlocks ([`Then::Unlocks`]), and those before the window goes ([`Then::Announce`]).
+    /// the unlocks ([`Then::Unlock`]), an item's release between them ([`Then::Release`]), and
+    /// those before the window goes ([`Then::Announce`]).
     pub(super) fn end_window(&mut self, script: &mut UiScript, failed: bool) {
         let Some(source) = self.loot.source() else {
             return;
         };
         if self.loot.window_closed_since() {
             // Its release went at the later packet: the close's signals alone, if still owed.
-            if !self.loot.take_queued_close(source) {
+            let Some(released) = self.loot.take_queued_close(source) else {
                 return;
-            }
+            };
             if failed {
                 self.errors.push(UiError::key("ERR_LOOT_NO_UI"));
             }
             self.loot.unlock_item_source(source);
+            if released {
+                self.loot.release_owed.push(source);
+            }
             self.loot.unlock_item_source(source);
             self.loot.then.push(Then::Announce);
-            self.loot.then.push(Then::Unlocks);
+            self.owe_unlocks();
             return;
         }
         if self.loot.disenchant_hold(&self.objects) {
@@ -295,13 +355,26 @@ impl LootSteps<'_, '_> {
         if failed {
             self.errors.push(UiError::key("ERR_LOOT_NO_UI"));
         }
-        let closed = close_interaction_in_place(&mut self.loot, &mut self.latch, Some(&self.net));
+        let closed = close_interaction_in_place(
+            &mut self.loot,
+            &mut self.latch,
+            Some(&self.net),
+            Some(&self.items),
+        );
         // The window goes (`0x48f33d` → `0x4c1cb0`) before the dead unit's deselect (`0x48f369`).
         if let Some(source) = self.dead.dead_unit(closed) {
             self.loot.then.push(Then::Deselect(source));
         }
         self.loot.then.push(Then::Announce);
-        self.loot.then.push(Then::Unlocks);
+        self.owe_unlocks();
+    }
+
+    /// A close's own unlock, its release and its teardown's unlock, each run once the one before
+    /// has signalled ([`Then::Unlock`], [`Then::Release`]).
+    fn owe_unlocks(&mut self) {
+        self.loot.then.push(Then::Unlock);
+        self.loot.then.push(Then::Release);
+        self.loot.then.push(Then::Unlock);
     }
 
     /// `GiveMasterLoot` (`0x4c2fd0`): the candidate at the 1-based index of the list packet's
@@ -458,10 +531,12 @@ impl LootSteps<'_, '_> {
                     self.end_window(script, false);
                 }
             }
-            Then::Unlocks => unlock_closed_source(script, &mut self.loot, &self.objects),
+            Then::Unlock => unlock_closed_source(script, &mut self.loot, &self.objects),
+            Then::Release => super::send_owed_release(&mut self.loot, &self.net),
             Then::Announce => self.loot.tear_down_here(script),
             Then::Deselect(source) => self.dead.deselect(source),
-            Then::OpenItem(open) => self.send_open_item(script, open),
+            Then::OpenItem(open) => self.lock_open_item(script, open),
+            Then::SendOpenItem(open) => self.send_open_item(open),
         }
     }
 }

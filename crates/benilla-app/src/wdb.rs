@@ -48,19 +48,36 @@ use benilla_protocol::messages::opcode;
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
+use crate::death::DeathNet;
 use crate::glue_session::roster::Roster;
 use crate::go_templates::GameObjectTemplates;
 use crate::item_names::ItemNames;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::NetHandlerApp;
+use crate::portrait::PortraitMarks;
 use crate::query_cache::QueryCache;
+use crate::ui_auction::{AuctionOpen, HouseLane};
+use crate::ui_battlefield::Battlefield;
+use crate::ui_battlefield_positions::BattlefieldPositions;
+use crate::ui_battlefield_score::BattlefieldScoreboard;
+use crate::ui_chat::ChannelRosters;
+use crate::ui_dialog_verbs::MeetingStone;
+use crate::ui_dressup::DressUpRoom;
+use crate::ui_duel::DuelState;
 use crate::ui_gossip::GossipState;
 use crate::ui_guild::GuildState;
 use crate::ui_item_text::PageTexts;
+use crate::ui_loot::LootState;
+use crate::ui_loot_roll::LootRolls;
 use crate::ui_mail::MailOpen;
-use crate::ui_petition::PetitionRecords;
+use crate::ui_party::GroupState;
+use crate::ui_petition::{PetitionRecords, PetitionState};
+use crate::ui_quest::QuestLines;
 use crate::ui_quest_log::QuestLog;
+use crate::ui_quest_share::QuestShare;
+use crate::ui_stable::StableCreatureWaits;
+use crate::ui_trade::TradeSession;
 
 /// Seconds between writes: answers arrive in bursts on zone-in, and a crash costs only re-asking.
 const SAVE_DEBOUNCE: f32 = 10.0;
@@ -325,6 +342,64 @@ fn clear_session_stores(
     }
 }
 
+/// The interface's teardown, on a `/reload` and a logout alike (`0x490bd0`): `0x490c35` →
+/// `0x5556c0` walks twelve query stores and frees every node's callbacks, running none, and leaves
+/// its record or in-flight ask (`0x555701` → `0x5615b0`). So an answer after it files its record
+/// and signals nothing. Each list here is what a store's lookups left: most tell the interface,
+/// and the guild store's `Members` and `NameText` (`0x5e29c0`, `0x5dd860`) renew engine name text.
+///
+/// Deviation: the reference frees the waits below too, leaving an item locked, a swap unsent, a
+/// friend's row blank, a chat line unshown, a unit's name stale, a model held or a roll in its
+/// slot when a `/reload` falls between an ask and its answer; benilla runs them or ends them,
+/// because each strands more than a word to the interface:
+/// - the item store's engine work ([`Items::free_store_callbacks`]);
+/// - `SocialState`'s name waits, which write the friend rows and send a refused name's removal;
+/// - the chat's held lines, which are its data: an answer releases them, and for any but a monster
+///   or battleground line (`Pending::held_for_subject`) its age pass does too;
+/// - a held unit's name callbacks (`0x5fb840`, `0x604660`), held in no list: an answer's handler
+///   derives `UNIT_NAME_UPDATE` and the plate's gate from the units it holds;
+/// - the equipment's re-derive, in no list either: `0x5ed880` freed, `[player+0x1d20]` stands and
+///   `0x5ec8f0` holds the model, where benilla dresses the player as the record lands;
+/// - a roll whose result line waited, which the freed callbacks would have closed (`0x61bd50`,
+///   `0x61bc80`, `0x61b7d0`): it goes and the next opens ([`LootRolls::free_store_callbacks`]).
+///
+/// What needs no entry: `ItemTextOpen`, whose sweep leg closes the read, and a wait a VM keeps,
+/// which dies with it.
+pub(crate) fn free_store_callbacks(world: &mut World) {
+    free::<Items>(world, Items::free_store_callbacks);
+    free::<NameCache>(world, NameCache::free_store_callbacks);
+    free::<PortraitMarks>(world, PortraitMarks::free_store_callbacks);
+    free::<GameObjectTemplates>(world, GameObjectTemplates::free_store_callbacks);
+    free::<GuildState>(world, GuildState::free_store_callbacks);
+    free::<QuestLog>(world, QuestLog::free_store_callbacks);
+    free::<QuestLines>(world, QuestLines::free_store_callbacks);
+    free::<QuestShare>(world, QuestShare::free_store_callbacks);
+    free::<MailOpen>(world, MailOpen::free_store_callbacks);
+    free::<PetitionState>(world, PetitionState::free_store_callbacks);
+    free::<StableCreatureWaits>(world, StableCreatureWaits::free_store_callbacks);
+    free::<Battlefield>(world, Battlefield::free_store_callbacks);
+    free::<BattlefieldPositions>(world, BattlefieldPositions::free_store_callbacks);
+    free::<BattlefieldScoreboard>(world, BattlefieldScoreboard::free_store_callbacks);
+    free::<LootState>(world, LootState::free_store_callbacks);
+    free::<LootRolls>(world, LootRolls::free_store_callbacks);
+    free::<HouseLane>(world, HouseLane::free_store_callbacks);
+    free::<AuctionOpen>(world, AuctionOpen::free_store_callbacks);
+    free::<ChannelRosters>(world, ChannelRosters::free_store_callbacks);
+    free::<MeetingStone>(world, MeetingStone::free_store_callbacks);
+    free::<DressUpRoom>(world, DressUpRoom::free_store_callbacks);
+    free::<GroupState>(world, GroupState::free_store_callbacks);
+    free::<TradeSession>(world, TradeSession::free_store_callbacks);
+    free::<DuelState>(world, DuelState::free_store_callbacks);
+    free::<DeathNet>(world, DeathNet::free_store_callbacks);
+}
+
+/// One resource's lists, where it stands; no reader sees a change, as no record moved.
+fn free<R: Resource>(world: &mut World, free: fn(&mut R)) {
+    if let Some(mut lists) = world.get_resource_mut::<R>() {
+        free(lists.bypass_change_detection());
+    }
+}
+
 /// Every saved store, for the disconnect's clear of their asks.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Stores<'w> {
@@ -343,7 +418,8 @@ struct Stores<'w> {
 ///
 /// Deviation: the reference keeps a saved store's ask "pending" for the rest of the process
 /// (`0x555740` clears only the stores built with persistence off), so a query a lost link dropped
-/// is never sent again until restart; benilla's reconnect asks it again.
+/// is never sent again until restart; benilla's reconnect asks it again because the name or text it
+/// was for would otherwise stay blank until restart.
 fn clear_saved_asks(In(ev): In<SessionEvent>, mut stores: Stores) {
     if !matches!(ev, SessionEvent::Disconnected { .. }) {
         return;

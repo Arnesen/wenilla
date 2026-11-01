@@ -5,7 +5,7 @@ use benilla_protocol::messages::ItemPushResult;
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use super::{LootCloseAtRest, LootLatch, LootMoveStart, LootState};
+use super::{LootLatch, LootState};
 use crate::net::{ClientCommand, NetCommands, NetHandlerApp, SelfGuid};
 use crate::query_cache::Ask;
 use crate::ui_action::{UiError, UiErrorKeys};
@@ -32,11 +32,9 @@ pub(super) fn register(app: &mut App) {
 /// unit to the cast there instead (`0x4935d5` → `0x6e5b40`), whose send and signals go ahead of the
 /// open. One for an object we lack shows
 /// `ERR_LOOT_DIDNT_KILL` and returns (`0x5ebb33`, mask 1, `0x5ebb3f`) before the latch
-/// (`0x5ebb60`) and the open. One that lands while our own
-/// body moves takes the move-start close (`0x5ebc3a`-`0x5ebc51`), which the loot lane runs after
-/// the copier's end, or the drain when the window waits on an item template. A close owed ahead of
-/// it takes the window it found first ([`OwedAhead`]), on the lane ahead of this one's steps. The
-/// copier asks each row's record here (`0x4c1e77`).
+/// (`0x5ebb60`) and the open. The copier asks each row's record here (`0x4c1e77`). One that lands
+/// while our own body moves takes the move-start close (`0x5ebc3a`-`0x5ebc51`) whatever its copier
+/// did ([`Response::open`]).
 fn on_response(
     In(ev): In<SessionEvent>,
     mut set: crate::script_calls::disjoint::Pair<
@@ -69,19 +67,17 @@ struct Response<'w, 's> {
     select: crate::target::SelectCommit<'w, 's>,
     player: Option<Res<'w, crate::player::Player>>,
     lock: Option<Res<'w, crate::player::MoverLock>>,
-    owed: OwedAhead<'w, 's>,
+    dead: super::DeadUnitDeselect<'w, 's>,
     index: Res<'w, crate::net::GuidIndex>,
     errors: Res<'w, UiErrorKeys>,
     items: Res<'w, crate::items::Items>,
 }
 
 impl Response<'_, '_> {
-    /// The response up to its select: the owed closes, the admission, the latch and the select
-    /// (`0x5ebc35`); the latch it replaced, or `None` once it returned.
+    /// The response up to its select: the admission, the latch and the select (`0x5ebc35`); the
+    /// latch it replaced, or `None` once it returned.
     fn select(&mut self, guid: u64, loot_type: u8) -> Option<Option<u64>> {
         let seam = &mut self.select.seam;
-        self.owed
-            .settle(&mut seam.loot, &mut seam.loot_latch, &seam.net);
         if !admit_response(
             guid,
             loot_type,
@@ -100,7 +96,7 @@ impl Response<'_, '_> {
         let latch_before = seam.loot_latch.0;
         seam.loot_latch.0 = Some(guid);
         // Its signals wait for the packet's end, beside the deselects; with no targets, nowhere.
-        match self.owed.dead.owed_selects() {
+        match self.dead.owed_selects() {
             Some(owed) => self.select.select_unit_in_packet(guid, owed),
             None => self.select.select_unit(guid),
         }
@@ -108,7 +104,9 @@ impl Response<'_, '_> {
     }
 
     /// The rest, past the select and its bind: the window's open (`0x48f3cb` → `0x4c1cb0`), its
-    /// rows' asks and the move-start close it owes.
+    /// rows' asks and the move-start close it owes. The copier's teardown of a session in progress
+    /// cancels the record fetches that session still waits on (`0x4c1ccb`, `0x4c1d3b`-`0x4c1d68`),
+    /// so their answers reach no window.
     fn open(
         &mut self,
         guid: u64,
@@ -122,56 +120,37 @@ impl Response<'_, '_> {
             rows.len()
         );
         let seam = &mut self.select.seam;
+        if seam.loot.source().is_some() {
+            self.items
+                .cancel_waits(crate::items::RecordCallback::LootRow);
+        }
         seam.loot.open(guid, loot_type, gold, rows);
         seam.loot.note_replaced_latch(latch_before);
         seam.loot.ask_rows(&self.items, &seam.net);
+        // The tail's test reads our movement word's low byte (`0x5ebc40`), our own body's alone.
         let steering_ourselves = self.lock.as_ref().is_none_or(|l| l.foreign_mover.is_none());
-        if steering_ourselves
+        let moving = steering_ourselves
             && self
                 .player
                 .as_ref()
-                .is_some_and(|p| p.move_flags() & crate::creature_anim::move_flags::STEERING != 0)
-        {
-            self.owed.move_start.0 = true;
+                .is_some_and(|p| p.move_flags() & crate::creature_anim::move_flags::STEERING != 0);
+        if !moving {
+            return;
         }
-    }
-}
-
-/// The closes owed ahead of a response, which the reference runs where they are owed: our own
-/// cast's GO ends its precast with the tail's close (`0x60d10b` → `0x48f200`), on the move the
-/// move-start one ([`LootMoveStart`]), at rest the full one ([`LootCloseAtRest`]). They take the
-/// window open then, or nothing (`0x48f23f`), never the one this response opens.
-#[derive(bevy::ecs::system::SystemParam)]
-struct OwedAhead<'w, 's> {
-    move_start: ResMut<'w, LootMoveStart>,
-    at_rest: ResMut<'w, LootCloseAtRest>,
-    objects: crate::net::Objects<'w, 's>,
-    dead: super::DeadUnitDeselect<'w, 's>,
-}
-
-impl OwedAhead<'_, '_> {
-    /// Run the owed closes at this packet, the move-start one first, their steps queued ahead of
-    /// the response's. A move-start close an earlier response in this drain owes stays for the
-    /// loot lane, which runs it after that window's copier end (`0x5ebc51`). A disenchant hold's
-    /// sweep (`0x48f264`) needs the VM and is owed to the lane, which runs it unless this
-    /// response's copier replaces the session.
-    fn settle(&mut self, loot: &mut LootState, latch: &mut LootLatch, net: &NetCommands) {
-        let response_owes = loot
-            .steps
-            .iter()
-            .any(|(_, s)| matches!(s, super::Step::Opened { .. }));
-        if !response_owes && std::mem::take(&mut self.move_start.0) {
-            let closed = super::close_on_move_start(loot, latch, net);
-            self.dead.after_close(closed);
+        if !seam.loot.copier_waits() {
+            seam.loot.close_after_the_copier();
+            return;
         }
-        if std::mem::take(&mut self.at_rest.0) {
-            if loot.disenchant_hold(&self.objects) {
-                loot.owe_sweep();
-            } else {
-                let closed = super::close_interaction(loot, latch, Some(net));
-                self.dead.after_close(closed);
-            }
-        }
+        // A copier waiting on a record returned with nothing signalled (`0x4c1ea6`), so the close
+        // runs here: its release now, its teardown's cancel of the row fetches (`0x4c1d4f`), whose
+        // answers then copy nothing, and its `LOOT_CLOSED` behind the copier's step.
+        let closed = super::close_on_move_start(
+            &mut seam.loot,
+            &mut seam.loot_latch,
+            &seam.net,
+            Some(&self.items),
+        );
+        self.dead.after_close(closed);
     }
 }
 
@@ -215,6 +194,7 @@ pub(super) struct WindowPacket<'w, 's> {
     loot: ResMut<'w, LootState>,
     latch: ResMut<'w, LootLatch>,
     net: Res<'w, NetCommands>,
+    items: Res<'w, crate::items::Items>,
     objects: crate::net::Objects<'w, 's>,
     dead: super::DeadUnitDeselect<'w, 's>,
 }
@@ -251,7 +231,12 @@ impl WindowPacket<'_, '_> {
         if self.loot.source().is_none() || self.loot.has_contents(&self.objects) {
             return;
         }
-        let closed = super::close_interaction(&mut self.loot, &mut self.latch, Some(&self.net));
+        let closed = super::close_interaction(
+            &mut self.loot,
+            &mut self.latch,
+            Some(&self.net),
+            Some(&self.items),
+        );
         if let Some(guid) = closed {
             debug!("net: loot emptied — release {guid:#x}");
         }
@@ -265,9 +250,12 @@ fn on_release_response(
     mut latch: ResMut<LootLatch>,
     mut dead: super::DeadUnitDeselect,
     objects: crate::net::Objects,
+    // The record fetches the close's teardown cancels; absent in a harness without the cache.
+    items: Option<Res<crate::items::Items>>,
 ) {
     if let SessionEvent::LootReleaseResponse { guid, result } = ev {
-        let closed = loot_release_response(guid, result, &mut loot, &mut latch, &objects);
+        let items = items.as_deref();
+        let closed = loot_release_response(guid, result, &mut loot, &mut latch, &objects, items);
         dead.after_close(closed);
     }
 }
@@ -481,6 +469,7 @@ fn loot_release_response(
     loot: &mut LootState,
     latch: &mut LootLatch,
     objects: &crate::net::Objects,
+    items: Option<&crate::items::Items>,
 ) -> Option<u64> {
     if result == 0 || latch.0 != Some(guid) {
         debug!(
@@ -497,7 +486,7 @@ fn loot_release_response(
         loot.owe_sweep();
         return None;
     }
-    super::close_interaction(loot, latch, None)
+    super::close_interaction(loot, latch, None, items)
 }
 
 /// `SMSG_LOOT_MASTER_LIST` (`0x61c550`): the candidate array, placed off the roster as this packet
@@ -881,7 +870,7 @@ mod tests {
         let mut latch = LootLatch(Some(CORPSE));
         loot.open(CORPSE, 1, 0, Vec::new());
         assert_eq!(
-            super::super::close_interaction(&mut loot, &mut latch, None),
+            super::super::close_interaction(&mut loot, &mut latch, None, None),
             Some(CORPSE)
         );
         assert!(loot
@@ -1140,8 +1129,6 @@ mod tests {
         world.init_resource::<crate::target::OwedSelects>();
         world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::player::Player>();
-        world.init_resource::<super::super::LootMoveStart>();
-        world.init_resource::<super::super::LootCloseAtRest>();
         world.init_resource::<super::super::AutoLootByte>();
         world.init_resource::<UiErrorKeys>();
         world.spawn((
@@ -1260,9 +1247,10 @@ mod tests {
     #[test]
     fn the_selection_tears_down_the_old_targets_window_before_the_new_one_opens() {
         let (mut world, rx) = tabbed_world();
-        world
-            .resource_mut::<LootState>()
-            .open(KOBOLD, 2, 0, Vec::new());
+        let mut loot = world.resource_mut::<LootState>();
+        loot.open(KOBOLD, 2, 0, Vec::new());
+        // Open long ago: its `LOOT_OPENED` has fired.
+        loot.signals_fired();
         world.resource_mut::<LootLatch>().0 = Some(CORPSE);
         respond(&mut world, CORPSE, 1);
         let sent: Vec<_> = rx.try_iter().collect();
@@ -1473,10 +1461,11 @@ mod tests {
             .fire_event("PLAYER_TARGET_CHANGED", vec![]);
     }
 
-    /// What [`super::super::drain_loot`] reads beside [`seat_tabbed`]'s, with our body's movement
-    /// word at `player`'s.
-    fn seat_drain(world: &mut World, player: crate::player::Player) {
+    /// What the loot lane reads beside [`seat_tabbed`]'s, with our body's movement word at
+    /// `player`'s.
+    fn seat_lane(world: &mut World, player: crate::player::Player) {
         world.insert_resource(player);
+        world.init_resource::<crate::names::NameCache>();
         super::super::seat_loot_steps(world);
     }
 
@@ -1485,19 +1474,17 @@ mod tests {
         crate::target::take_owed_deselects(world)
     }
 
-    /// A response on the corpse with `player` seated, then one drain.
+    /// A response on the corpse with `player` seated, then its steps fired.
     fn open_while(
         player: crate::player::Player,
         lock: crate::player::MoverLock,
     ) -> (World, crossbeam_channel::Receiver<ClientCommand>) {
         let (mut world, rx) = tabbed_world();
-        seat_drain(&mut world, player);
+        seat_lane(&mut world, player);
         world.insert_resource(lock);
         world.resource_mut::<LootLatch>().0 = Some(CORPSE);
         respond(&mut world, CORPSE, 1);
-        world
-            .run_system_once(super::super::drain_loot)
-            .expect("the drain runs as a one-shot system");
+        super::super::loot_frame(&mut world);
         (world, rx)
     }
 
@@ -1574,9 +1561,10 @@ mod tests {
         }
     }
 
-    /// The close our own cast's GO owes (`0x60d040` at `0x6e7fc5`, its tail `0x60d10b`): at rest
-    /// the full one, on the move (`& 0x200f`, falling included) the move-start one, which a
-    /// response's own tail (`0x5ebc40`, the low byte alone) does not owe while falling.
+    /// The close our own cast's GO makes inside its packet (`0x60d040` at `0x6e7fc5`, its tail
+    /// `0x60d10b`): at rest the full one, on the move (`& 0x200f`, falling included) the
+    /// move-start one, which a response's own tail (`0x5ebc40`, the low byte alone) does not owe
+    /// while falling.
     #[derive(Clone, Copy, Debug)]
     enum Owed {
         AtRest,
@@ -1589,18 +1577,10 @@ mod tests {
             (Owed::MoveStart, crate::creature_anim::move_flags::FALLING),
         ];
 
+        /// The GO's close, where its end applies.
         fn owe(self, world: &mut World) {
-            match self {
-                Owed::AtRest => world.resource_mut::<super::super::LootCloseAtRest>().0 = true,
-                Owed::MoveStart => world.resource_mut::<super::super::LootMoveStart>().0 = true,
-            }
+            super::super::close_at_precast_end(world, matches!(self, Owed::MoveStart));
         }
-    }
-
-    fn drain(world: &mut World) {
-        world
-            .run_system_once(super::super::drain_loot)
-            .expect("the drain runs as a one-shot system");
     }
 
     fn releases(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<u64> {
@@ -1614,16 +1594,15 @@ mod tests {
 
     /// A gather's or an opening's GO runs its close inside its own packet (`0x60d10b` →
     /// `0x48f200`), where no window is open (`0x48f23f`), so it closes nothing. The chest's
-    /// response behind it opens a window the frame's drain keeps, unreleased.
+    /// response behind it opens a window that stays, unreleased.
     #[test]
     fn a_close_the_go_ahead_owed_never_takes_the_window_its_response_opens() {
         for (owed, flags) in Owed::BOTH {
             let (mut world, rx) = tabbed_world();
-            seat_drain(&mut world, crate::player::Player::with_move_flags(flags));
+            seat_lane(&mut world, crate::player::Player::with_move_flags(flags));
             world.resource_mut::<LootLatch>().0 = Some(CHEST);
             owed.owe(&mut world);
             respond(&mut world, CHEST, 1);
-            drain(&mut world);
             assert_eq!(
                 world.resource::<LootState>().source(),
                 Some(CHEST),
@@ -1640,7 +1619,7 @@ mod tests {
     fn a_close_the_go_ahead_owed_takes_the_window_open_then() {
         for (owed, flags) in Owed::BOTH {
             let (mut world, rx) = tabbed_world();
-            seat_drain(&mut world, crate::player::Player::with_move_flags(flags));
+            seat_lane(&mut world, crate::player::Player::with_move_flags(flags));
             world.resource_mut::<LootLatch>().0 = Some(CORPSE);
             respond(&mut world, CORPSE, 1);
             world.init_resource::<crate::names::NameCache>();
@@ -1649,7 +1628,6 @@ mod tests {
             world.resource_mut::<LootLatch>().0 = Some(CHEST);
             owed.owe(&mut world);
             respond(&mut world, CHEST, 1);
-            drain(&mut world);
             assert_eq!(
                 world.resource::<LootState>().source(),
                 Some(CHEST),
@@ -1660,20 +1638,21 @@ mod tests {
         }
     }
 
-    /// A close owed after the response, by a GO behind it or a step, still takes its window in
-    /// the drain.
+    /// A GO behind the response takes the window it opened, at that GO, its release behind the
+    /// response's `LOOT_OPENED` still on the lane (`0x48f311` after the copier's end).
     #[test]
     fn a_close_owed_after_the_response_takes_its_window() {
         for (owed, flags) in Owed::BOTH {
             let (mut world, rx) = tabbed_world();
-            seat_drain(&mut world, crate::player::Player::with_move_flags(flags));
+            seat_lane(&mut world, crate::player::Player::with_move_flags(flags));
             world.resource_mut::<LootLatch>().0 = Some(CHEST);
             respond(&mut world, CHEST, 1);
             owed.owe(&mut world);
-            drain(&mut world);
             assert_eq!(world.resource::<LootState>().source(), None, "{owed:?}");
             assert_eq!(world.resource::<LootLatch>().0, None, "{owed:?}");
-            assert_eq!(releases(&rx), [CHEST], "{owed:?}");
+            let mut released = releases(&rx);
+            released.extend(world.resource_mut::<LootState>().take_queued_releases());
+            assert_eq!(released, [CHEST], "{owed:?}");
         }
     }
 
@@ -1684,17 +1663,14 @@ mod tests {
     fn two_responses_on_the_run_in_one_drain_release_each_window_once() {
         let mut app = App::new();
         let rx = seat_tabbed(app.world_mut());
-        seat_drain(
+        seat_lane(
             app.world_mut(),
             crate::player::Player::with_move_flags(crate::creature_anim::move_flags::FORWARD),
         );
         app.init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::names::NameCache>()
             .insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"))
-            .add_systems(
-                Update,
-                (super::super::loot_frame, super::super::drain_loot).chain(),
-            );
+            .add_systems(Update, super::super::loot_frame);
         app.world_mut().resource_mut::<LootLatch>().0 = Some(CORPSE);
         respond(app.world_mut(), CORPSE, 1);
         app.world_mut().resource_mut::<LootLatch>().0 = Some(CHEST);
@@ -1712,7 +1688,7 @@ mod tests {
         const TOUGH_JERKY: u32 = 117;
         let mut app = App::new();
         let rx = seat_tabbed(app.world_mut());
-        seat_drain(
+        seat_lane(
             app.world_mut(),
             crate::player::Player::with_move_flags(crate::creature_anim::move_flags::FORWARD),
         );
@@ -1726,10 +1702,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::names::NameCache>()
             .insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"))
-            .add_systems(
-                Update,
-                (super::super::loot_frame, super::super::drain_loot).chain(),
-            );
+            .add_systems(Update, super::super::loot_frame);
 
         app.world_mut().resource_mut::<LootLatch>().0 = Some(CORPSE);
         app.world_mut()
@@ -1773,15 +1746,12 @@ mod tests {
         const LINEN: u32 = 2589;
         let mut app = App::new();
         let rx = seat_tabbed(app.world_mut());
-        seat_drain(app.world_mut(), crate::player::Player::with_move_flags(0));
+        seat_lane(app.world_mut(), crate::player::Player::with_move_flags(0));
         app.insert_resource(super::super::AutoLootByte(true))
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::names::NameCache>()
             .insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"))
-            .add_systems(
-                Update,
-                (super::super::loot_frame, super::super::drain_loot).chain(),
-            );
+            .add_systems(Update, super::super::loot_frame);
         app.world_mut()
             .non_send_resource_mut::<benilla_ui::script::UiScript>()
             .run(
@@ -1853,7 +1823,7 @@ mod tests {
             ]);
             let (tx, rx) = crossbeam_channel::unbounded();
             app.insert_resource(crate::net::NetCommands(tx));
-            seat_drain(
+            seat_lane(
                 app.world_mut(),
                 crate::player::Player::with_move_flags(flags),
             );
@@ -1861,7 +1831,6 @@ mod tests {
                 Update,
                 (
                     super::super::loot_frame,
-                    super::super::drain_loot,
                     crate::target::fire_owed_selects_lane,
                 )
                     .chain(),

@@ -9,6 +9,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
+# `--check` runs every stage but writes the docs into a scratch folder, for the gates.
+out=docs
+if [ "${1:-}" = "--check" ]; then out=$(mktemp -d "${TMPDIR:-/tmp}/genmap-out.XXXXXX"); trap 'rm -rf "$out"' EXIT; fi
+
 # Extract a quoted `key = "value"` field from a Cargo.toml.
 field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]]*\"//; s/\".*$//"; }
 
@@ -122,16 +126,16 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
   done
   echo
 
-} > docs/MAP.md
+} > "$out/MAP.md"
 
-echo "genmap: wrote docs/MAP.md"
+echo "genmap: wrote $out/MAP.md"
 
 # ── docs/DEVIATIONS.md ─────────────────────────────────────────────────────────────────────────────
 # Every place benilla writes down that it differs from 1.12.1: the `Deviates` rows of the CVar table,
 # and each `Deviation:` comment in the crates (Rust and WGSL `//`, Lua `--`, XML `<!-- -->`). A
 # deviation's wording is read from where it lives, so the list cannot drift from the code.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/genmap.XXXXXX") || exit 1
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; [ "$out" = docs ] || rm -rf "$out"' EXIT
 
 # Test code is left out: a file under `tests/`, named `tests.rs` or `*_tests.rs`, or declared by a
 # `#[cfg(test)] mod x;` (listed here, resolved the way rustc does, `#[path]` included), and a
@@ -159,38 +163,6 @@ LC_ALL=C grep -rIlE 'Deviation:' crates 2>/dev/null | LC_ALL=C sort | grep -vE '
   | xargs env LC_ALL=C awk -v list="$tmp/testmods" '
   function indent_of(s,   t) { t = s; sub(/[^ \t].*$/, "", t); return length(t) }
   function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-  # The first sentence of a joined comment: to the first `.`/`?`/`!` that is followed by an
-  # uppercase word or the end, outside backticks and parentheses, and not an abbreviation.
-  function first_sentence(t,   len, k, ch, tick, par, nx, rest, pre) {
-    len = length(t); tick = 0; par = 0
-    for (k = 1; k <= len; k++) {
-      ch = substr(t, k, 1)
-      if (ch == "`") { tick = !tick; continue }
-      if (tick) continue
-      if (ch == "(") par++
-      else if (ch == ")") { if (par > 0) par-- }
-      else if ((ch == "." || ch == "?" || ch == "!") && par == 0) {
-        nx = substr(t, k + 1, 1)
-        if (nx == "") return substr(t, 1, k)
-        if (nx != " ") continue
-        rest = substr(t, k + 2); sub(/^ +/, "", rest)
-        if (rest != "" && substr(rest, 1, 1) !~ /[A-Z]/) continue
-        pre = tolower(substr(t, 1, k - 1))
-        if (pre ~ /(^|[^a-z])(vs|cf|ca)$/ || pre ~ /(e\.g|i\.e)$/) continue
-        return substr(t, 1, k)
-      }
-    }
-    return t
-  }
-  # The sentence, and the next one too while it is a fragment (`min(I, 1)`, `returns nothing`).
-  function lead(t,   s, rest) {
-    s = first_sentence(t)
-    while (length(s) < 70 && length(s) < length(t)) {
-      rest = substr(t, length(s) + 1); sub(/^ +/, "", rest)
-      s = s " " first_sentence(rest)
-    }
-    return s
-  }
   # Where a `Deviation:` label starts in a comment, 0 if none: one inside backticks is a mention.
   function label_at(c,   at, off, rest) {
     off = 0; rest = c
@@ -210,7 +182,7 @@ LC_ALL=C grep -rIlE 'Deviation:' crates 2>/dev/null | LC_ALL=C sort | grep -vE '
     if (r ~ /^assets\//) { rest = substr(r, 8); m = "assets"; if (index(rest, "/")) { sub(/\/.*/, "", rest); m = m "/" rest } return m }
     sub(/\/.*/, "", r); return r
   }
-  function process(f,   n, i, j, s, t, ext, xin, skipping, tindent, pend, p, q, c, kind, code, marker, text, lab, cr, rel, first, cont) {
+  function process(f,   n, i, j, s, t, ext, xin, skipping, tindent, pend, p, q, c, kind, code, marker, text, lab, cr, rel, first, cont, full) {
     n = 0; delete L; delete K; delete C; delete Q; delete XI; delete T
     while ((getline s < f) > 0) L[++n] = s
     close(f)
@@ -270,7 +242,9 @@ LC_ALL=C grep -rIlE 'Deviation:' crates 2>/dev/null | LC_ALL=C sort | grep -vE '
         if (cont == "" || cont ~ /^([-*] |```)/ || label_at(cont)) break
         text = text " " cont
       }
-      text = trim(lead(trim(text)))
+      full = trim(text); gsub(/\t/, " ", full)
+      # The whole paragraph is written, so the list carries the reference fact with the reason.
+      text = trim(text)
       gsub(/\t/, " ", text)
       # A rustdoc link [`x`] or [`x`](path) reads as `x`.
       while (match(text, /\[`[^`]*`\]\([^)]*\)/)) { q = index(substr(text, RSTART), "]("); text = substr(text, 1, RSTART - 1) substr(text, RSTART + 1, q - 2) substr(text, RSTART + RLENGTH) }
@@ -280,7 +254,7 @@ LC_ALL=C grep -rIlE 'Deviation:' crates 2>/dev/null | LC_ALL=C sort | grep -vE '
       sub(/[.;,:]+$/, "", text)
       if (text == "") text = "(see the comment)"
       if (T[i] || skipfile) { skipped++; continue }
-      printf "%s\t%s\t%s\t%d\t%s\n", cr, module_of(rel), rel, i, text
+      printf "%s\t%s\t%s\t%d\t%s\t%s\n", cr, module_of(rel), rel, i, text, full
     }
   }
   BEGIN {
@@ -422,6 +396,46 @@ MDESC='
     $2 != module { if (module != "") print ""; module = $2; printf "#### %s\n\n", module }
     { printf "- %s. ([`%s:%d`](../crates/%s/%s#L%d))\n", mdesc($5), $3, $4, $1, $3, $4 }
     END { print "" }' "$tmp/code.sorted"
-} > docs/DEVIATIONS.md
+} > "$out/DEVIATIONS.md"
 
-echo "genmap: wrote docs/DEVIATIONS.md ($(wc -l < "$tmp/code.sorted" | tr -d ' ') code entries, $(wc -l < "$tmp/cvars.tsv" | tr -d ' ') CVar rows)"
+echo "genmap: wrote $out/DEVIATIONS.md ($(wc -l < "$tmp/code.sorted" | tr -d ' ') code entries, $(wc -l < "$tmp/cvars.tsv" | tr -d ' ') CVar rows)"
+
+# ── the reason check ───────────────────────────────────────────────────────────────────────────────
+# `docs/METHOD.md`: a deviation is written down with the reference fact and why we differ. So a
+# `Deviation:` comment carries "because …" somewhere in its paragraph, and a CVar `Deviates` row
+# carries a Why. `scripts/deviation-why.allow` is the ratchet for the comments still waiting for a
+# reason: one `path<TAB>first twelve words` per line. It only shrinks. An entry that gained its reason,
+# or whose comment is gone or reworded, fails until it is removed; a comment off the list without
+# "because" fails; and an entry new against origin/main's copy of the list fails.
+allow=scripts/deviation-why.allow
+haveold=0
+if git cat-file -e "origin/main:$allow" 2>/dev/null; then
+  haveold=1
+  git show "origin/main:$allow" | grep -vE '^(#|$)' > "$tmp/allow.old" || true
+else
+  : > "$tmp/allow.old"
+fi
+grep -vE '^(#|$)' "$allow" 2>/dev/null > "$tmp/allow.now" || : > "$tmp/allow.now"
+LC_ALL=C awk -F '\t' -v haveold="$haveold" -v oldf="$tmp/allow.old" -v nowf="$tmp/allow.now" '
+  function key(t,   n, w, i, k) { n = split(t, w, " "); k = ""; for (i = 1; i <= n && i <= 12; i++) k = k (i > 1 ? " " : "") w[i]; return k }
+  BEGIN {
+    while ((getline l < oldf) > 0) old[l] = 1
+    close(oldf)
+    FS = "\t"
+    while ((getline l < nowf) > 0) { listed[l] = 1; order[++nl] = l; if (haveold == 1 && !(l in old)) { print "deviation-why: new on the allowlist, which only shrinks: " l; bad++ } }
+  }
+  FILENAME ~ /cvars\.tsv$/ { if ($4 == "") { print "deviation-why: the `" $1 "` Deviates row has no Why"; bad++ } next }
+  {
+    path = "crates/" $1 "/" $3; k = path "\t" key($6)
+    seen[k] = 1
+    if (tolower($6) ~ /(^|[^a-z])because([^a-z]|$)/) {
+      if (k in listed) { print "deviation-why: " path ":" $4 " has its reason now; remove it from the allowlist"; bad++ }
+    } else {
+      if (++dup[k] > 1) { print "deviation-why: " path ":" $4 " shares its first twelve words with another comment without a reason; reword one"; bad++ }
+      if (!(k in listed)) { print "deviation-why: " path ":" $4 " gives no reason; add \"because …\" (" substr($6, 1, 60) "…)"; bad++ }
+    }
+  }
+  END {
+    for (i = 1; i <= nl; i++) if (!(order[i] in seen)) { print "deviation-why: stale allowlist entry, remove it: " order[i]; bad++ }
+    if (bad) { print "deviation-why: " bad " problem(s); docs/METHOD.md: a deviation names why we differ" > "/dev/stderr"; exit 1 }
+  }' "$tmp/cvars.tsv" "$tmp/code.sorted" >&2 || exit 1

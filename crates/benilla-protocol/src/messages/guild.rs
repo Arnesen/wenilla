@@ -3,9 +3,9 @@
 //!
 //! Deviation: string reads are unbounded. The reference `0x4191b0` caps each field, counting the
 //! NUL (roster name `0x30`, notes `0x80`, MOTD `0x200`, info `0x7d0`, guild name `0x60`, rank name
-//! `0x40`), and on overflow empties it and no-ops every later read in the packet. Unbounded reads
-//! cannot poison a packet, and every cap is far above the server's own length limits, so a
-//! legitimate packet reads the same.
+//! `0x40`), and on overflow empties it and no-ops every later read in the packet. Reads stay
+//! unbounded because unbounded reads cannot poison a packet, and every cap is far above the
+//! server's own length limits, so a legitimate packet reads the same.
 
 use std::io::{self, Read};
 
@@ -523,10 +523,15 @@ pub fn guild_leader(name: &str) -> Vec<u8> {
     }
 }
 
-/// Body of `CMSG_GUILD_MOTD` (`Server/Packets/Guild.cpp:38-42`): the new MOTD; `""`, a lone NUL,
-/// clears it.
+/// Body of `CMSG_GUILD_MOTD` (`Server/Packets/Guild.cpp:38-42`): the new MOTD. `GuildSetMOTD`
+/// (`0x48b270`) writes the text only when its first byte is not NUL (`0x48b2c1` jumps past the
+/// write at `0x48b2d5`) and sends either way (`0x48b2e0`), so `""` is an empty body. The write is
+/// `PutCString` (`0x418430`), which stops at the text's first NUL.
 pub fn guild_motd(motd: &str) -> Vec<u8> {
-    cstring_body(motd)
+    match motd.split('\0').next() {
+        Some(text) if !text.is_empty() => cstring_body(text),
+        _ => Vec::new(),
+    }
 }
 
 /// Body of `CMSG_GUILD_RANK` (`Server/Packets/Guild.cpp:78-83`): rank id, rights, name. Both are

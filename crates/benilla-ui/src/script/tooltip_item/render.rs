@@ -198,7 +198,7 @@ pub(in crate::script) struct BuilderFlags {
 
 /// The deepest product build a recipe line nests. Deviation: the reference recurses without a
 /// bound (`0x52dbce` builds the product whatever the depth), so a product that teaches a recipe
-/// for itself would recurse until the stack overflows; benilla stops here, so a cyclic
+/// for itself would recurse until the stack overflows; benilla stops here because that way a cyclic
 /// `Spell.dbc` chain cannot crash the client.
 const MAX_PRODUCT_DEPTH: u8 = 4;
 
@@ -572,7 +572,7 @@ pub(super) fn render_view_flagged(
         }
         // Stats in the display order of `0x808e88` (4,3,7,5,6,1,0, then 8,9,2,10 and zero padding;
         // `0x52c6b0..0x52c801`), not wire order. Deviation: the reference's padding repeats a mana
-        // stat once per zero entry; not emulated, since only the internal test ring 6674 has one.
+        // stat once per zero entry; not emulated, because only the internal test ring 6674 has one.
         const STAT_DISPLAY_ORDER: [u32; 7] = [4, 3, 7, 5, 6, 1, 0];
         for &want in &STAT_DISPLAY_ORDER {
             for &(t, val) in &v.stats {
@@ -695,42 +695,20 @@ pub(super) fn render_view_flagged(
             live = true;
         }
     }
-    if v.allowable_class > 0
-        && (v.allowable_class & full_mask(&CLASS_NAMES)) != full_mask(&CLASS_NAMES)
-    {
-        let list: Vec<&str> = CLASS_NAMES
-            .iter()
-            .filter(|&&(id, _)| v.allowable_class & (1 << (id - 1)) != 0)
-            .map(|&(_, n)| n)
-            .collect();
-        if !list.is_empty() {
-            let class = req.head().class_id;
-            let ok = class > 0 && v.allowable_class & (1 << (class - 1)) != 0;
-            keyed(
-                "ITEM_CLASSES_ALLOWED",
-                &[Arg::S(&list.join(", "))],
-                req_color(ok),
-                false,
-            )?;
-        }
-    }
-    if v.allowable_race > 0 && (v.allowable_race & full_mask(&RACE_NAMES)) != full_mask(&RACE_NAMES)
-    {
-        let list: Vec<&str> = RACE_NAMES
-            .iter()
-            .filter(|&&(id, _)| v.allowable_race & (1 << (id - 1)) != 0)
-            .map(|&(_, n)| n)
-            .collect();
-        if !list.is_empty() {
-            let race = req.head().race_id;
-            let ok = race > 0 && v.allowable_race & (1 << (race - 1)) != 0;
-            keyed(
-                "ITEM_RACES_ALLOWED",
-                &[Arg::S(&list.join(", "))],
-                req_color(ok),
-                false,
-            )?;
-        }
+    // The race and class lines (`0x52ce14`..`0x52d2c9`), white when met, else red.
+    let race_class = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let head = req.head();
+        race_class_lines(
+            &model.item_req_names,
+            v.allowable_race,
+            v.allowable_class,
+            head.race_id,
+            head.class_id,
+        )
+    };
+    for line in &race_class {
+        keyed(line.key, &[Arg::S(&line.text)], req_color(line.ok), false)?;
     }
     // Only a required level above 1 prints (`0x52d2cf`).
     if v.required_level > 1 {
@@ -1018,7 +996,6 @@ fn lock_lines(lua: &Lua, v: &ItemTemplateView, inst: Option<&ItemInstance>) -> O
                 let entry = first.index;
                 let name = model.item_templates.get(&entry).map(|t| t.name.clone());
                 if name.is_none() && entry != 0 {
-                    model.item_stat_asks.insert(entry);
                     note_miss(model, CacheWait::Template(entry));
                 }
                 name.map(|arg| LockSubLine {

@@ -68,6 +68,9 @@ pub(crate) struct Cinematic {
     /// How many far shots have asked for a reload so far: the stream's focus carries it, so its
     /// load re-arms for each (a cinematic's focus is unpaced throughout, with no pacing edge).
     reloads: u32,
+    /// EndCinematic's zone-channel walk (`0x48f1d0`) is owed: a shot ended or was skipped, and the
+    /// walk has not run since ([`crate::ui_chat::walk_when_cinematic_ends`]).
+    end_walk: bool,
 }
 
 /// The black a shot that moved the camera past the reload gate holds before it fades in.
@@ -117,6 +120,11 @@ impl Cinematic {
         self.playing.is_some()
     }
 
+    /// Take EndCinematic's owed walk ([`Cinematic::end_walk`]).
+    pub(crate) fn take_end_walk(&mut self) -> bool {
+        std::mem::take(&mut self.end_walk)
+    }
+
     /// The far reloads shots have asked for so far.
     pub(crate) fn reloads(&self) -> u32 {
         self.reloads
@@ -149,6 +157,14 @@ impl Cinematic {
         }
     }
 
+    /// A cinematic that just ended, EndCinematic's walk still owed.
+    pub(crate) fn ended_for_test() -> Self {
+        Self {
+            end_walk: true,
+            ..Self::default()
+        }
+    }
+
     /// A shot-less cinematic for tests that only ask [`Cinematic::is_playing`]; a [`CinematicPath`]
     /// needs a real `Cameras\*.m2`, so anything that reads a shot panics here.
     pub(crate) fn playing_for_test() -> Self {
@@ -165,6 +181,7 @@ impl Cinematic {
             skip: false,
             hold: None,
             reloads: 0,
+            end_walk: false,
         }
     }
 
@@ -184,22 +201,17 @@ impl Cinematic {
 }
 
 /// One of the two letterbox bars, full-width black, top or bottom.
-/// Deviation: Bevy UI nodes computed per frame, not `CinematicFrame.xml`'s textures, so a window
-/// resized mid-cinematic stays letterboxed. `CinematicFrame` still shows and owns ESC.
+/// Deviation: Bevy UI nodes computed per frame, not `CinematicFrame.xml`'s textures, because that
+/// way a window resized mid-cinematic stays letterboxed. `CinematicFrame` still shows and owns ESC.
 #[derive(Component)]
 struct LetterboxBar;
-
-/// What [`drive_letterbox`] switched off at the start, so it puts back only what it took.
-#[derive(Default)]
-struct Takeover {
-    cursor: bool,
-}
 
 pub(crate) struct CinematicPlugin;
 
 impl Plugin for CinematicPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Cinematic>()
+            .init_resource::<crate::cursor::PointerDevice>()
             .add_systems(
                 Startup,
                 (load_catalog.after(AssetSet::Open), spawn_letterbox),
@@ -226,6 +238,13 @@ impl Plugin for CinematicPlugin {
             .add_systems(
                 Update,
                 drive_letterbox.in_set(WorldStage::Input).after(drive),
+            )
+            // EndCinematic's walk of the zone channels (`0x48f1d0`), the frame the shot ends.
+            .add_systems(
+                Update,
+                crate::ui_chat::walk_when_cinematic_ends
+                    .in_set(WorldStage::Input)
+                    .after(drive),
             )
             // Leaving the world drops a cinematic with no ack, as the reference's teardown does
             // (`0x490a80` clears the flag and sends no `CMSG_COMPLETE_CINEMATIC`); the exit
@@ -271,7 +290,7 @@ fn letterbox_bar(width: f32, screen: f32) -> f32 {
     two_to_one.min(screen / 6.0).max(0.0)
 }
 
-/// Hide the cursor and raise the letterbox while a shot is on screen; put both back after.
+/// Raise the letterbox while a shot is on screen; put it back after.
 ///
 /// `CinematicFrame.lua:9` crops to 2:1 (`width/2` capped at the height) only when wider than 4:3;
 /// otherwise the bars keep the XML's `1024 x 128` on the native `1024 x 768` sheet, a sixth of the
@@ -281,24 +300,15 @@ fn drive_letterbox(
     cine: Res<Cinematic>,
     mut bars: Query<(&mut Node, &mut Visibility), With<LetterboxBar>>,
     windows: Query<&Window>,
-    mut cursor: Query<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
-    mut ours: Local<Takeover>,
     mut logged: Local<f32>,
 ) {
     let playing = cine.is_playing();
     // The HUD is Lua's, as in the reference: `CINEMATIC_START` runs `ShowUIPanel`, whose
     // `area = "full"` routes to `SetFullScreenFrame`, which hides `UIParent`.
 
-    // The hardware cursor hides at StartCinematic and returns at EndCinematic and the leave-world
-    // teardown (`0x58b590(0)`/`(1)`); nothing else hides it while the view is detached.
-    if let Ok(mut opts) = cursor.single_mut() {
-        if let Some(visible) =
-            crate::cursor::pointer_visibility(playing, &mut ours.cursor, opts.visible)
-        {
-            opts.visible = visible;
-        }
-    }
-
+    // The pointer's device flag takes the shot's start as a hide and its end as a show
+    // (`0x58b590(0)` at `0x48ed94`, `(1)` at `0x48f189`); the last call decides, so a later call
+    // from the look or the glue shows it mid-shot ([`crate::cursor::PointerDevice`]).
     let height = playing
         .then(|| windows.iter().next())
         .flatten()
@@ -644,6 +654,7 @@ fn drive(
                 }
             }
             if ended {
+                cine.end_walk = true;
                 // Not faded in yet: the world around the body streamed away during the flight, so
                 // hold the black the reference shows while its own load blocks. EndCinematic
                 // reloads the body's spot only when the camera ended more than 30 yards from the
@@ -736,7 +747,10 @@ fn abandon_cinematic_on_leave_world(
     mut hosted_vm: crate::script_calls::HostedVm,
     mut cine: ResMut<Cinematic>,
     mut fade: ResMut<crate::screen_fade::ScreenFade>,
+    mut pointer: ResMut<crate::cursor::PointerDevice>,
 ) {
+    // `0x490bb6`-`0x490bbb`: the sweep's last act shows the pointer, whatever held it.
+    pointer.queue(true);
     hosted_vm.run(|script| {
         if !cine.is_playing() {
             return;
@@ -985,6 +999,7 @@ mod ack_ledger {
         app.insert_resource(Cinematic::playing_for_test())
             .insert_resource(net)
             .init_resource::<crate::screen_fade::ScreenFade>()
+            .init_resource::<crate::cursor::PointerDevice>()
             .add_sweep_leg(
                 crate::ui_script::SweepLeg::Cinematic,
                 abandon_cinematic_on_leave_world,

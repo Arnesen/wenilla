@@ -60,11 +60,7 @@ mod scan;
 mod script;
 pub(crate) use script::ScriptSelect;
 mod release;
-#[cfg(test)]
-pub(crate) use release::Releases;
-pub(crate) use release::{
-    drop_parked_releases, member as raid_member_or_pet, object_held, unit_released, OwedReleases,
-};
+pub(crate) use release::{member as raid_member_or_pet, object_held, unit_released, OwedReleases};
 #[cfg(test)]
 mod unheld_tests;
 
@@ -73,8 +69,9 @@ pub(crate) use cursor_mode::{
 };
 /// `GO_FLAG_LOCKED`, the bit the lock chain and the GameObject tooltip's "Locked" line read.
 pub(crate) use lock::GO_FLAG_LOCKED;
-// `OnDied`, which the update packet's field callbacks run on a unit's death edge.
-pub(crate) use died::died;
+// `OnDied`, which the update packet's field callbacks run on a unit's death edge, and the health
+// watcher's precast end after it.
+pub(crate) use died::{dead_selection_ends_precast, died};
 // This frame's combat-flash verdict, for the ring's material and the nameplate colour gate.
 pub(crate) use flash::CombatFlash;
 // The discount `0x612b80` the repair cost and the taxi fare take off their DBC prices.
@@ -92,6 +89,7 @@ pub(crate) use relations::{
 pub(crate) use scan::{fire_owed_selects_lane, take_owed_deselects, LastEnemy};
 pub(crate) use scan::{
     Acquire, AttackNearestRequest, AttackPick, CreatureTypes, Owed, OwedSelect, OwedSelects,
+    OwedWire,
 };
 // The typemask `TargetByName`'s candidate feed shares.
 pub(crate) use by_name::{assistable_alive, Candidacy, NameSearch, PlayerLookup};
@@ -274,6 +272,28 @@ impl Default for ClickConfig {
 #[derive(Resource, Default)]
 pub(crate) struct AssistAttack(pub(crate) bool);
 
+/// `targetNearestDistance`, the TAB range in yards (`[0xb4e2a8]`, registered at `0x48fda4` with
+/// default "41.000000"): the record's float the collector squares at each press (`0x494350`,
+/// `0x49435d`).
+#[derive(Resource)]
+pub(crate) struct TabRange(pub(crate) f32);
+
+impl Default for TabRange {
+    fn default() -> Self {
+        Self(41.0)
+    }
+}
+
+/// `targetNearestDistance`'s change callback, past its range check (`0x490720`).
+pub(crate) fn on_tab_range(
+    ev: &crate::cvars::CvarChanged,
+    mut range: bevy::prelude::Mut<'_, TabRange>,
+) {
+    if ev.is("targetNearestDistance") {
+        range.0 = ev.num();
+    }
+}
+
 /// The targeting rows' change callback: two flags.
 pub(crate) fn on_cvar(
     ev: &crate::cvars::CvarChanged,
@@ -319,6 +339,7 @@ impl Plugin for TargetPlugin {
             .init_resource::<CombatFlash>()
             .init_resource::<scan::TabHistory>()
             .init_resource::<scan::LastEnemy>()
+            .init_resource::<TabRange>()
             .add_message::<AttackNearestRequest>()
             .add_message::<Interact>()
             .add_systems(

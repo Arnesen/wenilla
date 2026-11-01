@@ -9,6 +9,9 @@ use anyhow::{bail, Result};
 use sha1::{Digest, Sha1};
 
 use crate::transport::ReadExactAsync;
+use crate::wire::{
+    read_array, read_cstring_capped, read_f32_le, read_u16_le, read_u32_le, read_u8,
+};
 use crate::RealmInfo;
 
 pub mod pin;
@@ -145,18 +148,51 @@ mod zone {
     }
 }
 
+/// `GetTimeZoneInformation`, declared here rather than through a binding crate.
 #[cfg(windows)]
 mod zone {
-    /// The runtime's `_timezone`, `GetTimeZoneInformation`'s standard bias in seconds west.
-    pub(super) fn standard_offset_east() -> Option<i64> {
-        let mut west: libc::c_long = 0;
-        // SAFETY: `_tzset` only rereads the zone; `_get_timezone` writes the one long it is
-        // handed.
-        let err = unsafe {
-            libc::tzset();
-            libc::get_timezone(&mut west)
+    /// `TIME_ZONE_INFORMATION`: its `Bias`, then the names, dates and biases this reads no
+    /// further, 172 bytes in all, as `0x4297c3` reserves.
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        _rest: [u8; 168],
+    }
+
+    /// `TIME_ZONE_ID_INVALID`, the failed call's answer.
+    const TIME_ZONE_ID_INVALID: u32 = u32::MAX;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// A test's stand-in for the system's answer: its `Bias`, or `None` for a failed call.
+        pub(super) static HELD: std::cell::Cell<Option<Option<i32>>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// The system zone's `Bias` from `GetTimeZoneInformation` (`0x4297d3`, `0x4297de`), minutes
+    /// west of UTC, never the C runtime's `TZ`; `None` when the call fails (`0x4297dc`).
+    fn bias_west() -> Option<i32> {
+        #[cfg(test)]
+        if let Some(held) = HELD.get() {
+            return held;
+        }
+        let mut info = TimeZoneInformation {
+            bias: 0,
+            _rest: [0; 168],
         };
-        (err == 0).then_some(-i64::from(west))
+        // SAFETY: the pointer is to a live record of the size and layout the call writes.
+        let got = unsafe { GetTimeZoneInformation(&mut info) };
+        (got != TIME_ZONE_ID_INVALID).then_some(info.bias)
+    }
+
+    /// The bias negated (`0x4297e4`), in seconds: neither `StandardBias` nor `DaylightBias`.
+    pub(super) fn standard_offset_east() -> Option<i64> {
+        bias_west().map(|west| -i64::from(west) * 60)
     }
 }
 
@@ -432,7 +468,7 @@ pub async fn read_proof_reply(r: &mut impl ReadExactAsync) -> Result<Option<[u8;
     let server_proof = read_array_async::<20>(r).await?;
     // Deviation: the survey id is read and dropped, and no survey runs, where the reference keeps
     // it on the link (`0x5bad53`) for the `Survey.dll` it downloads and calls (`GetSurveyId
-    // 0x5ab620`, called at `0x474064`). benilla runs no code a server sends
+    // 0x5ab620`, called at `0x474064`). benilla does this because it runs no code a server sends
     // ([`AuthReject::reply`] gives the rule).
     let _hardware_survey_id = read_u32_le_async(r).await?;
     Ok(Some(server_proof))
@@ -469,28 +505,68 @@ fn clean_realm_name(name: &str) -> String {
     spaced.trim_end_matches([' ', '.']).to_string()
 }
 
-/// Read `CMD_REALM_LIST_Server` into the advertised realms, rewriting [`MAGIC_POPULATIONS`] here
-/// as the reference parser does: the realm-list screen averages every realm's population, and an
-/// unswapped Recommended `600.0` would skew that mean for every row. Each name is cleaned
-/// ([`clean_realm_name`]) before anything shows it.
+/// A realm list the link's walk passed and the record fill's refused, an address of 32 characters
+/// or more: the holder is emptied (`0x5b23ff`), the request fails `REALM_LIST_FAILED` (`0x5b240f`
+/// → `0x5abbd8`) and the link stays up. The reply was read whole, so the stream stays aligned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RealmListRefused;
+
+impl std::fmt::Display for RealmListRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a realm's address is past the record fill's cap")
+    }
+}
+
+impl std::error::Error for RealmListRefused {}
+
+/// Read `CMD_REALM_LIST_Server` into the advertised realms: the link's walk over the size it read
+/// (`0x5ba8d0`), then the record fill's (`0x5b2230`), a failure of the first being malformed, which
+/// drops the link (`0x5baa0e`, `0x5bb1df`), and of the second [`RealmListRefused`].
+///
+/// wenilla: awaited, as the realmd link is a WebSocket in a page; the size, then the body read
+/// whole, so the walks below run over the buffer as upstream's do.
 pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInfo>> {
     let opcode = read_u8_async(r).await?;
     if opcode != CMD_REALM_LIST {
         bail!("expected CMD_REALM_LIST (0x10), got {opcode:#x}");
     }
-    let _size = read_u16_le_async(r).await?;
-    let _header_padding = read_u32_le_async(r).await?;
-    let number_of_realms = read_u8_async(r).await?;
-    let mut realms = Vec::with_capacity(number_of_realms as usize);
+    // The link waits for the whole size before it reads a record (`0x5ba90e`).
+    let size = read_u16_le_async(r).await?;
+    let mut body = vec![0u8; usize::from(size)];
+    r.read_exact_async(&mut body).await?;
+    // Past the u32 after the size, at the count byte both walks start from (`0x5ba933`,
+    // `0x5ba9ee`).
+    let Some(records) = body.get(4..) else {
+        bail!("a realm list of {size} bytes has no count");
+    };
+    // Both strings capped at 0x100 (`0x5ba974`, `0x5ba987`), and the bytes read after the size
+    // field are the size (`0x5ba9e7`).
+    let mut link = records;
+    if walk_realm_list(&mut link, 0x100).is_none() || !link.is_empty() {
+        bail!("a realm list of {size} bytes does not hold its records");
+    }
+    // The address capped at 0x20 (`0x5b22d9`), which poisons the store past it (`0x5b2321`).
+    let mut fill = records;
+    walk_realm_list(&mut fill, 0x20).ok_or_else(|| RealmListRefused.into())
+}
+
+/// One walk of a realm list from its count byte through its tail u16; `None` once a read runs past
+/// the end or a string past its cap, either of which poisons the reference's store (`0x4192aa`).
+/// It rewrites [`MAGIC_POPULATIONS`] as the reference parser does: the realm-list screen averages
+/// every realm's population, and an unswapped Recommended `600.0` would skew that mean for every
+/// row. Each name is cleaned ([`clean_realm_name`]) before anything shows it.
+fn walk_realm_list(r: &mut &[u8], address_cap: usize) -> Option<Vec<RealmInfo>> {
+    let number_of_realms = read_u8(r).ok()?;
+    let mut realms = Vec::with_capacity(usize::from(number_of_realms));
     for _ in 0..number_of_realms {
-        let realm_type = read_u32_le_async(r).await?;
-        let mut flags = read_u8_async(r).await?;
-        let name = read_cstring_async(r).await?;
-        let address = read_cstring_async(r).await?;
-        let mut population = read_f32_le_async(r).await?;
-        let characters = read_u8_async(r).await?;
-        let category = read_u8_async(r).await?;
-        let id = read_u8_async(r).await?;
+        let realm_type = read_u32_le(r).ok()?;
+        let mut flags = read_u8(r).ok()?;
+        let name = read_cstring_capped(r, 0x100)?;
+        let address = read_cstring_capped(r, address_cap)?;
+        let mut population = read_f32_le(r).ok()?;
+        let characters = read_u8(r).ok()?;
+        let category = read_u8(r).ok()?;
+        let id = read_u8(r).ok()?;
         // The sentinel swap, before anyone can average this number.
         if let Some(&(_, rewritten, bit)) = MAGIC_POPULATIONS
             .iter()
@@ -510,8 +586,8 @@ pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInf
             id,
         });
     }
-    let _footer_padding = read_u16_le_async(r).await?; // consume so the stream stays aligned (see challenge reply)
-    Ok(realms)
+    read_u16_le(r).ok()?;
+    Some(realms)
 }
 
 #[cfg(test)]
@@ -544,28 +620,43 @@ mod tests {
         assert_eq!(spelled(PLATFORM_X86), "x86");
     }
 
-    /// Holds `TZ` for a test: the lock keeps two zone tests apart, the drop restores it.
+    /// Holds the system's zone for a test, the drop putting it back: off Windows the zone `TZ`
+    /// names (`tz`), which `localtime_r` reads, under a lock that keeps two zone tests apart; on
+    /// Windows `GetTimeZoneInformation`'s answer, `west` minutes, which `OsGetTimeZoneBias` reads
+    /// and no `TZ` reaches.
     struct Zone {
+        #[cfg(unix)]
         old: Option<std::ffi::OsString>,
+        #[cfg(unix)]
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Zone {
-        fn set(tz: &str) -> Self {
+        #[cfg(unix)]
+        fn set(tz: &str, _west: i32) -> Self {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let old = std::env::var_os("TZ");
             std::env::set_var("TZ", tz);
             Self { old, _lock: lock }
         }
+
+        #[cfg(windows)]
+        fn set(_tz: &str, west: i32) -> Self {
+            super::zone::HELD.set(Some(Some(west)));
+            Self {}
+        }
     }
 
     impl Drop for Zone {
         fn drop(&mut self) {
+            #[cfg(unix)]
             match self.old.take() {
                 Some(v) => std::env::set_var("TZ", v),
                 None => std::env::remove_var("TZ"),
             }
+            #[cfg(windows)]
+            super::zone::HELD.set(None);
         }
     }
 
@@ -573,20 +664,26 @@ mod tests {
     /// the zone's bias negated, minutes east of UTC, without daylight saving's.
     #[test]
     fn the_challenge_carries_the_time_zone_bias() {
-        let bias = |tz: &str| {
-            let _zone = Zone::set(tz);
+        let bias = |tz: &str, west: i32| {
+            let _zone = Zone::set(tz, west);
             let mut out = Vec::new();
             write_logon_challenge(&mut out, "AB", 5875, LOCALE_TAG_EN_US).unwrap();
             i32::from_le_bytes(out[25..29].try_into().unwrap())
         };
-        assert_eq!(bias("NPT-05:45"), 345);
-        let east_coast = if cfg!(windows) {
-            "EST5EDT"
-        } else {
-            "EST5EDT,M3.2.0,M11.1.0"
-        };
-        assert_eq!(bias(east_coast), -300);
-        assert_eq!(bias("UTC0"), 0);
+        assert_eq!(bias("NPT-05:45", -345), 345);
+        assert_eq!(bias("EST5EDT,M3.2.0,M11.1.0", 300), -300);
+        assert_eq!(bias("UTC0", 0), 0);
+    }
+
+    /// A failed `GetTimeZoneInformation` sends a bias of 0 (`0x4297eb`).
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_zone_query_sends_no_bias() {
+        super::zone::HELD.set(Some(None));
+        let mut out = Vec::new();
+        write_logon_challenge(&mut out, "AB", 5875, LOCALE_TAG_EN_US).unwrap();
+        super::zone::HELD.set(None);
+        assert_eq!(i32::from_le_bytes(out[25..29].try_into().unwrap()), 0);
     }
 
     /// The whole challenge for account `AB` on an enGB install: the locale tag as `0x5b2115` loads
@@ -594,7 +691,7 @@ mod tests {
     /// `net/login#logon-challenge`).
     #[test]
     fn the_challenge_carries_the_locale_tag() {
-        let _zone = Zone::set("UTC0");
+        let _zone = Zone::set("UTC0", 0);
         let mut out = Vec::new();
         write_logon_challenge(&mut out, "AB", 5875, u32::from_be_bytes(*b"enGB")).unwrap();
         let mut want = vec![
@@ -682,7 +779,7 @@ mod tests {
         body.push(9); // realm id
 
         let mut packet = vec![CMD_REALM_LIST];
-        packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes()); // size
+        packet.extend_from_slice(&(body.len() as u16 + 7).to_le_bytes()); // size
         packet.extend_from_slice(&0u32.to_le_bytes()); // header padding
         packet.push(1); // number_of_realms
         packet.extend_from_slice(&body);
@@ -714,7 +811,7 @@ mod tests {
             body.extend_from_slice(&pop.to_le_bytes());
             body.extend_from_slice(&[0, 1, 0]);
             let mut packet = vec![CMD_REALM_LIST];
-            packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes());
+            packet.extend_from_slice(&(body.len() as u16 + 7).to_le_bytes());
             packet.extend_from_slice(&0u32.to_le_bytes());
             packet.push(1);
             packet.extend_from_slice(&body);
@@ -742,25 +839,91 @@ mod tests {
         assert_eq!(plain.population, 1.5);
     }
 
-    /// A one-realm `CMD_REALM_LIST_Server` named `name`, whose address is `127.0.0.1:8085`.
-    fn realm_named(name: &[u8]) -> RealmInfo {
+    /// A one-realm `CMD_REALM_LIST_Server`, its size field the bytes after it.
+    fn realm_packet(name: &[u8], address: &[u8]) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&0u32.to_le_bytes());
         body.push(0);
         body.extend_from_slice(name);
         body.push(0);
-        body.extend_from_slice(b"127.0.0.1:8085\0");
+        body.extend_from_slice(address);
+        body.push(0);
         body.extend_from_slice(&1.5f32.to_le_bytes());
         body.extend_from_slice(&[0, 1, 0]);
         let mut packet = vec![CMD_REALM_LIST];
-        packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes());
+        packet.extend_from_slice(&(body.len() as u16 + 7).to_le_bytes());
         packet.extend_from_slice(&0u32.to_le_bytes());
         packet.push(1);
         packet.extend_from_slice(&body);
         packet.extend_from_slice(&0u16.to_le_bytes());
-        futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet)))
+        packet
+    }
+
+    /// A one-realm list named `name`, whose address is `127.0.0.1:8085`, read.
+    fn realm_named(name: &[u8]) -> RealmInfo {
+        let packet = realm_packet(name, b"127.0.0.1:8085");
+        futures_lite::future::block_on(read_realm_list(&mut packet.as_slice()))
             .unwrap()
             .remove(0)
+    }
+
+    /// The bytes read after the size field must equal the size (`0x5ba9e7`): any other size is
+    /// malformed (`0x5baa0e`), whether the bytes run short or run on.
+    #[test]
+    fn a_realm_list_whose_size_disagrees_with_its_records_is_malformed() {
+        let good = realm_packet(b"R", b"h:1");
+        assert_eq!(futures_lite::future::block_on(read_realm_list(&mut good.as_slice())).unwrap().len(), 1);
+        let off_by = |delta: i16, tail: &[u8]| {
+            let mut p = good.clone();
+            let size = u16::from_le_bytes([p[1], p[2]]).wrapping_add_signed(delta);
+            p[1..3].copy_from_slice(&size.to_le_bytes());
+            p.extend_from_slice(tail);
+            p
+        };
+        for p in [
+            off_by(-1, &[]),
+            off_by(-2, &[]),
+            off_by(1, &[]),
+            off_by(1, &[0]),
+            off_by(2, &[0, 0]),
+        ] {
+            let e = futures_lite::future::block_on(read_realm_list(&mut p.as_slice())).unwrap_err();
+            assert!(!e.is::<RealmListRefused>(), "{e}");
+        }
+    }
+
+    /// The link's walk caps both strings at 0x100 (`0x5ba974`, `0x5ba987`): 255 characters and the
+    /// NUL fit, and 256 poison the store, which is malformed.
+    #[test]
+    fn a_realm_string_of_256_characters_is_malformed() {
+        let fits = "a".repeat(255);
+        assert_eq!(realm_named(fits.as_bytes()).name, fits);
+        let long = "a".repeat(256);
+        for p in [
+            realm_packet(long.as_bytes(), b"h:1"),
+            realm_packet(b"R", long.as_bytes()),
+        ] {
+            let e = futures_lite::future::block_on(read_realm_list(&mut p.as_slice())).unwrap_err();
+            assert!(!e.is::<RealmListRefused>(), "{e}");
+        }
+    }
+
+    /// The record fill caps the address at 0x20 (`0x5b22d9`): 31 characters and the NUL fit, and 32
+    /// up to the link's cap pass the link's walk and poison the fill's, which refuses the list
+    /// (`0x5b23ff`) with the stream past it.
+    #[test]
+    fn a_realm_address_of_32_characters_is_refused_with_the_stream_aligned() {
+        let fits = "a".repeat(31);
+        let p = realm_packet(b"R", fits.as_bytes());
+        assert_eq!(futures_lite::future::block_on(read_realm_list(&mut p.as_slice())).unwrap()[0].address, fits);
+        for len in [32, 255] {
+            let mut p = realm_packet(b"R", "a".repeat(len).as_bytes());
+            p.push(0xee);
+            let mut r = p.as_slice();
+            let e = futures_lite::future::block_on(read_realm_list(&mut r)).unwrap_err();
+            assert!(e.is::<RealmListRefused>(), "{e}");
+            assert_eq!(r, [0xeeu8], "the next reply's byte is next");
+        }
     }
 
     /// The realm record fill (`0x5b2230`) turns each of `"*/:<>?\|` in a name into a space

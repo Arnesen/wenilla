@@ -10,6 +10,8 @@ use benilla_formats::{
     CharSections, CharacterGeosets, CreatureCatalog, GameObjectCatalog,
 };
 use benilla_protocol::EntityKind;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
 use crate::net::NetEntity;
@@ -26,7 +28,7 @@ use display::{
 
 /// Attaching a visual to each net entity: skeleton, animation, character geosets and skin, fade.
 pub(crate) mod attach;
-use attach::{attach_entity_visuals, build_dressup_preview, build_glue_pet, build_glue_preview};
+use attach::{attach_entity_visuals, build_dressup_preview};
 
 /// Composited body skins by look, built off the main thread.
 mod skin_composite;
@@ -54,7 +56,7 @@ pub(crate) mod corpse;
 
 mod live_display;
 use live_display::{refresh_live_display, tick_scale_ease};
-pub(crate) use live_display::{AppliedDisplay, DisplaySwapped};
+pub(crate) use live_display::{AppliedDisplay, DisplayRebuilt, DisplaySwapped};
 
 /// Terrain conform: a model flagged `GlobalModelFlags & 3 ∈ {1,3}` tilts to the ground.
 mod conform;
@@ -646,11 +648,28 @@ fn publish_world_units(
     }
 }
 
+/// A display swap and a rig heal, then the frame's kit starts. A swap or heal ends what the unit
+/// held before its visual goes, so none of this frame's starts spawns on the body it takes; the
+/// starts then go in wire order, and those the packets put before the rebuild end at its place
+/// ([`spell_fx::resolve_spell_fx`]). The rebuild's replayed kits ring in the same frame, after the
+/// stop it raised ([`crate::creature_anim::replay_rebuilt_kit_sounds`]).
+fn rebuild_then_start_kits() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        (refresh_live_display, live_display::heal_rig_starved).chain(),
+        (
+            resolve_spell_fx,
+            crate::creature_anim::replay_rebuilt_kit_sounds,
+        ),
+    )
+        .chain()
+}
+
 /// Loads the display catalogs at startup and each frame gives every net entity its visual.
 pub(crate) struct EntitiesPlugin;
 
 impl Plugin for EntitiesPlugin {
     fn build(&self, app: &mut App) {
+        attach::glue_stage::plugin(app);
         app.add_systems(
             Update,
             publish_world_units
@@ -671,6 +690,7 @@ impl Plugin for EntitiesPlugin {
         // A display swap's rebuild edge, for the impact-kit replay the reference runs at the end
         // of `0x60abe0`.
         .add_message::<live_display::DisplaySwapped>()
+        .add_message::<live_display::DisplayRebuilt>()
         .add_systems(Startup, setup_entities.after(AssetSet::Open))
         // The eviction ahead of the VM pass, whose sends read the item displays for a ranged
         // spell's precast visual (`0x60d450`).
@@ -709,18 +729,15 @@ impl Plugin for EntitiesPlugin {
                 // 20-element ceiling.
                 (resolve_equipment, resolve_corpse_equipment),
                 // Spell effects and missiles create `SpellFx` entries too.
-                resolve_spell_fx,
+                rebuild_then_start_kits(),
                 move_missiles,
                 spawn_missiles,
                 // The dest-anchored lane's three independent producers also create entries.
                 (arm_ground_effects, spawn_ground_bursts, tick_shard_emitters),
+                // The glue screens' character and pet assemble in their own stage, ahead of
+                // `Update` (`attach::glue_stage`).
                 update_display_models.in_set(DisplayBuildSet),
-                // The glue screens' character, assembled from the display built just above.
-                build_glue_preview,
-                // The select screen's pet, on its own latch so a slow pet model never holds the
-                // character back.
-                build_glue_pet,
-                // The dressing room's preview, the same assembly and latch.
+                // The dressing room's preview, assembled from the display built just above.
                 build_dressup_preview,
                 attach_entity_visuals,
                 // A WMO GameObject's doodad props, spawned as each M2 lands.
@@ -745,14 +762,9 @@ impl Plugin for EntitiesPlugin {
                 // A mount change re-seats the rig on the mount's attachment 0 or back, as the
                 // reference re-parents the body model (`0x712f70`, `0x713020`).
                 reseat_mounts,
-                // A display swap rebuilds, a scale change eases over the reference's 2 s, and a
-                // unit denied a palette rig rebuilds once the table has room.
-                (
-                    refresh_live_display,
-                    tick_scale_ease,
-                    live_display::heal_rig_starved,
-                )
-                    .chain(),
+                // A scale change eases over the reference's 2 s, after attach so a rebuild's snap
+                // never draws.
+                tick_scale_ease,
             )
                 .chain()
                 .in_set(EntityVisualsSet)
@@ -962,9 +974,13 @@ fn setup_entities(
     match load_item_display_catalog(&mut chain) {
         Ok(catalog) => {
             info!("item display catalog: {} entries", catalog.len());
+            let races = benilla_formats::load_chr_races(&mut chain)
+                .map_err(|e| warn!("ChrRaces.dbc unavailable, no helm shows: {e:#}"))
+                .unwrap_or_default();
             commands.insert_resource(ItemDisplays {
                 catalog,
                 models: HashMap::new(),
+                races,
             });
         }
         Err(e) => warn!("item displays unavailable, units hold nothing: {e:#}"),

@@ -51,8 +51,9 @@ const PERP_EPSILON: f32 = 0.001;
 /// (`0x7afc10`/`0x7afc38`), which makes the per-frame re-roll crawl rather than strobe.
 const ADVECT_KEEP: f32 = 0.75;
 
-/// Deviation: a cap on one hop's sub-segment count, which the reference lacks, so a vertex run is
-/// never sized off table data alone; shipped rows peak at 12 (30 yd at `avgSegLen` 2.78).
+/// Deviation: a cap on one hop's sub-segment count, which the reference lacks, because that way a
+/// vertex run is never sized off table data alone; shipped rows peak at 12 (30 yd at `avgSegLen`
+/// 2.78).
 const MAX_SUBDIVISIONS: usize = 256;
 
 /// The caster's chain-target hop array, the reference's growable `unit+0xd44`: guids in wire
@@ -182,18 +183,22 @@ pub(super) fn spawn_chain_beams(
 ) {
     consumed.clear();
     for ev in kit_fx.read() {
-        let SpellKitFx::Reap {
-            entity,
-            spell_id,
-            class: FxClass::Hold,
-            ..
-        } = ev
-        else {
-            continue;
+        let reaped = |beam: &ChainBeam| match *ev {
+            SpellKitFx::Reap {
+                entity,
+                spell_id,
+                class: FxClass::Hold,
+                ..
+            } => beam.caster == entity && beam.spell_id == spell_id,
+            // A release closes every effect of the caster, and `~CEffect` stops the beams its
+            // slots hold (`0x61f591` → `0x6208b0`).
+            SpellKitFx::Release { entity, .. } => beam.caster == entity,
+            _ => false,
         };
         for (e, beam) in &beams {
-            if beam.persistent && beam.caster == *entity && beam.spell_id == *spell_id {
-                commands.entity(e).despawn();
+            // A death's release and a channel's reap can both name the beam in one frame.
+            if beam.persistent && reaped(beam) {
+                commands.entity(e).try_despawn();
             }
         }
     }
@@ -891,12 +896,42 @@ mod tests {
                 spell_id: CHAIN_SPELL,
                 class: FxClass::Hold,
                 force: true,
+                at: None,
             });
             app.update();
             assert_eq!(
                 beams(&mut app).len(),
                 usize::from(!persistent),
                 "persistent={persistent}: the reap takes the channel beam and spares the cast one"
+            );
+        }
+    }
+
+    /// A release (`0x614120`) closes the dying channeler's effects, and `~CEffect` stops the beams
+    /// their slots hold (`0x61f591` → `0x6208b0`): the channel beam goes, the one-shot runs on.
+    #[test]
+    fn a_release_ends_the_casters_channel_beam() {
+        for persistent in [false, true] {
+            let mut app = beam_app();
+            let (caster, t1) = (unit(&mut app), unit(&mut app));
+            app.world_mut()
+                .entity_mut(caster)
+                .insert(ChainHops(vec![t1]));
+            let mut p = play(caster, CHAIN_SPELL);
+            p.proc.flag = persistent;
+            app.world_mut().write_message(p);
+            app.update();
+            assert_eq!(beams(&mut app).len(), 1);
+
+            app.world_mut().write_message(SpellKitFx::Release {
+                entity: caster,
+                at: None,
+            });
+            app.update();
+            assert_eq!(
+                beams(&mut app).len(),
+                usize::from(!persistent),
+                "persistent={persistent}"
             );
         }
     }

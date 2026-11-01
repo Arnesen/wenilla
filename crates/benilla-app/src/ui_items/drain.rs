@@ -96,7 +96,7 @@ impl ScriptItemUse<'_, '_> {
                 on_object: None,
                 is_charter,
             },
-            &targeting.context().self_bound(on_self),
+            &targeting.context().selection_passed().self_bound(on_self),
             ladder,
             script,
             gate,
@@ -230,7 +230,7 @@ impl ScriptItemUse<'_, '_> {
                         on_object: None,
                         is_charter: c.is_charter,
                     },
-                    &targeting.context().self_bound(on_self),
+                    &targeting.context().selection_passed().self_bound(on_self),
                     ladder,
                     script,
                     gate,
@@ -298,7 +298,7 @@ impl ScriptItemUse<'_, '_> {
                         on_object: None,
                         is_charter: clicked.is_some_and(|c| c.is_charter),
                     },
-                    &targeting.context().self_bound(on_self),
+                    &targeting.context().selection_passed().self_bound(on_self),
                     ladder,
                     script,
                     gate,
@@ -743,6 +743,117 @@ mod tests {
             ),
             "the sweep, then the open: {sent:?}"
         );
+    }
+
+    /// The same Shift-open through the whole client's host, a `LOOT_OPENED` listener held: the
+    /// sweep's `LOOT_OPENED` (`0x4c2240`) runs its listeners before `OpenItem` locks the item and
+    /// sends `CMSG_OPEN_ITEM` (`0x5edcd9`, `0x5edd26`), so the listener's packet goes out first.
+    #[test]
+    fn a_shift_opens_sweep_listeners_run_before_its_lock_and_send() {
+        assert_eq!(
+            hosted_open(true, "LOOT_OPENED"),
+            ["autostore", "roll", "open"]
+        );
+    }
+
+    /// `OpenItem`'s lock (`0x5edcd9` → `0x4953e0`) signals `ITEM_LOCK_CHANGED` (`0x495415`), whose
+    /// listeners run before `CMSG_OPEN_ITEM` goes out (`0x5edd26`): a plain open's and a
+    /// Shift-open's after its sweep alike, the listener's packet goes out first.
+    #[test]
+    fn an_open_items_lock_listeners_run_before_its_send() {
+        assert_eq!(hosted_open(false, "ITEM_LOCK_CHANGED"), ["roll", "open"]);
+        assert_eq!(
+            hosted_open(true, "ITEM_LOCK_CHANGED"),
+            ["autostore", "roll", "open"]
+        );
+    }
+
+    /// Open the clam through the whole client's host, with a listener of `event` that rolls: with
+    /// `shift`, Shift down and a corpse's window open on a Linen row, which the open sweeps. The
+    /// loot, roll and open packets sent, in order.
+    fn hosted_open(shift: bool, event: &str) -> Vec<&'static str> {
+        const ME: u64 = 0x10;
+        const CORPSE: u64 = 0xF130_0000_0000_00AB;
+        const LINEN: u32 = 2589;
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let world = app.world_mut();
+        let me = world
+            .spawn((
+                SelfPlayer,
+                crate::net::Guid(ME),
+                ObjectStore(ObjectFields::from_pairs(&[
+                    (22, 100),
+                    (F_PACK_SLOT_1, CLAM as u32),
+                    (F_PACK_SLOT_1 + 1, (CLAM >> 32) as u32),
+                ])),
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(ME, me);
+        world.resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+        crate::items::test_spawn_item(
+            world,
+            CLAM,
+            ObjectFields::from_pairs(&[(2, 0x3), (F_OBJECT_ENTRY, CLAM_ENTRY)]),
+            false,
+        );
+        let mut items = world.resource_mut::<Items>();
+        items.insert_template(
+            CLAM_ENTRY,
+            Some(ItemInfo {
+                flags: ITEM_FLAG_LOOTABLE,
+                ..crate::items::test_template("Small Barnacled Clam")
+            }),
+        );
+        items.insert_template(LINEN, Some(crate::items::test_template("Linen Cloth")));
+        let corpse = world
+            .spawn(ObjectStore(ObjectFields::from_pairs(&[(2, 0x9)])))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(CORPSE, corpse);
+        crate::script_calls::insert_test_vm(world);
+        feed_clam(&mut app);
+        let world = app.world_mut();
+        if shift {
+            world.resource_mut::<crate::ui_loot::LootState>().open(
+                CORPSE,
+                1,
+                0,
+                vec![benilla_protocol::messages::LootItem {
+                    slot: 0,
+                    item_id: LINEN,
+                    count: 1,
+                    display_info_id: 0,
+                    random_property_id: 0,
+                    slot_type: benilla_protocol::messages::slot_type::ALLOW_LOOT,
+                }],
+            );
+            world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
+        }
+        crate::script_calls::with_hosted_vm(world, |s| {
+            let s = s.expect("a VM");
+            s.set_modifiers(shift, false, false);
+            s.run(&format!(
+                "local f = CreateFrame('Frame') f:RegisterEvent('{event}') \
+                 f:SetScript('OnEvent', function() RandomRoll(1, 1) end) \
+                 UseContainerItem(0, 1)",
+            ))
+        })
+        .expect("the chunk runs");
+        rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::AutostoreLootItem { .. } => Some("autostore"),
+                ClientCommand::RandomRoll { .. } => Some("roll"),
+                ClientCommand::OpenItem { .. } => Some("open"),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A repair-mode right-click on a bag item: `ITEM_REPAIR` as it goes out (`0x4f9ce4`), then
@@ -2186,8 +2297,7 @@ mod bind_confirm_tests {
     }
 
     /// Right-clicks a bind-on-use item in a bag (the use arm, `0x5d8d00`, event 290);
-    /// `no_use_spell` drops its on-use spell, since four of `0x5d91d3`'s five predecessors are
-    /// failed spell lookups and the reference still asks.
+    /// `no_use_spell` drops its on-use spell, which leaves ahead of the bind test (`0x5d8fc1`).
     fn right_click_a_bind_on_use_item(
         no_use_spell: bool,
     ) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
@@ -2413,15 +2523,15 @@ mod bind_confirm_tests {
     }
 
     #[test]
-    fn a_bind_on_use_item_with_no_on_use_spell_still_asks() {
+    fn a_bind_on_use_item_with_no_on_use_spell_never_asks() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(true);
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
             .tick(0.01);
         assert!(
-            shown(&mut app, "USE_BIND"),
-            "the reference's bind arm sits BELOW the on-use lookup's failure exits, not above them"
+            !shown(&mut app, "USE_BIND"),
+            "the use leaves at `0x5d8fc1`, ahead of the bind arm at `0x5d91d3`"
         );
         assert!(rx.try_iter().next().is_none());
     }
