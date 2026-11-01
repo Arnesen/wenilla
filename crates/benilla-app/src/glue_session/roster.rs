@@ -447,8 +447,8 @@ mod tests {
 
     /// The policy alone, with `kept` as the pick the session keeps, and what it asks of the IO
     /// thread.
-    fn policy_app(kept: bool) -> (App, crossbeam_channel::Receiver<CharRequest>) {
-        let (tx, rx) = crossbeam_channel::unbounded();
+    fn policy_app(kept: bool) -> (App, async_channel::Receiver<CharRequest>) {
+        let (tx, rx) = async_channel::unbounded();
         let mut roster = Roster::with_pending_pick(Vec::new(), 7).env_settled();
         roster.pending_pick = kept.then_some(7);
         let mut app = App::new();

@@ -31,7 +31,9 @@
 //! stage binds is still loading, so waiting on each change holds the frames the create paint's
 //! wait on every frame holds.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// std's `Instant` panics on wasm32; bevy's is `web_time`'s there.
+use bevy::platform::time::Instant;
 
 use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::{M2Model, WmoModel};

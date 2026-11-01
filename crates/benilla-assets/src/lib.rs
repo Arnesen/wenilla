@@ -127,6 +127,7 @@ fn opens_as_texture(name: &str, bytes: &[u8]) -> bool {
 /// The bytes of the first of `path`'s candidate files that `open` gives and that makes a texture.
 /// A candidate that is not there, or whose `.tga` header makes no texture, is passed over for the
 /// next, as the reference's two loaders fail silently (`0x44a169`, `0x44a399`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn first_candidate(
     path: &Path,
     mut open: impl FnMut(&str) -> Result<Option<Vec<u8>>, AssetReaderError>,

@@ -1121,8 +1121,8 @@ mod tests {
     }
 
     /// The park's end of the select build's asks, and what reached it.
-    fn park() -> (CharPick, crossbeam_channel::Receiver<CharRequest>) {
-        let (tx, rx) = crossbeam_channel::unbounded::<CharRequest>();
+    fn park() -> (CharPick, async_channel::Receiver<CharRequest>) {
+        let (tx, rx) = async_channel::unbounded::<CharRequest>();
         (CharPick(tx.into()), rx)
     }
 
@@ -1142,7 +1142,7 @@ mod tests {
             state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
         }
         assert!(matches!(
-            rx.try_iter().collect::<Vec<_>>().as_slice(),
+            std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>().as_slice(),
             [CharRequest::GuildQuery(5)]
         ));
         assert!(state.built && state.emblem.is_none(), "nothing has landed");
@@ -1154,7 +1154,7 @@ mod tests {
         state.built = true;
         state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
         assert!(state.built, "once");
-        assert_eq!(rx.try_iter().count(), 0, "a held record sends nothing");
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 0, "a held record sends nothing");
     }
 
     /// Slot 18's gates (`0x472ca0`, `0x472ca4`) and guild 0 (`0x560e3d`) ask for nothing.
@@ -1172,7 +1172,7 @@ mod tests {
             state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
             assert!(state.emblem.is_none());
         }
-        assert_eq!(rx.try_iter().count(), 0);
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 0);
     }
 
     /// A guild held on the return from the world crests the first build (`0x472cde` hits, so
@@ -1191,7 +1191,7 @@ mod tests {
             Some(&pick),
         );
         assert_eq!(state.emblem, Some(benilla_formats::GuildEmblem::default()));
-        assert_eq!(rx.try_iter().count(), 0);
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 0);
     }
 
     /// The asks last while the screen stands: a return from the world asks again for a guild still
@@ -1204,12 +1204,12 @@ mod tests {
         let look = tabarded(5, GUILD_TABARD);
         let mut state = PreviewState::default();
         state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
-        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 1);
         state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
-        assert_eq!(rx.try_iter().count(), 0);
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 0);
         state.watch_crest(None, Some(&displays), Some(&guilds), Some(&pick));
         state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
-        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 1);
     }
 
     /// Against the shipped `SpellVisualKit.dbc`: row 989's `+0x3c` reads

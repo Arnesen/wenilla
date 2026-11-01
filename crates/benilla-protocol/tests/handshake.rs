@@ -239,7 +239,7 @@ fn a_parked_session_asks_for_a_guild_and_keeps_its_answer() {
     session.guild_query(0x1234).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let answers = loop {
-        session.poll_link().unwrap();
+        futures_lite::future::block_on(session.poll_link()).unwrap();
         let answers = session.take_guild_answers();
         if !answers.is_empty() {
             break answers;

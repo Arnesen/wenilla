@@ -13,7 +13,8 @@
 //! The reference builds and waits for the whole stage in the select's call (`0x473083`
 //! `IsReady(1, 1)` on the scene model, `0x710450`), so its character draws in the select's frame.
 
-use std::time::Instant;
+// std's `Instant` panics on wasm32; bevy's is `web_time`'s there.
+use bevy::platform::time::Instant;
 
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::diagnostic::FrameCount;

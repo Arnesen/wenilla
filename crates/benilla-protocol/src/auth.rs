@@ -9,9 +9,7 @@ use anyhow::{bail, Result};
 use sha1::{Digest, Sha1};
 
 use crate::transport::ReadExactAsync;
-use crate::wire::{
-    read_array, read_cstring_capped, read_f32_le, read_u16_le, read_u32_le, read_u8,
-};
+use crate::wire::{read_cstring_capped, read_f32_le, read_u16_le, read_u32_le, read_u8};
 use crate::RealmInfo;
 
 pub mod pin;
@@ -19,11 +17,11 @@ pub mod pin;
 // ── The awaited wire readers ──────────────────────────────────────────────────────────────────────
 //
 // [`crate::wire`]'s readers take `impl Read`, which the browser cannot supply: a WebSocket frame
-// arrives on the very event loop a blocking read would be sitting on. These are the same four
-// encodings this protocol needs, byte for byte, over [`ReadExactAsync`] instead — every login field
-// is fixed-width or length-prefixed, so each one is a `read_exact` and the parsing below is
-// unchanged. Private: the world protocol reads its bodies out of a buffer, so this is the only
-// place that decodes straight off the wire.
+// arrives on the very event loop a blocking read would be sitting on. These are the encodings the
+// logon's replies read straight off the link, byte for byte, over [`ReadExactAsync`] instead —
+// each field is fixed-width, so each one is a `read_exact`. The realm list is read whole by its
+// size and walked as a buffer with [`crate::wire`]'s readers, as the world protocol reads its
+// bodies.
 
 /// Read a fixed-length byte array.
 async fn read_array_async<const N: usize>(r: &mut impl ReadExactAsync) -> std::io::Result<[u8; N]> {
@@ -42,23 +40,6 @@ async fn read_u16_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<u16> 
 
 async fn read_u32_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<u32> {
     Ok(u32::from_le_bytes(read_array_async::<4>(r).await?))
-}
-
-async fn read_f32_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<f32> {
-    Ok(f32::from_bits(read_u32_le_async(r).await?))
-}
-
-/// Read a NUL-terminated string (the realm list's names and addresses).
-async fn read_cstring_async(r: &mut impl ReadExactAsync) -> std::io::Result<String> {
-    let mut bytes = Vec::new();
-    loop {
-        let b = read_u8_async(r).await?;
-        if b == 0 {
-            break;
-        }
-        bytes.push(b);
-    }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 const CMD_AUTH_LOGON_CHALLENGE: u8 = 0x00;
