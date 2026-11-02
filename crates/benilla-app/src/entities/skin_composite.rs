@@ -131,7 +131,16 @@ impl SkinComposites {
             return done;
         }
         let atlas = match self.running.remove(&key) {
+            #[cfg(not(target_arch = "wasm32"))]
             Some(task) => block_on(task),
+            // wenilla: a page's composite is a task on the browser's event loop, which a wait
+            // inside the frame never lets run; one not yet done is dropped and composited here,
+            // on this thread, as a miss is.
+            #[cfg(target_arch = "wasm32")]
+            Some(mut task) => match block_on(future::poll_once(&mut task)) {
+                Some(atlas) => atlas,
+                None => work().and_then(|w| w()),
+            },
             None => work().and_then(|w| w()),
         };
         self.install(key, atlas, images)
