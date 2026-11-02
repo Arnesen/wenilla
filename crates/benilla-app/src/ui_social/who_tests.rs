@@ -243,6 +243,7 @@ fn the_lfg_verbs_send_inside_their_call() {
     {
         let mut script = w.app.world_mut().non_send_resource_mut::<UiScript>();
         script.set_lfg_dungeons(vec![benilla_ui::script::LfgDungeon {
+            id: 6,
             name: "Deadmines".into(),
             min_level: 15,
             max_level: 28,
@@ -413,7 +414,20 @@ fn an_answer_keeps_at_most_fifty_rows() {
 /// plural's selector (`0x5ae0f1`-`0x5ae0fb`), never the server's total.
 #[test]
 fn the_count_line_prints_the_raw_count() {
+    /// What the social lane held at each packet's end, ahead of the flush that fires it.
+    #[derive(Resource, Default)]
+    struct Tapped(Vec<super::Heard>);
+    fn tap(world: &mut World, _at: crate::lanes::Stamp) {
+        let heard: Vec<_> = world
+            .resource::<super::SocialLane>()
+            .heard()
+            .cloned()
+            .collect();
+        world.resource_mut::<Tapped>().0.extend(heard);
+    }
     let mut w = client();
+    w.app.init_resource::<Tapped>();
+    crate::net::handlers::add_packet_end(&mut w.app, tap);
     crate::net::handlers::dispatch(
         w.app.world_mut(),
         vec![SessionEvent::WhoResults(WhoResults {
@@ -429,9 +443,8 @@ fn the_count_line_prints_the_raw_count() {
         "UNKNOWN" => Some("Unknown".to_string()),
         _ => None,
     };
-    let lane = w.app.world().resource::<super::SocialLane>();
-    let Some(super::Heard::Who { raw, wire }) = lane.heard().last() else {
-        panic!("the answer is on the social lane");
+    let Some(super::Heard::Who { raw, wire }) = w.app.world().resource::<Tapped>().0.last() else {
+        panic!("the answer is on the social lane at its packet's end");
     };
     let lines: Vec<String> = super::feed::who_lines(wire, *raw, &get)
         .iter()
@@ -495,4 +508,46 @@ fn the_index_past_the_count_reads_the_next_slot() {
         (0, 0)
     );
     assert_eq!(name(&mut w, 1).as_deref(), Some("Zz"));
+}
+
+/// `MSG_LOOKING_FOR_GROUP`'s reply (`0x4e8dc0`), from its bytes, signals `UPDATE_LFG_LIST` at its
+/// packet and the getters read its records, the class through `ChrClasses` (`0x4e9952`).
+#[test]
+fn a_looking_for_group_reply_signals_and_fills_the_getters() {
+    use benilla_protocol::messages::{opcode, parse_server};
+    let mut w = client();
+    run(
+        &mut w,
+        r#"LISTED = 0
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("UPDATE_LFG_LIST")
+        f:SetScript("OnEvent", function() LISTED = LISTED + 1 end)"#,
+    );
+    let mut body = Vec::new();
+    for dword in [1u32, 4] {
+        body.extend_from_slice(&dword.to_le_bytes());
+    }
+    body.extend_from_slice(b"Aria\0");
+    for dword in [60u32, 8, 0, 0, 0] {
+        body.extend_from_slice(&dword.to_le_bytes());
+    }
+    body.extend_from_slice(b"LF Strat\0");
+    let packet = parse_server(opcode::MSG_LOOKING_FOR_GROUP, &body).expect("the reply parses");
+    crate::net::handlers::dispatch(w.app.world_mut(), benilla_protocol::decode(packet));
+    w.app
+        .world_mut()
+        .run_system(w.feed)
+        .expect("the social lane fires");
+    assert_eq!(eval::<i64>(&mut w, "return LISTED"), 1);
+    assert_eq!(
+        eval::<(i64, i64)>(&mut w, "return GetNumLFGResults()"),
+        (1, 4)
+    );
+    assert_eq!(
+        eval::<String>(
+            &mut w,
+            "local a, b, c, _, _, _, g = GetLFGResults(1) return a .. b .. '|' .. tostring(c) .. '|' .. g"
+        ),
+        "Aria60|Mage|LF Strat"
+    );
 }

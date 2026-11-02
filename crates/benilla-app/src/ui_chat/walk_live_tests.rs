@@ -29,6 +29,9 @@ const WESTFALL: u32 = 40;
 const STORMWIND: u32 = 1519;
 /// The city word's row (`0x200`).
 const CITY: u32 = 3459;
+/// An area whose row has no name, and one named as Elwynn in capitals.
+const NAMELESS: u32 = 5000;
+const SHOUTING: u32 = 5001;
 
 /// The client's world, driven a packet at a time through the dispatch, which fires each packet's
 /// lanes after its handlers, and the frame's end, the zone commit's poll.
@@ -43,11 +46,12 @@ impl Client {
         let world = self.app.world_mut();
         crate::net::handlers::dispatch(world, wire(packets));
         crate::lanes::fire_in_order(world);
-        bevy::ecs::system::RunSystemOnce::run_system_once(
-            world,
-            super::channels::auto_join_zone_channels,
-        )
-        .expect("the poll runs");
+        // The poll's tenth tick (`0x5db906`).
+        for _ in 0..10 {
+            world
+                .run_system_cached(crate::area::feed_zone_events)
+                .expect("the poll runs");
+        }
     }
 
     /// What went out, joins and leaves by name, emptied.
@@ -107,6 +111,8 @@ fn client(zone: u32, held: Option<&[(u16, u32)]>) -> Client {
             (WESTFALL, row(0, "Westfall")),
             (STORMWIND, row(0x138, "Stormwind City")),
             (CITY, row(0x200, "City")),
+            (NAMELESS, row(0, "")),
+            (SHOUTING, row(0, "ELWYNN FOREST")),
         ]),
     ));
     let catalog = benilla_formats::ChatChannelsCatalog::from_rows(
@@ -126,12 +132,22 @@ fn client(zone: u32, held: Option<&[(u16, u32)]>) -> Client {
         )
         .collect(),
     );
+    // The zone's channels already joined, as the first commit's walk finds them.
+    let zone_name = ["Elwynn Forest", "Westfall", "Stormwind City"][match zone {
+        ELWYNN => 0,
+        WESTFALL => 1,
+        _ => 2,
+    }];
     world.insert_resource(ChannelState {
         channels: catalog,
         zone_mask: Some(1 | 1 << 21),
+        joined: vec![
+            ChannelSlot::confirmed(&format!("General - {zone_name}"), 1).into(),
+            ChannelSlot::confirmed(&format!("LocalDefense - {zone_name}"), 22).into(),
+        ],
         ..Default::default()
     });
-    world.insert_resource(ZoneChannelWalk::walked_for_test(zone));
+    ZoneChannelWalk::seat_for_test(world, zone);
     world.resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
     if let Some(fields) = held {
         crate::test_support::hold_self_player(world, ME, fields);
@@ -341,6 +357,220 @@ fn our_create_runs_the_cascade_inside_its_packet() {
         r#"table.insert(Heard, tostring((GetChannelName("GuildRecruitment - City"))))"#,
     );
     c.frame(vec![vec![created()], combo(2)]);
-    assert_eq!(c.heard(), ["1"]);
+    assert_eq!(c.heard(), ["3"], "after General and LocalDefense");
     assert_eq!(c.wire(), ["join GuildRecruitment - City"]);
+}
+
+/// The poll's ticks (`0x5db900`), the tenth committing.
+fn tick(c: &mut Client, n: usize) {
+    for _ in 0..n {
+        c.app
+            .world_mut()
+            .run_system_cached(crate::area::feed_zone_events)
+            .expect("the feed runs");
+    }
+}
+
+/// Elwynn committed and walked, its slots joined, the wire empty.
+fn settled_in_elwynn() -> Client {
+    let mut c = client(ELWYNN, Some(&[]));
+    c.channels().joined = vec![
+        ChannelSlot::confirmed("General - Elwynn Forest", 1).into(),
+        ChannelSlot::confirmed("LocalDefense - Elwynn Forest", 22).into(),
+    ];
+    tick(&mut c, 10);
+    c.wire();
+    c
+}
+
+fn stand_in(c: &mut Client, area: u32) {
+    c.app
+        .world_mut()
+        .insert_resource(benilla_world::terrain_stream::CurrentArea(Some(area)));
+}
+
+/// The walk is `UpdateZoneText`'s (`0x494931`), run by the poll's tenth tick: a zone line crossed
+/// and crossed back between two polls changes nothing on the wire.
+#[test]
+fn a_zone_line_crossed_and_back_between_polls_walks_nothing() {
+    let mut c = settled_in_elwynn();
+    stand_in(&mut c, WESTFALL);
+    tick(&mut c, 3);
+    stand_in(&mut c, ELWYNN);
+    tick(&mut c, 7);
+    assert!(c.wire().is_empty(), "the poll saw Elwynn both times");
+}
+
+/// The channels change at the commit's tick, not on the frame the area moved.
+#[test]
+fn the_walk_runs_at_the_commits_tick_not_before_it() {
+    let mut c = settled_in_elwynn();
+    stand_in(&mut c, WESTFALL);
+    tick(&mut c, 9);
+    assert!(c.wire().is_empty(), "nine ticks return");
+    tick(&mut c, 1);
+    assert_eq!(
+        c.wire(),
+        [
+            "leave General - Elwynn Forest",
+            "join General - Westfall",
+            "leave LocalDefense - Elwynn Forest",
+            "join LocalDefense - Westfall",
+        ]
+    );
+}
+
+/// An area with no row commits nothing (the commit keeps the last zone), so the zone
+/// stays walked and the guild-recruitment cascade reads the last zone's row (`0x49ead7`).
+#[test]
+fn an_area_with_no_row_keeps_the_last_zone_and_the_cascade_reads_it() {
+    let mut c = client(STORMWIND, Some(&[]));
+    crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| {
+        s.expect("a VM").set_guild_recruitment_mode(0);
+    });
+    tick(&mut c, 10);
+    c.wire();
+    stand_in(&mut c, 4242);
+    tick(&mut c, 10);
+    assert!(c.wire().is_empty(), "no row, no walk");
+    crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| {
+        s.expect("a VM")
+            .run("SetGuildRecruitmentMode(1)")
+            .expect("the verb")
+    });
+    assert_eq!(
+        c.wire(),
+        ["join GuildRecruitment - City"],
+        "the cascade finds Stormwind, a capital, committed"
+    );
+}
+
+/// The walk comes before the commit's `ZONE_CHANGED_NEW_AREA` (`0x494931` before `0x49493f`): its
+/// listener finds the renamed slot.
+#[test]
+fn the_walk_runs_before_the_commits_new_area_listeners() {
+    let mut c = settled_in_elwynn();
+    crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| {
+        s.expect("a VM")
+            .run(
+                r#"
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+                f:SetScript("OnEvent", function()
+                    table.insert(Heard, tostring((GetChannelName("General - Westfall"))))
+                end)
+                "#,
+            )
+            .expect("the listener")
+    });
+    tick(&mut c, 9);
+    stand_in(&mut c, WESTFALL);
+    tick(&mut c, 1);
+    assert_eq!(c.heard(), ["1"]);
+}
+
+const WESTFALL_WALK: [&str; 4] = [
+    "leave General - Elwynn Forest",
+    "join General - Westfall",
+    "leave LocalDefense - Elwynn Forest",
+    "join LocalDefense - Westfall",
+];
+
+/// A cinematic running (`0x49491c`) or latched (`0x494928` → `0x5efc90`) holds the commit's walk
+/// off; the commit still stores the zone, and EndCinematic's walk (`0x48f1d0`) walks it.
+#[test]
+fn a_cinematic_holds_the_commits_walk_and_its_end_walks_the_committed_zone() {
+    for held in [
+        crate::cinematic::Cinematic::playing_for_test(),
+        crate::cinematic::Cinematic::pending_for_test(41),
+    ] {
+        let mut c = settled_in_elwynn();
+        c.app.world_mut().insert_resource(held);
+        stand_in(&mut c, WESTFALL);
+        tick(&mut c, 10);
+        assert!(c.wire().is_empty(), "no walk under a cinematic");
+        assert_eq!(
+            c.app.world().resource::<crate::area::CommittedZone>().0,
+            Some(WESTFALL),
+            "the zone is stored all the same"
+        );
+        c.app
+            .world_mut()
+            .insert_resource(crate::cinematic::Cinematic::ended_for_test());
+        c.app
+            .world_mut()
+            .run_system_cached(super::channels::walk_when_cinematic_ends)
+            .expect("the end walk runs");
+        assert_eq!(
+            c.wire(),
+            WESTFALL_WALK,
+            "EndCinematic walks the stored zone"
+        );
+    }
+}
+
+/// A reload builds a new VM and keeps the stored zone and the real zone text (`0xb4b404`,
+/// `0x495664` → `0x490bd0`): its first commit finds no change, so it walks nothing.
+#[test]
+fn a_reload_keeps_the_real_zone_text_and_walks_nothing() {
+    let mut c = settled_in_elwynn();
+    c.channels().joined = vec![ChannelSlot::confirmed("General - Stale", 1).into()];
+    c.app
+        .world_mut()
+        .insert_non_send_resource(UiScript::new().expect("a VM"));
+    tick(&mut c, 10);
+    assert!(c.wire().is_empty(), "Elwynn was walked before the reload");
+}
+
+/// An empty name leaves the real zone text as it was (`0x49489a` → `0x494936`), so the next
+/// name is compared with the one before it, ignoring case (`0x64a4c0`).
+#[test]
+fn an_empty_or_recased_name_walks_nothing() {
+    let mut c = settled_in_elwynn();
+    // Stale names, so that any walk shows on the wire.
+    c.channels().joined = vec![ChannelSlot::confirmed("General - Stale", 1).into()];
+    stand_in(&mut c, NAMELESS);
+    tick(&mut c, 10);
+    stand_in(&mut c, ELWYNN);
+    tick(&mut c, 10);
+    assert!(c.wire().is_empty(), "Elwynn again after an unnamed zone");
+    stand_in(&mut c, SHOUTING);
+    tick(&mut c, 10);
+    assert!(c.wire().is_empty(), "the same name in capitals");
+}
+
+/// A hit group the indoor dedup passes never reaches `0x494780` (`0x67e510`): the zone is not
+/// stored.
+#[test]
+fn the_indoor_dedup_stores_no_zone() {
+    use benilla_world::wmo_portal::{CurrentAreaInterior, WmoInteriorKeys};
+    let mut c = settled_in_elwynn();
+    let keys = WmoInteriorKeys {
+        wmo_id: 1,
+        name_set: 0,
+        group_area_id: 7,
+    };
+    let room = benilla_formats::WmoArea {
+        id: 1,
+        sound_provider: [0; 2],
+        ambience: 0,
+        zone_music: 0,
+        intro_sound: 0,
+        area_table_id: 0,
+        name: String::new(),
+    };
+    let world = c.app.world_mut();
+    benilla_world::wmo_portal::seat_wmo_areas(
+        world,
+        benilla_formats::WmoAreaCatalog::from_rows([(1, 0, 7, room)]),
+    );
+    world.insert_resource(CurrentAreaInterior(Some(keys)));
+    tick(&mut c, 10);
+    stand_in(&mut c, WESTFALL);
+    tick(&mut c, 10);
+    assert_eq!(
+        c.app.world().resource::<crate::area::CommittedZone>().0,
+        Some(ELWYNN),
+        "the same room: the update is skipped"
+    );
 }

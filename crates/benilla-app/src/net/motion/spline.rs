@@ -52,6 +52,15 @@ pub(crate) struct Spline {
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct SplineStopped(pub(crate) u32);
 
+/// A remote unit's mover holds a spline (`CMovement+0xa4`), live or ended: every monster move
+/// allocates it, a path's install (`0x6187e0` → `0x7c62c0`) or, for a stop or a path the root
+/// refuses, its stop at the point (`0x6020cd` → `0x618750` → `0x619300`), as a create that
+/// carries a path does (`0x619387`), and a path's end frees it only for the active player
+/// (`0x619de0`, `0x619dff`-`0x619e70`). It forces the next relayed move's apply (`0x618c43`), which frees it
+/// (`0x618f43` → `0x7c6310`), as a create without a path does (`0x61940c`).
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct HeldSpline;
+
 impl Spline {
     /// Average speed in yd/s (path length over duration); [`crate::creature_anim`] picks Walk or
     /// Run from it.
@@ -216,15 +225,37 @@ pub(in crate::net) fn monster_move_spline(
     })
 }
 
+/// A monster move's stop (type 1) 3 yd or more from where its unit stands, as the path the
+/// reference runs it as: the squared distance against `[0x80c5bc]` = 9.0 (`0x6019be`), then one
+/// leg from the unit to the stop point (`0x601aca`-`0x601b68`) at 4× the unit's run speed
+/// (`[0x80306c]` at `0x601f49`), over `len / speed · 1000` ms, rounded and at least 1
+/// (`0x601f9d`-`0x601fcc`). `None` for a nearer stop, which leaves the unit where it stands
+/// (`0x6019df` → `0x618750`), and for a speed of 2^-20 or less (`[0x8026bc]` at `0x601f8c`).
+pub(in crate::net) fn far_stop(
+    from: [f32; 3],
+    to: [f32; 3],
+    run: f32,
+) -> Option<(Vec<[f32; 3]>, u32)> {
+    let d = [0, 1, 2].map(|i| f64::from(to[i]) - f64::from(from[i]));
+    let squared = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    if squared.is_nan() || squared < 9.0 {
+        return None; // NaN included: `0x6019ca` reads it as near
+    }
+    let speed = f64::from(run) * 4.0;
+    if speed.is_nan() || speed <= f64::from(2.0f32.powi(-20)) {
+        return None;
+    }
+    // Stored as a float before the integer store (`0x601fac`-`0x601fb2`).
+    let ms = ((squared.sqrt() / speed * 1000.0) as f32).round_ties_even();
+    let duration = if ms <= 1.0 { 1 } else { ms as u32 };
+    Some((vec![from, to], duration))
+}
+
 /// The [`Spline`] a unit is already riding in its create block, back-dated by
 /// [`CreateSpline::time_passed_ms`]; `None` for a degenerate path, a zero duration, a finished
 /// ride, or anything under `WOW_CREATE_SPLINE=off`.
 pub(in crate::net) fn create_spline(spline: CreateSpline) -> Option<Spline> {
-    if !create_spline_enabled()
-        || spline.duration_ms == 0
-        || spline.path.len() < 2
-        || spline.time_passed_ms >= spline.duration_ms
-    {
+    if !create_spline_enabled() || ridden(&spline) {
         return None;
     }
     let passed = Duration::from_millis(u64::from(spline.time_passed_ms));
@@ -242,6 +273,48 @@ pub(in crate::net) fn create_spline(spline: CreateSpline) -> Option<Spline> {
         deck: None,
         final_facing: spline.facing,
     })
+}
+
+/// A create's path with nothing left to ride: a finished ride, a zero duration or a lone point.
+fn ridden(spline: &CreateSpline) -> bool {
+    spline.duration_ms == 0 || spline.path.len() < 2 || spline.time_passed_ms >= spline.duration_ms
+}
+
+/// Where a create's ridden path ([`create_spline`] declines it) ends: the reference installs any
+/// path the block carries (`0x619371` → `0x619387`), whose next tick finds it at its end
+/// (`0x7c5490`, u = 1), stops the mover (`0x61a863`), places it at the last point from 3 yd
+/// (`0x61a874` → [`snap_from_three_yards`]) and writes the end facing (`0x61a882`-`0x61a8db`).
+/// The last point, and the heading the follower leaves there (its tangent, `0x7c5490`), which a
+/// found final facing overrides. `None` for a path still being ridden, an empty one, and every
+/// path under `WOW_CREATE_SPLINE=off`, a lever that drops the path whole.
+pub(in crate::net) fn ridden_create_path(spline: &CreateSpline) -> Option<([f32; 3], Option<f32>)> {
+    if !create_spline_enabled() || !ridden(spline) || spline.path.is_empty() {
+        return None;
+    }
+    let now = Instant::now();
+    let path = Spline {
+        points: spline.path.clone(),
+        start: now,
+        duration: Duration::ZERO,
+        id: spline.id,
+        grounded: !spline.flying,
+        run_mode: spline.run_mode,
+        deck: None,
+        final_facing: spline.facing,
+    };
+    let (end, leg, _) = path.sample(now + Duration::from_secs(1));
+    Some((end, leg))
+}
+
+/// `0x616d60`: `point` replaces `at` when it lies 3 yd or more off, NaN included; a nearer one
+/// leaves `at`.
+pub(in crate::net) fn snap_from_three_yards(at: [f32; 3], point: [f32; 3]) -> [f32; 3] {
+    let d = [0, 1, 2].map(|i| f64::from(point[i]) - f64::from(at[i]));
+    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 9.0 {
+        at
+    } else {
+        point
+    }
 }
 
 /// One `csp` trace line per create block with a live spline, in either `WOW_CREATE_SPLINE` leg;
@@ -332,7 +405,10 @@ pub(in crate::net) fn sample_splines(
         Option<&mut crate::transport::TransportRider>,
         // Who turns to the end's facing through the display smoother.
         Option<&NetEntity>,
+        Option<&ObjectStore>,
         Has<ActiveMover>,
+        // The mover state the path's end stops ([`stop_at_path_end`]).
+        Option<&mut crate::net::RemoteMotion>,
     )>,
     // A `Target` facing's unit when it is not on a path itself.
     standing: Query<&Transform, Without<Spline>>,
@@ -350,7 +426,8 @@ pub(in crate::net) fn sample_splines(
     // The paths that ended facing a unit, resolved once every path has moved this frame; `true`
     // for a deck path, whose rider takes the facing.
     let mut facing_targets: Vec<(Entity, u64, [f32; 3], bool)> = Vec::new();
-    for (entity, spline, mut t, swimming, guid, rider, net, mover) in &mut q {
+    for (entity, spline, mut t, swimming, guid, rider, net, store, mover, mut motion) in &mut q {
+        let unit_flags = store.map_or(0, |s| s.0.unit_flags());
         let (wow_pos, facing, pitch) = spline.sample(now);
         // A deck path's sample is the rider's transport-local pose, composed later this frame.
         if let Some(deck) = spline.deck {
@@ -381,6 +458,10 @@ pub(in crate::net) fn sample_splines(
                 }
             }
             if done {
+                // Its world pose and facing are the deck's to compose (`compose_riders`).
+                if let Some(mut rm) = motion {
+                    rm.flags &= !PATH_END_STOP;
+                }
                 commands.entity(entity).remove::<Spline>();
             }
             continue;
@@ -407,6 +488,14 @@ pub(in crate::net) fn sample_splines(
                 Quat::from_rotation_y(f)
             };
         }
+        // The mover walks the path, its position and, from the tangent, its facing written each
+        // step (`0x7c5490`), so whatever ends the path leaves it standing where the path had it.
+        if let Some(rm) = motion.as_deref_mut() {
+            rm.wow_pos = wow_pos;
+            if let Some(f) = facing {
+                rm.orientation = f;
+            }
+        }
         if let Some(was) = was {
             trace_ride(guid.map_or(0, |g| g.0), spline, wow_pos, was, now);
         }
@@ -415,19 +504,27 @@ pub(in crate::net) fn sample_splines(
             // The end writes the raw facing (`0x61a820`, `0x61a882`-`0x61a8db`): an `Angle` as
             // sent, else a `Target` as the heading to that unit's position now, else a `Spot` as
             // the heading to the point (`0x47f220`), each from where the path left the unit.
-            match spline.final_facing {
-                MonsterMoveFacing::Target(g) => facing_targets.push((entity, g, wow_pos, false)),
+            let rest = match spline.final_facing {
+                MonsterMoveFacing::Target(g) => {
+                    facing_targets.push((entity, g, wow_pos, false));
+                    None
+                }
                 other => {
-                    if let Some(f) = resolve_facing(other, wow_pos, |_| None) {
+                    let rest = resolve_facing(other, wow_pos, |_| None);
+                    if let Some(f) = rest {
                         rest_facing(
                             &mut commands,
                             entity,
                             &mut t,
-                            smoothed(net.map(|n| n.kind), mover),
+                            smoothed(net.map(|n| n.kind), unit_flags, mover),
                             f,
                         );
                     }
+                    rest
                 }
+            };
+            if let Some(mut rm) = motion {
+                stop_at_path_end(&mut rm, wow_pos, rest.or(facing));
             }
             if tracing {
                 benilla_assets::trace::line(
@@ -450,7 +547,7 @@ pub(in crate::net) fn sample_splines(
         let Some(f) = resolve_facing(MonsterMoveFacing::Target(guid), at, |_| target) else {
             continue;
         };
-        let Ok((_, _, mut t, _, _, rider, net, mover)) = q.get_mut(entity) else {
+        let Ok((_, _, mut t, _, _, rider, net, store, mover, motion)) = q.get_mut(entity) else {
             continue;
         };
         if on_deck {
@@ -458,10 +555,37 @@ pub(in crate::net) fn sample_splines(
                 rider.local_orientation = f;
             }
         } else {
-            let smooth = smoothed(net.map(|n| n.kind), mover);
+            let flags = store.map_or(0, |s| s.0.unit_flags());
+            let smooth = smoothed(net.map(|n| n.kind), flags, mover);
             rest_facing(&mut commands, entity, &mut t, smooth, f);
+            if let Some(mut rm) = motion {
+                rm.orientation = f;
+            }
         }
     }
+}
+
+/// Whether a mover moves itself: a flag of `0x20ff`, which `CMovement::Update`'s substep loop
+/// steps (`0x616e20`) and [`crate::net::motion::remote::reckon`] resolves; a path, when it has one,
+/// drives it instead.
+pub(crate) fn moves_itself(m: &crate::net::RemoteMotion) -> bool {
+    m.flags & crate::creature_anim::move_flags::INTEGRATED != 0
+}
+
+/// The bits a path's end clears on its mover, `0x7c6c00`'s: forward, back and the deferred
+/// forward (`0x8000`).
+pub(in crate::net) const PATH_END_STOP: u32 =
+    crate::creature_anim::move_flags::FORWARD | crate::creature_anim::move_flags::BACKWARD | 0x8000;
+
+/// A world path's end on its unit's mover state: the mover stops where the path left it
+/// (`0x7c6c00`), facing `facing` when the end names one, so its dead-reckoning goes on from
+/// there; a later frame's clamp keeps its Z ([`ground_clamp_creatures`]).
+fn stop_at_path_end(rm: &mut crate::net::RemoteMotion, at: [f32; 3], facing: Option<f32>) {
+    rm.wow_pos = at;
+    if let Some(f) = facing {
+        rm.orientation = f;
+    }
+    rm.flags &= !PATH_END_STOP;
 }
 
 /// A finished path's raw facing `f`. A smoothed unit takes it as the goal its display facing
@@ -504,22 +628,26 @@ fn trace_ride(guid: u64, spline: &Spline, pos: [f32; 3], was: [f32; 3], now: Ins
 /// [`ground_clamp_creatures`]. The reference never asks the kind: `0x6187a0` links any unit a
 /// `SMSG_MONSTER_MOVE` names (`0x619ca0`), and the per-frame vertical-zero gate
 /// (`0x616cec`-`0x616d03`) reads only the mover's flags. So: every `Unit`; a `Player` a server
-/// spline has moved, until the relay takes it back (`derived_before` is [`GroundClamped`]'s
-/// presence); never the body we steer ([`crate::net::Embodied`]); nothing else. A relayed player's
-/// Z comes grounded by its own client, and a down-ray would flatten its dead-reckoned jump arc.
+/// spline moves or has moved, until a relayed move takes it back (`derived_before` is
+/// [`GroundClamped`]'s presence, which the relay clears); never the body we steer
+/// ([`crate::net::Embodied`]); never a body whose mover moves itself, a flag of `0x20ff` and no
+/// path (`self_moving`): its own step resolves its Z ([`crate::net::motion::remote::reckon`], as
+/// `0x616cb0` → `0x634040`), the falling resolver `0x635b00` taking a fall's from the arc, so a
+/// down-ray would flatten the arc; nothing else. A relayed player's Z comes grounded by its own
+/// client.
 pub(crate) fn ground_derived(
     kind: EntityKind,
     splined: bool,
     derived_before: bool,
     embodied: bool,
-    relayed: bool,
+    self_moving: bool,
 ) -> bool {
-    if embodied {
+    if embodied || (self_moving && !splined) {
         return false;
     }
     match kind {
         EntityKind::Unit => true,
-        EntityKind::Player => !relayed && (splined || derived_before),
+        EntityKind::Player => splined || derived_before,
         _ => false,
     }
 }
@@ -582,9 +710,10 @@ pub(in crate::net) fn ground_clamp_creatures(
         Has<CreatureSwimming>,
         // HOVER and WATERWALKING both move the answer.
         Option<&crate::net::UnitMoveModes>,
-        // [`ground_derived`]'s other Z authorities: the controller and the relay's dead-reckoning.
+        // [`ground_derived`]'s other Z authority, the controller.
         Has<crate::net::Embodied>,
-        Has<crate::net::RemoteMotion>,
+        // The mover state a re-grounded unit's dead-reckoning goes on from.
+        Option<&mut crate::net::RemoteMotion>,
     )>,
 ) {
     let cost = clamp_cost_enabled();
@@ -601,14 +730,15 @@ pub(in crate::net) fn ground_clamp_creatures(
     // (`armed`); a nonzero steady-state `armed` means the collider set is churning.
     let (mut reseat, mut armed) = (0u32, 0u32);
 
-    for (entity, net, spline, mut t, mut clamped, swimming, modes, embodied, relayed) in &mut q {
+    for (entity, net, spline, mut t, mut clamped, swimming, modes, embodied, mut motion) in &mut q {
         visited += 1;
+        let self_moving = motion.as_deref().is_some_and(moves_itself);
         if !ground_derived(
             net.kind,
             spline.is_some(),
             clamped.is_some(),
             embodied,
-            relayed,
+            self_moving,
         ) {
             skipped += 1;
             continue; // somebody else owns this body's Z
@@ -783,6 +913,11 @@ pub(in crate::net) fn ground_clamp_creatures(
         if y != t.translation.y {
             moved += 1;
             t.translation.y = y;
+            // Its mover stands where the clamp put it, as the walk resolve re-derives the mover's
+            // own Z (`0x6367b0`): on a path, or standing, as a derived body's mover is.
+            if let Some(rm) = motion.as_deref_mut() {
+                rm.wow_pos = bevy_to_wow(t.translation);
+            }
         }
         let state = GroundClamped {
             xz,
@@ -858,7 +993,7 @@ type SwimMarkQuery = (
     Has<Spline>,
     Has<GroundClamped>,
     Has<crate::net::Embodied>,
-    Has<crate::net::RemoteMotion>,
+    Option<&'static crate::net::RemoteMotion>,
 );
 
 /// The stamp [`mark_swimming_creatures`] leaves once a unit's room claim settles; 1.12 water is
@@ -948,10 +1083,11 @@ pub(in crate::net) fn mark_swimming_creatures(
             commands.entity(e).remove::<SwimEvaluated>();
         }
     }
-    for (e, net, t, collision, store, marked, evaluated, splined, clamped, embodied, relayed) in
+    for (e, net, t, collision, store, marked, evaluated, splined, clamped, embodied, motion) in
         &units
     {
-        if !ground_derived(net.kind, splined, clamped, embodied, relayed) {
+        let self_moving = motion.is_some_and(moves_itself);
+        if !ground_derived(net.kind, splined, clamped, embodied, self_moving) {
             continue; // GameObjects don't swim; a relayed player's flag arrives on the wire
         }
         // The unit's own room decides whose liquid answers (an interior's, not the ADT water over
@@ -1339,6 +1475,42 @@ mod tests {
         assert!(create_spline(spline(0, 5_000, vec![[1.0, 2.0, 3.0]])).is_none());
     }
 
+    /// A ridden create path ends at its last point, heading down its last leg (`0x7c5490`), and
+    /// the end places a unit there only from 3 yd (`0x616d60`).
+    #[test]
+    fn a_ridden_create_path_ends_at_its_last_point_from_three_yards() {
+        let ridden = CreateSpline {
+            path: vec![[10.0, -10.0, 0.0], [10.0, 10.0, 0.0]],
+            id: 1,
+            time_passed_ms: 5_000,
+            duration_ms: 5_000,
+            flying: false,
+            cyclic: false,
+            run_mode: true,
+            facing: MonsterMoveFacing::None,
+        };
+        let (end, leg) = super::ridden_create_path(&ridden).expect("ridden");
+        assert_eq!(end, [10.0, 10.0, 0.0]);
+        let leg = leg.expect("a leg");
+        assert!((leg - std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{leg}");
+        let riding = CreateSpline {
+            time_passed_ms: 1_000,
+            ..ridden
+        };
+        assert!(super::ridden_create_path(&riding).is_none(), "still riding");
+        let snap = super::snap_from_three_yards;
+        assert_eq!(
+            snap([0.0; 3], [3.0, 0.0, 0.0]),
+            [3.0, 0.0, 0.0],
+            "3 yd moves"
+        );
+        assert_eq!(snap([0.0; 3], [2.9, 0.0, 0.0]), [0.0; 3], "nearer stays");
+        assert!(
+            snap([0.0; 3], [f32::NAN, 0.0, 0.0])[0].is_nan(),
+            "NaN moves"
+        );
+    }
+
     /// Near a hairpin the doubled angle passes π/2 and the bank snaps to a full ±π roll.
     #[test]
     fn a_hairpin_snaps_the_bank_to_a_full_roll() {
@@ -1572,6 +1744,7 @@ mod server_moved_players {
             relay: Default::default(),
             last_apply_ms: 0.0,
             last_apply_pos: [0.0; 3],
+            fired_at_ms: None,
         }
     }
 
@@ -1679,25 +1852,78 @@ mod server_moved_players {
         );
     }
 
-    /// A remote player is the relay's, both freshly streamed in and under a live [`RemoteMotion`].
+    /// A remote player is the relay's streamed in, and a server path's while one drives it, its
+    /// [`RemoteMotion`] riding under the path as the reference's one mover does (`+0xa4` on the
+    /// `CMovement`), until a relayed move takes it back: the path and the clamp's mark go.
     #[test]
-    fn a_relayed_player_is_left_to_the_relay() {
+    fn a_relayed_player_is_the_paths_until_the_relay_takes_it_back() {
         let (mut app, body) = hollow(EntityKind::Player);
+        app.world_mut().entity_mut(body).insert(relayed());
         clamp(&mut app);
         assert_eq!(
             y_of(&app, body),
             RIM_Z,
-            "streamed in, never moved by anyone: not ours to ground"
+            "streamed in, never moved by a path: not ours to ground"
         );
 
+        walking(&mut app, body);
+        clamp(&mut app);
+        assert_grounded(
+            &app,
+            body,
+            "a path drives it, its mover state under the path",
+        );
+        assert_eq!(
+            app.world().get::<RemoteMotion>(body).unwrap().wow_pos[2],
+            benilla_assets::coords::bevy_to_wow(
+                app.world().get::<Transform>(body).unwrap().translation
+            )[2],
+            "and the mover stands where the clamp put it"
+        );
+
+        app.world_mut()
+            .entity_mut(body)
+            .remove::<Spline>()
+            .remove::<GroundClamped>()
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation
+            .y = RIM_Z;
+        clamp(&mut app);
+        assert_eq!(y_of(&app, body), RIM_Z, "the relay's again");
+    }
+
+    /// A creature whose mover moves itself keeps the height its own step gave it, its mover's
+    /// included: a fall's is the arc's (`0x635b00`), and a clamp that wrote it would flatten the
+    /// arc. Standing, or under a path, it is the clamp's again.
+    #[test]
+    fn a_creature_moving_itself_keeps_its_own_height() {
+        use crate::creature_anim::move_flags::{FALLING, FORWARD};
+        let mover_z = |app: &App, e| app.world().get::<RemoteMotion>(e).unwrap().wow_pos[2];
+        for flags in [FALLING, FORWARD] {
+            let (mut app, body) = hollow(EntityKind::Unit);
+            app.world_mut()
+                .entity_mut(body)
+                .insert(RemoteMotion { flags, ..relayed() });
+            clamp(&mut app);
+            assert_eq!(y_of(&app, body), RIM_Z, "{flags:#x}: its own step's height");
+            assert_eq!(mover_z(&app, body), RIM_Z, "{flags:#x}: and its mover's");
+
+            app.world_mut().get_mut::<RemoteMotion>(body).unwrap().flags = 0;
+            clamp(&mut app);
+            assert_grounded(&app, body, &format!("{flags:#x}, then standing"));
+            assert_eq!(
+                mover_z(&app, body),
+                benilla_assets::coords::bevy_to_wow(Vec3::new(0.0, FLOOR_Y, 0.0))[2],
+                "{flags:#x}: a standing mover stands where the clamp put it"
+            );
+        }
+
+        let (mut app, body) = hollow(EntityKind::Unit);
         app.world_mut().entity_mut(body).insert(relayed());
         walking(&mut app, body);
         clamp(&mut app);
-        assert_eq!(
-            y_of(&app, body),
-            RIM_Z,
-            "the relay stream outranks a spline that has not displaced it"
-        );
+        assert_grounded(&app, body, "a path drives it, whatever its mover's flags");
     }
 
     /// A swimming body keeps its wire Z, a Player included.
@@ -1757,30 +1983,32 @@ mod server_moved_players {
     /// The subject rule as a table, with a GameObject and the ways a Player leaves the set.
     #[test]
     fn the_subject_rule() {
-        let unit = |splined, memo, embodied, relayed| {
-            ground_derived(EntityKind::Unit, splined, memo, embodied, relayed)
+        let unit = |splined, memo, embodied| {
+            ground_derived(EntityKind::Unit, splined, memo, embodied, false)
         };
-        let player = |splined, memo, embodied, relayed| {
-            ground_derived(EntityKind::Player, splined, memo, embodied, relayed)
+        let player = |splined, memo, embodied| {
+            ground_derived(EntityKind::Player, splined, memo, embodied, false)
         };
         // A creature is ours walking or idle.
-        assert!(unit(true, true, false, false));
-        assert!(unit(false, false, false, false));
+        assert!(unit(true, true, false));
+        assert!(unit(false, false, false));
         // A possessed creature is the controller's.
-        assert!(!unit(true, true, true, false));
-        assert!(!unit(false, false, true, false));
+        assert!(!unit(true, true, true));
+        assert!(!unit(false, false, true));
+        // One whose mover moves itself is its own, unless a path drives it.
+        assert!(!ground_derived(EntityKind::Unit, false, true, false, true));
+        assert!(ground_derived(EntityKind::Unit, true, true, false, true));
 
-        assert!(player(true, false, false, false), "a bot's first path");
+        assert!(player(true, false, false), "a bot's first path");
         assert!(
-            player(false, true, false, false),
-            "and every frame after it"
+            player(false, true, false),
+            "and every frame after it, until a relayed move"
         );
         assert!(
-            !player(false, false, false, false),
-            "before anything moves it"
+            !player(false, false, false),
+            "before anything moves it, and under the relay stream"
         );
-        assert!(!player(true, true, true, false), "the body we steer");
-        assert!(!player(true, true, false, true), "under the relay stream");
+        assert!(!player(true, true, true), "the body we steer");
 
         for kind in [EntityKind::GameObject, EntityKind::Corpse] {
             assert!(

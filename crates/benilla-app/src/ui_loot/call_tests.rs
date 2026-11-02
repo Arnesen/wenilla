@@ -882,6 +882,62 @@ fn a_refusal_for_another_session_shows_nothing_and_drops_the_target() {
     }
 }
 
+/// A releasing refusal of the loot target drops it and leaves the window open (`0x5ebac2`), and the
+/// movement guard and the stand apply close only while one is latched (`IsLooting 0x6126b0`,
+/// tested at `0x60e9ce` and `0x5f07c6` ahead of `0x48f200` at `0x60e9dd` and `0x5f07d5`): a move,
+/// a sit and the server's sit close the window with the target held, and once a refusal dropped it
+/// leave the window open and release nothing. The lanes fire after each step, so a close's
+/// `LOOT_CLOSED` is heard wherever it signals.
+#[test]
+fn a_move_or_a_sit_keeps_a_window_a_refusal_unlatched() {
+    use benilla_protocol::messages::loot_error;
+    /// One step, run on the client.
+    type Step = fn(&mut Loot);
+    let steps: [(&str, Step); 3] = [
+        ("a move", |l| bound(l, "MoveForwardStart()")),
+        ("a sit", |l| bound(l, "SitOrStand()")),
+        ("the server's sit", |l| {
+            packets(l, vec![SessionEvent::StandStateUpdate { state: 1 }])
+        }),
+    ];
+    let mut wrong = Vec::new();
+    for (what, step) in steps {
+        for refused in [false, true] {
+            let mut l = client();
+            let world = l.app.world_mut();
+            let me = world.resource::<GuidIndex>().0[&ME];
+            world.entity_mut(me).insert(crate::net::Embodied);
+            world.init_resource::<crate::player::CameraControl>();
+            world.init_resource::<crate::player::Player>();
+            world.resource_mut::<crate::player::Player>().active = true;
+            open(&mut l, CORPSE, 1, 0, vec![row(0, LINEN)]);
+            if refused {
+                packets(
+                    &mut l,
+                    vec![SessionEvent::LootError {
+                        guid: CORPSE,
+                        error: loot_error::TOO_FAR,
+                    }],
+                );
+                assert_eq!(l.app.world().resource::<LootLatch>().0, None, "{what}");
+            }
+            let _ = (seen(&mut l), sent(&l));
+            step(&mut l);
+            crate::lanes::flush(l.app.world_mut());
+            let released = !sent(&l).is_empty();
+            let signalled = seen(&mut l).contains("LOOT_CLOSED");
+            let open = l.app.world().resource::<LootState>().source() == Some(CORPSE);
+            if (released, signalled, open) != (!refused, !refused, refused) {
+                wrong.push(format!(
+                    "{what}, refused {refused}: released {released}, LOOT_CLOSED {signalled}, \
+                     open {open}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// A response over an open window runs its copier's teardown first (`0x4c1cb0`): the source is
 /// zeroed (`0x4c1da0`) and `LOOT_CLOSED` signalled (`0x4c1dac`) before the new source is stored
 /// (`0x4c1dc2`), so a `CloseLoot` in its handlers finds no window (`0x48f23f`) and releases
@@ -1328,6 +1384,101 @@ fn close_loots_unlock_handlers_read_the_window_open() {
         eval::<String>(&mut l, "return table.concat(COUNTS, ',')"),
         "ITEM_LOCK_CHANGED:1,ITEM_LOCK_CHANGED:1,LOOT_CLOSED:0,after:0"
     );
+}
+
+/// `EndLootWindow` unlocks an item source with its `ITEM_LOCK_CHANGED` (`0x48f2bd` → `0x495420`)
+/// before it sends `CMSG_LOOT_RELEASE` (`0x48f311`), and its teardown unlocks it again after
+/// (`0x48f33d` → `0x4c1d36`): the first unlock's listener sends ahead of the release and the
+/// second's after it, for a `CloseLoot`, the last row's removal and the leave-world sweep.
+#[test]
+fn a_lockboxs_close_unlocks_it_ahead_of_its_release() {
+    for how in ["CloseLoot", "removal", "sweep"] {
+        let mut l = client();
+        run(
+            &mut l,
+            r#"local f = CreateFrame("Frame")
+            f:RegisterEvent("ITEM_LOCK_CHANGED")
+            f:SetScript("OnEvent", function() RandomRoll(1, 1) end)"#,
+        );
+        open(&mut l, LOCKBOX, 1, 0, vec![row(0, LINEN)]);
+        l.rx.try_iter().for_each(drop);
+        match how {
+            "CloseLoot" => run(&mut l, "CloseLoot()"),
+            "removal" => {
+                packets(&mut l, vec![SessionEvent::LootRemoved { slot: 0 }]);
+                feed(&mut l);
+            }
+            _ => crate::ui_script::sweep_test::sweep_in_place(&mut l.app),
+        }
+        let wire: Vec<&str> =
+            l.rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::RandomRoll { .. } => Some("roll"),
+                    ClientCommand::LootRelease { guid: LOCKBOX } => Some("release"),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(wire, ["roll", "release", "roll"], "{how}");
+    }
+}
+
+/// A listener's `CloseLoot` on the close's own unlock (`0x48f2bd` → `0x495420`) runs a nested
+/// `EndLootWindow` while the window is still open, which sends its own release (`0x48f311`)
+/// before the outer one goes on to send its own: two releases.
+#[test]
+fn a_nested_close_on_the_unlock_sends_its_own_release() {
+    let mut l = client();
+    run(
+        &mut l,
+        r#"local f = CreateFrame("Frame")
+        f:RegisterEvent("ITEM_LOCK_CHANGED")
+        f:SetScript("OnEvent", function()
+            if not NESTED then NESTED = true CloseLoot() end
+        end)"#,
+    );
+    open(&mut l, LOCKBOX, 1, 0, vec![row(0, LINEN)]);
+    l.rx.try_iter().for_each(drop);
+    run(&mut l, "CloseLoot()");
+    let released =
+        l.rx.try_iter()
+            .filter(|c| matches!(c, ClientCommand::LootRelease { guid: LOCKBOX }))
+            .count();
+    assert_eq!(released, 2);
+}
+
+/// Every source's release follows what was signalled ahead of it: the last row's removal signals
+/// `LOOT_SLOT_CLEARED` (`0x4c1f77`) before its close sends the release (`0x4c1f8d` → `0x48f311`),
+/// and `CloseLoot(1)` shows `ERR_LOOT_NO_UI` (`0x48f27b`) before it: each listener's packet goes
+/// out first, for a corpse as for an item.
+#[test]
+fn a_corpses_release_follows_the_signals_ahead_of_it() {
+    for how in ["removal", "CloseLoot(1)"] {
+        let mut l = client();
+        run(
+            &mut l,
+            r#"local f = CreateFrame("Frame")
+            f:RegisterEvent("LOOT_SLOT_CLEARED")
+            f:RegisterEvent("UI_ERROR_MESSAGE")
+            f:SetScript("OnEvent", function() RandomRoll(1, 1) end)"#,
+        );
+        open(&mut l, CORPSE, 1, 0, vec![row(0, LINEN)]);
+        l.rx.try_iter().for_each(drop);
+        if how == "removal" {
+            packets(&mut l, vec![SessionEvent::LootRemoved { slot: 0 }]);
+            feed(&mut l);
+        } else {
+            run(&mut l, how);
+        }
+        let wire: Vec<&str> =
+            l.rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::RandomRoll { .. } => Some("roll"),
+                    ClientCommand::LootRelease { guid: CORPSE } => Some("release"),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(wire, ["roll", "release"], "{how}");
+    }
 }
 
 /// `OnItemPush` signals `ITEM_PUSH` in the push's handler (`0x491be8`), which touches no loot

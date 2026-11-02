@@ -255,6 +255,47 @@ fn release(world: &mut World, b: MouseButton) {
     }
 }
 
+/// A mouse turn sets mode bit 6 (`0x50fee9`), which a session with no motion leaves clear.
+#[test]
+fn a_mouse_turn_marks_the_camera_moved() {
+    let mut w = world(false);
+    lua(&mut w, "MouselookStart()");
+    frame(&mut w, 0.0);
+    assert!(w.resource::<CameraControl>().is_looking());
+    assert!(!w.resource::<CameraControl>().view_moved);
+    frame(&mut w, 40.0);
+    assert!(w.resource::<CameraControl>().view_moved);
+}
+
+/// Freelook's entry and its leave stop a view's pitch, yaw and bias (`0x50fe90`-`0x50fecd`,
+/// `0x50f978`-`0x50f984`), and a release out of freelook still does (`0x514c48`, `0x50fddb`).
+#[test]
+fn freelook_stops_a_views_flights() {
+    let arm = |rig: &mut CameraControl| {
+        rig.view_blend.arm_pitch_for_test();
+        rig.follow.arm_view(0.0, 1.0, 180.0);
+        rig.smart_pivot.ease_for_test();
+        assert!(rig.view_blend.pitch_in_flight(), "the pitch armed");
+        assert!(rig.follow.target_offset().is_some(), "the yaw armed");
+        assert!(rig.smart_pivot.easing_for_test(), "the bias armed");
+    };
+    let stopped = |rig: &CameraControl| {
+        !rig.view_blend.pitch_in_flight()
+            && rig.follow.target_offset().is_none()
+            && !rig.smart_pivot.easing_for_test()
+    };
+    let mut rig = CameraControl::default();
+    arm(&mut rig);
+    assert!(rig.enter_in_place(LookButton::Right));
+    assert!(stopped(&rig), "the entry");
+    arm(&mut rig);
+    assert!(rig.leave_in_place(false));
+    assert!(stopped(&rig), "the leave");
+    arm(&mut rig);
+    assert!(!rig.leave_in_place(false));
+    assert!(stopped(&rig), "out of freelook");
+}
+
 /// The right button's session, entered with no button: the mouse turns the camera and the body
 /// together, the cursor is locked and hidden, and `IsMouselooking` answers 1 (`0x514210`).
 #[test]
@@ -728,6 +769,25 @@ fn mouselook_start_under_a_left_drag_is_the_both_button_run() {
     release(&mut w, MouseButton::Left);
     frame(&mut w, 0.0);
     assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
+}
+
+/// A new camera's mode word holds no freelook bit (`0x50c156`), so a `ToggleMouseMove` session,
+/// which no button holds, ends at a `/reload`: the leave shows the cursor (`0x490bb6`) and the
+/// frame's teardown drops the relative mouse (`0x481d4d`).
+#[test]
+fn a_reload_ends_a_toggled_session_and_gives_the_cursor_back() {
+    let mut w = world(false);
+    lua(&mut w, "ToggleMouseMove()");
+    frame(&mut w, 0.0);
+    assert!(looking(&w));
+    assert_eq!(cursor(&mut w).grab_mode, CursorGrabMode::Locked);
+    crate::player::rebuild_camera(&mut w);
+    assert!(!looking(&w));
+    assert!(!w.resource::<CameraControl>().toggled);
+    frame(&mut w, 0.0);
+    assert!(!looking(&w), "no button brings it back");
+    assert_eq!(cursor(&mut w).grab_mode, CursorGrabMode::None);
+    assert!(cursor(&mut w).visible);
 }
 
 /// `ToggleMouseMove` with no button enters mouselook (`0x50f910` → `0x50f930`): the cursor locks,

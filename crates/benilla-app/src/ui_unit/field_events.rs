@@ -13,6 +13,33 @@ use benilla_ui::strings::Arg;
 use crate::field_watch::{FieldNotice, NoticeLane};
 use crate::lanes::Until;
 
+/// The units' token flags a dying VM left for the next ([`benilla_ui::script::TokenFlagsCarry`]).
+#[derive(Resource)]
+pub(crate) struct TokenFlagsCarried(benilla_ui::script::TokenFlagsCarry);
+
+/// Take the dying VM's token flags and their links out, after its last signal, the shutdown's
+/// deselect (`0x490bdf`).
+pub(crate) fn fold_dying_vm_token_flags(world: &mut World) {
+    let Some(carry) = world
+        .get_non_send_resource_mut::<UiScript>()
+        .map(|mut s| s.take_token_flags())
+    else {
+        return;
+    };
+    world.insert_resource(TokenFlagsCarried(carry));
+}
+
+/// Seat a new in-game VM's token flags before its files run: a `/reload`'s the dying VM's, which
+/// the unit objects keep; a world entry's none, as its units are created after it, each reading
+/// its own (`0x5fbb21`).
+pub(crate) fn seed_vm_token_flags(world: &mut World, script: &mut UiScript, reload: bool) {
+    if let Some(TokenFlagsCarried(carry)) = world.remove_resource::<TokenFlagsCarried>() {
+        if reload {
+            script.seat_token_flags(carry);
+        }
+    }
+}
+
 /// What a field notice's firing reads.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct NoticeFiring<'w, 's> {
@@ -97,6 +124,35 @@ impl NoticeFiring<'_, '_> {
             }
             return false;
         }
+        if let FieldNotice::Plate { guid, call } = notice {
+            crate::vplates::fire_plate_call(script, guid, call);
+            return false;
+        }
+        // Each writer acts on the unit its lookup finds (`0x468460` with mask 8 or 0x10).
+        if let FieldNotice::TokenFlags { guid, change } = notice {
+            if self.holds_unit(guid) {
+                script.unit_token_flags(guid, change);
+            }
+            return false;
+        }
+        // The two health fields' watchers on the unit's own list, in the order they were linked
+        // (`0x467f65`): its unit-field watchers' signal, each plate bar's write and, on the health
+        // field, each tooltip's (`0x529560`, linked by the render at `0x52a0a8`).
+        if let FieldNotice::Unit { guid, id } = notice {
+            use crate::field_watch::id::{UNIT_HEALTH, UNIT_MAXHEALTH};
+            if matches!(id, UNIT_HEALTH | UNIT_MAXHEALTH) {
+                let store = self
+                    .index
+                    .as_ref()
+                    .and_then(|i| i.0.get(&guid))
+                    .and_then(|&e| self.views.get(e).ok());
+                let sink = &mut self.sink;
+                crate::vplates::health_watch(script, guid, store, id == UNIT_HEALTH, |script| {
+                    fire(script, sink, notice);
+                });
+                return false;
+            }
+        }
         if notice == FieldNotice::CorpsePlate {
             script.tooltip_corpse_refresh();
             return false;
@@ -167,13 +223,6 @@ impl NoticeFiring<'_, '_> {
             return false;
         }
         fire(script, &mut self.sink, notice);
-        if let FieldNotice::Unit {
-            guid,
-            id: crate::field_watch::id::UNIT_HEALTH,
-        } = notice
-        {
-            self.tooltip_health(script, guid);
-        }
         false
     }
 }
@@ -187,24 +236,6 @@ impl NoticeFiring<'_, '_> {
             .and_then(|i| i.0.get(&guid))
             .and_then(|&e| self.views.get(e).ok())
             .is_some_and(crate::net::ObjectStore::is_unit)
-    }
-
-    /// The unit tooltip's own watcher on the health of the unit it shows (`0x529560`, which the
-    /// render registers on the object, `0x52a0a8`), after the bridge's: `guid`'s health as its
-    /// packet left it.
-    fn tooltip_health(&self, script: &mut UiScript, guid: u64) {
-        let store = self
-            .index
-            .as_ref()
-            .and_then(|i| i.0.get(&guid))
-            .and_then(|&e| self.views.get(e).ok());
-        if let Some(store) = store {
-            script.tooltip_unit_health(
-                guid,
-                store.0.unit_health().unwrap_or(0),
-                store.0.unit_max_health().unwrap_or(0),
-            );
-        }
     }
 
     /// `SetPetGuid`'s signals in its order (`0x4bc847`-`0x4bc911`): on a change, `UNIT_PET`, then,
@@ -504,8 +535,13 @@ fn drunk(
     new: u8,
 ) {
     let me = script.is_active_player(guid);
-    if me && script.player_can_attack_target() {
-        script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str("target".to_string())]);
+    if me {
+        if script.player_can_attack_target() {
+            script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str("target".to_string())]);
+        }
+        // The plates' level latch (`0x5e2b42` → `0x605550`): the next frame's gate refreshes each
+        // kept plate's level, which the drunkenness lowers (`0x7cbce0`).
+        script.latch_nameplate_levels();
     }
     // The name cache as the watcher runs, through the lent host (`0x609210`).
     let name = (!me).then(|| {
@@ -678,6 +714,8 @@ pub(crate) fn fire(
         | FieldNotice::PetMacros
         | FieldNotice::PetGuidSet { .. }
         | FieldNotice::TooltipUnit { .. }
+        | FieldNotice::Plate { .. }
+        | FieldNotice::TokenFlags { .. }
         | FieldNotice::CorpsePlate
         | FieldNotice::RecruitmentCascade => {}
         // Put on the trainer lane by the packet's handler ([`crate::ui_trainer::TrainerPasses`]).
@@ -780,6 +818,7 @@ pub(crate) fn fire_unit_notice(script: &mut UiScript, notice: FieldNotice) {
             }
         }
         FieldNotice::Signal { guid, id } => signal_unit(script, guid, id),
+        FieldNotice::TokenFlags { guid, change } => script.unit_token_flags(guid, change),
         other => panic!("not a unit notice: {other:?}"),
     }
 }

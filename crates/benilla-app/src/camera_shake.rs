@@ -65,6 +65,12 @@ pub(crate) struct CameraShakes {
 }
 
 impl CameraShakes {
+    /// A new camera's list is empty (`0x50c37a`), the old camera's freed with it
+    /// (`0x50c495`-`0x50c4aa`).
+    pub(crate) fn clear(&mut self) {
+        self.live.clear();
+    }
+
     /// Enqueue a shake at a world point.
     fn add(&mut self, row: CameraShake, pos: Vec3, now: f32) {
         self.live.push(LiveShake {
@@ -287,9 +293,9 @@ fn fire_shakes(
 /// Fire the shake group a spell-visual kit's field 14 names, once per kit play, with no stage test
 /// and no cancel (`0x620e11`, or `0x60f4e6` when the play created no effect node).
 ///
-/// Deviation: the shake spawns at the kit play's position. The reference passes `&node+0x48` to
-/// the shake (`0x620e0e`) before `0x62101d` fills it from the attachment, so a bone-attached first
-/// node (`0x61fdd0`, which never writes it) shakes at the world origin its constructor left
+/// Deviation: the shake spawns at the kit play's position because the reference passes `&node+0x48`
+/// to the shake (`0x620e0e`) before `0x62101d` fills it from the attachment, so a bone-attached
+/// first node (`0x61fdd0`, which never writes it) shakes at the world origin its constructor left
 /// (`0x61f4c1`) and is culled beyond 80 yards of it, silencing 26 of the 58 shipped shake kits;
 /// that is a read before the write, not a behaviour.
 fn fire_kit_shakes(
@@ -393,6 +399,15 @@ mod tests {
         let mut s = CameraShakes::default();
         s.add(row, pos, 0.0);
         s
+    }
+
+    /// A new camera's list is empty, so a shake in flight ends with the old camera.
+    #[test]
+    fn a_new_camera_drops_the_live_shakes() {
+        let mut world = World::new();
+        world.insert_resource(at(FOOTSTEP_1, Vec3::ZERO));
+        crate::player::camera_at_interface_load(&mut world);
+        assert!(world.resource::<CameraShakes>().live.is_empty());
     }
 
     /// The signed vertical offset a shake produces, with the eye at `d` yards from it.

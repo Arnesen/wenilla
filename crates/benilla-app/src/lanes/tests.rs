@@ -79,6 +79,8 @@ fn stranger_named() -> SessionEvent {
 /// records every event it hears, `CHAT_MSG_*` with its text.
 fn client(handlers: impl FnOnce(&mut App)) -> App {
     let mut app = App::new();
+    // In the world with the interface up, so the dispatch fires each packet's lanes.
+    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
     app.add_plugins(crate::ui_unit::UiUnitPlugin);
     crate::ui_chat::add_chat_lane(&mut app);
     crate::names::net::register(&mut app);
@@ -186,6 +188,47 @@ fn each_handlers_events_fire_whole_in_the_packets_order() {
             "PLAYER_REGEN_DISABLED"
         ]
     );
+}
+
+/// A handler that notes its own turn among what the spy heard.
+fn notes_its_turn(_: In<SessionEvent>, world: &mut World) {
+    world
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .run("table.insert(Heard, 'the next handler')")
+        .unwrap();
+}
+
+/// A plain relay is its packet whole: `MSG_MOVE_STOP` and `MSG_MOVE_START_SWIM` take the relays'
+/// one handler (`0x603bb0` → `0x601580`), which runs whole before the next packet's
+/// (`0x537ae5`), so what it raises fires before the next packet's handler runs. Today's relay
+/// handler raises nothing on a lane (a remote's landing and our own move are messages the frame
+/// reads later), so a test handler on the relay's kind stands in for a raise.
+#[test]
+fn a_plain_relays_events_fire_before_the_next_packets_handler() {
+    use benilla_protocol::messages::{opcode, parse_server};
+    let mut app = client(|app| {
+        app.net_handler(SessionEventKind::UnitMove, regen)
+            .net_handler(SessionEventKind::LoggedOut, notes_its_turn);
+    });
+    // In the world, where the dispatch fires each packet's lanes at its end.
+    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+    // The packed guid, the flags, then the pose: a swimmer's carries a pitch.
+    for (op, flags, rest) in [
+        (opcode::MSG_MOVE_STOP, 0u32, 24),
+        (opcode::MSG_MOVE_START_SWIM, 0x0020_0001, 28),
+    ] {
+        let mut body = vec![0x01, 0x2a];
+        body.extend(flags.to_le_bytes());
+        body.extend(vec![0; rest]);
+        let mut packets = benilla_protocol::decode(parse_server(op, &body).unwrap());
+        assert_eq!(packets.len(), 1, "{op:#06x}: one pose");
+        packets.push(p1());
+        assert_eq!(
+            frame(&mut app, packets),
+            ["PLAYER_REGEN_DISABLED", "the next handler"],
+            "{op:#06x}"
+        );
+    }
 }
 
 /// A line held for its sender's name shows inside the name's answer (`0x49ccc0` → `0x49a870`,
@@ -302,14 +345,16 @@ fn crafted(_: In<SessionEvent>, log: Res<crate::ui_chat::ChatLog>) {
         (ME, combat::UnitClass::Me),
         (ME, combat::UnitClass::Me),
         combat::Fills::default(),
-        combat::Named::Item(LINEN),
+        combat::Named::Item(LINEN, combat::ItemLog::TradeSkill),
     )
     .unwrap();
-    log.push_combat(line);
+    let kind = combat::ItemLog::TradeSkill;
+    log.push_combat_waiting(kind, LINEN, combat::Replay::Line(Box::new(line)));
 }
 
 /// The item cache's answer as the item handler lands it: the record, then the combat log's
-/// callback for the lines that waited on it (`0x6294b0`).
+/// callback for the line that waited on it, the tradeskill writer's, which tests nothing again
+/// (`0x6294b0` → `0x629610`).
 fn linen_answers(
     In(ev): In<SessionEvent>,
     mut items: ResMut<crate::items::Items>,
@@ -317,7 +362,10 @@ fn linen_answers(
 ) {
     if let SessionEvent::ItemTemplate { entry, info } = ev {
         items.insert_template(entry, info.map(|b| *b));
-        log.answer_landed(crate::ui_chat::Answer::Item(entry));
+        let kind = crate::ui_chat::combat::ItemLog::TradeSkill;
+        if let Some(crate::ui_chat::combat::Replay::Line(line)) = log.take_wait(kind, entry) {
+            log.push_combat(*line);
+        }
     }
 }
 
@@ -413,29 +461,62 @@ fn a_monster_line_with_no_macro_fires_at_its_packet() {
     );
 }
 
-/// The handlers the answers come by queue the release behind a line that reads them: the item
-/// handler's (`0x6294b0`) and the name handler's (`0x49ccc0`), for a monster line's subject and a
-/// player line's sender.
+/// The handlers the answers come by queue what shows a line that reads them behind it: the item
+/// handler's callback the line itself (`0x6294b0` → `0x629610`), for a crafting line whose
+/// handler looked its item up and missed (`0x629650`), and the name handler's a release
+/// (`0x49ccc0`), for a monster line's subject and a player line's sender.
 #[test]
-fn each_answer_handler_queues_a_release_behind_a_line_that_reads_it() {
+fn each_answer_handler_queues_what_shows_a_line_that_reads_it() {
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
     let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let world = app.world_mut();
+    world.resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+    // Held as the active player, so the crafting line speaks in the first person.
+    crate::items::test_spawn_object(
+        world,
+        ME,
+        benilla_protocol::ObjectFields::from_pairs(&[(2, 0x19)]),
+    );
     let log = || crate::ui_chat::ChatLog::default();
-    for (line, answer) in [
+    let craft = SessionEvent::SpellLogExecute(SpellLogExecute {
+        caster: ME,
+        spell_id: 1,
+        effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry: LINEN }])],
+    });
+    let line = |line: fn(In<SessionEvent>, Res<crate::ui_chat::ChatLog>)| {
+        move |world: &mut World| {
+            bevy::ecs::system::RunSystemOnce::run_system_once_with(world, line, p1()).unwrap();
+        }
+    };
+    /// What queues a line that reads the answer's record.
+    type Queue = Box<dyn Fn(&mut World)>;
+    let cases: [(Queue, SessionEvent, &str); 3] = [
         (
-            crafted as fn(In<SessionEvent>, Res<crate::ui_chat::ChatLog>),
+            Box::new(move |world: &mut World| {
+                crate::net::handlers::dispatch(world, vec![craft.clone()])
+            }),
             linen_named(),
+            "combat",
         ),
-        (monster_hails_the_stranger, stranger_named()),
-        (stranger_whispers, stranger_named()),
-    ] {
+        (
+            Box::new(line(monster_hails_the_stranger)),
+            stranger_named(),
+            "release",
+        ),
+        (
+            Box::new(line(stranger_whispers)),
+            stranger_named(),
+            "release",
+        ),
+    ];
+    for (queue, answer, shows) in cases {
         world.insert_resource(log());
         // Each answer finds the cache without it, so its lookup's callback runs.
         world.insert_resource(crate::names::NameCache::default());
-        bevy::ecs::system::RunSystemOnce::run_system_once_with(&mut *world, line, p1()).unwrap();
+        queue(world);
         crate::net::handlers::dispatch(world, vec![answer]);
         let kinds = world.resource::<crate::ui_chat::ChatLog>().pending_kinds();
-        assert_eq!(kinds.last(), Some(&"release"), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&shows), "{kinds:?}");
     }
 }
 
@@ -664,6 +745,9 @@ fn the_session_end_drops_the_cast_and_house_lanes() {
     let mut app = cast_client(|app| {
         app.add_plugins(crate::ui_auction::UiAuctionPlugin);
     });
+    // The world entry, whose UI has not loaded: the client's in-world state, as a real state.
+    app.world_mut()
+        .remove_resource::<State<crate::client_state::ClientState>>();
     app.add_plugins(bevy::state::app::StatesPlugin)
         .insert_state(crate::client_state::ClientState::InWorld);
     let world = app.world_mut();

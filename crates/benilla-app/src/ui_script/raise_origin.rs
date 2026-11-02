@@ -1,89 +1,87 @@
 //! The origins outside a script call, a lane's firing and the tick that may raise an event into
 //! the VM ([`benilla_ui::script::origin`]), and the arming of that check around each frame's
-//! schedules. In a debug build a raise anywhere else names its caller: the app's tests and a run
-//! under `BENILLA_RAISE_STRICT=1` panic, and a live run warns once per site and goes on.
+//! schedules. In a debug build a raise anywhere else names the line that made it: the app's tests
+//! and a run under `BENILLA_RAISE_STRICT=1` panic, and a live run warns once per site and goes on.
 
 use benilla_ui::script::origin::{Allow, Failure};
 use bevy::app::MainScheduleOrder;
 use bevy::ecs::schedule::{ExecutorKind, ScheduleLabel};
 use bevy::prelude::*;
 
-/// Each origin, by a suffix of its function's path, with the reference fact that puts its raise
-/// there, or the guard row that names it as remaining work: a reason that opens with a list's
-/// name ([`ROW_LISTS`]) cites that list's row for the same function, which a test holds to it.
+/// Each site, by the key its scope opens around the part that raises ([`Origin::Allowed`]), the
+/// path of the function that opens it, with the reference fact that puts its raise there, or the
+/// guard row that names it as remaining work: a reason that opens with a list's name
+/// ([`ROW_LISTS`]) cites that list's row for the same function, which a test holds to it.
+///
+/// [`Origin::Allowed`]: benilla_ui::script::origin::Origin::Allowed
 pub(crate) const RAISES_AT_THEIR_OWN_PLACE: &[Allow] = &[
     // Their reference places, outside every packet and call.
     Allow {
-        frame: "net::handlers::call",
+        site: "net::handlers::call",
         why: "a packet's handler that signals in place, inside its packet, as the reference's \
               handlers run whole (`0x537ae5`) and signal inside themselves (`0x703e50`): one \
               handler's run, `NetHandlers::run`'s, not the dispatch's flushes, packet ends and \
               span starts around it",
     },
     Allow {
-        frame: "minimap::feed_minimap_inside",
+        site: "minimap::feed_minimap_inside",
         why: "the indoor byte's one writer is the minimap's update (`0x6d93a0`), which signals \
               `MINIMAP_UPDATE_ZOOM` on its change (`0x6d95b8`) at frame time",
     },
     Allow {
-        frame: "ui_script::sweep::sweep_on_worldport",
+        site: "ui_script::sweep::sweep_on_worldport",
         why: "a worldport's teardown is a timer (`0x401bc0`, posted at `0x401ba5`), and the tick \
               runs its timers ahead of the input and the packets (`0x420d0c`); its sweep signals \
               `PLAYER_LEAVING_WORLD` (`0x490b4d`)",
     },
     Allow {
-        frame: "ui_logout::leave_world",
+        site: "ui_logout::leave_world",
         why: "`SetInWorld(0)` (`0x5aae70`), the teardown timer's first call (`0x401bd4`), \
               signals `LOGOUT_CANCEL` in place (`0x5aae97`)",
     },
     Allow {
-        frame: "ui_session::latch::walk",
+        site: "ui_session::latch::walk",
         why: "the interaction watchdog (`0x493230`), every frame, closes the latched window \
               through `0x493310` (`0x493305`), whose close core signals; ours applies from the \
               watchdog's commands",
     },
     Allow {
-        frame: "ui_script::lifecycle::install_glue_vm",
+        site: "ui_script::lifecycle::install_glue_vm",
         why: "the glue's build (`0x46a7b0`) signals `FRAMES_LOADED` (`0x46aa34`) and the screen \
               (`0x46b848`) itself, outside any packet",
     },
     Allow {
-        frame: "ui_script::lifecycle::load_ingame_ui_seated",
+        site: "ui_script::lifecycle::load_ingame_ui_seated",
         why: "the interface's load signals its own events, `VARIABLES_LOADED` among them \
               (`0x49156a`), outside any packet",
     },
     Allow {
-        frame: "ui_script::lifecycle::entry_finish",
-        why: "the same interface load's final phases, including `VARIABLES_LOADED` (`0x49156a`), \
-              shared by the synchronous load and the browser's frame-sliced entry load",
-    },
-    Allow {
-        frame: "ui_script::lifecycle::close_ui_session",
+        site: "ui_script::lifecycle::close_ui_session",
         why: "the interface's shutdown (`0x490bd0`) signals `PLAYER_LEAVING_WORLD` (`0x490b4d`) \
               and `PLAYER_LOGOUT` (`0x490c2a`) itself, at a logout's, a disconnect's or a \
               reload's root",
     },
     // Rows of the guard's lists.
     Allow {
-        frame: "ui_script::glue_mgr::drive_glue_mgr",
+        site: "ui_script::glue_mgr::drive_glue_mgr",
         why: "AT_THEIR_OWN_PLACE: the login and character screens' answers",
     },
     Allow {
-        frame: "capture::fixtures::seed_ui_fixture",
+        site: "capture::fixtures::seed_ui_fixture",
         why: "QUEUED_FOR_THE_TICK: a capture's fixture",
     },
     Allow {
-        frame: "capture::fixtures::open_character_fixture",
+        site: "capture::fixtures::open_character_fixture",
         why: "a capture's fixture, dev tooling outside any session: the character window's open \
               stands in for a login's items' creates, whose set-up signals \
               `UNIT_INVENTORY_CHANGED` in place (`0x5d8606`)",
     },
     Allow {
-        frame: "ui_world_map::feed_world_map",
+        site: "ui_world_map::feed_world_map",
         why: "QUEUED_FOR_THE_TICK: the first world enter's selection",
     },
     Allow {
-        frame: "ui_world_map::install_world_loc_projector",
+        site: "ui_world_map::install_world_loc_projector",
         why: "QUEUED_FOR_THE_TICK: the projector's install",
     },
 ];
@@ -159,6 +157,8 @@ fn disarm(_: &mut World) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use benilla_ui::script::origin::{within, Origin};
     use benilla_ui::script::UiScript;
     use bevy::prelude::*;
@@ -177,8 +177,12 @@ mod tests {
         assert!(matches!(super::failure(), super::Failure::Panic));
     }
 
+    /// The line of [`raises_at_frame_time`]'s raise, stored as it runs.
+    static RAISED_AT: AtomicU32 = AtomicU32::new(0);
+
     fn raises_at_frame_time(world: &mut World) {
         let mut ui = world.non_send_resource_mut::<UiScript>();
+        RAISED_AT.store(line!() + 1, Ordering::Relaxed);
         ui.fire_event("PLAYER_MONEY", Vec::new());
     }
 
@@ -187,8 +191,8 @@ mod tests {
         within(Origin::Lane, || ui.fire_event("PLAYER_MONEY", Vec::new()));
     }
 
-    /// A frame-time system that raises outside every script call, lane firing and tick fails, its
-    /// own function named.
+    /// A frame-time system that raises outside every script call, lane firing and tick fails,
+    /// naming the line in it that raised, which needs no debug info to be right.
     #[test]
     #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
     fn a_raise_from_a_frame_time_system_fails_naming_it() {
@@ -197,7 +201,11 @@ mod tests {
             .expect_err("the raise passed");
         let message = failed.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(
-            message.contains("`PLAYER_MONEY`") && message.contains("raise_origin.rs:"),
+            message.contains("`PLAYER_MONEY`")
+                && message.contains(&format!(
+                    "raise_origin.rs:{}:",
+                    RAISED_AT.load(Ordering::Relaxed)
+                )),
             "{message}"
         );
     }

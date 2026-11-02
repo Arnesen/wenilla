@@ -19,6 +19,7 @@ use benilla_formats::{
     load_world_map_area_catalog, load_world_map_continent_catalog, load_world_map_overlay_catalog,
     load_zone_map, WorldMapArea,
 };
+use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::script::{
     UiScript, WorldMapContinentView, WorldMapLandmarkSource, WorldMapLevel, WorldMapOverlayView,
     WorldMapSheetRow, WorldMapZoneView,
@@ -511,11 +512,16 @@ pub(crate) fn project_on_displayed(
 
 /// Hand the engine `GetWorldLocMapPosition`'s projection (`0x4a7360`) over a copy of the catalog.
 fn install_world_loc_projector(script: &mut UiScript, data: &WorldMapUiData) {
-    let _caller = benilla_ui::script::origin::caller(&install_world_loc_projector);
     let copy = data.clone();
-    script.set_world_loc_projector(Box::new(move |selection, map, x, y| {
-        project_on_displayed(&copy, selection, map, x, y)
-    }));
+    // Its first landmark list queues `WORLD_MAP_UPDATE`: the projector's install.
+    within(
+        Origin::Allowed("ui_world_map::install_world_loc_projector"),
+        || {
+            script.set_world_loc_projector(Box::new(move |selection, map, x, y| {
+                project_on_displayed(&copy, selection, map, x, y)
+            }))
+        },
+    );
 }
 
 /// [`feed_world_map`]'s memos under one [`crate::ui_script::VmMemo`], so a new VM resets them all.
@@ -796,29 +802,30 @@ fn drop_landmark_signals(mut lane: ResMut<LandmarkLane>) {
     lane.items.clear();
 }
 
-/// The frame's feed: the player's zone and position on the displayed map, the projection's
-/// install, and the engine's world-enter selection. The explored bytes and the landmark sources
-/// the setter builds over are read at its run, and the corpse at `GetCorpseMapPosition`'s call,
-/// through the host ([`LandmarkReads`], [`MapPositionLive`]).
+/// The frame's feed: the player's zone and position on the displayed map, the facing of the object
+/// the camera follows, the projection's install, and the engine's world-enter selection. The
+/// explored bytes and the landmark sources the setter builds over are read at its run, and the
+/// corpse at `GetCorpseMapPosition`'s call, through the host ([`LandmarkReads`],
+/// [`MapPositionLive`]).
 fn feed_world_map(
-    mut vm: crate::script_calls::HostedVm,
+    mut vm: crate::script_calls::VmWith<crate::player::FollowedObject<'static, 'static>>,
     data: Option<Res<WorldMapUiData>>,
     player: Res<Player>,
     map: Option<Res<CurrentMap>>,
-    world: benilla_world::world_point::WorldPoint,
-    areas: Option<Res<crate::area::AreaTableRes>>,
+    committed: Res<crate::area::CommittedZone>,
     mut memo: Local<crate::ui_script::VmMemo<FeedMemos>>,
 ) {
-    let _caller = benilla_ui::script::origin::caller(&feed_world_map);
+    let followed_facing = vm.own().facing();
     vm.run(|script| {
-        let (Some(script), Some(data), Some(map), Some(areas)) = (script, data, map, areas) else {
+        let (Some(script), Some(data), Some(map)) = (script, data, map) else {
             return;
         };
         let wow = bevy_to_wow(player.pos);
         let (wx, wy) = (wow[0], wow[1]);
 
-        // CurrentArea is the MCNK leaf; its top zone is the zone-level area the reference matches.
-        let top_zone = world.area().and_then(|aid| areas.0.top_zone(aid));
+        // The resolver matches the rows against the stored zone `0xb4e314` (`0x4a6765`), which
+        // only the area poll's commit writes (`0x49479a`), never the live leaf.
+        let top_zone = committed.0;
         let player_sel = resolve_player_selection(&data, map.0, top_zone);
 
         // `GetWorldLocMapPosition` and the setter's landmark pass project synchronously with the
@@ -840,12 +847,15 @@ fn feed_world_map(
             if let Some(sel) = world_enter_selection(memo.map_synced, top_zone, player_sel) {
                 memo.map_synced = true;
                 let (c, z) = sel.zone.unwrap_or((0, 0));
-                script.sync_world_map_to_player_zone(c, z, sel.direct);
+                // The first world enter's selection, its signal queued (the module's deviation).
+                within(Origin::Allowed("ui_world_map::feed_world_map"), || {
+                    script.sync_world_map_to_player_zone(c, z, sel.direct)
+                });
             }
         }
 
         let uv = project_on_displayed(&data, script.world_map_selection(), map.0, wx, wy);
-        script.set_world_map_feed(player_sel.zone, uv, player.facing());
+        script.set_world_map_feed(player_sel.zone, uv, followed_facing);
         // The instance-map leg for `SetMapToCurrentZone`, which the battlefield minimap calls on
         // `PLAYER_ENTERING_WORLD` (`Blizzard_BattlefieldMinimap.lua:58-62`).
         script.set_world_map_player_direct_area(player_sel.direct);
@@ -947,7 +957,10 @@ impl Plugin for WorldMapUiPlugin {
                 Update,
                 (
                     // After the script tick: a selection changed this tick projects on the next.
-                    feed_world_map.after(crate::ui_script::UiTick),
+                    feed_world_map
+                        .after(crate::ui_script::UiTick)
+                        // The commit's zone is read in its own frame (`0x4947ac` runs inside it).
+                        .after(crate::area::feed_zone_events),
                     // After the script tick, so the jump hit-tests this tick's frame rects.
                     dev_map_jump.after(crate::ui_script::UiTick),
                     drop_landmark_signals
@@ -1295,6 +1308,99 @@ mod player_zone_tests {
                 },
             }],
         }
+    }
+
+    /// `SetMapToCurrentZone`'s resolver `0x4a6650` matches the stored zone `0xb4e314` (`0x4a6765`),
+    /// which only the poll's commit writes (`0x49479a`): the live area under the player is not read.
+    #[test]
+    fn the_map_follows_the_committed_zone_not_the_live_area() {
+        use benilla_ui::script::UiScript;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let world = app.world_mut();
+        benilla_world::world_point::init_world_point_resources(world);
+        let mut player = crate::player::Player::default();
+        player.active = true;
+        world.insert_resource(player);
+        world.insert_resource(benilla_world::world_map::CurrentMap(0));
+        world.insert_resource(data());
+        world.insert_resource(crate::area::AreaTableRes(
+            benilla_formats::AreaTableCatalog::from_rows(Vec::new()),
+        ));
+        // Standing in Elwynn (12), the poll yet to commit it.
+        world.insert_resource(benilla_world::terrain_stream::CurrentArea(Some(12)));
+        let mut script = UiScript::new().expect("a VM");
+        // The VM's catalog the selection clamps against: Kalimdor bare, Azeroth with ten zones.
+        let zones = |n: usize| vec![benilla_ui::script::WorldMapZoneView::default(); n];
+        script.set_world_map_catalog(vec![
+            benilla_ui::script::WorldMapContinentView::default(),
+            benilla_ui::script::WorldMapContinentView {
+                zones: zones(10),
+                ..Default::default()
+            },
+        ]);
+        world.insert_non_send_resource(script);
+        let selection = |app: &mut App| {
+            app.world_mut()
+                .run_system_cached(feed_world_map)
+                .expect("the feed runs");
+            crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
+                s.expect("a VM").world_map_selection()
+            })
+        };
+
+        // Before the first commit nothing is stored: the world-enter sync waits (`0x67e510`).
+        assert_eq!(selection(&mut app), (0, 0, None));
+
+        // The commit stores Lua zone 6 (area 905) while the live area is still Elwynn.
+        app.world_mut()
+            .insert_resource(crate::area::CommittedZone(Some(905)));
+        assert_eq!(selection(&mut app), (2, 6, None));
+    }
+
+    /// The arrows take the facing of the object the camera follows (`0x4a7c7c`-`0x4a7cd5`), and a
+    /// lookup that fails writes nothing (`0x4a7ca2`).
+    #[test]
+    fn the_arrows_take_the_followed_objects_facing() {
+        use benilla_ui::script::UiScript;
+
+        let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let world = app.world_mut();
+        benilla_world::world_point::init_world_point_resources(world);
+        world.insert_resource(crate::player::Player::default());
+        world.insert_resource(benilla_world::world_map::CurrentMap(0));
+        world.insert_resource(data());
+        world.insert_resource(crate::area::AreaTableRes(
+            benilla_formats::AreaTableCatalog::from_rows(Vec::new()),
+        ));
+        crate::player::camera_on_an_eye(world, 4.0);
+        let script = UiScript::new().expect("a VM");
+        script
+            .run(
+                r#"P = CreateFrame("Frame", "P") CreateWorldMapArrowFrame(P)
+                arrow = ({P:GetChildren()})[1]"#,
+            )
+            .expect("the arrow");
+        world.insert_non_send_resource(script);
+        let turned = |app: &mut App| {
+            app.world_mut()
+                .run_system_cached(feed_world_map)
+                .expect("the feed runs");
+            let world = app.world();
+            world
+                .non_send_resource::<UiScript>()
+                .run("UpdateWorldMapArrowFrames()")
+                .expect("the update");
+            crate::script_calls::eval_in_vm::<f32>(world, "return arrow:GetFacing()")
+        };
+
+        assert_eq!(turned(&mut app), 4.0);
+
+        app.world_mut()
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .clear();
+        assert_eq!(turned(&mut app), 4.0, "kept");
     }
 
     #[test]

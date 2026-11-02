@@ -11,7 +11,7 @@ pub mod world;
 pub use auth::{AuthReject, LogonReply};
 pub use events::{
     decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, NotifyBlock, Poll,
-    RosterCause, SessionEnd, SessionEvent, SessionEventKind, TransportClock,
+    RealmListEmptied, RosterCause, SessionEnd, SessionEvent, SessionEventKind, TransportClock,
 };
 pub use messages::field;
 pub use messages::{
@@ -21,8 +21,8 @@ pub use messages::{
     CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
 };
 pub use world::{
-    observe_sends, LinkTraffic, SendObserver, Unparsed, WorldAuthReject, WorldConnectEvent,
-    WorldReader, WorldSession, WorldWriter, WORLD_PORT,
+    observe_sends, CharListFailed, LinkTraffic, SendObserver, Unparsed, WorldAuthReject,
+    WorldConnectEvent, WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -295,7 +295,10 @@ pub struct RealmInfo {
 pub struct Logon {
     pub session_key: [u8; SESSION_KEY_LENGTH],
     pub realms: Vec<RealmInfo>,
-    /// `None` once a refresh has failed; the held list is then final.
+    /// The last reply was one the record fill refused ([`auth::RealmListRefused`]): `realms` is
+    /// empty and the link still up.
+    pub realms_refused: bool,
+    /// `None` once the link has failed a refresh; the held list is then final.
     ///
     /// A [`Conn`](transport::Conn), not a `TcpStream`: the realmd connection is a WebSocket in a
     /// page, and it is kept for exactly one reason — [`Self::refresh_realms`].
@@ -307,12 +310,9 @@ pub struct Logon {
 }
 
 impl Logon {
-    /// Re-request the realm list on the realmd connection — the reference's `RequestRealmList`.
-    ///
-    /// Returns whether the list was refreshed. A failed refresh **drops the connection and keeps
-    /// the realms we already have**: a stale list the player can still pick from beats an empty
-    /// one, and realmd closing an idle socket is ordinary. Bounded by `timeout` so a park that
-    /// calls this can never block on a server that accepted the request and said nothing.
+    /// The reference's `RequestRealmList`: re-reads the list, keeping the old one and dropping
+    /// the socket on a failure of the link (realmd closes idle sockets), or emptying it with the
+    /// socket up on a reply the record fill refused; `timeout` bounds a silent server.
     ///
     /// `async` because the read is: a page cannot block for realmd's answer (the frame it would
     /// block on arrives over the very event loop it is sitting on), and the park that calls this
@@ -332,7 +332,13 @@ impl Logon {
         match refreshed {
             Ok(realms) => {
                 self.realms = realms;
+                self.realms_refused = false;
                 true
+            }
+            Err(e) if e.is::<auth::RealmListRefused>() => {
+                self.realms.clear();
+                self.realms_refused = true;
+                false
             }
             Err(_) => {
                 self.stream = None;
@@ -544,13 +550,16 @@ async fn finish_logon(
     pin_asked: bool,
 ) -> Result<Logon> {
     auth::write_realm_list_request(&mut stream).context("requesting realm list")?;
-    let realms = auth::read_realm_list(&mut stream)
-        .await
-        .context("reading realm list")?;
+    let (realms, realms_refused) = match auth::read_realm_list(&mut stream).await {
+        Ok(realms) => (realms, false),
+        Err(e) if e.is::<auth::RealmListRefused>() => (Vec::new(), true),
+        Err(e) => return Err(e.context("reading realm list")),
+    };
 
     Ok(Logon {
         session_key,
         realms,
+        realms_refused,
         stream: Some(stream),
         pin,
         pin_asked,

@@ -287,7 +287,7 @@ fn select_past_cursor(
             }
             scan::Owed {
                 send: deselect_owing(&mut c.selection, &mut c.seam),
-                swing: None,
+                ..Default::default()
             }
         }
     };
@@ -316,11 +316,13 @@ fn interaction_already_open_on(target: u64, latch: &crate::ui_session::InteractL
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct Feedback<'w> {
     errors: Res<'w, crate::ui_action::UiErrorKeys>,
-    // The mailbox's open, which registers on the interaction latch with the world in hand,
-    // `TalkToTrainer`, whose close core runs with it, and the innkeeper's ask: run against the
-    // world after the unit edits.
+    // `TalkToTrainer`, whose close core runs with the world in hand, and the innkeeper's ask: run
+    // against the world after the unit edits.
     edits: Res<'w, crate::creature_anim::UnitEdits>,
     item_text: ResMut<'w, crate::ui_item_text::ItemTextOpen>,
+    /// The mailbox a use opens, which the host opens in its place; absent in a harness without
+    /// mail.
+    mail: Option<ResMut<'w, crate::ui_mail::MailOpen>>,
     // The cast queue: this system cannot also hold `CastLadder` (a second `Items` and
     // `CastReports` borrow), so the lock verdict and the skin go to
     // `ui_action::drain::drain_click_casts`.
@@ -418,6 +420,9 @@ enum Owed {
     /// The rest of StartAttack past its stand-up (`0x5ecca0` on): its own select (`0x5eccaa`),
     /// whose signals run their listeners before its swing ([`attack_select`]).
     Attack { entity: Entity, guid: u64 },
+    /// The NPC-service ladder past its gates and its Unavailable Quest Givers trigger
+    /// (`0x5f0278`), whose listeners run before the ladder (`0x5f0289` on, [`Dispatch::talk_ladder`]).
+    Talk { entity: Entity, guid: u64 },
 }
 
 /// Pay what [`interact`] owed past its turn, on a [`crate::script_calls::VmWith`] whose set, bound
@@ -438,9 +443,9 @@ macro_rules! pay_owed {
                     owed.pay(selection, &mut dispatch.seam);
                 });
             }
-            Some(owed) => $vm.turn(|_, $p| {
+            Some(owed) => $vm.turn(|script, $p| {
                 let (dispatch, _) = $parts;
-                owed.run(dispatch)
+                owed.run(dispatch, script)
             }),
             None => {}
         }
@@ -526,8 +531,9 @@ fn interact_select(
 }
 
 impl Owed {
-    fn run(self, dispatch: &mut Dispatch) {
+    fn run(self, dispatch: &mut Dispatch, script: Option<&mut benilla_ui::script::UiScript>) {
         match self {
+            Owed::Talk { entity, guid } => dispatch.talk_ladder(script, entity, guid),
             // The callers pay it with its select ([`pay_owed`]); with none, the swing alone.
             Owed::Attack { guid, .. } => dispatch.seam.start_tail(guid),
             Owed::LootCorpse { entity, guid, walk } => {
@@ -806,18 +812,16 @@ impl Dispatch<'_, '_> {
         if go_type == cursor_mode::GO_TYPE_MAILBOX {
             if in_reach {
                 debug!("right-click mailbox: open mail window {guid:#x}");
-                self.feedback
-                    .edits
-                    .push_world(Box::new(move |world: &mut World| {
-                        crate::ui_mail::open_mailbox(world, guid)
-                    }));
+                if let Some(mail) = self.feedback.mail.as_deref_mut() {
+                    mail.use_mailbox(guid);
+                }
             } else {
                 self.walk_to_object(entity, guid, go_type, walk);
             }
             return;
         }
         // TEXT (type 9) opens locally (`0x5f58c0` → `0x4e32e0(goGuid, 0)`; vmangos' `Use` has no
-        // type-9 case); a re-click closes it, and the page is read at paint time.
+        // type-9 case), inside the click as its host runs the read; a re-click closes it.
         if go_type == cursor_mode::GO_TYPE_TEXT {
             if !in_reach {
                 self.walk_to_object(entity, guid, go_type, walk);
@@ -1032,17 +1036,26 @@ impl Dispatch<'_, '_> {
     /// the spirit guide's event; `None` when no VM is mounted.
     fn talk(
         &mut self,
-        mut script: Option<&mut benilla_ui::script::UiScript>,
+        script: Option<&mut benilla_ui::script::UiScript>,
         entity: Entity,
         guid: u64,
         walk: bool,
     ) {
+        if self.talk_head(entity, guid, walk) {
+            self.talk_ladder(script, entity, guid);
+        }
+    }
+
+    /// [`Self::talk`] up to its ladder: the form test, the reach, the re-click gate and the
+    /// Unavailable Quest Givers trigger (`0x5f0268`-`0x5f0278`), whose listeners a caller runs
+    /// before [`Self::talk_ladder`]. Whether the ladder goes on.
+    fn talk_head(&mut self, entity: Entity, guid: u64, walk: bool) -> bool {
         if self.shapeshifted_from_npcs() {
             debug!("right-click interact: {guid:#x} — refused, shapeshifted");
             self.feedback.errors.push(crate::ui_action::UiError::key(
                 "ERR_CANT_INTERACT_SHAPESHIFTED",
             ));
-            return;
+            return false;
         }
         if !self.in_service_reach(entity) {
             if walk {
@@ -1054,13 +1067,13 @@ impl Dispatch<'_, '_> {
                     crate::player::TALK_STOP,
                 );
             }
-            return;
+            return false;
         }
         // The reference's own `UNIT_NPC_FLAGS` ladder (`0x5f0289`), not the cursor kind, which its
         // cursor ladder (`0x482336`) projects lossily; the re-click gate comes first.
         if interaction_already_open_on(guid, &self.service.interact) {
             debug!("right-click interact: {guid:#x} — its window is already open, nothing sent");
-            return;
+            return false;
         }
         // Dialog status 1, unavailable, triggers Unavailable Quest Givers ahead of the ladder
         // (`0x5f0268`-`0x5f0278`).
@@ -1069,6 +1082,16 @@ impl Dispatch<'_, '_> {
                 tutorials.trigger_now(crate::tutorial::id::UNAVAILABLE_QUEST_GIVERS);
             }
         }
+        true
+    }
+
+    /// [`Self::talk`]'s ladder (`0x5f0289` on), past its head ([`Self::talk_head`]).
+    fn talk_ladder(
+        &mut self,
+        mut script: Option<&mut benilla_ui::script::UiScript>,
+        entity: Entity,
+        guid: u64,
+    ) {
         let npc_flags = self
             .stores
             .get(entity)
@@ -1248,8 +1271,12 @@ impl ClickDispatch<'_, '_> {
 
     /// Pay what [`Self::act`] owed: StartAttack's own select, whose `SetSelection` the call
     /// signals in place before its swing ([`attack_select`]), returned with what it owes; or the
-    /// leg's loot or use, run here.
-    pub(crate) fn pay(&mut self, owed: ActOwed) -> Option<super::SelectDebt> {
+    /// leg's loot, use or service ladder, run here on `script`, the VM when one is mounted.
+    pub(crate) fn pay(
+        &mut self,
+        script: Option<&mut benilla_ui::script::UiScript>,
+        owed: ActOwed,
+    ) -> Option<super::SelectDebt> {
         match owed.0 {
             Owed::Attack { entity, guid } => {
                 let mark = crate::lanes::mark();
@@ -1258,7 +1285,7 @@ impl ClickDispatch<'_, '_> {
                 Some(select.owed)
             }
             owed => {
-                owed.run(&mut self.dispatch);
+                owed.run(&mut self.dispatch, script);
                 None
             }
         }
@@ -1295,7 +1322,7 @@ pub(super) fn act_on_right_click(mut c: ClickDispatch, held: Option<Res<PayloadH
     let Some(owed) = c.act_with(None, held.is_some_and(|h| h.0)) else {
         return;
     };
-    if let Some(owed) = c.pay(owed) {
+    if let Some(owed) = c.pay(None, owed) {
         owed.pay(&mut c.selection, &mut c.dispatch.seam);
     }
 }
@@ -1514,6 +1541,7 @@ fn interact_legs(
             } else if dispatch
                 .seam
                 .start_head(crate::creature_anim::StartTarget::Attackable)
+                == crate::creature_anim::StartHead::Go
             {
                 debug!("right-click attack: {guid:#x}");
                 return Some(Owed::Attack { entity, guid });
@@ -1571,7 +1599,10 @@ fn interact_legs(
                 _ => false,
             };
             if interacts {
-                dispatch.talk(script, entity, guid, walk);
+                // The ladder waits behind the head's trigger's listeners.
+                if dispatch.talk_head(entity, guid, walk) {
+                    return Some(Owed::Talk { entity, guid });
+                }
             } else {
                 debug!("right-click unit {guid:#x}: no interaction and no attack — the greeting");
                 dispatch.greet(entity);
@@ -1639,6 +1670,8 @@ pub(super) fn act_on_interact(
             &mut set.p1(),
             &mut selection
         ));
+        // A mailbox or a text object opens inside its use (`0x5f86b0` → `0x5f6820`, `0x5f58c0`).
+        vm.engine_open_used(mark);
     }
 }
 
@@ -1651,10 +1684,14 @@ pub(super) fn act_on_arrival(
     index: Res<crate::net::GuidIndex>,
     kinds: Query<&crate::net::NetEntity>,
 ) {
-    vm.turn(|mut script, mut dispatch| {
-        act_on_arrival_with(&mut dispatch, script.as_deref_mut(), &index, &kinds);
-        dispatch.auto.signal_follow_end(script);
+    let mark = crate::lanes::mark();
+    vm.turn(|script, mut dispatch| {
+        act_on_arrival_with(&mut dispatch, script, &index, &kinds);
     });
+    // A mailbox or a text object opens inside the dispatcher's use (`0x5f6820`, `0x5f58c0`),
+    // ahead of the follow's end it returns to.
+    vm.engine_open_used(mark);
+    vm.turn(|script, mut dispatch| dispatch.auto.signal_follow_end(script));
 }
 
 fn act_on_arrival_with(
@@ -2127,7 +2164,10 @@ pub(crate) fn deselect_on_ui_shutdown(
     selection.guid?;
     let before = Standing::of(&selection, &seam);
     let send = deselect_owing(&mut selection, &mut seam);
-    Some(before.owing(scan::Owed { send, swing: None }))
+    Some(before.owing(scan::Owed {
+        send,
+        ..Default::default()
+    }))
 }
 
 /// The shutdown deselect's signals, in place: its teardown's reports, `PET_BAR_UPDATE` and
@@ -2217,6 +2257,10 @@ pub(super) fn clear_owing(
 #[cfg(test)]
 #[path = "click_loot_tests.rs"]
 mod loot_tests;
+
+#[cfg(test)]
+#[path = "click_read_tests.rs"]
+mod read_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3553,10 +3597,9 @@ mod tests {
             let sent_use = rx
                 .try_iter()
                 .any(|c| matches!(c, ClientCommand::GameObjUse { .. }));
-            let mail_open = world
-                .resource::<crate::ui_mail::MailOpen>()
-                .mailbox
-                .is_some();
+            // The mailbox's open, or owed where the harness has no host to open it.
+            let mail = world.resource::<crate::ui_mail::MailOpen>();
+            let mail_open = mail.mailbox.is_some() || mail.used().is_some();
             assert_eq!(sent_use || mail_open, used, "{label}");
             let keys: Vec<&str> = world
                 .resource::<crate::ui_action::UiErrorKeys>()

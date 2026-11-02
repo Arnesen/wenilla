@@ -539,8 +539,9 @@ pub(crate) fn drive_nameplates(
                 ghost_visual: store.is_some_and(|s| s.0.unit_is_ghost_visual()),
                 is_self,
                 // No name over a fully faded first-person avatar. Deviation: `ShouldShowName`'s
-                // first leg is `IsSelectable` (`0x60be60`), which passes our own unit; what hides
-                // the own name in first person in 1.12.1 is untraced, so the avatar's fade stands in.
+                // first leg is `IsSelectable` (`0x60be60`), which passes our own unit; the avatar's
+                // fade stands in because what hides the own name in first person in 1.12.1 is
+                // untraced.
                 self_faded: rig
                     .as_deref()
                     .map_or(1.0, crate::player::CameraControl::self_fade)
@@ -583,9 +584,9 @@ pub(crate) fn drive_nameplates(
                 .and_then(|e| names.creature_subname(e))
                 // vmangos sends "" for most templates: an empty subname is no line.
                 .filter(|s| !s.trim().is_empty()),
-            EntityKind::Player if name_cfg.player_guild => {
-                store.and_then(|s| crate::ui_guild::unit_guild_name(&s.0, &guilds, &net_commands))
-            }
+            EntityKind::Player if name_cfg.player_guild => store.and_then(|s| {
+                crate::ui_guild::unit_guild_name(guid.0, &s.0, &guilds, &net_commands)
+            }),
             _ => None,
         };
         // The selector's first-priority branch: the combat flash while we melee this unit.

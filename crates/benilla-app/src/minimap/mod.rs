@@ -29,6 +29,7 @@ use benilla_formats::{tile_to_world, world_to_tile, MinimapTranslate};
 
 use interior::{interior_drawable, wmo_minimap_stem, InteriorWindow};
 
+use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::widget::{MinimapArt, MinimapArtSlot, MINIMAP_DEFAULT_ZOOM};
 
 use crate::player::Player;
@@ -741,7 +742,6 @@ fn feed_minimap_inside(
     mut inside_res: ResMut<MinimapInside>,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
-    let _caller = benilla_ui::script::origin::caller(&feed_minimap_inside);
     hosted_vm.run(|script| {
         let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
         inside_res.0 = inside;
@@ -749,7 +749,10 @@ fn feed_minimap_inside(
         if *was_inside.get(script) != Some(inside) {
             script.set_minimap_inside(inside);
             *was_inside.get(script) = Some(inside);
-            script.fire_event("MINIMAP_UPDATE_ZOOM", vec![]);
+            // The update signals the change itself, at frame time (`0x6d95b8`).
+            within(Origin::Allowed("minimap::feed_minimap_inside"), || {
+                script.fire_event("MINIMAP_UPDATE_ZOOM", vec![])
+            });
         }
     })
 }
@@ -955,14 +958,20 @@ fn clear_quest_blip_on_world_entry(
     })
 }
 
-/// Push the player's facing onto the Minimap's player-arrow `Model` every frame, as the reference's
-/// per-frame `CMinimap::SetPlayerFacing` (`0x4eb8e0`) writes `[+0x39c]`, what `Model:GetFacing()`
-/// reads. `player.facing()` is an unbounded accumulator, so it is normalized to `[0, 2π)`, the
-/// wire value vmangos's `VerifyMovementInfo` requires.
-fn feed_minimap_player_facing(mut hosted_vm: crate::script_calls::HostedVm, player: Res<Player>) {
-    hosted_vm.run(|script| {
+/// The Minimap's per-frame update (`0x4eb040`) on its player-arrow `Model`: the centring, then the
+/// followed object's facing, as `CMinimap::SetPlayerFacing` (`0x4eb8e0`) writes `[+0x39c]`, what
+/// `Model:GetFacing()` reads. An object that does not resolve leaves the facing as it stands
+/// (`0x4eb0a2`), past the centring (`0x4eb074`).
+fn feed_minimap_player_facing(
+    mut vm: crate::script_calls::VmWith<crate::player::FollowedObject<'static, 'static>>,
+) {
+    let facing = vm.own().facing();
+    vm.run(|script| {
         let Some(script) = script else { return };
-        script.set_minimap_player_facing(player.facing().rem_euclid(std::f32::consts::TAU));
+        script.centre_minimap_player_arrows();
+        if let Some(facing) = facing {
+            script.set_minimap_player_facing(facing);
+        }
     })
 }
 
@@ -1080,6 +1089,86 @@ mod stage_mask_tests {
         assert!(tile.modulate_rgb, "the outdoor tiles");
         assert_eq!(tile.rect, rect);
         assert!(matches!(stage_masks(None, rect), (None, None)));
+    }
+}
+
+#[cfg(test)]
+mod followed_facing_tests {
+    use super::*;
+    use crate::net::GuidIndex;
+    use crate::player::{camera_on_an_eye, FarSight};
+    use benilla_ui::script::UiScript;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A VM's world, its camera on a dynamic object facing 4.0.
+    fn world() -> World {
+        let mut world = World::new();
+        world.init_resource::<Player>();
+        world.init_resource::<FarSight>();
+        world.init_resource::<GuidIndex>();
+        camera_on_an_eye(&mut world, 4.0);
+        crate::script_calls::insert_test_vm(&mut world);
+        world
+    }
+
+    fn feed(world: &mut World) {
+        world
+            .run_system_once(feed_minimap_player_facing)
+            .expect("the feed runs");
+    }
+
+    /// The arrow takes the feed, and an object that does not resolve leaves it (`0x4eb0a2`).
+    #[test]
+    fn a_followed_object_lost_leaves_the_arrow_as_it_stands() {
+        let facing = |world: &World| {
+            crate::script_calls::eval_in_vm::<f32>(
+                world,
+                "return ({m:GetChildren()})[9]:GetFacing()",
+            )
+        };
+        let mut world = world();
+        world
+            .non_send_resource::<UiScript>()
+            .run(r#"m = CreateFrame("Minimap", "TestMinimap")"#)
+            .expect("the frame");
+
+        feed(&mut world);
+        assert_eq!(facing(&world), 4.0);
+
+        world.resource_mut::<GuidIndex>().0.clear();
+        feed(&mut world);
+        assert_eq!(facing(&world), 4.0, "kept");
+    }
+
+    /// The centring sits ahead of the lookup (`0x4eb04f`-`0x4eb074`), so an object that does not
+    /// resolve still centres the arrow.
+    #[test]
+    fn a_followed_object_lost_still_centres_the_arrow() {
+        let mut world = world();
+        {
+            let mut script = world.non_send_resource_mut::<UiScript>();
+            script
+                .run(
+                    r#"m = CreateFrame("Minimap", "TestMinimap")
+                    arrow = ({m:GetChildren()})[9] arrow:SetWidth(20) arrow:SetHeight(10)"#,
+                )
+                .expect("the arrow");
+            script.set_model_facts(
+                benilla_ui::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+                benilla_ui::widget::ModelFileFacts {
+                    sequences: Vec::new(),
+                    bbox: ([-0.01; 3], [0.01; 3]),
+                    cameras: 0,
+                },
+            );
+        }
+        world.resource_mut::<GuidIndex>().0.clear();
+        feed(&mut world);
+        let x = crate::script_calls::eval_in_vm::<f32>(
+            &world,
+            "local x = arrow:GetPosition() return x",
+        );
+        assert!(x > 0.0, "centred at half its width: {x}");
     }
 }
 

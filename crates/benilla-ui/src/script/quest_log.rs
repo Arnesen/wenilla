@@ -641,8 +641,7 @@ impl Model {
         match self.item_templates.get(&item_id) {
             Some(t) => Some((t.name.clone(), t.quality, t.icon.clone())),
             None => {
-                // The view the VM holds no copy of, which the app pushes, and the lookup's ask.
-                self.item_stat_asks.insert(item_id);
+                // The lookup's ask, made inside the call ([`ask_lookups`]).
                 self.quest_store.item_waits.insert(item_id);
                 self.quest_store.item_asks.push(item_id);
                 None
@@ -1109,10 +1108,10 @@ impl super::UiScript {
     /// landing, each rebuild callback it carries runs (`0x4de8b0`): one awaited record fewer, and
     /// the last one rebuilds (`0x4de8d4`-`0x4de8e2`), as does one landing when none is awaited.
     pub fn land_quest_records(&mut self, records: Vec<(u32, QuestRecordView)>) {
+        let ids: Vec<u32> = records.iter().map(|&(id, _)| id).collect();
         let waits: Vec<u32> = {
             let mut model = self.model_mut();
             let store = &mut model.quest_store;
-            let ids: Vec<u32> = records.iter().map(|&(id, _)| id).collect();
             store.records.extend(records);
             let waits: Vec<u32> = ids
                 .iter()
@@ -1139,6 +1138,7 @@ impl super::UiScript {
                 self.fire_event("QUEST_LOG_UPDATE", Vec::new());
             }
         }
+        self.lfg_titles_landed(&ids);
     }
 
     /// A record held with nothing waiting on it: a new VM's seat, before its load runs any file.
@@ -1153,9 +1153,13 @@ impl super::UiScript {
     /// and its rebuild callbacks run with status 0, which only log (`0x4de8bc`) and leave the
     /// awaited count as it was, so the list holds until the next world entry.
     pub fn refuse_quest_record(&mut self, quest_id: u32) {
-        let mut model = self.model_mut();
-        model.quest_store.records.remove(&quest_id);
-        model.quest_store.record_waits.remove(&quest_id);
+        {
+            let mut model = self.model_mut();
+            model.quest_store.records.remove(&quest_id);
+            model.quest_store.record_waits.remove(&quest_id);
+        }
+        // The looking-for-group title callback counts down whatever the status (`0x4e8d30`).
+        self.lfg_titles_landed(&[quest_id]);
     }
 
     /// The quests a rebuild run with no host lent missed, for a harness to ask.
@@ -1651,7 +1655,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // The reference counts the reward ids to the first unset one (`0x4e0a34`-`0x4e0a40`), so
     // `[A, 0, B, 0]` counts 1, and `GetQuestLogRewardInfo` indexes the raw array (`0x4e0b98`);
     // the choices count the same way (`0x4e0ac4`-`0x4e0ad0`).
-    // Deviation: four set ids count 4, where the loop's exit `jmp 0x4e0a4c` (`0x4e0a42`) skips
+    // Deviation: four set ids count 4, because the loop's exit `jmp 0x4e0a4c` (`0x4e0a42`) skips
     // the store at `0x4e0a49` and answers 0, a client bug.
     install_detail_count(lua, "GetNumQuestLogRewards", |r| {
         count_to_first_unset(&r.rewards)
@@ -3885,14 +3889,18 @@ mod tests {
             Some("(GetQuestLogRewardInfo(1))"),
         );
         assert!(
-            s.take_item_stat_asks().is_empty(),
+            s.take_item_asks(crate::script::ItemCallback::QuestLog)
+                .is_empty(),
             "the rebuild asks for no reward"
         );
         s.run("SelectQuestLogEntry(3)").unwrap();
         assert!(s
             .eval::<bool>("return GetQuestLogRewardInfo(1) == nil")
             .unwrap());
-        assert_eq!(s.take_item_stat_asks(), vec![3000]);
+        assert_eq!(
+            s.take_item_asks(crate::script::ItemCallback::QuestLog),
+            vec![3000]
+        );
         s.set_item_template(
             3000,
             ItemTemplateView {
@@ -3909,9 +3917,10 @@ mod tests {
         assert!(heard::take(&s).is_empty());
     }
 
-    /// Two reads of each line in flight: the item asks once and signals once as it lands, where
-    /// the reference's lookups hold a callback a call (`0x4e05c9`); the creature is asked in each
-    /// call that misses it, its wait the host's, and its name read through the host.
+    /// Two reads of each line in flight: the item is looked up in each call that misses it and
+    /// signals once as it lands, where the reference's lookups hold a callback a call
+    /// (`0x4e05c9`); the creature is asked in each call that misses it, its wait the host's, and
+    /// its name read through the host.
     #[test]
     fn each_missed_record_signals_once_however_many_calls_missed_it() {
         let mut s = UiScript::new().unwrap();
@@ -3932,7 +3941,11 @@ mod tests {
                 "... slain: 1/3"
             );
         }
-        assert_eq!(s.take_item_stat_asks(), vec![900]);
+        assert_eq!(
+            s.take_item_asks(crate::script::ItemCallback::QuestLog),
+            vec![900, 900],
+            "one per call, the host's wait kept once"
+        );
         assert_eq!(s.take_quest_creature_asks(), vec![40, 40], "one per call");
         s.set_item_template(
             900,

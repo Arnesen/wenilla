@@ -61,7 +61,8 @@ pub struct MipLevel {
 }
 
 impl DecodedBlp {
-    /// The authored chain length: `max(log2 w, log2 h)` with mipmaps, else 0 (`mips` still holds
+    /// The authored chain length with mipmaps, `floor(log2(max(w, h))) + 1` (`0x5a4ac0`, stored at
+    /// `0x5a83fb`), else 0 (`mips` still holds
     /// level 0).
     pub fn mip_chain_count(&self) -> usize {
         self.mip_chain_count
@@ -74,11 +75,14 @@ const PALETTE_SIZE: usize = 256 * 4;
 /// A cap on the header's dimensions, which size the buffers (1.12 art stops at 1024×1024).
 const MAX_DIM: u32 = 8192;
 
+/// The levels from `width` by `height` down to 1 by 1: `0x5a4ac0`, and `0x44ae70` for a TGA's.
+pub fn full_mip_count(width: u32, height: u32) -> usize {
+    width.max(height).max(1).ilog2() as usize + 1
+}
+
 fn mip_chain_count(width: u32, height: u32, has_mipmaps: bool) -> usize {
     if has_mipmaps {
-        let w = (width as f32).log2() as usize;
-        let h = (height as f32).log2() as usize;
-        w.max(h)
+        full_mip_count(width, height)
     } else {
         0
     }
@@ -237,26 +241,20 @@ impl Header<'_> {
     }
 
     /// DXTC level `level` as the reference reads it: `bpp·max(4,w)·max(4,h)/8` bytes from the
-    /// level's offset, never the header's size (`0x5a8555` points each level into the file;
-    /// OpenGL sizes the read at `0x59f4e6`–`0x59f515`, Direct3D copies `max(4,w)·max(4,h)` bytes
-    /// via `0x5a5780`). The encoder stores `max(1, (w/4)·(h/4))` blocks, one for a 2×16 level
-    /// whose grid needs four, so a short level takes the next levels' bytes. Deviation: past the
-    /// file's end [`pad_to`] zero-fills, because the reference reads stale buffer bytes there.
-    fn dxt_level_span<'b>(
-        &self,
-        bytes: &'b [u8],
-        level: usize,
-        need: usize,
-    ) -> Result<Option<&'b [u8]>> {
-        let Some(stored) = self.level_data(bytes, level)? else {
-            return Ok(None);
-        };
-        if stored.len() >= need {
-            return Ok(Some(stored));
-        }
+    /// level's offset, never the header's size, which `0x5a8558` only tests for zero (`0x5a8555`
+    /// points each level into the file; OpenGL sizes the read at `0x59f4e6`–`0x59f515`, Direct3D
+    /// copies `max(4,w)·max(4,h)` bytes via `0x5a5780`). The encoder stores `max(1, (w/4)·(h/4))`
+    /// blocks, one for a 2×16 level whose grid needs four, so a short level takes the next levels'
+    /// bytes. Deviation: past the file's end [`pad_to`] zero-fills, because the reference reads
+    /// stale buffer bytes there.
+    fn dxt_level_span<'b>(&self, bytes: &'b [u8], level: usize, need: usize) -> Option<&'b [u8]> {
         let off = self.offsets[level] as usize;
-        let end = (off + need).min(bytes.len());
-        Ok(Some(&bytes[off..end]))
+        if level > 0 && (self.sizes[level] == 0 || off == 0) {
+            return None;
+        }
+        let start = off.min(bytes.len());
+        let end = off.saturating_add(need).min(bytes.len());
+        Some(&bytes[start..end])
     }
 
     /// The DXTC form by `alpha_type`. Any other value (a stale `2` on alpha-less particle atlases)
@@ -281,7 +279,7 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedBlp> {
         let (lw, lh) = level_size(h.width, h.height, level);
         let data = if h.compression == 2 {
             let texels = h.dxt_texels();
-            h.dxt_level_span(bytes, level, texels.level_bytes(lw, lh))?
+            h.dxt_level_span(bytes, level, texels.level_bytes(lw, lh))
         } else {
             h.level_data(bytes, level)?
         };
@@ -325,7 +323,7 @@ pub fn decode_native(bytes: &[u8]) -> Result<NativeBlp> {
         let (lw, lh) = level_size(h.width, h.height, level);
         let need = texels.level_bytes(lw, lh);
         let data = if h.compression == 2 {
-            h.dxt_level_span(bytes, level, need)?
+            h.dxt_level_span(bytes, level, need)
         } else {
             h.level_data(bytes, level)?
         };
@@ -360,6 +358,10 @@ pub fn decode_level(texels: BlpTexels, width: u32, height: u32, bytes: &[u8]) ->
     let Some(fmt) = texels.codec() else {
         return bytes.to_vec();
     };
+    // Texpresso splits its output into rows of `width * 16` bytes, and an empty row panics.
+    if width == 0 {
+        return Vec::new();
+    }
     let blocks = pad_to(bytes, fmt.compressed_size(width as usize, height as usize));
     let mut out = vec![0u8; (width as usize) * (height as usize) * 4];
     fmt.decompress(&blocks, width as usize, height as usize, &mut out);
@@ -434,11 +436,7 @@ fn decode_raw3(data: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
 
 /// DXTC to RGBA8; a level the file ends inside is zero-padded first.
 fn decode_dxt(data: &[u8], w: u32, h: u32, texels: BlpTexels) -> Result<Vec<u8>> {
-    let fmt = texels.codec().expect("dxt_texels never returns Rgba8Unorm");
-    let blocks = pad_to(data, fmt.compressed_size(w as usize, h as usize));
-    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
-    fmt.decompress(&blocks, w as usize, h as usize, &mut out);
-    Ok(out)
+    Ok(decode_level(texels, w, h, data))
 }
 
 #[cfg(test)]
@@ -506,7 +504,7 @@ mod tests {
         let mut sizes = [0u32; 16];
         let mut payload = Vec::new();
         let base = (HEADER_SIZE + PALETTE_SIZE) as u32;
-        // The chain count for 8x8 is 3, so the stored 1x1 is past it and unread.
+        // The chain count for 8x8 is 4 (8, 4, 2, 1): the stored 1x1 is read.
         for (i, (w, h)) in [(8u32, 8u32), (4, 4), (2, 2), (1, 1)]
             .into_iter()
             .enumerate()
@@ -522,6 +520,22 @@ mod tests {
         b.resize(HEADER_SIZE + PALETTE_SIZE, 0);
         b.extend_from_slice(&payload);
         b
+    }
+
+    /// `0x5a4ac0` counts levels until both sides are 1: 8x8 has 8, 4, 2, 1, and 256x64 has 9.
+    #[test]
+    fn the_chain_keeps_the_one_by_one_level() {
+        assert_eq!(mip_chain_count(8, 8, true), 4);
+        assert_eq!(mip_chain_count(256, 256, true), 9);
+        assert_eq!(mip_chain_count(256, 64, true), 9);
+        assert_eq!(mip_chain_count(1, 1, true), 1);
+        assert_eq!(mip_chain_count(1, 16, true), 5);
+        assert_eq!(mip_chain_count(8, 8, false), 0);
+        let b = dxt_blp(0, 8);
+        let decoded = decode(&b).unwrap();
+        assert_eq!(decoded.mip_chain_count(), 4);
+        let last = decoded.mips.last().unwrap();
+        assert_eq!((last.width, last.height), (1, 1));
     }
 
     #[test]
@@ -600,7 +614,7 @@ mod tests {
         b[84 + 2 * 4..88 + 2 * 4].copy_from_slice(&short.to_le_bytes());
         let off = native_level_offset(&b, 2);
         let native = decode_native(&b).expect("short tail still decodes");
-        let tail = native.mips.last().unwrap();
+        let tail = &native.mips[2];
         assert_eq!((tail.width, tail.height), (2, 2));
         assert_eq!(tail.bytes.len(), 8, "one whole BC1 block");
         assert_eq!(
@@ -617,7 +631,51 @@ mod tests {
         assert_eq!(decoded.mips.len(), native.mips.len());
         let mut out = vec![0u8; 2 * 2 * 4];
         texpresso::Format::Bc1.decompress(&tail.bytes, 2, 2, &mut out);
-        assert_eq!(out, decoded.mips.last().unwrap().rgba);
+        assert_eq!(out, decoded.mips[2].rgba);
+    }
+
+    /// A zero width reads as a zero height does, an empty level; no shipped BLP has either.
+    #[test]
+    fn a_zero_dimension_decodes_to_an_empty_level() {
+        let dxt1 = |width, height| {
+            let mut offsets = [0u32; 16];
+            let mut sizes = [0u32; 16];
+            offsets[0] = HEADER_SIZE as u32;
+            sizes[0] = 8;
+            let mut b = header(2, 0, 0, 0, width, height, offsets, sizes);
+            b.extend_from_slice(&[0; 8]);
+            b
+        };
+        for (w, h) in [(0, 4), (4, 0), (0, 0)] {
+            let b = dxt1(w, h);
+            assert!(decode(&b).unwrap().mips[0].rgba.is_empty(), "{w}x{h}");
+            assert!(
+                decode_native(&b).unwrap().mips[0].bytes.is_empty(),
+                "{w}x{h}"
+            );
+            assert!(
+                decode_level(BlpTexels::Bc1, w, h, &[0; 8]).is_empty(),
+                "{w}x{h}"
+            );
+        }
+        assert_eq!(decode(&dxt1(4, 4)).unwrap().mips[0].rgba.len(), 64);
+    }
+
+    /// The header's size bounds nothing (`0x5a8558` tests it for zero): a level recorded at or past
+    /// the file's end, with a size past it too, zero-fills where a bound on that size failed the
+    /// whole texture.
+    #[test]
+    fn a_level_size_past_the_file_reads_from_its_offset() {
+        let mut b = dxt_blp(0, 8);
+        let len = b.len() as u32;
+        for offset in [len, len + 100] {
+            b[20 + 3 * 4..24 + 3 * 4].copy_from_slice(&offset.to_le_bytes());
+            b[84 + 3 * 4..88 + 3 * 4].copy_from_slice(&0xfffd_4bacu32.to_le_bytes());
+            let native = decode_native(&b).expect("a broken size past the file still decodes");
+            assert_eq!(native.mips.len(), 4);
+            assert_eq!(native.mips[3].bytes, [0u8; 8], "past the file, zeros");
+            assert_eq!(decode(&b).expect("and to RGBA").mips.len(), 4);
+        }
     }
 
     /// A 2×8 DXT3 level is stored as one block (`max(1, (2/4)·(8/4))`) where the grid needs two;

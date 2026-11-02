@@ -856,7 +856,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// `RestoreVideoDefaults`, which calls it directly (`0x639a51`). The host commits the latched rows
 /// (`0x639ec0`) before the verb goes on. With no host open (a bare VM) it is
 /// counted for the host's frame drain.
-fn restart_gx(lua: &Lua) -> mlua::Result<()> {
+pub(super) fn restart_gx(lua: &Lua) -> mlua::Result<()> {
     if super::host::open(lua) {
         return super::calls::submit(lua, super::ScriptCall::RestartGx);
     }
@@ -894,8 +894,8 @@ const VIDEO_DEFAULT_GX: usize = 6;
 ///
 /// Deviation: the reference (`0x48dad0` into `0x639a20`) writes hardware-recommended values from
 /// its matched `VideoHardware.dbc` row and the `CGxFormat` preset it names (`[0xc4e6ac]`): twelve
-/// `gx*` CVars, a synchronous `RestartGx`, then sixteen more. benilla has no such matching, so its
-/// registered defaults are its recommended configuration.
+/// `gx*` CVars, a synchronous `RestartGx`, then sixteen more. its registered defaults are its
+/// recommended configuration because benilla has no such matching.
 pub const VIDEO_DEFAULT_CVARS: &[&str] = &[
     // Of the twelve `gx*` the device record writes (`0x639c40`), the six benilla registers.
     "gxWindow",

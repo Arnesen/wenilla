@@ -117,11 +117,16 @@ pub struct WowModelExt {
     pub anim_slots: Vec4,
     /// The second texture stage: `x` = bound (1) or not (0), `y` = its combine preset 0-5
     /// (`benilla_formats::TextureStage::combine`); `z` = the stage-0 combine preset plus one
-    /// (`benilla_formats::RenderSubmesh::combine`), 0 for a batch that has none; `w` unused.
+    /// (`benilla_formats::RenderSubmesh::combine`), 0 for a batch that has none; `w` = 1 when it
+    /// reads the vertex's UV set 1 (`ATTRIBUTE_UV_1`), not the generated coordinate.
     #[uniform(100)]
     pub stage1: Vec4,
-    /// Stage 1's texture, sampled at the generated environment coordinate when `stage1.x` is set;
-    /// `None` binds the fallback image, unread.
+    /// Stage 1's own texture transform, read when `stage1.w` is set: `x` = its UV-scroll row and
+    /// `y` its affine row in the `matanim` region, `zw` = its UV-scroll offset at t = 0, as
+    /// `anim_slots.x`, `anim_slots.z` and `sun_scale.zw` are stage 0's.
+    #[uniform(100)]
+    pub stage1_uv: Vec4,
+    /// Stage 1's texture, sampled when `stage1.x` is set; `None` binds the fallback image, unread.
     #[texture(101, visibility(fragment))]
     #[sampler(102, visibility(fragment))]
     pub stage1_texture: Option<Handle<Image>>,
@@ -459,6 +464,646 @@ mod tests {
         );
     }
 
+    /// The reference lights in the vertex stage: `Model2.bls` evaluates the SH lobe and writes the
+    /// colour to `oD0`, and WMO and clutter run FFP T&L, so the colour is clamped at each vertex
+    /// and interpolated. The light lanes live in `vertex_light`, the vertex stage writes its result
+    /// to the interpolated `primary`, and the fragment only modulates the texel by it.
+    #[test]
+    fn the_model_light_is_evaluated_per_vertex() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is gone"))
+        };
+        let light = &src[at("fn vertex_light(")..at("@vertex")];
+        let vertex = &src[at("@vertex")..at("@fragment")];
+        let fragment = &src[at("@fragment")..];
+        for (lane, term) in [
+            ("the exterior SH lobe", "wow_light.sh_c10_r.w + sun_dc.x"),
+            ("the FFP N·L", "let ndotl = max(dot(n_lit, L), 0.0);"),
+            (
+                "the interior probe",
+                "dot(wow_light.prop_probes[probe + 0u], n1)",
+            ),
+        ] {
+            assert!(light.contains(term), "{lane} left `vertex_light`");
+        }
+        assert!(
+            vertex.contains("out.primary = vertex_light(out.world_normal, point_lit, vcol,"),
+            "the vertex stage no longer lights its vertex"
+        );
+        assert!(
+            src.contains("    @location(8) primary: vec3<f32>,\n"),
+            "the lit colour must be interpolated across the triangle, never flat"
+        );
+        for term in [
+            "sh_c10",
+            "sh_c13",
+            "prop_probes",
+            "light_sun",
+            "light_diffuse",
+            "point_light_sum",
+            "vertex_light(",
+        ] {
+            assert!(
+                !fragment.contains(term),
+                "the fragment evaluates `{term}` again — the reference lights per vertex"
+            );
+        }
+        assert!(
+            fragment.contains("var lit_rgb = base.rgb * in.primary;"),
+            "the fragment modulates the texel by the interpolated lit colour"
+        );
+    }
+
+    /// The vertex or model colour is the lit material, inside the one clamp, and the texel
+    /// multiplies the clamped result. The FFP takes it as GL_COLOR_MATERIAL on ambient and diffuse
+    /// (`0x59cfec`, `0x59cff3`-`0x59cffd`), so a WMO lights `clamp(MOCV·sum + emission)`.
+    /// `Model2.bls` takes it as `c28`, `[model+0x1a0]` × the batch's M2Color (`0x70c60a`-`0x70c654`,
+    /// written at `0x70c712`), and writes `c28·(E, 1) + c29` to the saturating `oD0`, clamping E
+    /// first only with a point light bound. The install tests below read that law in every lit
+    /// program and run two of them against the M2 lane.
+    #[test]
+    fn the_material_colour_is_lit_inside_the_one_clamp() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is gone"))
+        };
+        let light = &src[at("fn vertex_light(")..at("@vertex")];
+        let fragment = &src[at("@fragment")..];
+        for (why, line) in [
+            (
+                "the FFP sum is never clamped on its own",
+                "let sum_nl = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl;",
+            ),
+            (
+                "the window ambient saturates as its own byte add, never the sum",
+                "let sum_window = min(window_mid + vec3<f32>(16.0 / 255.0), vec3<f32>(1.0))\n            \
+                 + window_mid * ndotl;",
+            ),
+            (
+                "a WMO's MOCV multiplies the light sum inside the one clamp",
+                "return clamp(vcol.rgb * sum_wmo + sidn_e + highlight, vec3<f32>(0.0), vec3<f32>(1.0));",
+            ),
+            (
+                "an M2's `c28` multiplies E inside the one clamp",
+                "return clamp(c * e + highlight, vec3<f32>(0.0), vec3<f32>(1.0));",
+            ),
+            (
+                "E clamps first only with a point light bound",
+                "if (point_lit.w > 0.5) {\n        e = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0));\n    }",
+            ),
+        ] {
+            assert!(light.contains(line), "{why}: `{line}` is gone");
+        }
+        assert!(
+            !light.contains("clamp(sun_lobe"),
+            "the SH lobe clamps before `c28` multiplies it again"
+        );
+        assert!(
+            src.contains("vo.color = vec4<f32>(1.0, 1.0, 1.0, in.color.a);"),
+            "Bevy folds the vertex colour into the texel again, outside the clamp"
+        );
+        assert!(
+            fragment
+                .contains("lit_rgb = base.rgb * m.tint.rgb * mix(vcol.rgb, in.primary, vcol.a);"),
+            "a TRANS batch is its clamped lit pass by MOCV.a over the unlit `tex × MOCV`"
+        );
+    }
+
+    /// A ground-clutter tuft's vertex colour, `0xffc0c0c0` on baked shadow and white elsewhere
+    /// (`0x6b260e`/`0x6b2615`), is the FFP's lit material: the detail-doodad pass commits the
+    /// chunk's lights (`0x681656`) and draws with colour material on ambient and diffuse
+    /// (`0x59cfec`), so the grey multiplies the light sum inside the one clamp.
+    #[test]
+    fn a_clutter_tufts_grey_is_lit_inside_the_clamp() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is gone"))
+        };
+        let light = &src[at("fn vertex_light(")..at("@vertex")];
+        let fragment = &src[at("@fragment")..];
+        assert!(
+            light.contains(
+                "return clamp(c * (sum_nl + point_lit.rgb) + highlight, vec3<f32>(0.0), vec3<f32>(1.0));"
+            ),
+            "the tuft's grey left the clamp of its light sum"
+        );
+        assert!(
+            light.contains("let c = vcol.rgb * anim_tint * body_tint(fade_tag);"),
+            "the tuft's material colour is its vertex colour"
+        );
+        assert!(
+            !fragment.contains("albedo * in.primary"),
+            "the fragment multiplies the grey outside the clamp again"
+        );
+    }
+
+    /// The install's `Shaders\Vertex\Model2.bls`, or `None` (a skip) without an install.
+    fn model2_bls() -> Option<Vec<u8>> {
+        let data = benilla_formats::wow_data_or_skip!(None);
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let bls = chain
+            .read_file("Shaders\\Vertex\\Model2.bls")
+            .expect("read Model2.bls");
+        assert_eq!(
+            &bls[..8],
+            b"SVXG\x03\x00\x01\x00",
+            "a vertex shader file, version 0x10003"
+        );
+        Some(bls)
+    }
+
+    /// One level's 1800 programs in vertex shader id order: the level table holds a file offset
+    /// per level at `0xc` (`0x5951e6`), and each record is two empty parameter lists, the format
+    /// tag (2 Direct3D, 0 ARB), the code size and the code padded to 4 bytes (`0x598320`).
+    fn model2_level(bls: &[u8], level: usize) -> Vec<&[u8]> {
+        let word = |at: usize| u32::from_le_bytes(bls[at..at + 4].try_into().unwrap()) as usize;
+        let tag = if level == 1 { 2 } else { 0 };
+        let mut at = word(0xc + 4 * level);
+        let mut out = Vec::with_capacity(1800);
+        while out.len() < 1800 {
+            assert_eq!(
+                (word(at), word(at + 4), word(at + 8)),
+                (0, 0, tag),
+                "level {level} record {} at {at:#x}",
+                out.len()
+            );
+            let size = word(at + 12);
+            out.push(&bls[at + 16..at + 16 + size]);
+            at += 16 + size.next_multiple_of(4);
+        }
+        out
+    }
+
+    /// The reference fact `vertex_light` follows, read from the install's `Model2.bls` at both
+    /// levels, Direct3D (1, the default device, `vs_2_0`) and ARB (2): every lit program of the
+    /// vertex-lit set (digit L 1, P 0; `0x71de50` builds the id, `0x707cf6` adds the bound light
+    /// count as its last digit) ends `c28·(E, 1) + c29` into the primary colour, and clamps E
+    /// with `min`/`max` exactly when it binds a point light.
+    #[test]
+    fn model2_clamps_the_light_sum_only_with_a_point_light_bound() {
+        let Some(bls) = model2_bls() else { return };
+        let lit = |id: usize| id < 900 && (id / 90) & 1 == 1;
+
+        // Level 1: `vs_2_0` tokens. An instruction's length is bits 24-27; a register's type is
+        // bits 28-30 and 11-12, its number bits 0-10, a destination's write mask bits 16-19.
+        let reg = |t: u32| (((t >> 28) & 7) | ((t >> 8) & 0x18), t & 0x7ff);
+        for (id, code) in model2_level(&bls, 1).into_iter().enumerate() {
+            if !lit(id) {
+                continue;
+            }
+            let t: Vec<u32> = code
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
+                .collect();
+            assert_eq!(t[0], 0xfffe_0200, "program {id} is vs_2_0");
+            let mut ops: Vec<(u32, &[u32])> = Vec::new();
+            let mut i = 1;
+            while t[i] & 0xffff != 0xffff {
+                let op = t[i] & 0xffff;
+                let len = if op == 0xfffe {
+                    (t[i] >> 16) & 0x7fff
+                } else {
+                    (t[i] >> 24) & 0xf
+                } as usize;
+                if op != 0xfffe {
+                    ops.push((op, &t[i + 1..i + 1 + len]));
+                }
+                i += 1 + len;
+            }
+            // `mad oD0, c28, E, c29`: oD0 is type 5 register 0, c29 type 2 register 29.
+            let out = ops
+                .iter()
+                .position(|(op, a)| *op == 4 && reg(a[0]) == (5, 0))
+                .unwrap_or_else(|| panic!("program {id} writes no oD0 by mad"));
+            assert_eq!(reg(ops[out].1[3]), (2, 29), "program {id} adds c29");
+            // A clamp of E is `min` (10) and `max` (11) into a temp's xyz.
+            let clamps = |opcode: u32| {
+                ops[..out]
+                    .iter()
+                    .any(|(op, a)| *op == opcode && reg(a[0]).0 == 0 && (a[0] >> 16) & 0xf == 7)
+            };
+            assert_eq!(
+                clamps(10) && clamps(11),
+                id % 5 > 0,
+                "Direct3D program {id}, {} point lights bound",
+                id % 5
+            );
+        }
+
+        // Level 2: ARB text.
+        let mut seen = 0;
+        for (id, code) in model2_level(&bls, 2).into_iter().enumerate() {
+            if !lit(id) {
+                continue;
+            }
+            seen += 1;
+            let text = std::str::from_utf8(code).expect("ARB text");
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            let out = lines
+                .iter()
+                .find(|l| l.contains("result.color.front.primary"))
+                .unwrap_or_else(|| panic!("program {id} writes no primary colour"));
+            assert!(
+                out.starts_with("MAD result.color.front.primary,") && out.ends_with("c28[1];"),
+                "program {id} ends `{out}`"
+            );
+            let clamps = |op: &str| {
+                lines
+                    .iter()
+                    .any(|l| l.starts_with(op) && l.contains(".xyz, c0."))
+            };
+            assert_eq!(
+                clamps("MIN R") && clamps("MAX R"),
+                id % 5 > 0,
+                "ARB program {id}, {} point lights bound",
+                id % 5
+            );
+        }
+        assert_eq!(seen, 450, "the vertex-lit set's lit programs");
+    }
+
+    /// Stage `k` reads the vertex's UV set `k`. In every `Model2.bls` program, at both levels,
+    /// stage `k`'s output coordinate (set `k`, or `k + 2` past the pixel-shader set's two lighting
+    /// sets) comes from the input `texcoord[k]` when its digit (`0x71de50`) is 0, passed, or 1,
+    /// transformed, and from no input coordinate when it is 2, generated. A coordinate entry at or
+    /// below 2 picks no set, so `wow_model.wgsl` gives stage 1 the vertex's UV set 1. This pins
+    /// the reference fact, not benilla's code, which `stage_k_reads_uv_set_k_whatever_its_entry`
+    /// tests.
+    #[test]
+    fn model2_passes_texcoord_k_to_stage_k() {
+        use std::collections::{BTreeSet, HashMap};
+        let Some(bls) = model2_bls() else { return };
+        // The id is `5·(3·(3·Z + t0) + t1) + lights`; Z from 20 up is the pixel-shader set.
+        let digits = |id: usize| {
+            let q = id / 5;
+            ([(q / 3) % 3, q % 3], if q / 9 >= 20 { 2 } else { 0 })
+        };
+        let want = |digit: usize, k: u32| -> BTreeSet<u32> {
+            if digit == 2 {
+                BTreeSet::new()
+            } else {
+                BTreeSet::from([k])
+            }
+        };
+
+        // Level 1: `vs_2_0` tokens. `dcl` (31) gives an input register its usage (5 a texture
+        // coordinate) and index; temps (type 0) carry the sets they were computed from into the
+        // output coordinates (type 6).
+        let reg = |t: u32| (((t >> 28) & 7) | ((t >> 8) & 0x18), t & 0x7ff);
+        for (id, code) in model2_level(&bls, 1).into_iter().enumerate() {
+            let t: Vec<u32> = code
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
+                .collect();
+            let mut sets_of_input: HashMap<u32, u32> = HashMap::new();
+            let mut temps: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+            let mut outs: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+            let mut i = 1;
+            while t[i] & 0xffff != 0xffff {
+                let op = t[i] & 0xffff;
+                if op == 0xfffe {
+                    i += 1 + ((t[i] >> 16) & 0x7fff) as usize;
+                    continue;
+                }
+                let a = &t[i + 1..i + 1 + ((t[i] >> 24) & 0xf) as usize];
+                if op == 31 {
+                    if reg(a[1]).0 == 1 && a[0] & 0x1f == 5 {
+                        sets_of_input.insert(reg(a[1]).1, (a[0] >> 16) & 0xf);
+                    }
+                } else if op != 81 {
+                    let mut sets = BTreeSet::new();
+                    for &src in &a[1..] {
+                        match reg(src) {
+                            (1, n) => sets.extend(sets_of_input.get(&n)),
+                            (0, n) => sets.extend(temps.get(&n).into_iter().flatten()),
+                            _ => {}
+                        }
+                    }
+                    match reg(a[0]) {
+                        (0, n) if (a[0] >> 16) & 0xf == 0xf => {
+                            temps.insert(n, sets);
+                        }
+                        (0, n) => temps.entry(n).or_default().extend(sets),
+                        (6, n) => outs.entry(n).or_default().extend(sets),
+                        _ => {}
+                    }
+                }
+                i += 1 + a.len();
+            }
+            let (stage_digits, shift) = digits(id);
+            for (k, &d) in stage_digits.iter().enumerate() {
+                let k = k as u32;
+                assert_eq!(
+                    outs.get(&(k + shift)).cloned().unwrap_or_default(),
+                    want(d, k),
+                    "Direct3D program {id}, stage {k}, digit {d}"
+                );
+            }
+        }
+
+        // Level 2: ARB text, `ATTRIB vN = vertex.texcoord[k]` read into `result.texcoord[n]`.
+        for (id, code) in model2_level(&bls, 2).into_iter().enumerate() {
+            let text = std::str::from_utf8(code).expect("ARB text");
+            let mut sets_of_attrib: HashMap<&str, u32> = HashMap::new();
+            let mut temps: HashMap<&str, BTreeSet<u32>> = HashMap::new();
+            let mut outs: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+            for line in text.lines().map(|l| l.trim().trim_end_matches(';')) {
+                if let Some(rest) = line.strip_prefix("ATTRIB ") {
+                    let (name, binding) = rest.split_once(" = ").unwrap();
+                    if let Some(k) = binding.strip_prefix("vertex.texcoord[") {
+                        sets_of_attrib.insert(name, k.trim_end_matches(']').parse().unwrap());
+                    }
+                    continue;
+                }
+                let Some((_, operands)) = line.split_once(char::is_whitespace) else {
+                    continue;
+                };
+                if line.starts_with("PARAM") || line.starts_with("TEMP") {
+                    continue;
+                }
+                // A register's last `.` part is its mask or swizzle; `result.texcoord[n]` has
+                // a `.` of its own.
+                fn masked(r: &str) -> (&str, &str) {
+                    r.rsplit_once('.')
+                        .filter(|(_, m)| m.chars().all(|c| "xyzw".contains(c)))
+                        .unwrap_or((r, "xyzw"))
+                }
+                let operands: Vec<&str> = operands.trim().split(", ").collect();
+                let mut sets = BTreeSet::new();
+                for src in &operands[1..] {
+                    let name = masked(src.trim_start_matches('-')).0;
+                    sets.extend(sets_of_attrib.get(name));
+                    sets.extend(temps.get(name).into_iter().flatten());
+                }
+                let (dst, mask) = masked(operands[0]);
+                if let Some(n) = dst.strip_prefix("result.texcoord[") {
+                    if mask != "zw" {
+                        outs.entry(n.trim_end_matches(']').parse().unwrap())
+                            .or_default()
+                            .extend(sets);
+                    }
+                } else if dst.starts_with('R') {
+                    if mask == "xyzw" {
+                        temps.insert(dst, sets);
+                    } else {
+                        temps.entry(dst).or_default().extend(sets);
+                    }
+                }
+            }
+            let (stage_digits, shift) = digits(id);
+            for (k, &d) in stage_digits.iter().enumerate() {
+                let k = k as u32;
+                assert_eq!(
+                    outs.get(&(k + shift)).cloned().unwrap_or_default(),
+                    want(d, k),
+                    "ARB program {id}, stage {k}, digit {d}"
+                );
+            }
+        }
+    }
+
+    /// Runs one ARB vertex program on one vertex: `local` is `program.local[]`, `attribs` binds
+    /// `vertex.position` and `vertex.normal`. Returns the primary colour, which the GL clamps to
+    /// [0, 1] before it interpolates. Covers the instructions of the vertex-lit programs.
+    fn run_arb(text: &str, local: &[[f32; 4]; 96], attribs: &[(&str, [f32; 4])]) -> [f32; 3] {
+        use std::collections::HashMap;
+        enum Param {
+            Literal([f32; 4]),
+            Local(usize),
+        }
+        let mut params: HashMap<&str, Param> = HashMap::new();
+        let mut regs: HashMap<String, [f32; 4]> = HashMap::new();
+        let split_mask = |s: &str| -> (String, String) {
+            match s.rsplit_once('.') {
+                Some((name, m)) if !m.is_empty() && m.chars().all(|c| "xyzw".contains(c)) => {
+                    (name.to_string(), m.to_string())
+                }
+                _ => (s.to_string(), "xyzw".to_string()),
+            }
+        };
+        for line in text.lines().map(str::trim) {
+            let line = line.trim_end_matches(';');
+            if line.is_empty()
+                || line.starts_with("!!")
+                || line == "END"
+                || line.starts_with("TEMP")
+            {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("PARAM ") {
+                let (name, value) = rest.split_once(" = ").unwrap();
+                let name = name.split('[').next().unwrap();
+                let value = value.trim_matches(|c| c == '{' || c == '}' || c == ' ');
+                let param = match value.strip_prefix("program.local[") {
+                    Some(range) => Param::Local(range.split("..").next().unwrap().parse().unwrap()),
+                    None => {
+                        let v: Vec<f32> = value
+                            .split(',')
+                            .map(|x| x.trim().parse().unwrap())
+                            .collect();
+                        Param::Literal([v[0], v[1], v[2], v[3]])
+                    }
+                };
+                params.insert(name, param);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("ATTRIB ") {
+                let (name, binding) = rest.split_once(" = ").unwrap();
+                let v = attribs
+                    .iter()
+                    .find(|(b, _)| *b == binding)
+                    .map_or([0.0; 4], |a| a.1);
+                regs.insert(name.to_string(), v);
+                continue;
+            }
+            let (op, operands) = line.split_once(char::is_whitespace).unwrap();
+            let operands: Vec<&str> = operands.trim().split(", ").collect();
+            let read = |s: &str| -> [f32; 4] {
+                let (neg, s) = s.strip_prefix('-').map_or((false, s), |r| (true, r));
+                let (name, swz) = split_mask(s);
+                let v = if let Some((base, idx)) = name.split_once('[') {
+                    let idx: usize = idx.trim_end_matches(']').parse().unwrap();
+                    match params[base] {
+                        Param::Local(b) => local[b + idx],
+                        Param::Literal(_) => panic!("an indexed literal `{s}`"),
+                    }
+                } else if let Some(r) = regs.get(&name) {
+                    *r
+                } else {
+                    match params[name.as_str()] {
+                        Param::Local(b) => local[b],
+                        Param::Literal(v) => v,
+                    }
+                };
+                let swz: Vec<usize> = swz.chars().map(|c| "xyzw".find(c).unwrap()).collect();
+                std::array::from_fn(|k| {
+                    let x = v[swz[k.min(swz.len() - 1)]];
+                    if neg {
+                        -x
+                    } else {
+                        x
+                    }
+                })
+            };
+            let src: Vec<[f32; 4]> = operands[1..].iter().map(|s| read(s)).collect();
+            let each = |f: &dyn Fn(usize) -> f32| -> [f32; 4] { std::array::from_fn(f) };
+            let r = match op {
+                "MOV" => src[0],
+                "ADD" => each(&|k| src[0][k] + src[1][k]),
+                "MUL" => each(&|k| src[0][k] * src[1][k]),
+                "MAD" => each(&|k| src[0][k] * src[1][k] + src[2][k]),
+                "MIN" => each(&|k| src[0][k].min(src[1][k])),
+                "MAX" => each(&|k| src[0][k].max(src[1][k])),
+                "DP3" => [(0..3).map(|k| src[0][k] * src[1][k]).sum::<f32>(); 4],
+                "DP4" => [(0..4).map(|k| src[0][k] * src[1][k]).sum::<f32>(); 4],
+                "RSQ" => [1.0 / src[0][0].abs().sqrt(); 4],
+                "RCP" => [1.0 / src[0][0]; 4],
+                _ => panic!("an instruction the vertex-lit programs do not use: `{line}`"),
+            };
+            let (dst, mask) = split_mask(operands[0]);
+            let slot = regs.entry(dst).or_insert([0.0; 4]);
+            for c in mask.chars() {
+                let k = "xyzw".find(c).unwrap();
+                slot[k] = r[k];
+            }
+        }
+        let c = regs["result.color.front.primary"];
+        [c[0], c[1], c[2]].map(|x| x.clamp(0.0, 1.0))
+    }
+
+    /// `vertex_light`'s M2 lane against the reference itself: Model2.bls programs 135 (lit, no
+    /// point light) and 136 (one bound) run on the same constants as a mirror of the lane. The
+    /// WGSL checks pin the shader to the mirror's shape: the SH basis, the point light's falloff,
+    /// E clamped only with a light bound, and `c28·E + c29` clamped once.
+    #[test]
+    fn vertex_light_runs_model2_programs_135_and_136() {
+        let src = include_str!("shaders/wow_model.wgsl");
+        for line in [
+            "let n_lit = wow_normalize(world_normal);",
+            "let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);",
+            "let n1 = vec4<f32>(n_lit, 1.0);",
+            "let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;",
+            "let atten = 1.0 / (0.7 * d + 0.03 * d * d);",
+            "let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);",
+            "sum += vec4<f32>(wow_light.points[2u * sel[s] + 1u].rgb * (atten * nl), 1.0);",
+            "var e = select(e_exterior, e_probe, is_interior || is_rig) + point_lit.rgb;",
+            "if (point_lit.w > 0.5) {\n        e = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0));\n    }",
+            "return clamp(c * e + highlight, vec3<f32>(0.0), vec3<f32>(1.0));",
+        ] {
+            assert!(src.contains(line), "the M2 lane left its mirror: `{line}` is gone");
+        }
+        let Some(bls) = model2_bls() else { return };
+        let arb = model2_level(&bls, 2);
+
+        // The lit material colour `c28`, the highlight `c29`, the committed SH rows c10-c16
+        // (the sum passes 1 on the lit side) and one point light's colour and position.
+        let c28 = [0.5f32, 0.8, 1.0];
+        let c29 = [0.1f32, 0.0, 0.05];
+        let sh: [[f32; 4]; 7] = [
+            [0.30, 0.55, 0.20, 0.70],
+            [0.25, 0.45, 0.15, 0.55],
+            [0.10, 0.30, 0.05, 0.40],
+            [0.12, -0.05, 0.08, 0.10],
+            [0.09, -0.04, 0.06, 0.08],
+            [0.05, -0.02, 0.03, 0.04],
+            [0.07, 0.05, 0.03, 0.0],
+        ];
+        let (light_pos, light_rgb) = ([2.0f32, 3.0, 1.0], [1.5f32, 1.0, 0.5]);
+        let mut local = [[0.0f32; 4]; 96];
+        local[2] = [1.0, 0.0, 0.0, 0.0]; // c2-c5: the projection, identity
+        local[3] = [0.0, 1.0, 0.0, 0.0];
+        local[4] = [0.0, 0.0, 1.0, 0.0];
+        local[5] = [0.0, 0.0, 0.0, 1.0];
+        local[10..17].copy_from_slice(&sh);
+        local[17] = [light_rgb[0], light_rgb[1], light_rgb[2], 0.0]; // c17: colour
+        local[21] = [light_pos[0], light_pos[1], light_pos[2], 1.0]; // c21: position
+        local[25] = [0.0; 4]; // c25-c27: constant, linear, quadratic falloff
+        local[26] = [0.7, 0.0, 0.0, 0.0];
+        local[27] = [0.03, 0.0, 0.0, 0.0];
+        local[28] = [c28[0], c28[1], c28[2], 1.0];
+        local[29] = [c29[0], c29[1], c29[2], 0.0];
+        local[31] = [1.0, 0.0, 0.0, 0.0]; // c31-c33: the bone, identity
+        local[32] = [0.0, 1.0, 0.0, 0.0];
+        local[33] = [0.0, 0.0, 1.0, 0.0];
+
+        /// `vertex_light`'s M2 lane, step for step, on committed SH rows.
+        fn lane(
+            sh: &[[f32; 4]; 7],
+            n: [f32; 3],
+            p: [f32; 3],
+            light: Option<([f32; 3], [f32; 3])>,
+            c: [f32; 3],
+            highlight: [f32; 3],
+        ) -> [f32; 3] {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let n = n.map(|x| x / len);
+            let quad = [n[0] * n[1], n[1] * n[2], n[2] * n[2], n[0] * n[2]];
+            let x2y2 = n[0] * n[0] - n[1] * n[1];
+            let mut e: [f32; 3] = std::array::from_fn(|ch| {
+                let c10 = sh[ch];
+                let c13 = sh[3 + ch];
+                c10[3]
+                    + (c10[0] * n[0] + c10[1] * n[1] + c10[2] * n[2])
+                    + (0..4).map(|k| c13[k] * quad[k]).sum::<f32>()
+                    + sh[6][ch] * x2y2
+            });
+            if let Some((pos, rgb)) = light {
+                let to: [f32; 3] = std::array::from_fn(|k| pos[k] - p[k]);
+                let d = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+                let atten = 1.0 / (0.7 * d + 0.03 * d * d);
+                let nl = ((n[0] * to[0] + n[1] * to[1] + n[2] * to[2]) / d.max(1e-4)).max(0.0);
+                e = std::array::from_fn(|k| (e[k] + rgb[k] * atten * nl).clamp(0.0, 1.0));
+            }
+            std::array::from_fn(|k| (c[k] * e[k] + highlight[k]).clamp(0.0, 1.0))
+        }
+
+        let p = [0.5f32, -0.2, 0.3];
+        let mut order_shows = false;
+        for n in [
+            [0.3f32, 0.8, 0.5],
+            [0.9, 0.6, 1.2], // unnormalized: the program normalizes the bone-space normal
+            [-0.4, 0.2, -0.9],
+            [0.0, 0.0, 1.0],
+        ] {
+            let attribs = [
+                ("vertex.position", [p[0], p[1], p[2], 1.0]),
+                ("vertex.normal", [n[0], n[1], n[2], 0.0]),
+            ];
+            for (id, light) in [(135usize, None), (136, Some((light_pos, light_rgb)))] {
+                let text = std::str::from_utf8(arb[id]).expect("ARB text");
+                let want = run_arb(text, &local, &attribs);
+                let got = lane(&sh, n, p, light, c28, c29);
+                for k in 0..3 {
+                    assert!(
+                        (got[k] - want[k]).abs() < 1e-5,
+                        "program {id}, n {n:?}, ch{k}: the lane gives {} where Model2.bls gives {}",
+                        got[k],
+                        want[k]
+                    );
+                }
+                // The constants reach the clamps: with no light, clamping E before `c28` would
+                // have given another colour somewhere.
+                if light.is_none() {
+                    let clamped_first =
+                        lane(&sh, n, p, Some(([100.0, 0.0, 0.0], [0.0; 3])), c28, c29);
+                    order_shows |= (0..3).any(|k| (clamped_first[k] - want[k]).abs() > 1e-3);
+                }
+            }
+        }
+        assert!(
+            order_shows,
+            "the sample never puts E past 1 under a c28 below 1"
+        );
+    }
+
     /// A second texture stage samples `Model2.bls`'s generated coordinate: the program for a stage
     /// whose coordinate lookup is above 2 reflects the view-space position about the normal
     /// (`DP3`, `MUL 2`, `MAD −`), normalizes it (`RSQ`) and maps x, y by `MAD ·0.5 + 0.5`.
@@ -472,15 +1117,16 @@ mod tests {
         );
         assert!(
             src.contains(
-                "out.env_uv = wow_env_uv(view_rot * p_cam, normalize(view_rot * out.world_normal));"
+                "out.stage1_uv = wow_env_uv(view_rot * p_cam, normalize(view_rot * out.world_normal));"
             ),
             "stage 1 no longer generates its coordinate in view space"
         );
         assert!(
-            src.contains(
-                "tex1 = textureSampleBias(stage1_texture, stage1_sampler, in.env_uv, view.mip_bias);"
-            ),
-            "stage 1 no longer samples its texture at the generated coordinate"
+            src.contains("var st1_uv = in.stage1_uv;")
+                && src.contains(
+                    "tex1 = textureSampleBias(stage1_texture, stage1_sampler, st1_uv, view.mip_bias);"
+                ),
+            "stage 1 no longer samples its texture at its own coordinate"
         );
 
         /// The ARB program's arithmetic, step for step.

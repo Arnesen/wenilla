@@ -124,6 +124,12 @@ pub struct GroupState {
     /// raised, in its order, for the handler to resolve against the objects held
     /// ([`Self::take_released`]).
     pub(crate) released: Vec<RosterRelease>,
+    /// The `RefreshNameDesc` calls the party's slot writers made, in their order, for the handler
+    /// to resolve against the objects held ([`Self::take_roster_colours`]).
+    pub(crate) roster_colours: Vec<RosterColour>,
+    /// The token flags the party's and the raid's writers moved, in their order, for the handler
+    /// to resolve against the objects held ([`Self::take_token_moves`]).
+    pub(crate) token_moves: Vec<TokenMove>,
     /// While a test sets it, each signal with the roster cells as they stood when its handler
     /// signalled it, what a listener fired at that place would read.
     #[cfg(test)]
@@ -152,6 +158,58 @@ impl NameWait {
     fn guid(self) -> u64 {
         match self {
             NameWait::Seat(guid) | NameWait::Notice(guid, _) | NameWait::Row(guid) => guid,
+        }
+    }
+}
+
+/// A party slot writer's `RefreshNameDesc` (`0x607080`), whose plate leg recolours the member's bar:
+/// `AddPartyMember`'s on a member it seats (`0x4e83dd`), held as a player (`0x4e838d`), and
+/// `ClearParty`'s on each member it empties (`0x4e8568`), held as a unit (`0x4e84d7`), ahead of the
+/// slot's zeroing (`0x4e858c`). Each reads the reaction with the party slots as they stood there,
+/// [`RosterColour::party`], the member's own among them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RosterColour {
+    pub(crate) at: crate::lanes::Stamp,
+    pub(crate) guid: u64,
+    /// Whether the seat's (a player held) or the clear's (any unit held).
+    pub(crate) seat: bool,
+    pub(crate) party: [u64; 4],
+}
+
+/// A roster writer's token flags on a member, and on that member's pet, held as a unit: the party
+/// seat's 0x10 and 0x20 on a member held as a player (`0x4e838d` → `0x4e839e`, `0x4e83c9` →
+/// `0x4e83d6`), the clear's off one held as a unit, its pet's first (`0x4e84d7`, `0x4e8530`,
+/// `0x4e8561`); the raid arrival's 0x100 and 0x200 (`0x4bab18` → `0x4bab2a`, `0x4bab55` →
+/// `0x4bab65`) and the departure's, its pet's first (`0x4baa18`, `0x4baa74`, `0x4baa80`), on one
+/// held as a player. Each at its own place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TokenMove {
+    pub(crate) at: crate::lanes::Stamp,
+    pub(crate) pet_at: crate::lanes::Stamp,
+    pub(crate) guid: u64,
+    /// The member's bits; its pet's are the next ones up.
+    pub(crate) bits: u32,
+    pub(crate) add: bool,
+    /// Whether the member's lookup asks for a player (typemask 0x10) rather than a unit.
+    pub(crate) as_player: bool,
+}
+
+impl TokenMove {
+    fn now(guid: u64, bits: u32, add: bool, as_player: bool) -> Self {
+        // An add tags the member then its pet; a removal the pet first.
+        let (first, second) = (crate::lanes::stamp(), crate::lanes::stamp());
+        let (at, pet_at) = if add {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        Self {
+            at,
+            pet_at,
+            guid,
+            bits,
+            add,
+            as_player,
         }
     }
 }
@@ -200,9 +258,10 @@ pub(crate) enum GroupSignal {
     /// clears the board (`0x4ba5db`).
     RaidTargetUpdate,
     /// `PARTY_INVITE_REQUEST` with the inviter: every `SMSG_GROUP_INVITE` (`0x5e6747` →
-    /// `0x48f420`, event `0x118`). Its partner `PARTY_INVITE_CANCEL` is `SMSG_GROUP_CANCEL`'s
-    /// alone (`0x5e6784` → `0x48f440`), which vmangos never sends and benilla does not read.
+    /// `0x48f420`, event `0x118`). Its partner is [`GroupSignal::InviteCancel`].
     InviteRequest(String),
+    /// `PARTY_INVITE_CANCEL`, no argument: every `SMSG_GROUP_CANCEL` (`0x5e6784` → `0x48f440`).
+    InviteCancel,
     /// `PARTY_MEMBER_ENABLE` with the member's 1-based party slot: a party member's player object
     /// created (`CGPlayer_C::PostInit`, `0x5dec35`) or brought back (`0x5deca1`), through
     /// `0x4e85d0` mode 1 (`0x4e86b6`).
@@ -344,6 +403,12 @@ const LOOT_METHOD_KEYS: [&str; 5] = [
 const LOOT_METHOD_MASTER: u8 = 2;
 
 impl GroupState {
+    /// The teardown's free of the handlers' name callbacks, running none (`0x55f990`); the raid's
+    /// pending count stands until the next list writes it.
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.name_waits.clear();
+    }
+
     /// Apply one `SMSG_GROUP_LIST` and return what it shows, in the reference's order: the party
     /// slots' joins, the new-group line, the party slots' leaves, then the raid roster's lines.
     /// Kick, leave (`0x5e690b`) and disband lines come from their opcodes. Every name is taken as
@@ -430,9 +495,28 @@ impl GroupState {
                 .filter(|&g| g != 0 && missed(g))
                 .map(NameWait::Seat),
         );
-        // The emptier ahead of the seat loop (`0x5e6b19` into `0x4e84a0(0)`) zeroes the leader
-        // cell and the index cell (`0x4e85a9`, `0x4e85b5`), which the leader store fills only after
-        // the event (`0x5e6c7e`).
+        // The emptier ahead of the seat loop (`0x5e6b19` into `0x4e84a0(0)`) refreshes each member
+        // it empties, slot by slot, then zeroes the leader cell and the index cell (`0x4e85a9`,
+        // `0x4e85b5`), which the leader store fills only after the event (`0x5e6c7e`); then the
+        // seat loop refreshes each member it seats into the slots it fills in order.
+        self.clear_colours(&held_slots);
+        // A zero guid takes no slot (`0x4e82eb`): each member fills the first one empty.
+        let mut filled = [0; 4];
+        for (slot, m) in seated.iter().filter(|m| m.guid != 0).enumerate() {
+            filled[slot] = m.guid;
+            self.token_moves.push(TokenMove::now(
+                m.guid,
+                benilla_ui::script::TOKEN_PARTY,
+                true,
+                true,
+            ));
+            self.roster_colours.push(RosterColour {
+                at: crate::lanes::stamp(),
+                guid: m.guid,
+                seat: true,
+                party: filled,
+            });
+        }
         self.leader = 0;
         self.store_leader_index();
         for m in &seated {
@@ -554,7 +638,30 @@ impl GroupState {
                 out.ask_raid_targets = true;
             }
             // The rows (`0x4ba8a4`-`0x4ba960`), each ranked against this list's leader.
+            let old_rows: Vec<u64> = if raid_held {
+                self.raid_rows().collect()
+            } else {
+                Vec::new()
+            };
             self.raid = RaidRow::rebuilt(&members, (self_guid.unwrap_or(0), own_flags), leader);
+            // Each departure's token flags off, then each arrival's on (`0x4ba9f0`-`0x4baae4`,
+            // `0x4bab00`-`0x4babd9`).
+            let new_rows: Vec<u64> = self.raid_rows().collect();
+            let moved = |rows: &[u64], others: &[u64]| -> Vec<u64> {
+                rows.iter()
+                    .copied()
+                    .filter(|&g| g != 0 && Some(g) != self_guid && !others.contains(&g))
+                    .collect()
+            };
+            let raid_bits = benilla_ui::script::TOKEN_RAID;
+            for guid in moved(&old_rows, &new_rows) {
+                self.token_moves
+                    .push(TokenMove::now(guid, raid_bits, false, true));
+            }
+            for guid in moved(&new_rows, &old_rows) {
+                self.token_moves
+                    .push(TokenMove::now(guid, raid_bits, true, true));
+            }
             // The rebuild counts afresh (`0x4ba89e`): each new row's lookup, ours after the
             // members' once any is listed, a zero guid asking nothing (`0x4ba9b4`). It ends in the
             // signal unless a name is pending (`0x4babdf`-`0x4babef`).
@@ -741,6 +848,8 @@ impl GroupState {
     /// leader store finds the 0 already there and signals nothing (`0x4e8267`). The raid roster
     /// stays.
     fn end_party(&mut self) {
+        let slots: Vec<u64> = self.party_slots().map(|m| m.guid).collect();
+        self.clear_colours(&slots);
         // Each slot's teardown, the argument set (`0x4e84b0`-`0x4e8598`).
         self.released = self
             .party_slots()
@@ -793,11 +902,51 @@ impl GroupState {
         std::mem::take(&mut self.released)
     }
 
+    /// The token flags the last list or ending moved, in their order ([`TokenMove`]).
+    pub(crate) fn take_token_moves(&mut self) -> Vec<TokenMove> {
+        std::mem::take(&mut self.token_moves)
+    }
+
+    /// The colour refreshes the last list or ending made, in their order ([`RosterColour`]).
+    pub(crate) fn take_roster_colours(&mut self) -> Vec<RosterColour> {
+        std::mem::take(&mut self.roster_colours)
+    }
+
+    /// `ClearParty`'s walk over `slots` (`0x4e84b0`-`0x4e8598`): each member's refresh with the
+    /// slots ahead of it already zeroed (`0x4e858c`) and its own and those behind still held.
+    fn clear_colours(&mut self, slots: &[u64]) {
+        let mut standing = [0; 4];
+        for (slot, &guid) in slots.iter().take(4).enumerate() {
+            standing[slot] = guid;
+        }
+        for slot in 0..slots.len().min(4) {
+            let guid = standing[slot];
+            if guid != 0 {
+                let party = benilla_ui::script::TOKEN_PARTY;
+                self.token_moves
+                    .push(TokenMove::now(guid, party, false, false));
+                self.roster_colours.push(RosterColour {
+                    at: crate::lanes::stamp(),
+                    guid,
+                    seat: false,
+                    party: standing,
+                });
+            }
+            standing[slot] = 0;
+        }
+    }
+
     /// `SMSG_GROUP_INVITE` (`0x5e6730`): the invite's signal, which the feed fires as
     /// `PARTY_INVITE_REQUEST` (`0x5e6747`) and follows with `ERR_INVITED_TO_GROUP_S` (`0x5e6752`).
     pub fn apply_invited(&mut self, inviter: &str) {
         self.pending_invite = Some(inviter.to_string());
         self.signal(GroupSignal::InviteRequest(inviter.to_string()));
+    }
+
+    /// `SMSG_GROUP_CANCEL` (`0x5e6770`): `PARTY_INVITE_CANCEL`, no argument (`0x5e6784` →
+    /// `0x48f440`, event `0x119`); it leaves the pending invite as it is.
+    pub fn apply_invite_cancelled(&mut self) {
+        self.signal(GroupSignal::InviteCancel);
     }
 
     /// A handler's line, shown where it shows it (`0x496720`), among its signals; returned too.
@@ -988,8 +1137,10 @@ impl GroupState {
             name_waits: _,
             raid_names_pending: _,
             saved_instances: _,
-            // The list's own teardowns, raised before its reset.
+            // The list's own teardowns, refreshes and token flags, raised before its reset.
             released: _,
+            roster_colours: _,
+            token_moves: _,
             #[cfg(test)]
                 signal_cells: _,
         } = self;

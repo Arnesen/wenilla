@@ -2,6 +2,7 @@
 
 use super::*;
 use benilla_protocol::messages::trainer_spell_state;
+use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::script::UiScript;
 
 /// The `vplates` fixture's wolf, the reference screenshot's subject (vmangos `creature_template`
@@ -121,7 +122,6 @@ pub(super) fn seed_ui_fixture(
     progress: Res<WorldLoadProgress>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
 ) {
-    let _caller = benilla_ui::script::origin::caller(&seed_ui_fixture);
     let icons = icons.as_deref();
     // The seed's Lua (its pushes, chunks and hovers) runs once the turn's world writes are in,
     // with the host lent: what it fires runs in place, and what it calls applies inside the verb.
@@ -1760,7 +1760,11 @@ pub(super) fn seed_ui_fixture(
     if let Some(lua) = lua {
         vm.run(|script| {
             if let Some(script) = script {
-                lua(script);
+                // A capture's fixture, dev tooling outside any session, signals as it seeds.
+                within(
+                    Origin::Allowed("capture::fixtures::seed_ui_fixture"),
+                    || lua(script),
+                );
             }
         });
     }
@@ -1778,7 +1782,6 @@ fn open_character_fixture(
     mut vm: crate::script_calls::HostedVm,
     names: crate::ui_unit::NameTables,
 ) {
-    let _caller = benilla_ui::script::origin::caller(&open_character_fixture);
     let names = names.get();
     let named =
         |pair: Option<(&str, &str)>| pair.map(|(name, file)| (name.to_string(), file.to_string()));
@@ -1792,9 +1795,15 @@ fn open_character_fixture(
         let open = s.map(|s| {
             s.set_player_record(record);
             s.seat_player_guid(me);
-            s.fire_event(
-                "UNIT_INVENTORY_CHANGED",
-                vec![benilla_ui::script::ScriptValue::Str("player".into())],
+            // The items' creates' signal, in place (`0x5d8606`).
+            within(
+                Origin::Allowed("capture::fixtures::open_character_fixture"),
+                || {
+                    s.fire_event(
+                        "UNIT_INVENTORY_CHANGED",
+                        vec![benilla_ui::script::ScriptValue::Str("player".into())],
+                    )
+                },
             );
             s.run("ToggleCharacter(\"PaperDollFrame\")")
         });

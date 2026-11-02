@@ -173,6 +173,10 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
                 x: v.f32_at(32).ok_or(Error::Truncated)?,
                 y: v.f32_at(36).ok_or(Error::Truncated)?,
             },
+            tex_coords2: C2 {
+                x: v.f32_at(40).ok_or(Error::Truncated)?,
+                y: v.f32_at(44).ok_or(Error::Truncated)?,
+            },
         });
     }
 
@@ -442,6 +446,8 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             transparency_tracks,
             transparency_lookup,
             texture_unit_lookup,
+            texture_unit_lookup_at: (texture_unit_lookup_arr.0 != 0)
+                .then_some(texture_unit_lookup_arr.1 as usize),
             texture_combiners: if version == 0x101 {
                 parse_texture_combiners(b)
             } else {
@@ -449,6 +455,8 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             },
             texture_transforms,
             texture_transform_lookup,
+            texture_transform_lookup_at: (tex_anim_lookup_arr.0 != 0)
+                .then_some(tex_anim_lookup_arr.1 as usize),
             global_sequences,
             bones: bone_list,
             cameras: parse_cameras(b),

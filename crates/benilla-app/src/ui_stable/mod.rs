@@ -110,12 +110,12 @@ impl LatchedWindow for StableOpen {
 
 /// The close core `0x4cae10`: with a stable open, the latch release (`0x4cae24`), the cell
 /// cleared, then `PET_STABLE_CLOSED` (`0x4cae3a`), held behind what the lane still holds
-/// ([`lane::behind_lane`]).
+/// ([`crate::lanes::step`]).
 pub(crate) fn close_core(world: &mut World) {
     if world.resource::<StableOpen>().npc.is_none() {
         return;
     }
-    lane::behind_lane(world, |world| {
+    crate::lanes::step(world, |world| {
         let Some(npc) = world.resource::<StableOpen>().npc else {
             return;
         };
@@ -340,6 +340,11 @@ pub(crate) fn ask_creature(
 }
 
 impl StableCreatureWaits {
+    /// The teardown's free of the getters' creature callbacks, running none (`0x557200`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.0.clear();
+    }
+
     /// The record of `entry` answered, `found` or refused: each callback waiting on it runs and
     /// goes, in the order kept, and a found record's signals `PET_STABLE_UPDATE` (`0x4cb3bf`) or
     /// `PET_STABLE_UPDATE_PAPERDOLL` (`0x4cba5f`), on the lane; a refusal's signal nothing.

@@ -1,13 +1,15 @@
 //! BLP to Bevy [`Image`] loader, in the [`BlpVariant`] the load settings choose.
 
 use bevy::asset::io::Reader;
-use bevy::asset::{AssetLoader, LoadContext, RenderAssetUsages};
+use std::path::PathBuf;
+
+use bevy::asset::{AssetLoader, AssetPath, LoadContext, RenderAssetUsages};
 use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use serde::{Deserialize, Serialize};
 
-use benilla_formats::{blp_bytes_to_native_chain, blp_to_rgba};
+use benilla_formats::{blp_bytes_to_native_chain, blp_to_rgba, tga_texture_size, BlpMipChain};
 
 use crate::gpu_blp::{for_upload, UploadChain};
 
@@ -57,6 +59,34 @@ impl AssetLoader for BlpImageLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
+        // The reader hands over the first candidate of `TextureCreate`'s chain that opens
+        // (`0x449d90`), which is a `.tga` where no `.blp` is there or the name asked for it.
+        if !bytes.starts_with(b"BLP") && tga_texture_size(&bytes).is_some() {
+            // A model's texture keeps the levels the files beside it hold (`0x4493a0`).
+            let mut mip_files = Vec::new();
+            if settings.variant == BlpVariant::WorldArt {
+                let (w, h) = tga_texture_size(&bytes).unwrap_or((1, 1));
+                let stem = crate::tga_stem(&ctx.path().path().to_string_lossy());
+                for n in 1..benilla_formats::full_mip_count(w, h) as u32 {
+                    let name = crate::tga_chain::mip_file_name(&stem, n);
+                    let path = AssetPath::from_path_buf(PathBuf::from(name))
+                        .with_source(ctx.path().source().clone().into_owned());
+                    let Ok(file) = ctx.read_asset_bytes(path).await else {
+                        break;
+                    };
+                    mip_files.push(Some(file));
+                }
+            }
+            let chain = crate::tga_chain::tga_texture_chain(&bytes, |n| {
+                mip_files.get_mut(n as usize - 1).and_then(Option::take)
+            })
+            .ok_or_else(|| std::io::Error::other("TGA header makes no texture"))?;
+            return Ok(tga_image(
+                chain,
+                settings.variant,
+                crate::sampler_mode_of(&ctx.path().to_string()),
+            ));
+        }
         Ok(match settings.variant {
             BlpVariant::WorldArt => world_art_image(
                 for_upload(blp_bytes_to_native_chain(&bytes).map_err(to_io)?),
@@ -88,6 +118,28 @@ impl AssetLoader for BlpImageLoader {
 
     fn extensions(&self) -> &[&str] {
         &["blp"]
+    }
+}
+
+/// A `.tga` candidate's chain (`0x449d90`) as the `variant` lane draws it: the lanes that draw
+/// one level take level 0.
+fn tga_image(chain: BlpMipChain, variant: BlpVariant, wrap: (bool, bool)) -> Image {
+    let (w, h) = (chain.width, chain.height);
+    match variant {
+        BlpVariant::WorldArt => world_art_image(for_upload(chain), wrap),
+        other => {
+            let rgba = chain.mips[0].clone();
+            match other {
+                BlpVariant::Sprite => sprite_image(w, h, rgba),
+                BlpVariant::MapTile => map_tile_image(w, h, rgba),
+                BlpVariant::Effect => effect_image(w, h, rgba),
+                BlpVariant::PointSprite => point_sprite_image(for_upload(BlpMipChain {
+                    mips: vec![rgba],
+                    ..chain
+                })),
+                _ => cursor_image(w, h, rgba),
+            }
+        }
     }
 }
 
@@ -235,4 +287,96 @@ fn cursor_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::io::memory::{Dir, MemoryAssetReader};
+    use bevy::asset::io::AssetSourceBuilder;
+    use bevy::asset::{AssetApp, AssetPlugin, AssetServer, Assets};
+    use bevy::prelude::*;
+    use std::path::Path;
+
+    /// An uncompressed 32-bit TGA, B G R A per texel, `pixel` repeated.
+    fn tga(side: u16, pixel: [u8; 4]) -> Vec<u8> {
+        let mut b = vec![0u8; 18];
+        b[2] = 2;
+        b[12..14].copy_from_slice(&side.to_le_bytes());
+        b[14..16].copy_from_slice(&side.to_le_bytes());
+        b[16] = 32;
+        b[17] = 8 | 0x20;
+        for _ in 0..side as usize * side as usize {
+            b.extend_from_slice(&pixel);
+        }
+        b
+    }
+
+    /// Load `url` through [`BlpImageLoader`] over a memory source named `mpq` holding `files`.
+    fn load(files: &[(&str, Vec<u8>)], url: &str) -> Option<Image> {
+        let dir = Dir::default();
+        for (name, bytes) in files {
+            dir.insert_asset(Path::new(name), bytes.clone());
+        }
+        let mut app = App::new();
+        app.register_asset_source(
+            crate::MPQ_SOURCE,
+            AssetSourceBuilder::new(move || Box::new(MemoryAssetReader { root: dir.clone() })),
+        );
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<Image>();
+        app.register_asset_loader(BlpImageLoader);
+        let handle: Handle<Image> = app.world().resource::<AssetServer>().load(url.to_string());
+        for _ in 0..2000 {
+            app.update();
+            if let Some(image) = app.world().resource::<Assets<Image>>().get(&handle) {
+                return Some(image.clone());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        None
+    }
+
+    /// The loader's own content check takes a `.tga` candidate (no `BLP` magic, a TGA header), and
+    /// builds its chain from the files beside it (`0x4493a0`) and a box filter below them.
+    #[test]
+    fn the_loader_takes_a_tga_candidate_and_its_mip_files() {
+        let image = load(
+            &[
+                ("tex/foo@cc.blp", tga(16, [10, 20, 30, 255])),
+                ("tex/foo_mip1.tga", tga(8, [200, 200, 200, 255])),
+            ],
+            "mpq://tex/foo@cc.blp",
+        )
+        .expect("a TGA behind a .blp name loads");
+        assert_eq!((image.width(), image.height()), (16, 16));
+        assert_eq!(image.texture_descriptor.mip_level_count, 5);
+        let data = image.data.as_ref().unwrap();
+        assert_eq!(data.len(), 1024 + 256 + 64 + 16 + 4);
+        assert_eq!(&data[..4], &[30, 20, 10, 255], "level 0 from the file");
+        assert!(
+            data[1024..1280]
+                .chunks(4)
+                .all(|p| p == [200, 200, 200, 255]),
+            "level 1 is the file's"
+        );
+        assert_eq!(
+            &data[1360..],
+            &[200, 200, 200, 255],
+            "1x1 is filtered from level 1"
+        );
+    }
+
+    /// A gated `.tga` the decoder refuses is opaque white at the gated size, not a load error
+    /// (`0x44a2eb` into `0x448920`).
+    #[test]
+    fn a_gated_tga_that_will_not_decode_loads_as_white() {
+        let mut bad = tga(8, [0; 4]);
+        bad.truncate(18);
+        let image =
+            load(&[("tex/bad.blp", bad)], "mpq://tex/bad.blp").expect("white, not an error");
+        assert_eq!((image.width(), image.height()), (8, 8));
+        assert_eq!(image.texture_descriptor.mip_level_count, 4);
+        assert!(image.data.as_ref().unwrap().iter().all(|&b| b == 0xff));
+    }
 }

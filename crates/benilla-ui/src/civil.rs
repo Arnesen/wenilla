@@ -84,8 +84,8 @@ pub fn local(secs: i64) -> (Civil, bool) {
 /// `0x740825`), then adds `_dstbias` only when `isdst` is set (`0x740811`, `0x740836`). The sum is
 /// a 32-bit `time_t`'s, so a wrap past it is negative and refused.
 ///
-/// Deviation: a `_dstbias` that takes the time below 0 faults the client, which copies the second
-/// `localtime`'s null answer unchecked (`0x740842` → `0x740860`); here it is refused.
+/// Deviation: a `_dstbias` that takes the time below 0 is refused here because it faults the
+/// client, which copies the second `localtime`'s null answer unchecked (`0x740842` → `0x740860`).
 pub fn local_seconds(utc: i32, isdst: bool) -> Option<i32> {
     let (zone, bias) = zone().biases;
     let mut t = utc.wrapping_add(zone);
@@ -286,23 +286,6 @@ mod platform;
 #[cfg(windows)]
 mod platform {
     pub(super) fn tzset() {
-        // Rust changes the Win32 environment; the CRT owns a separate copy for `_tzset`.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            extern "C" {
-                fn _putenv_s(name: *const libc::c_char, value: *const libc::c_char) -> libc::c_int;
-                fn __dstbias() -> *mut libc::c_long;
-            }
-            let tz = std::ffi::CString::new(std::env::var("TZ").unwrap_or_default())
-                .expect("a test zone without NUL");
-            // SAFETY: both strings are NUL-terminated, and `_putenv_s` copies their contents.
-            assert_eq!(unsafe { _putenv_s(c"TZ".as_ptr(), tz.as_ptr()) }, 0);
-            if !tz.as_bytes().is_empty() {
-                // The CRT's explicit-TZ path retains `_dstbias`; tests use its one-hour US rule.
-                // SAFETY: the accessor returns the CRT's live long; the zone reader is locked.
-                unsafe { *__dstbias() = -3600 };
-            }
-        }
         // SAFETY: `_tzset` takes nothing and only reads the zone.
         unsafe { libc::tzset() };
     }
@@ -316,7 +299,7 @@ mod platform {
     }
 
     /// The runtime's own `_timezone` and `_dstbias`.
-    pub(super) fn biases(spans: &[super::Span]) -> (i32, i32) {
+    pub(super) fn biases(_: &[super::Span]) -> (i32, i32) {
         // `long` is 32 bits on Windows.
         let (mut zone, mut bias): (libc::c_long, libc::c_long) = (0, 0);
         // SAFETY: each writes the one long it is handed.
@@ -324,8 +307,46 @@ mod platform {
             libc::get_timezone(&mut zone);
             libc::get_dstbias(&mut bias);
         }
-        // A fixed-offset zone has no daylight adjustment, even if the CRT retains its default.
-        (zone, if spans.iter().any(|s| s.dst) { bias } else { 0 })
+        (zone, bias)
+    }
+
+    /// Puts `TZ` where the runtime reads it, its own copy of the environment (`_wgetenv_s`), with
+    /// the process's: `std::env::set_var`'s `SetEnvironmentVariableW` never reaches a copy made
+    /// before it. An empty value takes it out.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn put_tz(tz: Option<&std::ffi::OsStr>) {
+        use std::os::windows::ffi::OsStrExt;
+        let wide = |s: &std::ffi::OsStr| s.encode_wide().chain([0]).collect::<Vec<u16>>();
+        let (name, value) = (wide("TZ".as_ref()), wide(tz.unwrap_or_default()));
+        // SAFETY: both are NUL-terminated wide strings that outlive the call, which copies them.
+        unsafe { libc::wputenv_s(name.as_ptr(), value.as_ptr()) };
+    }
+
+    /// The runtime's `_dstbias`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn dstbias() -> libc::c_long {
+        let mut bias = 0;
+        // SAFETY: writes the one long it is handed.
+        unsafe { libc::get_dstbias(&mut bias) };
+        bias
+    }
+
+    /// Sets the runtime's `_dstbias` to `bias`, or with `None` to what a system zone like the one
+    /// `TZ` names gives it (`0x414645`, `0x414657`): an hour with daylight time, none without. A
+    /// zone read from `TZ` leaves it as it was, its parse ending at `_daylight` (`0x4147ee`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn hold_dstbias(bias: Option<libc::c_long>) {
+        extern "C" {
+            fn __dstbias() -> *mut libc::c_long;
+        }
+        let mut daylight = 0;
+        // SAFETY: `_tzset` reads the zone; `_get_daylight` writes the one int it is handed; and
+        // `__dstbias` answers the runtime's own `_dstbias`, written under the guard's lock.
+        unsafe {
+            libc::tzset();
+            libc::get_daylight(&mut daylight);
+            *__dstbias() = bias.unwrap_or(if daylight != 0 { -3600 } else { 0 });
+        }
     }
 
     pub(super) fn name(isdst: bool) -> Vec<u8> {
@@ -359,11 +380,15 @@ pub fn unix_seconds() -> i64 {
 /// every machine: the lock keeps two zone tests apart, the zone is read at once (so `tzset` has
 /// run for the platform's own `localtime_r` too), and the drop puts the old `TZ` and zone back.
 /// The process reads its zone once (`0x414568`), so a test sets it here and never through `TZ`
-/// alone. Behind `test-support` for the tests of crates that read local time through [`local`].
+/// alone. On Windows the zone is the one the runtime reads from `TZ` (`put_tz`), with the
+/// `_dstbias` a system zone like it has, which unix derives the same way. Behind `test-support`
+/// for the tests of crates that read local time through [`local`].
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub struct ZoneGuard {
     old: Option<std::ffi::OsString>,
+    #[cfg(windows)]
+    old_dstbias: libc::c_long,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -373,23 +398,43 @@ impl ZoneGuard {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var_os("TZ");
-        std::env::set_var("TZ", tz);
+        #[cfg(windows)]
+        let old_dstbias = platform::dstbias();
+        put_tz(Some(tz.as_ref()));
+        #[cfg(windows)]
+        platform::hold_dstbias(None);
         reread_zone();
         drop(zone());
-        Self { old, _lock: lock }
+        Self {
+            old,
+            #[cfg(windows)]
+            old_dstbias,
+            _lock: lock,
+        }
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for ZoneGuard {
     fn drop(&mut self) {
-        match self.old.take() {
-            Some(v) => std::env::set_var("TZ", v),
-            None => std::env::remove_var("TZ"),
-        }
+        put_tz(self.old.take().as_deref());
+        #[cfg(windows)]
+        platform::hold_dstbias(Some(self.old_dstbias));
         reread_zone();
         drop(zone());
     }
+}
+
+/// Sets `TZ`, or with `None` takes it out, where the platform's runtime reads it: the process's
+/// environment, and on Windows the runtime's own copy of it too.
+#[cfg(any(test, feature = "test-support"))]
+fn put_tz(tz: Option<&std::ffi::OsStr>) {
+    match tz {
+        Some(v) => std::env::set_var("TZ", v),
+        None => std::env::remove_var("TZ"),
+    }
+    #[cfg(windows)]
+    platform::put_tz(tz);
 }
 
 /// Drops the zone the process read, so the next use reads the one a test set.
@@ -435,7 +480,7 @@ mod tests {
     fn the_zone_is_read_once() {
         let _zone = ZoneGuard::set("UTC0");
         assert_eq!(local(0).0.hour, 0);
-        std::env::set_var("TZ", "JST-9");
+        put_tz(Some("JST-9".as_ref()));
         assert_eq!(local(0), (from_unix(0), false));
         assert_eq!(local_seconds(0, false), Some(0));
         assert_eq!(zone_name(false), b"UTC");
@@ -448,19 +493,16 @@ mod tests {
     #[test]
     fn explicit_daylight_zones_do_not_inherit_the_host_bias() {
         let _zone = ZoneGuard::set("UTC0");
-        extern "C" {
-            fn __dstbias() -> *mut libc::c_long;
-        }
         // Simulate a host without daylight saving, as restored between guarded test zones.
-        // SAFETY: the accessor returns a live CRT long and this test holds the zone guard.
-        unsafe { *__dstbias() = 0 };
+        platform::hold_dstbias(Some(0));
         let at = 1_000_000_000;
         for (tz, east, dst) in [
             ("EST5EDT", -4 * 3600, true),
             ("NPT-05:45", 5 * 3600 + 45 * 60, false),
             ("EST5EDT", -4 * 3600, true),
         ] {
-            std::env::set_var("TZ", tz);
+            put_tz(Some(tz.as_ref()));
+            platform::hold_dstbias(None);
             reread_zone();
             assert_eq!(local(at), (from_unix(at + east), dst), "{tz}");
             assert_eq!(
@@ -471,24 +513,26 @@ mod tests {
         }
     }
 
-    /// A zone with daylight time: each change of offset found to the second.
+    /// A zone with daylight time: each change of offset found to the second. The Windows runtime
+    /// reads no rule from `TZ`, only names and an offset, and keeps the USA's for daylight time,
+    /// which the rule spelled out for unix matches.
     #[test]
     fn the_zone_changes_at_its_second() {
-        // The Windows CRT accepts no POSIX transition suffix and uses US daylight rules.
-        let (tz, at) = if cfg!(windows) {
-            ("CET-1CEST", 1_710_032_400)
+        let _zone = ZoneGuard::set(if cfg!(windows) {
+            "EST5EDT"
         } else {
-            ("CET-1CEST,M3.5.0,M10.5.0/3", 1_711_846_800)
-        };
-        let _zone = ZoneGuard::set(tz);
+            "EST5EDT,M3.2.0,M11.1.0"
+        });
+        // 2024-03-10 07:00 UTC, when 02:00 EST becomes 03:00 EDT.
+        let at = 1_710_054_000;
         assert_eq!(local(at - 1).0.hour, 1);
         assert!(!local(at - 1).1);
         assert_eq!(local(at).0.hour, 3);
         assert!(local(at).1);
-        // `_timezone` -3600 and `_dstbias` -3600.
-        assert_eq!(local_seconds(7200, false), Some(3600));
-        assert_eq!(local_seconds(7200, true), Some(0));
-        assert_eq!(local_seconds(0, false), None);
+        // `_timezone` 18000 and `_dstbias` -3600.
+        assert_eq!(local_seconds(7200, false), Some(25_200));
+        assert_eq!(local_seconds(7200, true), Some(21_600));
+        assert_eq!(local_seconds(-18_001, false), None);
     }
 
     /// Two changes in one sampled day, and one back the next day, each found at its second.

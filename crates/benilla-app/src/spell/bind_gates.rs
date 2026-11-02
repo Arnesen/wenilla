@@ -2,8 +2,8 @@
 //! (`6e5bd8`-`6e5ca2`). A refused unit binds nothing, so `ArmCast` falls to its next candidate,
 //! the player behind `autoSelfCast`, and then to the enemy-word refusal or the targeting cursor.
 //! The read-only mirror `SpellCanTargetObject 0x6e6460` runs the same five (`6e6507`-`6e65ab`), so
-//! the press, the cursor's click, `SpellTargetUnit` and the hover verdict share this one gate
-//! through [`super::cast_target::unit_binds`].
+//! the press, the cursor's click and `SpellTargetUnit` ([`super::cast_target::unit_bind`]) and
+//! the hover verdict ([`super::cast_target::unit_can_target`]) share this one gate.
 
 use benilla_formats::SpellDisplay;
 use benilla_protocol::ObjectFields;
@@ -387,6 +387,7 @@ mod tests {
             };
             let candidates = CastCandidates {
                 selection: Some(if selection_is_self { ME } else { THEM }),
+                selected: true,
                 selection_held: true,
                 caster: Some(ME),
                 auto_self: Some(ME),

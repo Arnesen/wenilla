@@ -45,6 +45,7 @@ fn roster_named(name: &str, guid: u64) -> Roster {
             y: 0.0,
             z: 0.0,
         },
+        guild_id: 0,
         flags: 0,
         equipment: [benilla_protocol::CharEnumItem::default(); 19],
         pet_display_id: 0,
@@ -662,6 +663,60 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// The interface load builds a new camera, a login's as a `/reload`'s, which reads the views off
+/// their CVars (`0x481b4e` → `0x50c0e0`, `0x50c3db` → `0x50fb80`).
+#[test]
+fn the_interface_load_rereads_the_camera_views() {
+    use crate::cvars::Cvars;
+    use crate::player::camera_view::CameraViews;
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("reload-views");
+    let mut world = booted_world();
+    world.init_resource::<Cvars>();
+    world.init_resource::<CameraViews>();
+
+    world.resource_mut::<Cvars>().set("cameraDistanceA", "20");
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        world.resource::<CameraViews>().current_customised(),
+        "the login's new camera read the row"
+    );
+    world.resource_mut::<Cvars>().set("cameraDistanceA", "5.55");
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert!(
+        !world.resource::<CameraViews>().current_customised(),
+        "and so did the reload's"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `ReloadUI()`'s teardown destroys the camera with the world frame and its load builds a new one
+/// (`0x481e12`, `0x481b4e` → `0x50c0e0`), which counts as moved (`0x50c400`).
+#[test]
+fn a_reload_builds_a_new_camera() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("reload-camera");
+    let mut world = booted_world();
+    world.init_resource::<crate::player::CameraControl>();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+
+    let rig = world.resource::<crate::player::CameraControl>();
+    assert!(rig.is_new_for_test());
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `ReloadUI()` is the reference's teardown and rebuild pair (`0x495664`/`0x495669`): the logout
 /// and login edges, run without leaving the world.
 #[test]
@@ -864,6 +919,48 @@ fn a_ready_check_outlives_a_reload_and_not_a_login() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// The looking-for-group list is engine state (`0xbc6fd8`-`0xbc7620`) that only its reply's
+/// handler writes, and `ReloadUI()` does not run `InitializeGame`'s party init (`0x4e7c70`), so a
+/// reloaded VM reads the list; a login starts with none ([`crate::ui_social::seed_vm_lfg`]).
+#[test]
+fn the_lfg_list_outlives_a_reload_and_not_a_login() {
+    use benilla_ui::script::{LfgReply, LfgResultRead, UiScript};
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("lfg-list");
+    let mut world = booted_world();
+    let counts = |world: &World| -> (i64, i64) {
+        world
+            .non_send_resource::<UiScript>()
+            .eval("return GetNumLFGResults()")
+            .unwrap()
+    };
+
+    log_in_as(&mut world, "Onehunter", 1);
+    world
+        .non_send_resource_mut::<UiScript>()
+        .lfg_results(LfgReply {
+            count: Some(1),
+            total: Some(3),
+            records: vec![LfgResultRead {
+                name: "Aria".into(),
+                ..Default::default()
+            }],
+        });
+
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert_eq!(counts(&world), (1, 3), "the reloaded VM reads the list");
+
+    super::end_ui_session(&mut world);
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(counts(&world), (0, 0), "a login starts with none");
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `ReloadUI()` runs only the teardown and `UI_Init` (`0x495664`, `0x495669`); the roster's
 /// show-offline flag (`0xb73124`) is zeroed only by `InitGuildRoster` (`0x4d0a25`), from
 /// `InitializeGame` (`0x48f5ea`). So an addon's file scope, which runs before `VARIABLES_LOADED`
@@ -916,6 +1013,44 @@ fn the_roster_flag_outlives_a_reload_and_not_a_login() {
         0,
         "the next login's InitGuildRoster zeroed it"
     );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A new interface's copy of the item records is seated at its load, before its first frame's
+/// feed: a read off the copy finds every record the cache holds from the load on, at a login and
+/// at a reload, as the reference's interface reads the one item cache from its first file
+/// (`0x55ba30`). The login's first packets dispatch in that frame, ahead of the feed.
+#[test]
+fn a_new_interfaces_item_records_are_seated_at_its_load() {
+    use benilla_ui::script::UiScript;
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("item-records");
+    let mut world = booted_world();
+    world.init_resource::<crate::items::Items>();
+    world
+        .resource_mut::<crate::items::Items>()
+        .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
+    // Off the VM's copy, with no host lent to read the cache through.
+    let copy = |world: &World| -> Option<String> {
+        world
+            .non_send_resource::<UiScript>()
+            .eval("return (GetItemInfo(25))")
+            .unwrap()
+    };
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        copy(&world).as_deref(),
+        Some("Linen Cloth"),
+        "a login's load"
+    );
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert_eq!(copy(&world).as_deref(), Some("Linen Cloth"), "a reload's");
 
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);

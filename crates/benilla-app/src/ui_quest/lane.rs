@@ -31,9 +31,6 @@ pub(crate) enum QuestGiverEvent {
     AcceptConfirm { name: String, title: String },
     /// The turn-in's `QUESTCOMPLETED` fanfare.
     Fanfare,
-    /// What a close core run outside a call signalled while this lane held items, parked in the
-    /// VM of the session under the key ([`crate::script_calls::park_since`]).
-    Parked { session: u64, key: u64 },
 }
 
 /// The questgiver lane's queue.
@@ -157,13 +154,6 @@ fn fire(script: &mut UiScript, sink: &mut MessageSink, event: QuestGiverEvent) {
             vec![ScriptValue::Str(name), ScriptValue::Str(title)],
         ),
         QuestGiverEvent::Fanfare => script.queue_sound_kit("QUESTCOMPLETED"),
-        QuestGiverEvent::Parked { session, key } => {
-            if script.session() == session {
-                crate::ui_session::in_parked_close(crate::ui_session::NpcWindow::Quest, || {
-                    script.run_parked(key)
-                });
-            }
-        }
     }
 }
 
@@ -174,17 +164,4 @@ fn show(script: &mut UiScript, sink: &mut MessageSink, msg: UiError) {
         let shown = crate::ui_action::Shown::keyed(msg.key, text);
         crate::ui_action::show_now(script, sink, "ui_quest", shown);
     }
-}
-
-/// Run the close `core` behind the lane ([`crate::lanes::behind`]), so a close never fires ahead
-/// of the panel it closes.
-pub(super) fn behind_lane(world: &mut World, core: impl FnOnce(&mut World)) {
-    let head = world
-        .get_resource::<QuestGiverLane>()
-        .and_then(QuestGiverLane::head);
-    crate::lanes::behind(world, head, core, |world, session, key| {
-        world
-            .resource_mut::<QuestGiverLane>()
-            .push(QuestGiverEvent::Parked { session, key });
-    });
 }

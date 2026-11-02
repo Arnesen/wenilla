@@ -9,8 +9,9 @@
 //! Two keys, LF, six decimals, a trailing newline (writer `0x50c4d0`, reader `0x50c5a0`), no yaw.
 //! Ours is `benilla-config/camera/<realm>-<character>.txt`, written at logout, disconnect and
 //! quit; the reference's UI teardown (`0x490bd0`) also writes it on `ReloadUI` and a UI-scale
-//! change and reads it straight back, which ours does not. Read once per session, when the roster
-//! names the character; the pitch reaches the camera through the login seize.
+//! change and reads it straight back, where ours takes the same values in memory
+//! ([`rebuild_camera`]). Read once per session, when the roster names the character; the pitch
+//! reaches the camera through the login seize.
 
 use std::path::PathBuf;
 
@@ -19,6 +20,7 @@ use bevy::prelude::*;
 use crate::client_state::{ClientState, InWorldGated};
 
 use super::camera::{CameraControl, FlyCam, CAM_PITCH_LIMIT};
+use super::camera_view::CameraViews;
 use super::camera_zoom::{CAM_DIST_DEFAULT, CAM_DIST_MAX, CAM_DIST_MIN};
 use super::Player;
 use benilla_world::view::WorldCamera;
@@ -111,6 +113,7 @@ fn load_camera_pose(
     rig.distance = CAM_DIST_DEFAULT;
     rig.target_distance = CAM_DIST_DEFAULT;
     rig.collision_distance = CAM_DIST_DEFAULT;
+    rig.new_camera();
     player.login_pitch = None;
 
     let Some(path) = file.path.clone() else {
@@ -135,6 +138,40 @@ fn load_camera_pose(
         player.login_pitch = Some(p);
     }
     info!("camera pose: restored from {}", path.display());
+}
+
+/// What a new camera reads at the interface load that builds it, a login's as a `/reload`'s
+/// (`0x481b4e` → `0x50c0e0`): the views, off the registry the dying VM has folded into, and no
+/// shake.
+pub(crate) fn camera_at_interface_load(world: &mut World) {
+    world.try_resource_scope(|world, mut views: Mut<CameraViews>| {
+        if let Some(cvars) = world.get_resource::<crate::cvars::Cvars>() {
+            views.reseed(cvars);
+        }
+    });
+    if let Some(mut shakes) = world.get_resource_mut::<crate::camera_shake::CameraShakes>() {
+        shakes.clear();
+    }
+}
+
+/// A `/reload`'s new camera: the teardown saves the pose's targets (`0x50c48a`, `0x50c4ff`,
+/// `0x50c549`) and destroys the camera, and the load's constructor reads them back as live and
+/// target (`0x481b4e` → `0x50c0e0`, `0x50c3ea`), with the yaw offset 0 (`0x50c1a7`).
+pub(crate) fn rebuild_camera(world: &mut World) {
+    let facing = world.get_resource::<Player>().map_or(0.0, Player::facing);
+    if let Some(mut scoped) = world.get_resource_mut::<super::scoped_view::ScopedView>() {
+        scoped.new_camera();
+    }
+    world.try_resource_scope(|world, mut rig: Mut<CameraControl>| {
+        let mut cams = world.query_filtered::<&mut FlyCam, With<WorldCamera>>();
+        if let Ok(mut cam) = cams.single_mut(world) {
+            cam.pitch = rig.view_blend.pitch_target(cam.pitch);
+            cam.yaw = facing;
+        }
+        rig.new_camera();
+        rig.distance = rig.target_distance;
+        rig.collision_distance = rig.target_distance;
+    });
 }
 
 /// Writes the pose to the path the load resolved: by `OnExit(InWorld)` the roster is unwinding.
@@ -201,6 +238,47 @@ pub(super) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `/reload`'s new camera: the saved targets live, the offset and the flip 0, nothing in
+    /// flight, and the mode word as a new camera's.
+    #[test]
+    fn a_reload_builds_a_new_camera() {
+        let mut world = World::new();
+        world.init_resource::<Player>();
+        world.resource_mut::<Player>().face_yaw = 0.5;
+        world.init_resource::<CameraControl>();
+        {
+            let mut rig = world.resource_mut::<CameraControl>();
+            rig.distance = 3.0;
+            rig.target_distance = 8.0;
+            rig.collision_distance = 2.0;
+            rig.flip_yaw = 1.0;
+            rig.scoped = true;
+            rig.view_blend.arm_pitch_for_test();
+            rig.follow.arm_view(0.0, 1.0, 180.0);
+        }
+        world.spawn((
+            FlyCam {
+                yaw: 1.5,
+                pitch: 0.25,
+                speed: 1.0,
+            },
+            WorldCamera,
+        ));
+        rebuild_camera(&mut world);
+        let rig = world.resource::<CameraControl>();
+        assert_eq!(rig.distance, 8.0);
+        assert_eq!(rig.collision_distance, 8.0);
+        assert_eq!(rig.flip_yaw, 0.0);
+        assert!(rig.view_moved);
+        assert!(!rig.scoped);
+        assert!(!rig.view_blend.pitch_in_flight());
+        assert_eq!(rig.follow.target_offset(), None);
+        let yaw = world.query::<&FlyCam>().single(&world).unwrap().yaw;
+        let pitch = world.query::<&FlyCam>().single(&world).unwrap().pitch;
+        assert_eq!(yaw, 0.5);
+        assert!((pitch - 1.25).abs() < 1e-5, "the pitch's target: {pitch}");
+    }
 
     /// The values come from a `camera-settings.txt` the reference wrote.
     #[test]
@@ -276,6 +354,7 @@ mod login_tests {
                     y: 0.0,
                     z: 0.0,
                 },
+                guild_id: 0,
                 flags: 0,
                 equipment: [benilla_protocol::CharEnumItem::default(); 19],
                 pet_display_id: 0,
@@ -284,6 +363,34 @@ mod login_tests {
             }],
             guid,
         )
+    }
+
+    /// A new camera's constructor ends by setting mode bit 6 (`0x50c400`), so the first request
+    /// for its own view stays timed (`0x512eb4`).
+    #[test]
+    fn a_new_camera_counts_as_moved() {
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cam-new-{}", std::process::id()));
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let mut app = App::new();
+        app.init_resource::<CameraPoseFile>()
+            .init_resource::<CameraControl>()
+            .init_resource::<Player>()
+            .insert_resource(roster("Tank", 7));
+        app.world_mut().spawn((
+            FlyCam {
+                yaw: 0.0,
+                pitch: 0.0,
+                speed: 1.0,
+            },
+            WorldCamera,
+        ));
+        app.world_mut().run_system_once(load_camera_pose).unwrap();
+        assert!(app.world().resource::<CameraControl>().view_moved);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

@@ -268,7 +268,7 @@ fn render_subject(lua: &Lua, this: &Table, subject: Subject<'_>) -> mlua::Result
         super::visibility::set_shown(lua, h, false);
         return Ok(false);
     };
-    set_subject(lua, h, Some(u.guid));
+    set_subject(lua, h, u.guid, u.has_object);
     if let Some(bar) = seed_bar(lua, h, &u) {
         super::visibility::set_shown(lua, bar, true);
     }
@@ -401,13 +401,44 @@ fn keyed_line(lua: &Lua, this: &Table, key: &str, color: [f32; 4]) -> mlua::Resu
     }
 }
 
-/// Remember (or drop) the guid of the unit the tooltip shows, the health watcher's key.
-fn set_subject(lua: &Lua, h: FrameHandle, guid: Option<u64>) {
+/// Remember the guid of the unit the tooltip shows, the health watcher's key (`0x52a070`). A build
+/// that shows a unit links the tooltip's watcher on it at the list's tail when the tooltip has a
+/// status bar (`0x52a07f`-`0x52a0a8`) and the object manager holds the unit: the registration
+/// looks the object up and links nothing without it (`0x467e70` at `0x467e86`, `0x467e8f`), as
+/// for a party member its record alone shows.
+fn set_subject(lua: &Lua, h: FrameHandle, guid: u64, held: bool) {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     if let Some(f) = model.arena.frame_mut(h) {
         if let KindState::Tooltip(t) = &mut f.kind_state {
-            t.unit_guid = guid;
+            t.unit_guid = Some(guid);
         }
+    }
+    if held && super::tooltip::status_bar(&model, h).is_some() {
+        model.unit_watches.link_tooltip(h);
+    }
+}
+
+/// Whether tooltip `h` shows the unit `guid`, the key its watcher was linked under.
+pub(super) fn shows(model: &Model, h: FrameHandle, guid: u64) -> bool {
+    model.frame_to_id.contains_key(&h)
+        && matches!(
+            model.arena.frame(h).map(|f| &f.kind_state),
+            Some(KindState::Tooltip(t)) if t.unit_guid == Some(guid)
+        )
+}
+
+/// Tooltip `h`'s watcher on its unit's health (`0x529560`): its bar seeded with `health` of
+/// `max_health` when it last saw another health (its compare at `0x4655bb`).
+pub(super) fn watch_health(lua: &Lua, h: FrameHandle, health: u32, max_health: u32) {
+    let moved = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        matches!(
+            model.arena.frame(h).map(|f| &f.kind_state),
+            Some(KindState::Tooltip(t)) if t.unit_health != health
+        )
+    };
+    if moved {
+        seed_bar_at(lua, h, health, max_health);
     }
 }
 
@@ -494,41 +525,18 @@ fn seed_bar_at(lua: &Lua, h: FrameHandle, health: u32, max_health: u32) -> Optio
     Some(bar)
 }
 
-/// The tooltips showing `guid`, whose health is now `health` of `max_health`: each whose bar last
-/// saw another health is seeded again (`0x529560`, its compare at `0x4655bb`).
-fn on_unit_health(lua: &Lua, guid: u64, health: u32, max_health: u32) {
-    let hits: Vec<FrameHandle> = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        // Registered frames only, as `update_bar` writes layout.
-        model
-            .arena
-            .tooltip_kinds()
-            .iter()
-            .copied()
-            .filter(|&h| {
-                model.frame_to_id.contains_key(&h)
-                    && matches!(
-                        model.arena.frame(h).map(|f| &f.kind_state),
-                        Some(KindState::Tooltip(t))
-                            if t.unit_guid == Some(guid) && t.unit_health != health
-                    )
-            })
-            .collect()
-    };
-    for h in hits {
-        seed_bar_at(lua, h, health, max_health);
-    }
-}
-
 impl super::UiScript {
-    /// The unit tooltip's own watcher on the health of the unit it shows, which the render
-    /// registers on the object (`0x52a0a8`, `0x529560` on `+0x368`/`+0x36c`): the object `guid`'s
-    /// health moved to `health` of `max_health`, inside the notify pass of the packet that wrote
-    /// it. Each tooltip showing the unit whose bar last saw another health is seeded again.
+    /// The unit tooltip's own watcher on the health of the unit it shows, which the render links
+    /// on the object (`0x52a0a8`, `0x529560` on `+0x368`/`+0x36c`): the object `guid`'s health
+    /// moved to `health` of `max_health`, inside the notify pass of the packet that wrote it, with
+    /// no other watcher among them ([`Self::unit_health_watchers`]). Each tooltip showing the unit
+    /// whose bar last saw another health is seeded again.
     pub fn tooltip_unit_health(&mut self, guid: u64, health: u32, max_health: u32) {
-        if guid != 0 {
-            on_unit_health(&self.lua, guid, health, max_health);
-        }
+        let watch = super::HealthWatch {
+            bar: None,
+            tooltip: Some((health, max_health)),
+        };
+        self.unit_health_watchers(guid, watch, |_| {});
     }
 
     /// `RefreshTooltipForUnit` (`0x4919d0`): while `GameTooltip` (`[0xb4b3c4]`) still shows

@@ -129,23 +129,9 @@ fn the_glue_surface_matches_the_shapes_table() {
     }
 }
 
-/// Glue-state functions the glue VM does not answer yet, by registrar table, each with why. The
-/// list only shrinks: a verb is absent until built, never stubbed.
-const NOT_YET: &[(&str, &[&str])] = &[(
-    "the glue core (0x46ddf0, table 0x8373b8): the movie's setter, the \
-         patch and survey and the billing; each a binding of its own, the ones \
-         with an in-game namesake included",
-    &[
-        "GetBillingPlan",
-        "GetBillingTimeRemaining",
-        "GetBillingTimeRested",
-        "PatchDownloadApply",
-        "PatchDownloadCancel",
-        "PatchDownloadProgress",
-        "SetMovieSubtitles",
-        "SurveyNotificationDone",
-    ],
-)];
+/// Glue-state functions the glue VM does not answer yet, by registrar table, each with why: none
+/// today. The list only shrinks: a verb is absent until built, never stubbed.
+const NOT_YET: &[(&str, &[&str])] = &[];
 
 /// The glue VM's globals by Lua type name.
 fn glue_globals() -> BTreeMap<String, String> {

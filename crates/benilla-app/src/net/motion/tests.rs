@@ -43,9 +43,10 @@ fn remote_fall_arc_reports_height_only_on_the_landing_edge() {
         fall_arc_step(false, true, None, at(100.0)),
         (Some(at(100.0)), None)
     );
+    // Each airborne packet re-derives the start (`0x7c6490`).
     assert_eq!(
         fall_arc_step(true, true, Some(at(100.0)), at(80.0)),
-        (Some(at(100.0)), None)
+        (Some(at(80.0)), None)
     );
     assert_eq!(
         fall_arc_step(true, false, Some(at(100.0)), at(70.0)),
@@ -80,6 +81,46 @@ fn a_remote_jump_on_a_descending_lift_lands_with_no_fall_height() {
     );
 }
 
+/// An airborne status's start height is its height plus the arc's drop over its fall time
+/// (`0x7c6490` → `0x7c5f30`), in the world and on the deck: a second into a fall from rest is
+/// g/2, 9.6455 yd, and under feather fall the 7.0 cap takes over at 0.3629 s, 5.7300 yd.
+#[test]
+fn an_airborne_status_starts_its_arc_its_drop_above_it() {
+    const DECK: u64 = 0x1fc0_0000_0000_0002;
+    let rest = Some(JumpInfo::default());
+    let tail = benilla_protocol::TransportPose {
+        guid: DECK,
+        pos: benilla_protocol::wire::Vector3d {
+            x: 0.0,
+            y: 0.0,
+            z: 2.0,
+        },
+        orientation: 0.0,
+    };
+    let start = FallHeight::airborne([0.0, 0.0, 50.0], Some(&tail), rest, 1000, false);
+    assert!(
+        (start.world_z - 59.6455).abs() < 1e-3,
+        "{} yd",
+        start.world_z
+    );
+    let deck = start.aboard.expect("aboard").1;
+    assert!((deck - 11.6455).abs() < 1e-3, "{deck} yd on the deck");
+    let feather = FallHeight::airborne([0.0, 0.0, 50.0], None, rest, 1000, true);
+    assert!(
+        (feather.world_z - 55.73).abs() < 1e-3,
+        "{} yd",
+        feather.world_z
+    );
+    // Through the relay's apply: a mover first seen a second into its fall lands 19.6455 yd
+    // below where its arc began, not 10.
+    let mut falling = observed(move_flags::FALLING, [0.0, 0.0, 50.0], RelayVerb::Pose);
+    falling.fall_time = 1000;
+    falling.jump = rest;
+    let airborne = apply_observed(motion(0, 0.0), &falling);
+    let start = airborne.fall_start.expect("a fall start").world_z;
+    assert!((start - 59.6455).abs() < 1e-3, "{start} yd");
+}
+
 fn motion(flags: u32, orientation: f32) -> RemoteMotion {
     RemoteMotion {
         wow_pos: [0.0, 0.0, 0.0],
@@ -94,6 +135,7 @@ fn motion(flags: u32, orientation: f32) -> RemoteMotion {
         relay: Default::default(),
         last_apply_ms: 0.0,
         last_apply_pos: [0.0, 0.0, 0.0],
+        fired_at_ms: None,
     }
 }
 
@@ -833,11 +875,13 @@ fn facing_lerp_turns_the_short_way_and_lands_at_fire_time() {
     assert_eq!(held, 1.0, "dead-zone: negligible turn skipped");
 }
 
-/// The frame loop as [`crate::net`] chains it, arrival before drain on one clock; returns the
-/// applied order by `fall_time` and the final flags.
+/// The frame loop as [`crate::net`] chains it: each arrival due by the clock the last frame's
+/// drain stamped, then this frame's drain; returns the applied order by `fall_time` and the final
+/// flags.
 fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
     use super::relay::{PendingMove, RelayMove};
     let mut rm = motion(MOVING, 0.0);
+    let mut tick = None;
     let mut applied = Vec::new();
     let apply = |rm: &mut RemoteMotion, mv: &RelayMove, applied: &mut Vec<u32>| {
         rm.flags = mv.flags; // the one part of `apply_move` the ordering needs
@@ -858,7 +902,7 @@ fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
         };
         let (live, empty) = (rm.flags, rm.pending.is_empty());
         let fire_ms = rm.relay.schedule(wire_ms, now, live, empty);
-        if rm.fires_at_arrival(fire_ms, now) {
+        if rm.fires_at_arrival(fire_ms, tick) {
             apply(&mut rm, &mv, &mut applied);
         } else {
             rm.pending.push_back(PendingMove { fire_ms, mv });
@@ -867,6 +911,7 @@ fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
             let ev = rm.pending.pop_front().expect("front checked");
             apply(&mut rm, &ev.mv, &mut applied);
         }
+        tick = Some(now);
     }
     (applied, rm.flags)
 }
@@ -876,11 +921,11 @@ fn a_due_arrival_never_jumps_the_queue() {
     // A 60 Hz burst builds a one-deep queue, then the Stop lands at 96 ms with its fire-time (64)
     // already past while the FORWARD packet 3 is still queued.
     let script: [(u32, f64, u32); 5] = [
-        (1000, 0.0, MOVING),  // 0: seeds, fires at arrival
+        (1000, 0.0, MOVING),  // 0: seeds, fire 0, for the frame's drain
         (1016, 0.0, MOVING),  // 1: fire 16, queued
         (1032, 16.0, MOVING), // 2: fire 32, queued; the drain releases 1
         (1048, 32.0, MOVING), // 3: fire 48, queued; the drain releases 2
-        (1064, 96.0, 0),      // 4: the Stop, fire 64, due; 3 still queued
+        (1064, 96.0, 0),      // 4: the Stop, fire 64, past this arrival; 3 still queued
     ];
     let (order, flags) = replay_frames(&script);
     assert_eq!(

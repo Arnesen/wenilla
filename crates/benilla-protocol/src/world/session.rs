@@ -20,7 +20,8 @@ use super::{recv_packet, send_packet, LinkTraffic};
 const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Read timeout in the login queue, where updates can be minutes apart. Deviation: the reference
-/// waits forever; a bound tells a server that died mid-queue from a long wait.
+/// waits forever; here the wait is bounded because that tells a server that died mid-queue from a
+/// long wait.
 const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The world server refused the session. Its code is from `messages`' `AUTH_*` block, not
@@ -54,6 +55,9 @@ pub struct WorldSession {
     chat_language: u32,
     /// `SMSG_TUTORIAL_FLAGS` when it lands during the handshake rather than in the world stream.
     tutorial_flags: Option<Vec<u8>>,
+    /// The `SMSG_GUILD_QUERY_RESPONSE`s read at character select, until
+    /// [`Self::take_guild_answers`].
+    guild_answers: Vec<messages::GuildQueryResponse>,
 }
 
 /// What the connection learned that outlives one character's world session, carried by the read
@@ -63,7 +67,7 @@ pub(super) struct LinkFacts {
     /// Roster guid to race, so [`WorldSession::player_login`] can pick the chat language.
     roster_races: std::collections::HashMap<u64, u8>,
     /// The billing group the last `SMSG_AUTH_RESPONSE` to carry one gave. Deviation: zeros until
-    /// one does, where the reference's words are never initialised (the session is allocated
+    /// one does, because the reference's words are never initialised (the session is allocated
     /// without zero-fill, `ui/billing` in benilla-re).
     billing: messages::Billing,
     /// `SMSG_ADDON_INFO`'s per-record status bytes in order; `None` until the server answers.
@@ -189,6 +193,7 @@ impl WorldSession {
             traffic,
             chat_language: messages::LANGUAGE_COMMON,
             tutorial_flags: None,
+            guild_answers: Vec::new(),
         };
 
         // AUTH_RESPONSE is not always first, so others are skipped.
@@ -202,7 +207,7 @@ impl WorldSession {
                 ..
             } = packet
             {
-                session.link.billing = billing;
+                session.link.billing.apply(billing);
             }
             match packet {
                 ServerPacket::AuthResponse { result, .. } if result == messages::AUTH_OK => break,
@@ -274,12 +279,16 @@ impl WorldSession {
         // `SMSG_ADDON_INFO` can reach any of the handshake's read loops, so it is caught here.
         match &packet {
             ServerPacket::AddonInfo { records } => self.link.addon_info = Some(records.clone()),
-            // Deviation: benilla runs no Warden module and answers nothing, where the reference
-            // hands `SMSG_WARDEN_DATA` to the module its connect loads (`0x6ca2f0`, `0x6ca5c0`)
-            // and sends that module's answer as `CMSG_WARDEN_DATA` (`0x6ca6a0`). The message is
-            // read past like any stray and the login goes on; what follows is the server's policy
-            // (vmangos kicks after `Warden.ClientResponseDelay`, `Warden.cpp:686-691`). benilla
-            // runs no code a server sends ([`crate::auth::AuthReject::reply`] gives the rule).
+            // So can a guild's answer, which is no reply to any of them (`0x555290`).
+            ServerPacket::GuildQueryResponse(answer) => self.guild_answers.push(answer.clone()),
+            // Deviation: benilla runs no Warden module and answers nothing, because the answers
+            // come from native Win32 x86 code the server sends, which the client maps, links and
+            // runs in its own process (`0x7a79d0`), and benilla runs no such code on any platform
+            // ([`crate::auth::AuthReject::reply`] gives the rule). The reference hands
+            // `SMSG_WARDEN_DATA` to the module its connect loads (`0x6ca2f0`, `0x6ca5c0`) and sends
+            // that module's answer as `CMSG_WARDEN_DATA` (`0x6ca6a0`); here the message is read
+            // past like any stray and the login goes on. What follows is the server's
+            // policy (vmangos kicks after `Warden.ClientResponseDelay`, `Warden.cpp:686-691`).
             ServerPacket::Other {
                 opcode: opcode::SMSG_WARDEN_DATA,
             } => self.link.warden_asked = true,
@@ -323,8 +332,9 @@ impl WorldSession {
         )
     }
 
-    /// Request and return the character list (blocking) — the native twin of
-    /// [`Self::char_enum_async`].
+    /// Request and return the character list, remembering each race for the chat language; a list
+    /// the reply failed is [`super::CharListFailed`], with the session unharmed (blocking) — the
+    /// native twin of [`Self::char_enum_async`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn char_enum(&mut self) -> Result<Vec<Character>> {
         futures_lite::future::block_on(self.char_enum_async())
@@ -338,8 +348,11 @@ impl WorldSession {
                 continue;
             };
             match packet {
-                ServerPacket::CharEnum { characters } => {
+                ServerPacket::CharEnum { characters, failed } => {
                     self.link.roster_races = characters.iter().map(|c| (c.guid, c.race)).collect();
+                    if failed {
+                        return Err(super::CharListFailed.into());
+                    }
                     return Ok(characters);
                 }
                 other => self.note_stray(other),
@@ -377,6 +390,19 @@ impl WorldSession {
         if let ServerPacket::TutorialFlags(flags) = packet {
             self.tutorial_flags = Some(flags.bytes);
         }
+    }
+
+    /// Ask for a guild's record at character select, as the select build's emblem lookup does on a
+    /// miss (`0x472cde` → `0x6d6d20` → `0x560e30`). Nothing waits on the reply: vmangos answers an
+    /// unknown id with another packet (`Handlers/GuildHandler.cpp:44`), and a read here takes the
+    /// answer whenever it comes ([`Self::take_guild_answers`]).
+    pub fn guild_query(&mut self, guild_id: u32) -> Result<()> {
+        self.send(opcode::CMSG_GUILD_QUERY, &messages::guild_query(guild_id))
+    }
+
+    /// The guild answers read at character select since the last call, in the order they came.
+    pub fn take_guild_answers(&mut self) -> Vec<messages::GuildQueryResponse> {
+        std::mem::take(&mut self.guild_answers)
     }
 
     /// Create a character; returns the `SMSG_CHAR_CREATE` result byte (blocking) — the native twin
@@ -989,6 +1015,7 @@ impl WorldSession {
             traffic: writer.traffic,
             chat_language: writer.chat_language,
             tutorial_flags: None,
+            guild_answers: Vec::new(),
         };
         session
             .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))

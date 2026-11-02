@@ -118,7 +118,7 @@ impl RosterUpdate {
 
 /// The `guildMemberNotify` CVar, Guild Member Alert on the Chat options page (help string at
 /// `0x860320`). Off by default: its register site `0x5e24c7` pushes `"0"` (`0x82e570`). Kept apart
-/// from [`GuildState`], which is cleared on disconnect.
+/// from [`GuildState`], which a session's end resets.
 #[derive(Resource, Default)]
 pub(crate) struct GuildMemberNotify(pub(crate) bool);
 
@@ -136,10 +136,15 @@ pub(crate) enum Waiter {
     /// The `PLAYER_GUILD_TIMESTAMP` watcher's `0x5e29c0` (`0x5e299d`): `RefreshGuildTag` on every
     /// held player of the guild (`0x5e29e0`).
     Members,
+    /// `GetGuildName`'s `OnGuildRecordForName` (`0x5e0a25`, `0x5dd860`) for the player `guid`,
+    /// whose name block the guild line missed: `InvalidateNameDesc` on it while the object
+    /// manager holds it (`0x5dd880`, `0x5dd88b`), whose gate may bind its plate there (`0x60706a`).
+    NameText(u64),
 }
 
 /// The guild session mirror: filled by the packet handlers, read by the getters through the call
-/// host, reset on disconnect, and its roster and ranks at each world entry ([`seed_vm_guild`]).
+/// host, reset at a session's end but for the guild store ([`Self::end_session`]), and its roster
+/// and ranks at each world entry ([`seed_vm_guild`]).
 #[derive(Resource)]
 pub(crate) struct GuildState {
     /// Our `PLAYER_GUILDID` (field 191), `0` when guildless; mirrored from our descriptor as the
@@ -258,6 +263,30 @@ impl GuildState {
         self.identity_generation = self.identity_generation.wrapping_add(1);
         Arc::make_mut(&mut self.now.identities).clear();
         self.settle();
+    }
+
+    /// A session's end: the next login may be another character, so all but the guild store goes.
+    /// The store, its in-flight asks with it, lasts until the world entry's clear, the one caller
+    /// of `0x555740` (`0x48f586`), so the select screen reads what the world asked. Only its
+    /// callbacks go, freed node by node at the interface's teardown (`0x490c35` → `0x5615b0`).
+    fn end_session(&mut self) {
+        let now = GuildView {
+            identities: std::mem::take(&mut self.now.identities),
+            ..GuildView::default()
+        };
+        *self = Self {
+            identities: std::mem::take(&mut self.identities),
+            identity_generation: self.identity_generation,
+            lane: GuildLane::new(now.clone()),
+            now,
+            ..Self::default()
+        };
+    }
+
+    /// The teardown's free of the store's callbacks, running none, its records and in-flight asks
+    /// left (`0x5615b0`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.waiters().clear();
     }
 
     /// The deadline `GuildRoster()` waits for (`0xb73130`), in real-time seconds.
@@ -445,6 +474,25 @@ impl GuildState {
                 .entry(guild_id)
                 .or_default()
                 .push(Waiter::Info(guid));
+        }
+    }
+
+    /// The name block's guild line missed `guild_id` for the player `guid` (`0x5e0a3a`): its
+    /// callback waits on the record. One a player: each rebuild that misses again leaves the
+    /// reference another, whose run gates the same unit again and moves nothing more.
+    fn wait_for_name_text(&self, guild_id: u32, guid: u64) {
+        let mut waiters = self.waiters();
+        let list = waiters.entry(guild_id).or_default();
+        if !list.contains(&Waiter::NameText(guid)) {
+            list.push(Waiter::NameText(guid));
+        }
+    }
+
+    /// The player `guid` leaves the object manager: its release cancels the name block's callback
+    /// on a record still pending (`0x5e9af8`-`0x5e9b16`), as its destruction does (`0x5dd6f2`).
+    pub(crate) fn cancel_name_text(&self, guid: u64) {
+        for list in self.waiters().values_mut() {
+            list.retain(|w| *w != Waiter::NameText(guid));
         }
     }
 
@@ -661,16 +709,23 @@ fn guild_of(fields: &ObjectFields, guild: &GuildState, ask: Ask<'_>) -> Option<U
 }
 
 /// A unit's guild name alone: the overhead name stack's guild line (`"\n<%s>"`, `0x860f9c`), shown
-/// under `UnitNamePlayerGuild`'s mask bit `0x10` (`0x609085`) and read through `0x5e09f0`.
+/// under `UnitNamePlayerGuild`'s mask bit `0x10` (`0x609085`) and read through `0x5e09f0`, for the
+/// player `guid`, whose miss leaves its name block's callback ([`Waiter::NameText`]).
 /// [`unit_guild`] without its clones: [`crate::nameplates::drive_nameplates`] reads it per frame.
 pub(crate) fn unit_guild_name<'a>(
+    guid: u64,
     fields: &ObjectFields,
     guild: &'a GuildState,
     commands: &NetCommands,
 ) -> Option<&'a str> {
-    guild
-        .resolve_identity(fields.player_guild_id(), Ask::New(commands))
-        .map(|identity| identity.name.as_str())
+    let guild_id = fields.player_guild_id();
+    let name = guild
+        .resolve_identity(guild_id, Ask::New(commands))
+        .map(|identity| identity.name.as_str());
+    if name.is_none() && guild_id != 0 {
+        guild.wait_for_name_text(guild_id, guid);
+    }
+    name
 }
 
 /// A unit's guild crest for the body composite, off its public `PLAYER_GUILDID`, its guild record
@@ -695,6 +750,12 @@ pub(crate) fn corpse_guild_emblem(
     ask: Ask<'_>,
 ) -> Option<GuildEmblem> {
     guild_emblem(fields.corpse_guild(), guild, ask)
+}
+
+/// A select record's crest, off its roster guild, as far as the cache holds it: the select build
+/// asks a miss itself, over the character park, where no world writer stands.
+pub(crate) fn select_guild_emblem(guild_id: u32, guild: &GuildState) -> Option<GuildEmblem> {
+    guild_emblem(guild_id, guild, Ask::Read)
 }
 
 fn guild_emblem(guild_id: u32, guild: &GuildState, ask: Ask<'_>) -> Option<GuildEmblem> {
@@ -755,6 +816,20 @@ pub(crate) mod net {
             for waiter in &waiters {
                 match waiter {
                     Waiter::Roster => guild.raise(Fire::Roster(RosterUpdate::Applied)),
+                    // `0x5dd880`: the unit held, with mask 8.
+                    &Waiter::NameText(guid) => {
+                        let held = index
+                            .0
+                            .get(&guid)
+                            .and_then(|&e| stores.get(e).ok())
+                            .is_some_and(|(store, _)| store.is_unit());
+                        if held {
+                            notices.write(FieldNotice::Plate {
+                                guid,
+                                call: crate::vplates::PlateCall::Gate,
+                            });
+                        }
+                    }
                     other => notices.write_batch(waiter_notices(
                         guild_id,
                         std::slice::from_ref(other),
@@ -781,7 +856,7 @@ pub(crate) mod net {
                     guid,
                     id: crate::field_watch::id::PLAYER_GUILD_UPDATE,
                 }),
-                Waiter::Roster => {}
+                Waiter::Roster | Waiter::NameText(_) => {}
                 Waiter::Members => out.extend(
                     players
                         .iter()
@@ -854,11 +929,10 @@ pub(crate) mod net {
         }
     }
 
-    /// Reset at session end: the next login may be another character. The identity store goes
-    /// too, which the next world entry would clear anyway (`0x5557c0`). The verbs' own state
-    /// resets at that entry ([`seed_vm_guild`]).
+    /// A session's end ([`GuildState::end_session`]). The verbs' own state resets at the next
+    /// world entry ([`seed_vm_guild`]).
     fn on_session_end(In(_): In<SessionEvent>, mut guild: ResMut<GuildState>) {
-        *guild = GuildState::default();
+        guild.end_session();
     }
 
     /// Queue the message ids [`lines`] named.
@@ -1030,6 +1104,83 @@ mod tests {
             params: params.iter().map(|p| (*p).to_string()).collect(),
             guid,
         }
+    }
+
+    /// The select build's read of a record: never the store's key 0 (`0x560e3d`), and no crest for
+    /// one undesigned, whose `-1`s fail `0x6d6d20` (`0x6d6d73`-`0x6d6d93`).
+    #[test]
+    fn a_select_crest_is_a_designed_record_of_a_real_guild() {
+        let mut guild = GuildState::default();
+        let land = |guild: &mut GuildState, guild_id: u32, emblem_style: i32| {
+            guild.apply_query_response(GuildQueryResponse {
+                guild_id,
+                name: "Guild".to_string(),
+                emblem_style,
+                ..Default::default()
+            });
+        };
+        assert_eq!(select_guild_emblem(5, &guild), None, "nothing held");
+        land(&mut guild, 5, 12);
+        assert_eq!(
+            select_guild_emblem(5, &guild).map(|e| e.emblem_style),
+            Some(12)
+        );
+        land(&mut guild, 6, -1);
+        assert_eq!(select_guild_emblem(6, &guild), None, "undesigned");
+        land(&mut guild, 0, 12);
+        assert_eq!(select_guild_emblem(0, &guild), None, "no guild");
+    }
+
+    /// Through the real registration: a session's end takes the character's guild and the store's
+    /// callbacks (`0x490c35` → `0x5615b0`) and leaves the store, records and in-flight asks, to the
+    /// next world entry's clear (`0x48f586` → `0x5557c0`).
+    #[test]
+    fn a_session_end_leaves_the_guild_store_to_the_next_world_entry() {
+        let (commands, _rx) = net_commands();
+        let mut app = App::new();
+        app.add_plugins(UiGuildPlugin);
+        let mut guild = app.world_mut().resource_mut::<GuildState>();
+        guild.apply_query_response(GuildQueryResponse {
+            guild_id: 5,
+            name: "Legacy".to_string(),
+            emblem_style: 12,
+            ..Default::default()
+        });
+        guild.resolve_identity(8, Ask::New(&commands));
+        guild.waiters().entry(8).or_default().push(Waiter::Roster);
+        guild.mirror_self(5, 1);
+        guild.apply_roster(GuildRoster {
+            motd: "Raid at eight".into(),
+            members: vec![member(1, "Tigole", guild_presence::ONLINE)],
+            ..Default::default()
+        });
+        let generation = guild.identity_generation();
+
+        crate::net::handlers::dispatch(
+            app.world_mut(),
+            vec![benilla_protocol::SessionEvent::Disconnected {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+            }],
+        );
+
+        let mut guild = app.world_mut().resource_mut::<GuildState>();
+        assert_eq!(
+            select_guild_emblem(5, &guild).map(|e| e.emblem_style),
+            Some(12),
+            "the select screen wears it at once"
+        );
+        assert!(guild.seen().identities.contains_key(&5));
+        assert!(guild.identities.is_pending(8), "an ask stays in flight");
+        assert_eq!(guild.identity_generation(), generation);
+        assert!(guild.waiters().is_empty(), "its callbacks went");
+        assert!(guild.mirrors(0, 0), "the character's guild went");
+        assert_eq!(guild.now.roster.motd, "");
+        assert!(guild.now.roster.members.is_empty());
+
+        guild.clear_world_session();
+        assert!(!guild.identity_known(5), "the world entry clears it");
+        assert!(!guild.identity_known(8));
     }
 
     #[test]
@@ -1579,19 +1730,19 @@ mod tests {
         guild.identities.refuse(8);
 
         let guildless = ObjectFields::from_pairs(&[]);
-        assert_eq!(unit_guild_name(&guildless, &guild, &commands), None);
+        assert_eq!(unit_guild_name(1, &guildless, &guild, &commands), None);
         assert_eq!(rx.try_iter().count(), 0, "guild id 0 asks nothing");
 
         let unknown = ObjectFields::from_pairs(&[(191, 9)]);
         assert_eq!(
-            unit_guild_name(&unknown, &guild, &commands),
+            unit_guild_name(1, &unknown, &guild, &commands),
             None,
             "a query in flight draws no line"
         );
         assert_eq!(rx.try_iter().count(), 1, "and the miss asked for it");
 
         let blank = ObjectFields::from_pairs(&[(191, 8)]);
-        assert_eq!(unit_guild_name(&blank, &guild, &commands), None);
+        assert_eq!(unit_guild_name(1, &blank, &guild, &commands), None);
         assert_eq!(
             rx.try_iter().count(),
             0,
@@ -1599,8 +1750,11 @@ mod tests {
         );
 
         let member = ObjectFields::from_pairs(&[(191, 7), (192, 1)]);
-        assert_eq!(unit_guild_name(&member, &guild, &commands), Some("Legacy"));
-        let via_line = unit_guild_name(&member, &guild, &commands).map(str::to_owned);
+        assert_eq!(
+            unit_guild_name(1, &member, &guild, &commands),
+            Some("Legacy")
+        );
+        let via_line = unit_guild_name(1, &member, &guild, &commands).map(str::to_owned);
         let via_api = unit_guild(&member, &guild, &commands).map(|g| g.name);
         assert_eq!(via_line, via_api, "the two readers of one cache disagree");
     }

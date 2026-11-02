@@ -170,6 +170,107 @@ fn transparency_lookup_reads_0xa4_not_the_texture_unit_lookup_at_0x9c() {
     assert_eq!(m.texture_transform_lookup, vec![0xffff]);
 }
 
+/// The draw reads the coordinate table unchecked (`0x70b8bd`), so a stage past it reads the file's
+/// next u16: a one-entry `[0]` followed by `0, 0xffff` gives stage 1 a vertex UV set and stage 2
+/// the sphere map. A table ending the file, or an empty one, leaves nothing to read.
+#[test]
+fn a_stage_past_the_coordinate_table_reads_on_into_the_file() {
+    let mut b = header();
+    let unit_ofs = b.len() as u32;
+    for v in [0u16, 0, 0xffff] {
+        b.extend(v.to_le_bytes());
+    }
+    set_arr(&mut b, OFS_TEX_UNIT_LOOKUP, 1, unit_ofs);
+    let fmt = parse(&b).expect("a one-entry coordinate table parses");
+    let m = fmt.model();
+    let batch = combine_batch();
+    assert_eq!(m.texture_unit_lookup, vec![0]);
+    assert_eq!(m.stage_coord(&b, &batch, 0), Some(0));
+    assert_eq!(m.stage_coord(&b, &batch, 1), Some(0), "the file's next u16");
+    assert!(
+        !m.stage_is_env_mapped(&b, &batch, 1),
+        "0 is a vertex UV set, not the sphere map"
+    );
+    assert_eq!(m.stage_coord(&b, &batch, 2), Some(0xffff));
+    assert!(m.stage_is_env_mapped(&b, &batch, 2));
+    // The combo index itself past the table reads on the same way.
+    let past = SkinBatch {
+        texture_coord_combo_index: 2,
+        ..combine_batch()
+    };
+    assert_eq!(m.stage_coord(&b, &past, 0), Some(0xffff));
+
+    // The table is the file's last bytes: nothing past it, the sphere map.
+    b.truncate(unit_ofs as usize + 2);
+    let fmt = parse(&b).expect("a table at the end of the file parses");
+    assert_eq!(fmt.model().stage_coord(&b, &batch, 1), None);
+    assert!(fmt.model().stage_is_env_mapped(&b, &batch, 1));
+
+    // An empty table is a null pointer in the reference, whatever follows its offset.
+    let mut b = header();
+    let unit_ofs = b.len() as u32;
+    b.extend([0u8; 4]);
+    set_arr(&mut b, OFS_TEX_UNIT_LOOKUP, 0, unit_ofs);
+    let fmt = parse(&b).expect("an empty coordinate table parses");
+    assert_eq!(fmt.model().stage_coord(&b, &batch, 0), None);
+    assert!(fmt.model().stage_is_env_mapped(&b, &batch, 0));
+}
+
+/// The draw reads the transform table unchecked too (`0x70b8aa`): a one-entry `[1]` followed by
+/// `0, 2` gives stage 1 transform 0 and stage 2 the identity, at or above the count of two
+/// (`0x70b90b`). A table ending the file, or an empty one, leaves the identity.
+#[test]
+fn a_stage_past_the_transform_table_reads_on_into_the_file() {
+    let mut b = header();
+    // Two keyless transforms, told apart by their translation's global sequence.
+    let rec_ofs = b.len() as u32;
+    for k in [0u16, 1] {
+        b.extend(m2track(0, k, (0, 0), (0, 0)));
+        b.extend(m2track(0, 0xffff, (0, 0), (0, 0)));
+        b.extend(m2track(0, 0xffff, (0, 0), (0, 0)));
+    }
+    set_arr(&mut b, OFS_TEX_ANIM, 2, rec_ofs);
+    let lk_ofs = b.len() as u32;
+    for v in [1u16, 0, 2] {
+        b.extend(v.to_le_bytes());
+    }
+    set_arr(&mut b, OFS_TEX_ANIM_LOOKUP, 1, lk_ofs);
+    let fmt = parse(&b).expect("a one-entry transform table parses");
+    let m = fmt.model();
+    assert_eq!(m.texture_transform_lookup, vec![1]);
+    let batch = combine_batch();
+    let at = |batch: &SkinBatch, stage| {
+        m.stage_transform(&b, batch, stage)
+            .map(|t| t.translation.gseq)
+    };
+    assert_eq!(at(&batch, 0), Some(1));
+    assert_eq!(at(&batch, 1), Some(0), "the file's next u16");
+    assert_eq!(at(&batch, 2), None, "2 is past the two transforms");
+    let past = SkinBatch {
+        texture_transform_combo_index: 1,
+        ..combine_batch()
+    };
+    assert_eq!(at(&past, 0), Some(0));
+
+    // The table is the file's last bytes: nothing past it, the identity.
+    b.truncate(lk_ofs as usize + 2);
+    let fmt = parse(&b).expect("a table at the end of the file parses");
+    assert!(fmt.model().stage_transform(&b, &batch, 1).is_none());
+
+    // An empty table is a null pointer in the reference, whatever follows its offset.
+    let mut b = header();
+    let rec_ofs = b.len() as u32;
+    for _ in 0..3 {
+        b.extend(m2track(0, 0xffff, (0, 0), (0, 0)));
+    }
+    set_arr(&mut b, OFS_TEX_ANIM, 1, rec_ofs);
+    let lk_ofs = b.len() as u32;
+    b.extend([0u8; 4]);
+    set_arr(&mut b, OFS_TEX_ANIM_LOOKUP, 0, lk_ofs);
+    let fmt = parse(&b).expect("an empty transform table parses");
+    assert!(fmt.model().stage_transform(&b, &batch, 0).is_none());
+}
+
 /// A batch on material 0 for [`M2Model::stage_combine`]; only `material_index` is read.
 fn combine_batch() -> SkinBatch {
     SkinBatch {
@@ -336,6 +437,9 @@ fn one_vertex_decodes_all_fields() {
     vert[28..32].copy_from_slice(&6.0f32.to_le_bytes());
     vert[32..36].copy_from_slice(&0.5f32.to_le_bytes());
     vert[36..40].copy_from_slice(&0.25f32.to_le_bytes());
+    // UV set 1 at `+0x28`, the coordinates stage 1 reads.
+    vert[40..44].copy_from_slice(&0.75f32.to_le_bytes());
+    vert[44..48].copy_from_slice(&(-2.5f32).to_le_bytes());
     b.extend(vert);
 
     let fmt = parse(&b).expect("one full vertex record parses");
@@ -345,6 +449,10 @@ fn one_vertex_decodes_all_fields() {
     assert_eq!(v.bone_indices, [1, 2, 3, 4]);
     assert_eq!((v.normal.x, v.normal.y, v.normal.z), (4.0, 5.0, 6.0));
     assert_eq!((v.tex_coords.x, v.tex_coords.y), (0.5, 0.25));
+    assert_eq!(
+        (v.tex_coords2.x.to_bits(), v.tex_coords2.y.to_bits()),
+        (0.75f32.to_bits(), (-2.5f32).to_bits())
+    );
 }
 
 #[test]

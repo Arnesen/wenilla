@@ -45,8 +45,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # What landed on main, first line only — the pin history reads as a list of what shipped
-          # rather than a column of identical "auto-bump" lines.
-          subject=$(printf '%s' "${SUBJECT}" | head -n1)
+          # rather than a column of identical "auto-bump" lines. Cut in the shell, not by a pipe
+          # into `head`: a squashed sync's message runs to tens of KB, `head` exits after one line,
+          # and the writer's broken pipe fails the step under pipefail.
+          subject=${SUBJECT%%$'\n'*}
           # Two merges landing together race for this push: whoever loses rebases onto the winner's
           # pin and re-applies. The pin is one line, so a rebase here is either a no-op or a
           # fast-forward — and if the winner already pinned this same SHA, the check below exits.

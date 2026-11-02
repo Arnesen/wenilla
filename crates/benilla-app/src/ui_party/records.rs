@@ -93,16 +93,31 @@ pub(crate) fn record_notices(
     if mask & 0x600 != 0 {
         signal(member, id::UNIT_AURA);
     }
+    // A new pet guid has the old pet's, then the new one's token flags read again, each held
+    // as a unit (`0x5e580b`-`0x5e5846`), then `UNIT_PET`.
     if mask & 0x800 != 0 {
-        signal(member, id::UNIT_PET);
+        for pet in [old.pet_guid, new.pet_guid].into_iter().flatten() {
+            out.push(FieldNotice::TokenFlags {
+                guid: pet,
+                change: benilla_ui::script::TokenChange::Update,
+            });
+        }
+        out.push(FieldNotice::Signal {
+            guid: member,
+            id: id::UNIT_PET,
+        });
     }
     let pet = new.pet_guid.unwrap_or(0);
     if pet != 0 {
         let power = u16::from(new.pet_power_type.unwrap_or(0));
-        // `0x491a00` on the pet (`0x5e5873`): the tooltip's refresh, for a held pet alone, then
-        // `UNIT_NAME_UPDATE`.
+        // `0x491a00` on the pet (`0x5e5873`): the tooltip's refresh and the name's gate, for a
+        // held pet alone, then `UNIT_NAME_UPDATE`.
         if mask & 0x1000 != 0 {
             out.push(FieldNotice::TooltipUnit { guid: pet });
+            out.push(FieldNotice::Plate {
+                guid: pet,
+                call: crate::vplates::PlateCall::Gate,
+            });
             out.push(FieldNotice::Signal {
                 guid: pet,
                 id: id::UNIT_NAME_UPDATE,
@@ -603,9 +618,18 @@ mod tests {
             pet_guid: Some(PET + 1),
             ..old.clone()
         };
+        let update = |guid| FieldNotice::TokenFlags {
+            guid,
+            change: benilla_ui::script::TokenChange::Update,
+        };
         assert_eq!(
             record_notices(MEMBER, &old, &other_pet),
-            signals(&[(MEMBER, 0)])
+            [
+                &[update(PET), update(PET + 1)][..],
+                &signals(&[(MEMBER, 0)])
+            ]
+            .concat(),
+            "the old pet's, then the new one's flags, then `UNIT_PET`"
         );
         let pet_moved = PartyMemberStatsInfo {
             pet_name: Some("Fang".into()),
@@ -617,7 +641,13 @@ mod tests {
             ..old.clone()
         };
         // Focus, power type 2: `UNIT_FOCUS` 19.
-        let mut want = vec![FieldNotice::TooltipUnit { guid: PET }];
+        let mut want = vec![
+            FieldNotice::TooltipUnit { guid: PET },
+            FieldNotice::Plate {
+                guid: PET,
+                call: crate::vplates::PlateCall::Gate,
+            },
+        ];
         want.extend(signals(&[(PET, 183)]));
         want.push(FieldNotice::PortraitMark { guid: PET });
         want.extend(signals(&[(PET, 16), (PET, 30), (PET, 19), (PET, 41)]));

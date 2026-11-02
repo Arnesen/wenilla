@@ -40,10 +40,11 @@ taken.
 A feature 1.12.1 does not have lives in a crate of its own that adds its Bevy plugins through
 `benilla_app::run_with`, as `crates/benilla-app/examples/extended_launcher.rs` shows, or in a
 fork. A client started through `run_with` says `extended` in its build line, so its reports read
-apart from stock benilla's. The crate keeps its own settings, never rows in benilla's CVar table,
-which every addon reads, and its files go under `benilla_app::config_dir()`, its own
-`benilla-config/`: an addon it ships is written into that folder's `AddOns/` and loads as any
-addon does.
+apart from stock benilla's. Its build script calls `benilla_buildstamp::emit()`, which stamps the
+commit that line names and gives its binary the 8 MB main-thread stack the app needs on Windows.
+The crate keeps its own settings, never rows in benilla's CVar table, which every addon reads,
+and its files go under `benilla_app::config_dir()`, its own `benilla-config/`: an addon it ships
+is written into that folder's `AddOns/` and loads as any addon does.
 
 Past `run_with` and that folder, benilla opens a piece of itself to such a crate only when its own
 1.12.1 work creates that piece, never for the crate alone, and promises no stable API: a crate
@@ -189,7 +190,10 @@ out of scope is closed with the reason.
   crate's tests, the quickest loop. `scripts/check.sh` verifies a round of work: the crates your
   branch changed against main and their dependents, so on a clean clone it has nothing to check; `scripts/gates.sh` is the full chain, and it opens a window for the engine boot
   checks, so it needs a display. `WOW_STOCK_UI=1` boots a dev build on the stock interface
-  alone, without benilla's layer. Work on a branch.
+  alone, without benilla's layer. A dev build panics when a script call or an engine turn sends a
+  packet, or writes an item's lock or the cursor, while an event handler it raised has yet to
+  run, which 1.12.1 runs first (`crates/benilla-ui/src/script/census.rs`);
+  `BENILLA_SEND_CENSUS_PANIC=0` turns that off. Work on a branch.
 
 ## Reporting a bug
 

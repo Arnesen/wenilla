@@ -44,15 +44,7 @@ pub(super) enum Row {
 /// What still fires in the frame's system order rather than the packets', with what it is. A
 /// queue's row stays while any feed takes that queue; each goes when its producer moves onto a
 /// lane, and a row whose queue, feed or system is gone fails as stale.
-pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[(
-    Row::HostHeld,
-    "::items::Items",
-    "the record answers' callbacks still run off the frame's records rather than in the \
-         answer's list (`ItemCacheReceive` `0x55bdb0`, `0x55bf12`-`0x55bf39`): the \
-         dress-up's (`0x504ba0`) and the equipment display's (`0x5ed880`); and the combat log's \
-         (`0x6294b0`) and the auction lists' (`0x4cca10`, `0x4ccc60`, `0x4cceb0`), which \
-         `run_answer_tail` runs after the answer's list rather than in it",
-)];
+pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[];
 
 /// The host-held queues a handler fills that no feed fires off, each named quiet beside why: the
 /// check finds a queue the handlers and the host both hold, but not whether a feed fires off it
@@ -78,6 +70,14 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read through the host by the set block, and quiet: a member's answer rebuilds the tooltip
     // waiting on it through the build's own wait, read as the tick runs.
     "::item_names::ItemNames",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: the item records, read through
+    // the host by the getters at their calls (`0x55ba30`), and quiet. Every callback a lookup
+    // leaves runs in its answer's list in the order registered (`0x55bdb0`, `0x55bf12`-`0x55bf39`),
+    // the dress-up's (`0x504ba0`), the combat log's (`0x6294b0`) and the auction lists'
+    // (`0x4cca10`, `0x4ccc60`, `0x4cceb0`) among them; the equipment display's (`0x5ed880`) dresses
+    // the model and signals nothing, a draw; and the item-record feed's quest log signal
+    // (`0x4e0830`) falls due only for a record pushed outside every packet.
+    "::items::Items",
     // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: read, and quiet. A member's ping
     // stores the point at its packet and signals on the notice lane (`0x4ee330`), our own
     // `PingLocation` holds it in the host in its call, and only a new VM's seed reads it.
@@ -123,10 +123,18 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Quiet: the autorun bit as the frame's calls leave it, read and written inside each call
     // (`0x513de7`), which an auto-move's stop clears in place (`0x514630`).
     "::player::press::CallAutorun",
+    // Quiet: the stand state's prediction `[player+0x1d68]`, which the local apply writes in its
+    // call, in the controller and in `SMSG_STANDSTATE_UPDATE`'s handler (`0x5f07a3`), and which
+    // `GetStandState` reads at the call (`0x5ed570`); the apply's loot close and attack stop
+    // signal in place, and no feed fires off it.
+    "::player::state::StandPending",
     // Quiet: the cast ladder's per-call state, which the cast result's, the loot response's and the
     // go's handlers hold with the ladder and never write. A press holds the first and its call resumes it before it returns
     // (`0x6e4efb`), each call sets and puts back the second, and the pet press applies the third
-    // in its call; no feed reads them.
+    // in its call; no feed reads them. A call parks its cast in the fourth at each signal ahead
+    // of a later send and resumes it past that signal's listeners before it returns; a handler's
+    // cast finds it unarmed and runs straight through.
+    "::spell::cast_send::CastPark",
     "::spell::cast_send::HeldForPick",
     "::spell::cast_send::ScriptCastPermit",
     "::spell::cast_send::unit_caster::UnitAttackOwed",
@@ -335,21 +343,6 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
 /// a row whose feed or inputs moved fails until it matches.
 #[rustfmt::skip]
 pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
-    // The VM's copy of the item records, seated whole in a new VM and topped up with a record that
-    // lands outside an answer (a cache file's load), as the frame left the cache; an answer pushes
-    // its record at its packet, ahead of its callbacks (`0x55bdb0`), and a tooltip build reads the
-    // record and the player at the call (`0x5075f0` at `0x52da24`). A getter's miss is asked here,
-    // where the reference's lookup sends inside the call (`0x55ba30`).
-    ("::ui_items::feed::feed_item_stats", &["items::Items"]),
-    // The plates seated off the units as the frame left them, where the reference moves a plate's
-    // bar inside the packet, by its health watcher `0x7cc570` (registered by `0x7cc510`), and
-    // binds plates there too: `0x60f600`, called at `0x60706a` from `InvalidateNameDesc`, whose
-    // callers include `0x491a00`, `0x5ff800` and `0x604910`.
-    ("::vplates::drive_vplates", &["Transform", "names::NameCache", "net::GuidIndex",
-        "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
-        "player::camera::CameraControl", "spell::group_relation::GroupRoster",
-        "spell::targeting::SpellTargeting", "target::Selection", "ui_party::GroupState",
-        "video::Widescreen", "vplates::PlateFlashes", "vplates::VPlateMode"]),
 ];
 
 /// The view pushes [`READS_FRAME_FINAL`]'s test finds whose build the reference too makes outside
@@ -360,10 +353,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
 /// dispatch reads what the last build left, as 1.12.1's does. They stay.
 #[rustfmt::skip]
 pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
-    ("::area::feed_zone_events", &["net::ObjectStore"],
-        "the tenth-tick area poll (`0x5db900`), after the packets, commits zone text through \
-         `0x494780`; wenilla's browser snapshot publishes the same commit and reads our faction \
-         template for its PvP type, without replacing the getters' live reads"),
     // With `widescreen`, which seats the cursor-anchored plate on the interface's screen.
     ("::ui_tooltip::drive_mouseover_tooltip", &["go_templates::GameObjectTemplates",
         "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
@@ -381,28 +370,60 @@ pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &
     ("::minimap::feed_minimap_arrows", &["death::DeathNet", "net::GuidIndex", "net::ObjectStore",
         "poi_marker::PoiMarker", "ui_party::GroupState"],
         "the arrow half of the minimap's render (`0x4ec950`), which aims them by bearing"),
+    ("::minimap::feed_minimap_player_facing", &["Transform", "net::GuidIndex", "net::ObjectStore",
+        "net::motion::remote::RemoteMotion", "player::view_subject::FarSight"],
+        "the minimap's frame update (`0x4eb040`), which reads the camera's object's facing \
+         (`0x4eb07e`-`0x4eb0a8`) in the frame pass after the packets"),
+    ("::ui_world_map::feed_world_map", &["Transform", "net::GuidIndex", "net::ObjectStore",
+        "net::motion::remote::RemoteMotion", "player::view_subject::FarSight"],
+        "`UpdateWorldMapArrowFrames` (`0x4a7c20`), which reads the camera's object's facing \
+         (`0x4a7c7c`-`0x4a7cd5`), called by `WorldMapButton_OnUpdate` in the frame pass after the \
+         packets"),
     ("::player::camera::focus_on_look_edges", &["player::camera::CameraControl"],
         "the mouse half of the freelook edges the frame's mouse made, which the input pass runs \
          ahead of its tick (`0x51491f` → `0x493070`, `0x493090`); a call's edge runs it inside"),
-    ("::spell::targeting::feed_targeting_to_input", &["items::Items", "names::NameCache",
-        "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
+    ("::spell::targeting::feed_targeting_to_input", &["Transform", "items::Items",
+        "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds",
+        "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
         "spell::group_relation::GroupRoster", "spell::mods::SpellModifiers",
         "spell::targeting::SpellTargeting", "target::Selection", "ui_party::GroupState",
         "ui_session::latch::InteractLatch"],
         "the word as the frame began, for the input records' reads with no host to ask; a call's \
          reads go live through the host (`SpellIsTargeting` `0x6e6cd0`)"),
+    // The units' gate binds what it reads of a unit it gives a plate, and its in-packet runs and
+    // the unit's callbacks write a bound plate's bar, colour, level, icon and name at their
+    // packets; `widescreen` shapes the screen the seat solves on, the camera rig the freelook
+    // edge, the selection the alpha and the targeting the hit-test veto (`0x7cba30`).
+    ("::vplates::drive_vplates", &["Transform", "names::NameCache", "net::GuidIndex",
+        "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
+        "player::camera::CameraControl", "spell::group_relation::GroupRoster",
+        "spell::targeting::SpellTargeting", "target::Selection", "ui_party::GroupState",
+        "video::Widescreen", "vplates::VPlateMode"],
+        "the world's render `0x483460` in the frame pass, after the packets, whose scene drain \
+         ticks each unit (`0x4815d0` → `0x48160c`, slot 14 `0x607ed0`), which runs the gate \
+         `0x60f600` at `0x607ef9`: a unit it gives a plate is bound (`0x6086e0` → `0x7cb6d0`), \
+         one it drops released (`0x60f742`), a kept one's point stored and its level refreshed on \
+         the latch (`0x60875f`); the render then seats them (`0x483647` → `0x608ce0`), and each \
+         plate's `OnUpdate` sets its alpha (`0x7cb9f9`); inside the packets the bar's watchers \
+         (`0x7cc570`), the health watcher's colour and flash (`0x60471b`, `0x604764`), the \
+         reaction's colour (`0x606e3c`), the level watcher (`0x60ce5b`), the raid board's icons \
+         (`0x4ba28a` → `0x608a90`), the logs' flashes (`0x62abac`, `0x62ce43`), the name \
+         answers' releases (`0x5fb86e`, `0x6046c1`), `InvalidateNameDesc`'s gate (`0x60706a`) \
+         and the unit's release (`0x5fbba9`) write the plate at their callbacks"),
     ("::ui_script::extract::tick_script", &["ui_script::UiScaleCvar", "video::Widescreen"],
         "the frame pass's `OnUpdate` walk (`0x764330` → `0x765650`), its screen and scale"),
     ("::ui_script::extract::paint_script", &["video::Widescreen"],
         "the UI pass's paint, after the walk, which no getter reads"),
-    ("::ui_chat::channels::auto_join_zone_channels", &["net::ObjectStore",
-        "ui_chat::edit::ChannelState"],
+    ("::area::feed_zone_events", &["net::ObjectStore", "ui_chat::edit::ChannelState"],
         "the zone text's update `0x494780`, whose walk (`0x494931`, gated on our taxi flag at \
          `0x494908`-`0x49491a`) the area poll runs in the idle pass after the packets \
-         (`0x401ece` → `0x5db900` → `0x67e510` → `0x494780`), and `EndCinematic`'s (`0x48f1d0`), \
-         in the frame pass; its runs inside a packet run there: the chat cache's load \
-         (`0x499a22`) and the taxi flag's clear (`0x5ff56e`)"),
+         (`0x401ece` → `0x5db900` → `0x67e510` → `0x494780`); its runs inside a packet run \
+         there: the chat cache's load (`0x499a22`) and the taxi flag's clear (`0x5ff56e`)"),
+    ("::ui_chat::channels::walk_when_cinematic_ends", &["net::ObjectStore",
+        "ui_chat::edit::ChannelState"],
+        "`EndCinematic`'s walk (`0x48f1d0`, gated on our taxi flag at `0x48f1c3`-`0x48f1ce`), in \
+         the frame pass where the shot ends"),
 ];
 
 /// The systems that write the VM and push no view a getter reads of what a handler writes, by a
@@ -451,9 +472,14 @@ pub(super) const WRITES_NO_VIEW: &[(&str, &str)] = &[
     ("::ui_dialog_verbs::drain_meeting_stone_joins", "the meeting stone's use, at its click"),
     ("::ui_dialog_verbs::poll_area_spirit_healer", "the healer scan every frame (`0x4818ca` → \
         `0x4923b0`), signalling in place"),
-    ("::ui_dressup::compose_dressup", "the booth's frame: the try-on callbacks (`0x504ba0`) the \
-        record answers owe, which `NOT_YET_ON_A_LANE`'s `Items` row counts, then the pane's look, \
-        a draw"),
+    ("::ui_dressup::compose_dressup", "the booth's frame: the room emptied with no pane shown, \
+        then the pane's look, a draw"),
+    ("::ui_items::feed::feed_item_stats", "the item records that land or go outside every \
+        packet, a cache file's at the character's pick ahead of the world entry's load and another \
+        realm's forget, carried into the VM's copy, and the reads `GetItemInfo` and the link verbs \
+        made of a record the copy lacked (`0x48e172`); a VM no load seated is seated whole. A new \
+        interface's copy is seated at its load, an answer's record reaches it at its packet ahead \
+        of its callbacks (`0x55bdb0`), and a getter's miss asks inside its call (`0x55ba30`)"),
     ("::ui_logout::leave_world", "the world load's first call (`0x401bd4`)"),
     ("::ui_loot::close_loot_on_leave_world", "the sweep's loot leg (`0x490ab2`)"),
     ("::ui_macro::save_dirty_macros", "the macros' save"),
@@ -543,16 +569,27 @@ pub(super) const READ_ONLY_TO_HANDLERS: &[&str] = &[
     // The connection's state, which the death getters' body test reads through the host; the
     // socket's handlers write it through their own `ResMut`.
     "::net::NetStatus",
+    // The movement clock a relayed move is due by at its arrival (`@0x618dd2`), which only the
+    // movement tick stamps, after the packets (`0x616846`).
+    "::net::motion::remote::MoveTick",
+    // What a due arrival's catch-up resolves its mover against (`0x618bb0` → `0x616cb0` →
+    // `0x634040`): the collision world's trees and scale, our controller's capsule and the traces
+    // it skips, the terrain's residency gate (`0x634154`) and the liquid index a water-walker's
+    // plane is read from (`0x63162e`).
+    "avian3d::collider_tree::ColliderTrees",
+    "avian3d::dynamics::solver::plugin::PhysicsLengthUnit",
+    "::player::state::PlayerCapsule",
+    "benilla_world::collision::MoverTraceExclusions",
+    "benilla_world::liquid::spatial::WaterIndex",
+    "benilla_world::terrain_stream::residency::TerrainResidency",
     // The login pick, which names the character the account-data sections belong to.
     "::glue_session::roster::Roster",
     // `0xb4e314`, which the party snapshot reads; only the zone feed commits it.
     "::area::CommittedZone",
-    // The walk's committed zone, which the recruitment cascade's plan reads through the host
-    // (`0x49ead7`), and the slots; the walk's poll and the notice lane's taxi walk write them
-    // through their own `ResMut`. Both sit here only because the scan cannot see an exclusive
-    // handler's writes: the chat cache's read writes both inside its section's settle, in its
-    // packet (`0x499a22`).
-    "::ui_chat::channels::ZoneChannelWalk",
+    // The slots, which the recruitment cascade's plan reads through the host (`0x49eac3`); the
+    // zone commit's walk and the notice lane's taxi walk write them through their own `ResMut`.
+    // They sit here only because the scan cannot see an exclusive handler's writes: the chat
+    // cache's read writes them inside its section's settle, in its packet (`0x499a22`).
     "::ui_chat::edit::ChannelState",
     // The console's registry, which a `ConsoleExec` a listener makes reads.
     "::console::ConsoleCommands",
@@ -718,10 +755,13 @@ pub(super) const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "bevy_input::mouse::AccumulatedMouseMotion",
     // The frame a quest-share line starts its bounded wait for a name at.
     "bevy_diagnostic::frame_count_diagnostics_plugin::FrameCount",
+    // The frame gate's spatial verdicts, which the gate a packet runs reads through the host
+    // (`0x60706a` → `0x60f600`); only the frame's gate writes them, in the world's render.
+    "::vplates::PlateSpots",
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-pub(super) fn lane_types() -> [TypeId; 42] {
+pub(super) fn lane_types() -> [TypeId; 41] {
     [
         // The views lane: what each packet changed in the stores.
         TypeId::of::<crate::ui_unit::views::ViewLog>(),
@@ -738,11 +778,8 @@ pub(super) fn lane_types() -> [TypeId; 42] {
         TypeId::of::<crate::ui_party::PartyLane>(),
         // The list rebuilds a learn, an unlearn or a pet's spells owe, stamped at their packets.
         TypeId::of::<crate::ui_tradeskill::ListRebuilds>(),
-        // The field callbacks' lane: the signals each callback's legs parked, stamped under its
-        // edge, and the refused records' walks gone on behind their signals.
+        // The field callbacks' lane: the refused records' walks gone on behind their signals.
         TypeId::of::<crate::field_callbacks::FieldCallbacks>(),
-        // The release lane: the signals each selection teardown parked, stamped under its release.
-        TypeId::of::<crate::target::Releases>(),
         TypeId::of::<crate::target::OwedSelects>(),
         // The item-text lane: the page-text packets' reads, stamped at their packets.
         TypeId::of::<crate::ui_item_text::ItemTextLane>(),
@@ -1016,7 +1053,6 @@ fn the_frames_drain_runs_after_the_feeds_and_before_the_tick() {
             "pet cooldowns",
             "quest events",
             "quest giver",
-            "releases",
             "reputation",
             "social",
             "stable",
@@ -1295,21 +1331,10 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
          the drain runs only with it up",
     ),
     (
-        "::ui_chat::channels::auto_join_zone_channels",
-        "world entry only arms the zone-channel walk, whose one push is a walk's refusal onto \
-         the ui-error lane, made where the zone text's update walks, after the packets \
-         (`0x401ece` → `0x494931`)",
-    ),
-    (
         "::player::controller::control",
         "the mover's queue sends the root and unroot acks at its frame update (`0x616438`, \
-         `0x6164a9`), and their input tick stops an auto-move there (`0x60e33d` → `0x60e347`)",
-    ),
-    (
-        "::player::press::press_tick",
-        "the window deactivate runs the input tick outside every call (`0x514490` → \
-         `0x5144b5`), its direction and pitch bits cleared (`0x5144a3`), whose pitch stop ends \
-         the auto-move there (`0x60ddda` → `0x60e990`)",
+         `0x6164a9`), and their input tick stops an auto-move there (`0x60e33d` → `0x60e347`), \
+         its starts' guard closing the loot there too (`0x60e990` → `0x60e9dd`)",
     ),
     (
         "::ui_chat::channels::end_session_channels_on_disconnect",
@@ -1319,14 +1344,7 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 
 /// The systems outside the phase that lend the call host and take a handler queue, firing off it
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
-pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[(
-    "::ui_loot::drain_loot",
-    "the loot closes a precast end owes (`0x60d040` → `EndLootWindow` `0x48f200` at `0x60d10b`), \
-     which the reference makes inside the packet that ends it: `HandleSpellGo` (`0x6e7fc5`), the \
-     spell failures (`0x6e8dd7`, `0x6e8e8c`), the health watcher (`0x6047e7`) and \
-     `OnMonsterMove` (`0x6020e8`); the unit edits owe them after the handler and the drain \
-     closes them in its own phase, so `LOOT_CLOSED` fires behind the frame's packets",
-)];
+pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[];
 
 /// The placed queues' readers that defer work to their commands and push nothing onto a lane
 /// from them, by a suffix of the system's name, with what the commands do.
@@ -1595,13 +1613,13 @@ fn the_systems_unordered_against_the_drain_meet_it_only_on_a_pure_cache() {
         for t in [
             TypeId::of::<crate::creature_anim::PlaySeq>(),
             TypeId::of::<bevy::ecs::message::Messages<crate::creature_anim::CastEvent>>(),
-            TypeId::of::<crate::ui_loot::LootMoveStart>(),
-            TypeId::of::<crate::ui_loot::LootCloseAtRest>(),
         ] {
             if let Some(id) = world.components().get_resource_id(t) {
                 drain.add_resource_write(id);
             }
         }
+        // The tail's loot close, which runs as its end applies.
+        drain.extend(crate::ui_loot::precast_end_close_access(world).combined_access());
         if let Some(id) = world
             .components()
             .get_resource_id(TypeId::of::<crate::player::Player>())
@@ -2075,13 +2093,11 @@ fn every_call_that_queues_for_the_tick_is_listed() {
 }
 
 /// Each entry of the raise check's allow list ([`crate::ui_script::raise_origin::RAISES_AT_THEIR_OWN_PLACE`])
-/// names a function that exists and gives its reason; one that cites a guard list has that list's
-/// row for it; and every call that queues for the tick has its entry, as each raises at its own
-/// place in the frame.
+/// gives its reason; one that cites a guard list has that list's row for it; and every call that
+/// queues for the tick has its entry, as each raises at its own place in the frame.
 #[test]
 fn every_raise_origin_allowed_names_its_function_and_its_row() {
     use crate::ui_script::raise_origin::{RAISES_AT_THEIR_OWN_PLACE, ROW_LISTS};
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let module = |file: &str| file.trim_end_matches(".rs").replace('/', "::");
     let queued: BTreeSet<String> = QUEUED_FOR_THE_TICK
         .iter()
@@ -2092,27 +2108,16 @@ fn every_raise_origin_allowed_names_its_function_and_its_row() {
         .collect();
     let mut wrong = Vec::new();
     for a in RAISES_AT_THEIR_OWN_PLACE {
-        let (path, func) = a.frame.rsplit_once("::").expect("a `module::fn` frame");
-        let dir = path.replace("::", "/");
-        let found = [format!("{dir}.rs"), format!("{dir}/mod.rs")]
-            .iter()
-            .filter_map(|f| std::fs::read_to_string(src.join(f)).ok())
-            .any(|code| {
-                code.contains(&format!("fn {func}(")) || code.contains(&format!("fn {func}<"))
-            });
-        if !found {
-            wrong.push(format!("{}: no such function", a.frame));
-        }
         if a.why.trim().is_empty() {
-            wrong.push(format!("{}: no reason", a.frame));
+            wrong.push(format!("{}: no reason", a.site));
         }
         let Some((list, _)) = a.why.split_once(':').filter(|(l, _)| ROW_LISTS.contains(l)) else {
             continue;
         };
-        let suffix = format!("::{}", a.frame);
+        let suffix = format!("::{}", a.site);
         let named = a.why.split('`').nth(1).filter(|n| n.starts_with("::"));
         let has_row = match list {
-            "QUEUED_FOR_THE_TICK" => queued.contains(a.frame),
+            "QUEUED_FOR_THE_TICK" => queued.contains(a.site),
             "AT_THEIR_OWN_PLACE" => AT_THEIR_OWN_PLACE.iter().any(|(s, _)| s.ends_with(&suffix)),
             "NOT_YET_ON_A_LANE" => NOT_YET_ON_A_LANE
                 .iter()
@@ -2120,12 +2125,40 @@ fn every_raise_origin_allowed_names_its_function_and_its_row() {
             _ => false,
         };
         if !has_row {
-            wrong.push(format!("{}: {list} has no row for it", a.frame));
+            wrong.push(format!("{}: {list} has no row for it", a.site));
         }
     }
     for q in &queued {
-        if !RAISES_AT_THEIR_OWN_PLACE.iter().any(|a| a.frame == q) {
+        if !RAISES_AT_THEIR_OWN_PLACE.iter().any(|a| a.site == q) {
             wrong.push(format!("{q}: queues for the tick and has no allow entry"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Each row of the raise check's allow list has its scope (`Origin::Allowed`) opened inside the
+/// function its key names, and every scope the shipped code opens names a row by a literal key, so
+/// neither the list nor its sites can drift from the other.
+#[test]
+fn every_allow_row_has_its_scope_and_every_scope_its_row() {
+    use crate::ui_script::raise_origin::RAISES_AT_THEIR_OWN_PLACE;
+    let scopes = crate::ui_script::fire_scan::allowed_scopes();
+    let mut wrong = Vec::new();
+    for s in &scopes {
+        match s.site.as_deref() {
+            None => wrong.push(format!("{}: a scope whose key is no literal", s.at)),
+            Some(site) if !RAISES_AT_THEIR_OWN_PLACE.iter().any(|a| a.site == site) => {
+                wrong.push(format!("{}: `{site}` has no row on the allow list", s.at));
+            }
+            Some(site) if s.function != site => {
+                wrong.push(format!("{}: `{site}` opens in `{}`", s.at, s.function));
+            }
+            Some(_) => {}
+        }
+    }
+    for a in RAISES_AT_THEIR_OWN_PLACE {
+        if !scopes.iter().any(|s| s.site.as_deref() == Some(a.site)) {
+            wrong.push(format!("{}: no scope opens it", a.site));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));

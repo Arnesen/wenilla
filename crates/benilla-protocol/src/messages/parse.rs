@@ -243,6 +243,22 @@ fn read_char_rename(r: &mut &[u8]) -> io::Result<ServerPacket> {
     Ok(ServerPacket::CharRename { result, renamed })
 }
 
+/// `SMSG_CHAR_ENUM`'s records as `0x5b42a0` keeps them, `None` for a list it empties
+/// (`0x5b4539`-`0x5b455d`): a count above 10 (`0x5b42d5`-`0x5b42e6`), or a store not read to its
+/// end (`0x5b4523`), as bytes after the last record leave it and a short read or a name past its
+/// cap ([`Character::read`]) poison it.
+fn read_char_enum(r: &mut &[u8]) -> Option<Vec<Character>> {
+    let count = read_u8(r).ok()?;
+    if count > 10 {
+        return None;
+    }
+    let mut characters = Vec::with_capacity(capacity_hint(count, 10));
+    for _ in 0..count {
+        characters.push(Character::read(r).ok()??);
+    }
+    r.is_empty().then_some(characters)
+}
+
 fn skip(r: &mut &[u8], n: usize) -> Option<()> {
     (r.len() >= n).then(|| *r = &r[n..])
 }
@@ -281,20 +297,27 @@ fn parse_server_body(
         opcode::SMSG_AUTH_RESPONSE => {
             // The client's grammar (`0x5b41b0`): `u8 code`; then, for OK or WAIT_QUEUE with 5+
             // bytes left, `u32 billingTimeRemaining, u8 billingPlanFlags, u32 billingTimeRested`;
-            // then, for WAIT_QUEUE, `u32 position`. The 5 guarding a 9-byte group is the client's
-            // and mis-parses a 6..=9 byte body; matched on purpose. Deviation: a body too short
-            // for the position gives `None` where the client redisplays a stale global, because
-            // showing a stale queue position as current is a client bug.
+            // then, for WAIT_QUEUE, `u32 position`. The 5 guarding a 9-byte group is the client's:
+            // a 5..=8 byte tail leaves the last dword unread, keeping its old value; matched.
+            // Deviation: a body too short for the position gives `None` where the client
+            // redisplays a stale global, because showing a stale queue position as current is a
+            // client bug.
             let result = read_u8(&mut r)?;
             let queued = result == super::AUTH_WAIT_QUEUE;
             let mut billing = None;
             if (result == super::AUTH_OK || queued) && r.len() >= 5 {
-                // Read in the client's order, into `+0x1af4`, `+0x1afc` and `+0x1af8`.
-                billing = Some(super::Billing {
-                    time_remaining: read_u32_le(&mut r)?,
-                    plan_flags: read_u8(&mut r)?,
-                    time_rested: read_u32_le(&mut r)?,
-                });
+                // Read in the client's order, into `+0x1af4`, `+0x1afc` and `+0x1af8`. A short
+                // `GetUInt32` writes nothing and leaves the stream past its end (`0x418eb0`), so
+                // every read after it is short too and the packet is still reported (`0x5b424a`).
+                let read = super::BillingRead {
+                    time_remaining: read_u32_le(&mut r).ok(),
+                    plan_flags: read_u8(&mut r).ok(),
+                    time_rested: read_u32_le(&mut r).ok(),
+                };
+                if read.time_rested.is_none() {
+                    r = &[];
+                }
+                billing = Some(read);
             }
             ServerPacket::AuthResponse {
                 result,
@@ -302,24 +325,19 @@ fn parse_server_body(
                 billing,
             }
         }
-        opcode::SMSG_CHAR_ENUM => {
-            let count = read_u8(&mut r)?;
-            // vmangos clamps `CharactersPerRealm` to 10 (`World.cpp:629`).
-            let mut characters = Vec::with_capacity(capacity_hint(count, 10));
-            for _ in 0..count {
-                match Character::read(&mut r)? {
-                    Some(character) => characters.push(character),
-                    // A name past its cap poisons the store: every read after it fails, and the
-                    // end check (`0x5b4523`) empties the list (`0x5b4539`-`0x5b455d`).
-                    None => {
-                        characters.clear();
-                        r = &[];
-                        break;
-                    }
+        opcode::SMSG_CHAR_ENUM => match read_char_enum(&mut r) {
+            Some(characters) => ServerPacket::CharEnum {
+                characters,
+                failed: false,
+            },
+            None => {
+                r = &[];
+                ServerPacket::CharEnum {
+                    characters: Vec::new(),
+                    failed: true,
                 }
             }
-            ServerPacket::CharEnum { characters }
-        }
+        },
         opcode::SMSG_CHAR_DELETE => ServerPacket::CharDelete {
             result: read_u8(&mut r)?,
         },
@@ -1329,6 +1347,10 @@ fn parse_server_body(
             let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
             ServerPacket::GameObjectDespawnAnim { guid }
         }
+        opcode::SMSG_GAMEOBJECT_RESET_STATE => {
+            let guid = gameobject::read_gameobject_reset_state(&mut r)?;
+            ServerPacket::GameObjectResetState { guid }
+        }
         opcode::SMSG_GAMEOBJECT_PAGETEXT => ServerPacket::GameObjectPageText {
             guid: gameobject::read_gameobject_page_text(&mut r)?,
         },
@@ -1373,6 +1395,11 @@ fn parse_server_body(
         opcode::SMSG_GROUP_INVITE => ServerPacket::GroupInvite {
             inviter: group::read_group_invite(&mut r)?,
         },
+        // `0x5e6770` reads a name at capacity 0x30 (`0x5e677f`) it never passes on (`0x5e6784`).
+        opcode::SMSG_GROUP_CANCEL => {
+            let _ = read_cstring_capped(&mut r, 0x30);
+            ServerPacket::GroupCancel
+        }
         opcode::SMSG_GROUP_DECLINE => ServerPacket::GroupDecline {
             name: group::read_group_decline(&mut r)?,
         },
@@ -1493,6 +1520,7 @@ fn parse_server_body(
             ServerPacket::FriendStatus(social::read_friend_status(&mut r)?)
         }
         opcode::SMSG_WHO => ServerPacket::WhoResults(social::read_who(&mut r)?),
+        opcode::MSG_LOOKING_FOR_GROUP => ServerPacket::LookingForGroup(social::read_lfg(&mut r)?),
         opcode::SMSG_GUILD_QUERY_RESPONSE => {
             ServerPacket::GuildQueryResponse(guild::read_guild_query_response(&mut r)?)
         }
@@ -1720,7 +1748,7 @@ mod tests {
     /// later positions and its closing `AUTH_OK` without (`WorldSession.cpp:961-976`).
     #[test]
     fn the_auth_response_billing_group_decodes_in_the_clients_order() {
-        use crate::messages::{Billing, AUTH_OK, AUTH_WAIT_QUEUE};
+        use crate::messages::{Billing, BillingRead, AUTH_OK, AUTH_WAIT_QUEUE};
         let decode = |body: &[u8]| match parse_server_with_tail(opcode::SMSG_AUTH_RESPONSE, body)
             .expect("a vmangos body decodes")
         {
@@ -1741,10 +1769,10 @@ mod tests {
             (
                 AUTH_OK,
                 None,
-                Some(Billing {
-                    time_remaining: 1,
-                    plan_flags: 0x44,
-                    time_rested: 90,
+                Some(BillingRead {
+                    time_remaining: Some(1),
+                    plan_flags: Some(0x44),
+                    time_rested: Some(90),
                 }),
                 0
             )
@@ -1757,10 +1785,10 @@ mod tests {
             (
                 AUTH_WAIT_QUEUE,
                 Some(3),
-                Some(Billing {
-                    time_remaining: 300,
-                    plan_flags: Billing::RECURRING,
-                    time_rested: 0,
+                Some(BillingRead {
+                    time_remaining: Some(300),
+                    plan_flags: Some(Billing::RECURRING),
+                    time_rested: Some(0),
                 }),
                 0
             )
@@ -1771,6 +1799,65 @@ mod tests {
             (AUTH_WAIT_QUEUE, Some(5), None, 0)
         );
         assert_eq!(decode(&[0x0c]), (AUTH_OK, None, None, 0));
+    }
+
+    /// `0x5b41b0` reports the response whatever the tail: a field `GetUInt32` (`0x418eb0`) was too
+    /// short for keeps its old value, and the stream is then past its end for every read after.
+    #[test]
+    fn an_auth_response_with_a_short_billing_tail_still_decodes() {
+        use crate::messages::{Billing, BillingRead, AUTH_OK, AUTH_WAIT_QUEUE};
+        let tail_bytes = [0x01, 0x00, 0x00, 0x00, 0x44, 0x5a, 0x00, 0x00, 0x00];
+        for (code, queued) in [(AUTH_OK, false), (AUTH_WAIT_QUEUE, true)] {
+            for n in 0..=9 {
+                let mut body = vec![code];
+                body.extend_from_slice(&tail_bytes[..n]);
+                let (packet, tail) = parse_server_with_tail(opcode::SMSG_AUTH_RESPONSE, &body)
+                    .unwrap_or_else(|e| panic!("code {code:#x} tail {n}: {e}"));
+                let ServerPacket::AuthResponse {
+                    result,
+                    queue_position,
+                    billing,
+                } = packet
+                else {
+                    panic!("decodes as AuthResponse");
+                };
+                assert_eq!(result, code);
+                let want = match n {
+                    0..=4 => None,
+                    5..=8 => Some(BillingRead {
+                        time_remaining: Some(1),
+                        plan_flags: Some(0x44),
+                        time_rested: None,
+                    }),
+                    _ => Some(BillingRead {
+                        time_remaining: Some(1),
+                        plan_flags: Some(0x44),
+                        time_rested: Some(90),
+                    }),
+                };
+                // With exactly 4 bytes after the result, the queue's position takes them whole.
+                let want_pos = (queued && n == 4).then_some(1);
+                assert_eq!((billing, queue_position), (want, want_pos), "tail {n}");
+                if n == 0 || n >= 5 {
+                    assert_eq!(tail, 0, "tail {n}");
+                }
+            }
+        }
+        // A field the body was too short for keeps what the connection had.
+        let mut kept = Billing {
+            time_remaining: 7,
+            plan_flags: 1,
+            time_rested: 9,
+        };
+        kept.apply(BillingRead {
+            time_remaining: Some(1),
+            plan_flags: Some(0x44),
+            time_rested: None,
+        });
+        assert_eq!(
+            (kept.time_remaining, kept.plan_flags, kept.time_rested),
+            (1, 0x44, 9)
+        );
     }
 
     /// `SMSG_SET_FORCED_REACTIONS`: a count, then `(faction, rank)` pairs of `u32`s.

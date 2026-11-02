@@ -23,15 +23,18 @@ pub(crate) use modes::UnitMoveModes;
 pub(in crate::net) use modes::ROOT_APPLY_WIPE;
 pub(crate) use relay::{PendingMove, RelayMove};
 pub(crate) use remote::jump_seed;
-pub(crate) use remote::RemoteMotion;
-pub(in crate::net) use remote::{apply_move, arrival_snap, trace_relay, RelayOutcome};
+pub(in crate::net) use remote::{
+    apply_move, arrival_snap, catch_up, trace_relay, MoverWorld, RelayOutcome,
+};
 pub(super) use remote::{drain_pending_moves, extrapolate_remote_units};
+pub(crate) use remote::{FallHeight, MoveTick, RemoteMotion};
 pub(crate) use spline::grounded_y;
 pub(super) use spline::{
-    create_spline, ground_clamp_creatures, mark_swimming_creatures, monster_move_spline,
-    sample_splines, trace_create_spline, trace_move_snap,
+    create_spline, far_stop, ground_clamp_creatures, mark_swimming_creatures, monster_move_spline,
+    ridden_create_path, sample_splines, snap_from_three_yards, trace_create_spline,
+    trace_move_snap,
 };
-pub(crate) use spline::{CreatureSwimming, Spline, SplineStopped};
+pub(crate) use spline::{CreatureSwimming, HeldSpline, Spline, SplineStopped};
 
 /// The Bevy rotation of a wire yaw (radians about WoW +Z): a Bevy +Y yaw with no 180° offset,
 /// unlike doodad and WMO placement.

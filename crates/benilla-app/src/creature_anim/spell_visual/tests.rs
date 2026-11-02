@@ -108,6 +108,7 @@ fn cast_event(entity: Entity, spell_id: u32, kind: CastEventKind) -> CastEvent {
         spell_id,
         kind,
         seq: 1,
+        at: None,
     }
 }
 
@@ -529,6 +530,7 @@ fn a_go_with_no_caster_unit_plays_its_instant_impacts() {
         target_mask: 0x2,
         ammo_display_id: None,
         seq: 1,
+        at: None,
     });
     app.update();
     let wounds: Vec<Entity> = app
@@ -538,6 +540,439 @@ fn a_go_with_no_caster_unit_plays_its_instant_impacts() {
         .map(|w| w.entity)
         .collect();
     assert_eq!(wounds, [target]);
+}
+
+/// A GO's impact kits carry the GO packet's place, not the frame's last cast edge's: a display
+/// rebuild between the two (`0x60abe0`) ends the impact the wire put before it and spares the
+/// cast after it, with or without a caster unit.
+#[test]
+fn a_gos_impact_kits_carry_the_gos_own_place() {
+    const BOLT: u32 = 5143;
+    const BOLT_VISUAL: u32 = 140;
+    const IMPACT_KIT: u32 = 301;
+    const IMPACT_SOUND: u32 = 3001;
+    let mut app = app();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([
+            (
+                BOLT_VISUAL,
+                VisualStages {
+                    impact: IMPACT_KIT,
+                    ..Default::default()
+                },
+            ),
+            (
+                VISUAL,
+                VisualStages {
+                    precast: PRECAST_KIT,
+                    ..Default::default()
+                },
+            ),
+        ]),
+        HashMap::from([
+            (
+                IMPACT_KIT,
+                VisualKit {
+                    sound: Some(IMPACT_SOUND),
+                    ..Default::default()
+                },
+            ),
+            (PRECAST_KIT, VisualKit::default()),
+        ]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                BOLT,
+                SpellDisplay {
+                    visual: BOLT_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                SPELL,
+                SpellDisplay {
+                    visual: VISUAL,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    let target = app.world_mut().spawn_empty().id();
+    let later_caster = app.world_mut().spawn_empty().id();
+    let go = crate::lanes::stamp();
+    let later = crate::lanes::stamp();
+    app.world_mut().write_message(SpellGoTargets {
+        caster: None,
+        spell_id: BOLT,
+        hits: vec![target],
+        misses: Vec::new(),
+        source: None,
+        dest: None,
+        target_mask: 0x2,
+        ammo_display_id: None,
+        seq: 1,
+        at: Some(go),
+    });
+    app.world_mut().write_message(CastEvent {
+        at: Some(later),
+        ..cast_event(later_caster, SPELL, CastEventKind::Start)
+    });
+    app.update();
+    let impacts: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<SpellKitSound>>()
+        .drain()
+        .filter_map(|ev| match ev {
+            SpellKitSound::Play {
+                entity,
+                kit_sound: IMPACT_SOUND,
+                at,
+                ..
+            } => Some((entity, at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(impacts, [(target, Some(go))]);
+}
+
+/// A pushed kit (`SMSG_PLAY_SPELL_VISUAL`, an environmental hit's) carries its packet's place, so
+/// a display rebuild after it (`0x60abe0`) ends it, and one before it spares it.
+#[test]
+fn a_pushed_kit_carries_its_packets_place() {
+    const PUSHED_KIT: u32 = 302;
+    const PUSHED_SOUND: u32 = 3002;
+    let mut app = app();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::new(),
+        HashMap::from([(
+            PUSHED_KIT,
+            VisualKit {
+                sound: Some(PUSHED_SOUND),
+                ..Default::default()
+            },
+        )]),
+    )));
+    let unit = app.world_mut().spawn_empty().id();
+    let at = crate::lanes::stamp();
+    app.world_mut().write_message(KitPush {
+        entity: unit,
+        kit_id: PUSHED_KIT,
+        seq: 1,
+        at: Some(at),
+    });
+    app.update();
+    let places: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<SpellKitSound>>()
+        .drain()
+        .filter_map(|ev| match ev {
+            SpellKitSound::Play {
+                entity,
+                kit_sound: PUSHED_SOUND,
+                at,
+                ..
+            } => Some((entity, at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(places, [(unit, Some(at))]);
+}
+
+/// The rebuild replays the aura slots' state kits (`0x5ff130` at `0x60ada6`), then the channel's
+/// (`0x612a30` at `0x60adad`), as kind 2: each sound rings afresh at the rebuild's place, an aura
+/// in two slots once.
+#[test]
+fn a_rebuild_rings_the_aura_and_channel_kits_again() {
+    use benilla_protocol::field::{FIELD_UNIT_AURA, FIELD_UNIT_CHANNEL_SPELL};
+    const AURA: u32 = 1459; // Arcane Intellect
+    const AURA_VISUAL: u32 = 150;
+    const AURA_KIT: u32 = 401;
+    const AURA_SOUND: u32 = 4001;
+    const CHANNEL: u32 = 5143; // Arcane Missiles
+    const CHANNEL_VISUAL: u32 = 151;
+    const CHANNEL_KIT: u32 = 402;
+    const AM_HUM: u32 = 3136;
+    let mut app = App::new();
+    app.add_message::<crate::entities::DisplaySwapped>()
+        .add_message::<SpellKitSound>()
+        .insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+            HashMap::from([
+                (
+                    AURA_VISUAL,
+                    VisualStages {
+                        state: AURA_KIT,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    CHANNEL_VISUAL,
+                    VisualStages {
+                        channel: CHANNEL_KIT,
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            HashMap::from([
+                (
+                    AURA_KIT,
+                    VisualKit {
+                        sound: Some(AURA_SOUND),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    CHANNEL_KIT,
+                    VisualKit {
+                        sound: Some(AM_HUM),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        )))
+        .insert_resource(crate::ui_action::Spells {
+            catalog: SpellCatalog::from_displays(HashMap::from([
+                (
+                    AURA,
+                    SpellDisplay {
+                        visual: AURA_VISUAL,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    CHANNEL,
+                    SpellDisplay {
+                        visual: CHANNEL_VISUAL,
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..crate::ui_action::Spells::empty_for_tests()
+        })
+        .add_systems(Update, super::replay_rebuilt_kit_sounds);
+    let unit = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[
+                (FIELD_UNIT_AURA, AURA),
+                (FIELD_UNIT_AURA + 1, AURA),
+                (FIELD_UNIT_CHANNEL_SPELL, CHANNEL),
+            ]),
+        ))
+        .id();
+    let at = crate::lanes::stamp();
+    app.world_mut()
+        .write_message(crate::entities::DisplaySwapped { entity: unit, at });
+    app.update();
+    let replays: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<SpellKitSound>>()
+        .drain()
+        .filter_map(|ev| match ev {
+            SpellKitSound::Replay {
+                entity,
+                spell_id,
+                kit_sound,
+                at,
+                ..
+            } => Some((entity, spell_id, kit_sound, at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replays,
+        [(unit, AURA, AURA_SOUND, at), (unit, CHANNEL, AM_HUM, at)]
+    );
+}
+
+/// The loot watcher's app: [`super::arm_loot_fx`] with the loot art row.
+fn loot_app() -> App {
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>()
+        .add_message::<super::super::AnimSoundEvent>()
+        .add_message::<SpellKitFx>()
+        .add_message::<SpellKitSound>()
+        .init_resource::<super::DeathStamps>()
+        .insert_resource(SpellVisuals(
+            SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new()).with_hardcoded(
+                "HARDCODED Loot Art",
+                14,
+                "Particles\\LootFX.mdl",
+            ),
+        ))
+        .add_systems(Update, super::arm_loot_fx);
+    app.update();
+    app
+}
+
+/// A unit's health and dynamic flags.
+fn loot_fields(health: u32, flags: u32) -> crate::net::ObjectStore {
+    use benilla_protocol::field::{FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_HEALTH};
+    crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (FIELD_UNIT_HEALTH, health),
+        (FIELD_UNIT_DYNAMIC_FLAGS, flags),
+    ]))
+}
+
+fn loot_unit(app: &mut App, health: u32, flags: u32) -> Entity {
+    app.world_mut()
+        .spawn((
+            loot_fields(health, flags),
+            crate::net::NetEntity {
+                kind: benilla_protocol::EntityKind::Unit,
+                display_id: Some(7),
+                scale: 1.0,
+            },
+        ))
+        .id()
+}
+
+/// A unit field's edge, stamped now.
+fn loot_edge(entity: Entity, index: u16, old: u32, new: u32) -> crate::net::FieldChanged {
+    crate::net::FieldChanged {
+        at: crate::lanes::stamp(),
+        entity,
+        guid: 1,
+        kind: benilla_protocol::messages::ObjectType::Unit,
+        index,
+        old,
+        new,
+    }
+}
+
+type LootFx = Vec<(&'static str, Option<crate::lanes::Stamp>)>;
+
+/// One frame over `edges`: the fx edges written, and the sound releases' stamps.
+fn loot_frame(
+    app: &mut App,
+    edges: &[crate::net::FieldChanged],
+) -> (LootFx, Vec<crate::lanes::Stamp>) {
+    for &e in edges {
+        app.world_mut().write_message(e);
+    }
+    app.update();
+    let fx = (app
+        .world_mut()
+        .resource_mut::<Messages<SpellKitFx>>()
+        .drain())
+    .map(|ev| match ev {
+        SpellKitFx::Release { at, .. } => ("release", at),
+        SpellKitFx::Begin { at, .. } => ("sparkle", at),
+        SpellKitFx::Reap { at, .. } => ("reap", at),
+    })
+    .collect();
+    let sounds = (app
+        .world_mut()
+        .resource_mut::<Messages<SpellKitSound>>()
+        .drain())
+    .filter_map(|ev| match ev {
+        SpellKitSound::Release { at, .. } => Some(at),
+        _ => None,
+    })
+    .collect();
+    (fx, sounds)
+}
+
+/// `ReleaseEffects` (`0x614120`) at its two watcher sites, in wire order, gated on the death stamp
+/// (`+0xcb4`). The death's `OnDied` (`0x6047a3` → `0x605922`) releases at the health edge. While
+/// the Death clip plays the stamp is 0, so a lootable flags write in a later frame releases and
+/// hangs nothing (`0x600574`). The stamp hangs the sparkle (`0x5fc962`), after which any flags
+/// write that leaves bit 0 set releases and hangs it again (`0x600587`, `0x60058e`). A return to
+/// life clears the stamp (`0x5fef85`) and takes nothing; the sparkle goes only as bit 0 falls
+/// (`0x60047b`). A unit created dead is stamped at once (`0x5fba26`).
+#[test]
+fn the_death_stamp_gates_the_flags_release_and_only_the_flag_reaps() {
+    use benilla_protocol::field::{FIELD_UNIT_DYNAMIC_FLAGS as FLAGS, FIELD_UNIT_HEALTH as HEALTH};
+    let mut app = loot_app();
+    let mob = loot_unit(&mut app, 100, 0);
+    let set = |app: &mut App, health, flags| {
+        app.world_mut()
+            .entity_mut(mob)
+            .insert(loot_fields(health, flags));
+    };
+    loot_frame(&mut app, &[]);
+
+    // The killing update, in field order: the health, then the lootable flag.
+    let died = loot_edge(mob, HEALTH, 100, 0);
+    set(&mut app, 0, 1);
+    let (fx, sounds) = loot_frame(&mut app, &[died, loot_edge(mob, FLAGS, 0, 1)]);
+    assert_eq!(fx, [("release", Some(died.at))], "OnDied's release alone");
+    assert_eq!(sounds, [died.at]);
+
+    // A later frame, the Death clip still playing: the stamp is 0.
+    set(&mut app, 0, 5);
+    let (fx, sounds) = loot_frame(&mut app, &[loot_edge(mob, FLAGS, 1, 5)]);
+    assert_eq!((fx, sounds), (vec![], vec![]), "nothing before the stamp");
+
+    // The Death clip ends: the stamp hangs the sparkle.
+    app.world_mut()
+        .resource_mut::<super::DeathStamps>()
+        .stamp(mob);
+    let (fx, _) = loot_frame(&mut app, &[]);
+    assert_eq!(fx, [("sparkle", None)]);
+
+    // A write that leaves the flag set, now the death is stamped.
+    let tapped = loot_edge(mob, FLAGS, 5, 1);
+    set(&mut app, 0, 1);
+    let (fx, sounds) = loot_frame(&mut app, &[tapped]);
+    assert_eq!(
+        fx,
+        [("release", Some(tapped.at)), ("sparkle", Some(tapped.at))]
+    );
+    assert_eq!(sounds, [tapped.at]);
+
+    // Back to life: the stamp clears and the sparkle stays, and a lootable write releases nothing.
+    set(&mut app, 100, 1);
+    let (fx, _) = loot_frame(&mut app, &[loot_edge(mob, HEALTH, 0, 100)]);
+    assert!(fx.is_empty(), "no reap on a return to life: {fx:?}");
+    set(&mut app, 100, 5);
+    let (fx, sounds) = loot_frame(&mut app, &[loot_edge(mob, FLAGS, 1, 5)]);
+    assert_eq!((fx, sounds), (vec![], vec![]));
+
+    // Bit 0 falls: the sparkle goes.
+    let cleared = loot_edge(mob, FLAGS, 5, 4);
+    set(&mut app, 100, 4);
+    let (fx, _) = loot_frame(&mut app, &[cleared]);
+    assert_eq!(fx, [("reap", Some(cleared.at))]);
+
+    // A unit created dead and lootable is stamped, and hangs its sparkle, at once.
+    let corpse = loot_unit(&mut app, 0, 1);
+    let (fx, _) = loot_frame(&mut app, &[]);
+    assert_eq!(fx, [("sparkle", None)]);
+    assert!(app.world().resource::<super::DeathStamps>().settled(corpse));
+}
+
+/// The model's `$DTH` hangs the sparkle on a lootable unit with no stamp test (`0x5fffb4` →
+/// `0x6247d0` → `0x624aa4` → `0x6005d0`): at the thud, ahead of the Death clip's end, whose stamp
+/// then finds one hanging. A unit without bit 0 hangs nothing.
+#[test]
+fn a_death_thud_hangs_the_sparkle_before_the_stamp() {
+    let mut app = loot_app();
+    let (mob, unlootable) = (loot_unit(&mut app, 100, 0), loot_unit(&mut app, 100, 0));
+    loot_frame(&mut app, &[]);
+    // Dead and lootable, the Death clip still playing: no stamp yet.
+    app.world_mut().entity_mut(mob).insert(loot_fields(0, 1));
+    let thud = |app: &mut App, entity| {
+        app.world_mut().write_message(super::super::AnimSoundEvent {
+            entity,
+            ident: *b"$DTH",
+            data: 0,
+            anim_id: 1,
+            pos: None,
+        });
+    };
+    thud(&mut app, mob);
+    thud(&mut app, unlootable);
+    let (fx, _) = loot_frame(&mut app, &[]);
+    assert_eq!(fx, [("sparkle", None)], "the lootable unit's alone");
+    assert!(!app.world().resource::<super::DeathStamps>().settled(mob));
+
+    app.world_mut()
+        .resource_mut::<super::DeathStamps>()
+        .stamp(mob);
+    let (fx, _) = loot_frame(&mut app, &[]);
+    assert!(fx.is_empty(), "the stamp finds one hanging: {fx:?}");
 }
 
 /// The ranged weapon-visual merge (`0x60d450`): a spell with `Attributes & 0x2` fills every zero
@@ -897,6 +1332,7 @@ fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
             target_mask: 0x2,
             ammo_display_id: None,
             seq: 1,
+            at: None,
         });
         app.update();
         assert_eq!(wounds(&mut app), expected, "instant GO of spell {spell_id}");
@@ -1040,6 +1476,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
             target_mask: 0x2,
             ammo_display_id: None,
             seq: 1,
+            at: None,
         });
     }
     app.update();
@@ -1126,6 +1563,7 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         target_mask: 0x40,
         ammo_display_id: None,
         seq: 1,
+        at: None,
     });
     app.update();
     let spawns: Vec<_> = app
@@ -1157,6 +1595,7 @@ fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_poin
         spell_id: GROUND,
         kind: CastEventKind::GroundImpact { pos: at },
         seq: 2,
+        at: None,
     });
     app.update();
     let sounds: Vec<_> = app
@@ -1950,6 +2389,7 @@ fn a_state_kits_anim_is_a_recompute_and_never_a_second_play() {
         target_mask: 0x2,
         ammo_display_id: None,
         seq: 1,
+        at: None,
     });
     app.update();
 
@@ -2485,7 +2925,9 @@ fn esc_with_a_cursor_up_leaves_the_running_channels_hold_and_loop() {
                 entity,
                 spell_id,
                 kit_sound: AM_HUM,
-            } => loops.rang(entity, spell_id, AM_HUM),
+                cast_hold,
+                at,
+            } => loops.rang(entity, (spell_id, AM_HUM), cast_hold, at),
             SpellKitSound::StopHold { entity, spell_id } => {
                 loops.stop_hold(entity, spell_id);
             }
@@ -2494,7 +2936,7 @@ fn esc_with_a_cursor_up_leaves_the_running_channels_hold_and_loop() {
     }
     assert_eq!(
         loops.held(me),
-        Some((ARCANE_MISSILES, AM_HUM)),
+        [(ARCANE_MISSILES, AM_HUM)],
         "Blizzard's reap stops none of the channel's sound (got {after:?})"
     );
 }
@@ -2531,7 +2973,9 @@ fn a_go_stops_the_running_auto_repeat_spells_hold_and_loop_on_its_caster() {
                     entity,
                     spell_id,
                     kit_sound: AUTO_SHOT_LOOP,
-                } => loops.rang(entity, spell_id, AUTO_SHOT_LOOP),
+                    cast_hold,
+                    at,
+                } => loops.rang(entity, (spell_id, AUTO_SHOT_LOOP), cast_hold, at),
                 SpellKitSound::StopHold { entity, spell_id } => {
                     loops.stop_hold(entity, spell_id);
                 }
@@ -2595,7 +3039,7 @@ fn a_go_stops_the_running_auto_repeat_spells_hold_and_loop_on_its_caster() {
         ],
     );
     assert_eq!(hold(&app, hunter), Some(AUTO_SHOT));
-    assert_eq!(loops.held(hunter), Some((AUTO_SHOT, AUTO_SHOT_LOOP)));
+    assert_eq!(loops.held(hunter), [(AUTO_SHOT, AUTO_SHOT_LOOP)]);
 
     let reaped = frame(
         &mut app,
@@ -2603,7 +3047,7 @@ fn a_go_stops_the_running_auto_repeat_spells_hold_and_loop_on_its_caster() {
         &[cast_event(hunter, ARCANE_SHOT, CastEventKind::Go)],
     );
     assert_eq!(hold(&app, hunter), None, "the caster's Auto Shot hold");
-    assert_eq!(loops.held(hunter), None, "and its loop");
+    assert_eq!(loops.held(hunter), [], "and its loop");
     assert_eq!(
         reaped,
         vec![(hunter, ARCANE_SHOT), (hunter, AUTO_SHOT)],
@@ -2612,7 +3056,7 @@ fn a_go_stops_the_running_auto_repeat_spells_hold_and_loop_on_its_caster() {
     assert_eq!(hold(&app, other), Some(AUTO_SHOT), "another unit's hold");
     assert_eq!(
         loops.held(other),
-        Some((AUTO_SHOT, AUTO_SHOT_LOOP)),
+        [(AUTO_SHOT, AUTO_SHOT_LOOP)],
         "and its loop"
     );
 
@@ -2629,7 +3073,7 @@ fn a_go_stops_the_running_auto_repeat_spells_hold_and_loop_on_its_caster() {
         &[cast_event(hunter, ARCANE_SHOT, CastEventKind::Go)],
     );
     assert_eq!(hold(&app, hunter), Some(AUTO_SHOT));
-    assert_eq!(loops.held(hunter), Some((AUTO_SHOT, AUTO_SHOT_LOOP)));
+    assert_eq!(loops.held(hunter), [(AUTO_SHOT, AUTO_SHOT_LOOP)]);
 }
 
 /// A GO of `hits` and `misses` (target, code, reflect byte) under `target_mask`, at `dest`.
@@ -2649,6 +3093,7 @@ fn launcher_go(
         target_mask,
         ammo_display_id: None,
         seq: 1,
+        at: None,
     }
 }
 
@@ -2789,6 +3234,7 @@ fn a_travelling_spell_without_a_missile_or_ammo_flies_nothing() {
             target_mask: 0x2,
             ammo_display_id,
             seq: 1,
+            at: None,
         });
         app.update();
         let spawns = app

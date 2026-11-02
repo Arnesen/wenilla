@@ -11,7 +11,7 @@
 //! refuses a write carries it as its check: the camera block's (`0x50b380`, `0x50b3c0`,
 //! `0x50bfe0`, `0x50c000`, `0x50c040`), the error filter's (`0x4030f0`), the target range's
 //! (`0x490720`) and the world's (`0x688b70`, `0x688bd0`, `0x688f00`, `0x688fb0`, `0x689000`,
-//! `0x689050`, `0x689250`, `0x689450`, `0x6d8530`). The two LOD distances' (`0x688ab0`,
+//! `0x689050`, `0x689250`, `0x689450`). The two LOD distances' (`0x688ab0`,
 //! `0x6891f0`) never refuse but print a line out of range, and `ffxRectangle`'s (`0x6cde30`)
 //! prints its state; they run too. The trailing address is
 //! the register site in `reference/cvars.tsv`.
@@ -20,7 +20,6 @@ use super::table::{same, Registered};
 
 pub(super) const INERT: &[Registered] = &[
     // ── The camera block ─────────────────────────────────────────────────────────────────────
-    same("cameraDistanceSmoothSpeed", "8.33").checked(benilla_ui::script::check_camera_decay), // 0x50b8a2
     same("cameraDive", "1"), // 0x50be03
     same("cameraFoVSmoothSpeed", "0.5").checked(benilla_ui::script::check_camera_rate), // 0x50b87f
     same("cameraHeightIgnoreStandState", "0"), // 0x50bd83
@@ -70,8 +69,6 @@ pub(super) const INERT: &[Registered] = &[
     same("cameraSmoothSmartTrackFactor", "10.0"),                                        // 0x50bb5e
     same("cameraSmoothSmartTurnDelay", "0.0"),                                           // 0x50bb5e
     same("cameraSmoothSmartTurnFactor", "1.0"),                                          // 0x50bb5e
-    same("cameraSmoothTimeMax", "2.0").checked(benilla_ui::script::check_camera_time),   // 0x50bfa4
-    same("cameraSmoothTimeMin", "0.1").checked(benilla_ui::script::check_camera_time),   // 0x50bf81
     same("cameraSmoothViewDataAlwaysDistanceDelay", "0.0"),                              // 0x50bbfe
     same("cameraSmoothViewDataAlwaysDistanceFactor", "0.0"),                             // 0x50bbfe
     same("cameraSmoothViewDataAlwaysPitchDelay", "0.0"),                                 // 0x50bbfe
@@ -185,7 +182,6 @@ pub(super) const INERT: &[Registered] = &[
     same("cameraTerrainTiltSmartTurnAbsorb", "1.0"),                                   // 0x50bc9e
     same("cameraTerrainTiltSmartTurnDelay", "0.0"),                                    // 0x50bc9e
     same("cameraTerrainTiltSmartTurnFactor", "1.0"),                                   // 0x50bc9e
-    same("cameraViewBlendStyle", "1"),                                                 // 0x50b972
     same("cameraYawSmoothMax", "0.0").checked(benilla_ui::script::check_camera_yaw),   // 0x50bf5e
     same("cameraYawSmoothMin", "0.0").checked(benilla_ui::script::check_camera_yaw),   // 0x50bf3b
     same("camerasmooth", "1"),                                                         // 0x50ba39
@@ -234,7 +230,6 @@ pub(super) const INERT: &[Registered] = &[
     same("mapObjLightLOD", "0").checked(benilla_ui::script::check_map_obj_light_lod), // 0x6886ec
     same("mapObjOverbright", "1"),          // 0x6886c6
     same("mapShadows", "1"),                // 0x6884fe
-    same("MapWaterSounds", "1"),            // 0x462ac9
     same("MaxLights", "4").checked(benilla_ui::script::check_max_lights), // 0x688596
     same("mouseInvertYaw", "0"),            // 0x50b72d
     same("ObjectSelectionCircle", "1"),     // 0x6146ec
@@ -244,16 +239,12 @@ pub(super) const INERT: &[Registered] = &[
     same("PlayerFadeInRate", "4096"),       // 0x481b72
     same("PlayerFadeOutAlpha", "128"),      // 0x481bbf
     same("PlayerFadeOutRate", "4096"),      // 0x481b91
-    same("shadowBias", "0.1").checked(benilla_ui::script::check_shadow_bias), // 0x6d817d
-    same("shadowLOD", "1"),                 // 0x6d8157
     same("ShowErrors", "1"),                // 0x402cc1
     same("showfootprintparticles", "1"),    // 0x6039b5
     same("showfootprints", "1"),            // 0x688842
     same("showsmartrects", "0"),            // 0x509439
     same("SkyCloudLOD", "0"),               // 0x6d1d33
     same("TargetAnim", "0"),                // 0x60335e
-    same("targetNearestDistance", "41.000000")
-        .checked(benilla_ui::script::check_target_nearest_distance), // 0x48fda4
     same("targetNearestDistanceRadius", "10.000000")
         .checked(benilla_ui::script::check_target_nearest_distance), // 0x48fd60
     same("textureLodDist", "777.0").checked(benilla_ui::script::check_texture_lod_dist), // 0x6887f6
@@ -261,6 +252,5 @@ pub(super) const INERT: &[Registered] = &[
     same("triangleStrips", "1"),            // 0x68888e
     same("unitDrawDist", "300.0").checked(benilla_ui::script::check_unit_draw_dist), // 0x68875e
     same("UnitNameRenderMode", "2"),        // 0x48fdc3
-    same("violenceLevel", "2"),             // 0x6c5ae1
     same("waterLOD", "0").checked(benilla_ui::script::check_water_lod), // 0x688784
 ];
