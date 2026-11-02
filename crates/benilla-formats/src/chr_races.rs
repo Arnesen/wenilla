@@ -20,6 +20,14 @@ const CHR_RACES: &str = "DBFilesClient\\ChrRaces.dbc";
 /// The shipped copy's column count, which `benilla-dbc` enforces as the reference loader does.
 const CHR_RACES_FIELDS: usize = 29;
 
+/// Field 1, the flags (`+0x4`): bit 0 hides a row from an item's race lines (`0x52ce62`,
+/// `0x4fea2e`).
+const FLAGS_FIELD: usize = 1;
+
+/// Field 6, the client prefix (`+0x18`), the `%s` of a helm model's `<stem>_<prefix><sex>.m2`
+/// (`0x479a21`).
+const PREFIX_FIELD: usize = 0x18 / 4;
+
 /// Field 15, the file string (`+0x3c`).
 const FILE_FIELD: usize = 0x3c / 4;
 
@@ -34,8 +42,14 @@ const NAME_FIELD: usize = 0x44 / 4;
 struct Row {
     name: String,
     file: String,
+    /// The client prefix (`+0x18`), `Hu`, `Or`, ..., `Gb`.
+    prefix: String,
     /// `CinematicSequenceID` (`+0x40`).
     intro: u32,
+    /// The flags (`+0x4`).
+    flags: u32,
+    /// The row's place in the file.
+    index: usize,
 }
 
 /// `ChrRaces.dbc`'s read columns by race id.
@@ -47,10 +61,21 @@ impl ChrRaces {
     pub fn from_rows<'a>(rows: impl IntoIterator<Item = (u32, &'a str, &'a str)>) -> Self {
         Self(
             rows.into_iter()
-                .map(|(id, name, file)| {
+                .enumerate()
+                .map(|(index, (id, name, file))| {
                     let (name, file) = (name.to_string(), file.to_string());
-                    let intro = 0;
-                    (id, Row { name, file, intro })
+                    let (intro, prefix) = (0, String::new());
+                    (
+                        id,
+                        Row {
+                            name,
+                            file,
+                            prefix,
+                            intro,
+                            flags: 0,
+                            index,
+                        },
+                    )
                 })
                 .collect(),
         )
@@ -69,10 +94,33 @@ impl ChrRaces {
         self.0.iter().map(|(id, r)| (*id, r.name.as_str()))
     }
 
+    /// The rows in file order with bit 0 of their flags clear, each id and name: the record table
+    /// (`0xc0ded8`, count `0xc0dedc`) as an item's race lines walk it, testing the flag at every
+    /// step (`0x52ce62`, `0x52cfcc`, `0x52d094`, `0x4fea2e`, `0x4febc2`, `0x4fec80`).
+    pub fn visible_in_file_order(&self) -> Vec<(u32, &str)> {
+        let mut rows: Vec<_> = self.0.iter().filter(|(_, r)| r.flags & 1 == 0).collect();
+        rows.sort_by_key(|(id, r)| (r.index, **id));
+        rows.into_iter()
+            .map(|(id, r)| (*id, r.name.as_str()))
+            .collect()
+    }
+
     /// The race row's `CinematicSequenceID` (`+0x40`), the intro cinematic the first-login camera
     /// looks up (`0x46c2f8`); a race with no row has none.
     pub fn intro_sequence(&self, race: u32) -> Option<u32> {
         self.0.get(&race).map(|r| r.intro)
+    }
+
+    /// The race row's client prefix (`+0x18`, `0x479a21`) that a helm model's name is built with;
+    /// a race with no row has none, and `0x4799a0` attaches no helm for it (`0x4799cc`-`0x4799e9`).
+    pub fn client_prefix(&self, race: u32) -> Option<&str> {
+        self.0.get(&race).map(|r| r.prefix.as_str())
+    }
+
+    /// A table for tests of what reads the client prefix: `race` holds `prefix`.
+    pub fn with_client_prefix(mut self, race: u32, prefix: &str) -> Self {
+        self.0.entry(race).or_default().prefix = prefix.to_string();
+        self
     }
 
     /// A table for tests of what reads the intro column: `race` holds `sequence`.
@@ -90,7 +138,8 @@ impl ChrRaces {
 fn schema() -> Schema {
     let mut s = Schema::new("ChrRaces");
     for i in 0..CHR_RACES_FIELDS {
-        let ty = if i == FILE_FIELD
+        let ty = if i == PREFIX_FIELD
+            || i == FILE_FIELD
             || (NAME_FIELD..NAME_FIELD + 8).contains(&i)
             || (26..=28).contains(&i)
         {
@@ -115,14 +164,17 @@ pub fn load_chr_races(chain: &mut Chain) -> Result<ChrRaces> {
 fn table_from_bytes(bytes: &[u8], locale: Locale) -> Result<ChrRaces> {
     let rs = parse(bytes, schema(), "ChrRaces.dbc")?;
     let mut rows = HashMap::with_capacity(rs.records().len());
-    for r in rs.records() {
+    for (index, r) in rs.records().iter().enumerate() {
         let Some(id) = u32_at(r, 0) else { continue };
         rows.insert(
             id,
             Row {
                 name: loc_str(&rs, r, NAME_FIELD, locale).unwrap_or_default(),
                 file: str_at(&rs, r, FILE_FIELD).unwrap_or_default(),
+                prefix: str_at(&rs, r, PREFIX_FIELD).unwrap_or_default(),
                 intro: u32_at(r, INTRO_FIELD).unwrap_or(0),
+                flags: u32_at(r, FLAGS_FIELD).unwrap_or(0),
+                index,
             },
         );
     }
@@ -133,7 +185,7 @@ fn table_from_bytes(bytes: &[u8], locale: Locale) -> Result<ChrRaces> {
 mod tests {
     use super::*;
 
-    /// Two 29-field rows: race 4 with a name per locale, race 9 with its seventh column blank.
+    /// Two 29-field rows: race 4 with a name per locale, race 9 hidden, its seventh column blank.
     fn synthetic() -> Vec<u8> {
         let names = [
             "Night Elf",
@@ -163,6 +215,7 @@ mod tests {
         rows.push(row);
         let mut row = vec![0u32; CHR_RACES_FIELDS];
         row[0] = 9;
+        row[FLAGS_FIELD] = 1;
         row[FILE_FIELD] = put("Goblin", &mut strings);
         for i in 0..7 {
             row[NAME_FIELD + i] = put("Goblin", &mut strings);
@@ -216,6 +269,23 @@ mod tests {
         assert_eq!(blank.names(0), None);
     }
 
+    /// Bit 0 of field 1 (`+0x4`) hides a row from an item's race lines (`0x52ce62`), and the rest
+    /// keep the file's order, whatever their ids.
+    #[test]
+    fn the_visible_rows_skip_the_hidden_and_keep_file_order() {
+        let table = table_from_bytes(&synthetic(), Locale::from_index(0).unwrap()).unwrap();
+        assert_eq!(table.visible_in_file_order(), [(4, "Night Elf")]);
+        let listed = ChrRaces::from_rows([
+            (8, "Troll", "Troll"),
+            (1, "Human", "Human"),
+            (3, "Dwarf", "Dwarf"),
+        ]);
+        assert_eq!(
+            listed.visible_in_file_order(),
+            [(8, "Troll"), (1, "Human"), (3, "Dwarf")]
+        );
+    }
+
     /// `CinematicSequenceID` is the row's field 16 (`+0x40`, read at `0x46c2f8`): a row whose column
     /// is 0 holds 0, and a race with no row holds nothing.
     #[test]
@@ -250,5 +320,9 @@ mod tests {
         assert!(t
             .names(1)
             .is_some_and(|(n, f)| !n.is_empty() && !f.is_empty()));
+        // The Goblin row is hidden, which leaves an item's race lines the eight.
+        let mut visible: Vec<u32> = t.visible_in_file_order().iter().map(|r| r.0).collect();
+        visible.sort_unstable();
+        assert_eq!(visible, [1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

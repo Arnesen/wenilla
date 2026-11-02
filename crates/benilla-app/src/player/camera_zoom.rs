@@ -10,7 +10,7 @@ use super::camera::CameraControl;
 /// head, and the avatar fades out. Deviation: the starting zoom, [`CAM_DIST_DEFAULT`], is 15 yd
 /// where the reference starts at 5.55, the third-person-A row of its default table `0x84f488`
 /// that `cameraView` 1 picks (`0x50c17a`, `0x50c18b`; the `cameraDistance` CVar itself registers
-/// "0.0"), for a wider view.
+/// "0.0"), because that gives a wider view.
 pub(super) const CAM_DIST_MIN: f32 = 0.0;
 /// The zoom ceiling, yd (`ds:0x8089a4` = 50.0): the cap on [`ZoomLimit`] (`0x511309`) and the top
 /// of the distance validator `0x50b310`; also the clamp for a distance read back off disk.
@@ -101,10 +101,15 @@ fn orbit_limit(distance_max: f32, factor: f32) -> f32 {
 /// The distance's glide, run every frame after the axes (`0x5112d0`, which move the target, the
 /// zoom's among them): the target held to the limit, so lowering the max-distance slider pulls
 /// the camera in, and the distance easing to it at a constant `cameraDistanceMoveSpeed`
-/// (`speed`), as after a view's seat. `max` is [`ZoomLimit::max`], CVar-fed, so it bounds by
-/// `max`/`min`, never `f32::clamp`, which panics on a NaN or inverted bound.
+/// (`speed`), or by a timed view's channel while one runs (`0x50f2b8`). `max` is
+/// [`ZoomLimit::max`], CVar-fed, so it bounds by `max`/`min`, never `f32::clamp`, which panics on
+/// a NaN or inverted bound.
 pub(super) fn glide_zoom(dt: f32, rig: &mut CameraControl, max: f32, speed: f32) {
     rig.target_distance = rig.target_distance.min(max);
+    if let Some(live) = rig.view_blend.step_distance(rig.target_distance, dt) {
+        rig.distance = live;
+        return;
+    }
     let max_step = speed * dt;
     rig.distance += (rig.target_distance - rig.distance).clamp(-max_step, max_step);
 }

@@ -27,6 +27,7 @@ pub(crate) struct CvarCallbacks<'w> {
     camera_options: Option<ResMut<'w, crate::player::camera_dynamics::CameraOptions>>,
     click: Option<ResMut<'w, crate::target::ClickConfig>>,
     assist: Option<ResMut<'w, crate::target::AssistAttack>>,
+    tab_range: Option<ResMut<'w, crate::target::TabRange>>,
     self_cast: Option<ResMut<'w, crate::spell::AutoSelfCast>>,
     damage_text: Option<ResMut<'w, crate::combat_text::DamageTextGates>>,
     log_ranges: Option<ResMut<'w, crate::ui_chat::combat::CombatLogRanges>>,
@@ -44,6 +45,8 @@ pub(crate) struct CvarCallbacks<'w> {
     realmlist: Option<ResMut<'w, crate::realmlist::Realmlist>>,
     gamma: Option<ResMut<'w, crate::ui_gamma::DisplayGamma>>,
     render_scale: Option<ResMut<'w, crate::world_backdrop::RenderScale>>,
+    shadows: Option<ResMut<'w, crate::blob_shadow::ShadowSettings>>,
+    violence: Option<ResMut<'w, crate::creature_anim::blood::ViolenceLevel>>,
 }
 
 impl CvarCallbacks<'_> {
@@ -72,6 +75,9 @@ impl CvarCallbacks<'_> {
         }
         if let (Some(click), Some(assist)) = (self.click.as_mut(), self.assist.as_mut()) {
             crate::target::on_cvar(ev, click.reborrow(), assist.reborrow());
+        }
+        if let Some(k) = self.tab_range.as_mut() {
+            crate::target::on_tab_range(ev, k.reborrow());
         }
         if let Some(k) = self.self_cast.as_mut() {
             crate::spell::cast_target::on_cvar(ev, k.reborrow());
@@ -123,6 +129,12 @@ impl CvarCallbacks<'_> {
         if let Some(k) = self.render_scale.as_mut() {
             crate::world_backdrop::on_cvar(ev, k.reborrow());
         }
+        if let Some(k) = self.shadows.as_mut() {
+            crate::blob_shadow::on_cvar(ev, k.reborrow());
+        }
+        if let Some(k) = self.violence.as_mut() {
+            crate::creature_anim::blood::on_cvar(ev, k.reborrow(), cvars.locale);
+        }
     }
 }
 
@@ -144,6 +156,8 @@ pub(crate) fn on_cvar_changed(
 pub(crate) struct CvarSteps<'w> {
     cvars: Option<ResMut<'w, Cvars>>,
     callbacks: CvarCallbacks<'w>,
+    /// The camera's views, whose `cameraView` write a scope's start or end leaves to the sync.
+    views: Option<ResMut<'w, crate::player::camera_view::CameraViews>>,
 }
 
 impl CvarSteps<'_> {
@@ -171,6 +185,10 @@ impl CvarSteps<'_> {
         let Some(cvars) = self.cvars.as_deref_mut() else {
             return;
         };
+        if let Some(views) = self.views.as_mut().filter(|v| v.owes_active()) {
+            let view = views.take_owed_active();
+            cvars.set(crate::player::camera_view::CVAR_ACTIVE_VIEW, &view);
+        }
         let script = match script {
             Some(script) => {
                 if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {

@@ -220,6 +220,15 @@ pub enum GlueCall {
     /// screen state 5, the `CHAR_CREATE_IN_PROGRESS` dialog and the `CMSG_CHAR_CREATE`
     /// (`0x46b290`).
     CreateCharacter(super::glue_create::GlueCreateRequest),
+    /// `PatchDownloadCancel()` (`0x46d400` → `0x474710`) with no download in flight: the logon
+    /// cancelled (`0x5b3320`), the screen state 0 and the `login` screen up (`0x46b840`).
+    CancelPatchDownload,
+    /// `PatchDownloadApply()` (`0x46d410` → `0x4749f0`) with no `wow-patch.mpq` to open: the
+    /// failure dialog for code 4 (`0x474a43`, `0x474ab0`).
+    ApplyPatch,
+    /// `SurveyNotificationDone()` (`0x46ddd0` → EndSurvey `0x473e30`): the logon listener's
+    /// slot 4 with `LOGIN_STATE_AUTHENTICATED` (`0x473ef5`).
+    SurveyDone,
 }
 
 /// A glue string by its global's key, or as given.
@@ -421,9 +430,9 @@ const LAUNCH_HOSTS: [&str; 10] = [
 /// reference works on a C string, so the verb cuts its argument at a NUL before asking; a URL with
 /// a NUL in it is refused here.
 ///
-/// Deviation: a host of 0x80 bytes or more is refused. The reference copies the host into a 0x80-byte
-/// buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and the cut
-/// host could end in a whitelisted suffix the real one does not; this takes the safe side.
+/// Deviation: a host of 0x80 bytes or more is refused because the reference copies the host into a
+/// 0x80-byte buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and
+/// the cut host could end in a whitelisted suffix the real one does not; this takes the safe side.
 pub fn launch_url_allowed(url: &str) -> bool {
     if url.len() >= 0x400 || url.contains('\0') {
         return false;
@@ -581,6 +590,10 @@ pub(crate) struct GlueCore {
     /// credits frame (`CreditsFrame.lua:75`, `CreditsFrame.xml:456`) and the movie frame
     /// (`MovieFrame.lua:36`, `:49`).
     cursor_hidden: bool,
+    /// The device's pointer calls (`0x58b590`) the glue made since the host last took them, in
+    /// order: the verbs' (`0x46db60` shows, `0x46db70` hides) and the build's `SetCursor`
+    /// (`0x46a872`), which shows.
+    pub(super) pointer_calls: Vec<bool>,
     /// The realm list the realm verbs read ([`super::glue_realm`]).
     pub(super) realms: super::glue_realm::GlueRealmList,
     /// The character roster and the select verbs' cells ([`super::glue_select`]).
@@ -633,6 +646,11 @@ impl super::UiScript {
     /// Seat the host's agreement cells, which outlive this VM.
     pub fn set_glue_notices(&mut self, notices: GlueNotices) {
         self.model_mut().glue.notices = notices;
+    }
+
+    /// The pointer calls the glue made since the last take, as shown or not, in order.
+    pub fn take_glue_pointer_calls(&self) -> Vec<bool> {
+        std::mem::take(&mut self.model_mut().glue.pointer_calls)
     }
 
     /// Whether the glue has hidden the pointer (`HideCursor`) and not shown it again.
@@ -1101,6 +1119,103 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // Three numbers (`0x46dc40`) off the plan flags byte `f` (`+0x1afc`): 1, 2, 3 or 4 for
+    // `f & 0x16` equal to 2, 4, 0 or 0x10 and 0 for any other, then `f >> 5 & 1`, then
+    // `f >> 3 & 1`. With no billing group received, `f` is 0: plan 3.
+    g.set(
+        "GetBillingPlan",
+        lua.create_function(|lua, _: MultiValue| {
+            let f = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .billing_plan_flags;
+            let plan = match f & 0x16 {
+                0x02 => 1.0,
+                0x04 => 2.0,
+                0x00 => 3.0,
+                0x10 => 4.0,
+                _ => 0.0,
+            };
+            Ok(MultiValue::from_vec(vec![
+                Value::Number(plan),
+                Value::Number(f64::from((f >> 5) & 1)),
+                Value::Number(f64::from((f >> 3) & 1)),
+            ]))
+        })?,
+    )?;
+    // One number (`0x46dbf0`): the minutes left (`+0x1af4`, unsigned), 0 when the plan is a
+    // recurring subscription (bit 1 of `+0x1afc`, `0x46dc0a`).
+    g.set(
+        "GetBillingTimeRemaining",
+        lua.create_function(|lua, _: MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let minutes = if model.billing_plan_flags & 0x02 != 0 {
+                0
+            } else {
+                model.billing_time_remaining
+            };
+            Ok(f64::from(minutes))
+        })?,
+    )?;
+    // One number (`0x46dcf0`): the rested minutes (`+0x1af8`, unsigned).
+    g.set(
+        "GetBillingTimeRested",
+        lua.create_function(|lua, _: MultiValue| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(f64::from(model.billing_time_rested))
+        })?,
+    )?;
+
+    // One number (`0x46d3e0`): the patch download's progress float `[0xb414c0]`, 0 at load; only
+    // a download (`0x474b70`) writes it, and this client downloads no patch.
+    g.set(
+        "PatchDownloadProgress",
+        lua.create_function(|_, _: MultiValue| Ok(0.0f64))?,
+    )?;
+    // No result (`0x46d400` → `0x474710`, then `xor eax,eax`); with no download in flight the
+    // abort and the free are skipped, the rest runs in the host.
+    g.set(
+        "PatchDownloadCancel",
+        lua.create_function(|lua, _: MultiValue| {
+            call(lua, GlueCall::CancelPatchDownload);
+            Ok(())
+        })?,
+    )?;
+    // No result (`0x46d410` → `0x4749f0`, then `xor eax,eax`); there is no `wow-patch.mpq` to open.
+    g.set(
+        "PatchDownloadApply",
+        lua.create_function(|lua, _: MultiValue| {
+            call(lua, GlueCall::ApplyPatch);
+            Ok(())
+        })?,
+    )?;
+    // The flag argument 1 through `0x6f1c10`, default 1 (`0x46db80`-`0x46db87`), then
+    // `CVar::Set` (`0x63df50`) of `movieSubtitle` to "1" or "0"; no result.
+    g.set(
+        "SetMovieSubtitles",
+        lua.create_function(|lua, args: MultiValue| {
+            let on = super::binding_abi::bool_or_default(args.front(), true);
+            super::cvars::set_from_engine(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                "movieSubtitle",
+                if on { "1" } else { "0" }.to_string(),
+            );
+            super::cvars::written(lua)
+        })?,
+    )?;
+    // The flag argument 1 (`0x6f1c10`, default 0, `0x46ddd7`) only sends the kept survey result
+    // (`0x473df0`), which benilla never keeps. EndSurvey (`0x473e30`) always runs: it frees the
+    // result and file (none held), then reports the login authenticated (`0x473ef5`) in the host
+    // and stores state 1 in `0xb41da0`, the screen state the host models. One result without a
+    // push (`0x46ddea`): the stack's top, the last argument, or nil with none.
+    g.set(
+        "SurveyNotificationDone",
+        lua.create_function(|lua, args: MultiValue| {
+            call(lua, GlueCall::SurveyDone);
+            Ok(args.back().cloned().unwrap_or(Value::Nil))
+        })?,
+    )?;
+
     // One value (`0x46dbc0`): 1 when the `movieSubtitle` CVar's integer (`[0x882640]+0x28`) is
     // nonzero, else nil.
     g.set(
@@ -1133,10 +1248,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, _: MultiValue| {
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .glue
-                    .cursor_hidden = hidden;
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.glue.cursor_hidden = hidden;
+                model.glue.pointer_calls.push(!hidden);
                 Ok(())
             })?,
         )?;
@@ -1305,7 +1419,8 @@ mod tests {
         let (s, host) = seated(Vec::new());
         s.run(
             "DisconnectFromServer() QuitGame() RequestRealmList(1) CancelRealmListQuery() \
-             SetCurrentScreen('login') RealmListDialogCancelled()",
+             SetCurrentScreen('login') RealmListDialogCancelled() PatchDownloadCancel() \
+             PatchDownloadApply() SurveyNotificationDone()",
         )
         .unwrap();
         assert_eq!(
@@ -1315,7 +1430,10 @@ mod tests {
                 "QuitGame",
                 "RequestRealmList { dialog: true }",
                 "CancelRealmListQuery",
-                "CancelLogon"
+                "CancelLogon",
+                "CancelPatchDownload",
+                "ApplyPatch",
+                "SurveyDone"
             ]
         );
     }
@@ -1713,6 +1831,92 @@ mod tests {
         assert!(s.glue_cursor_hidden());
         s.run("ShowCursor()").unwrap();
         assert!(!s.glue_cursor_hidden());
+        // The build's `SetCursor` with a texture (`0x46a872`) shows first, then each verb in order.
+        assert_eq!(s.take_glue_pointer_calls(), [true, false, true]);
+        assert!(s.take_glue_pointer_calls().is_empty());
+        assert!(s.take_errors().is_empty());
+    }
+
+    /// The billing trio decodes the group the session wrote (`0x46dbf0`, `0x46dc40`, `0x46dcf0`):
+    /// with none received the plan flags are 0, which is plan 3, and the minutes 0.
+    #[test]
+    fn the_billing_verbs_decode_the_connections_group() {
+        let mut s = UiScript::new_glue().unwrap();
+        let plan = |s: &UiScript| s.eval::<Vec<f64>>("return {GetBillingPlan()}").unwrap();
+        assert_eq!(plan(&s), [3.0, 0.0, 0.0]);
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRemaining()").unwrap(),
+            0.0
+        );
+        assert_eq!(s.eval::<f64>("return GetBillingTimeRested()").unwrap(), 0.0);
+        assert_eq!(
+            s.eval::<f64>("return PatchDownloadProgress()").unwrap(),
+            0.0
+        );
+
+        // `f & 0x16` of 2, 4, 0x10 and 0x06 (no arm): plans 1, 2, 4 and 0; bit 5 and bit 3 follow.
+        for (flags, want) in [
+            (0x02, [1.0, 0.0, 0.0]),
+            (0x04, [2.0, 0.0, 0.0]),
+            (0x10, [4.0, 0.0, 0.0]),
+            (0x06, [0.0, 0.0, 0.0]),
+            (0x28, [3.0, 1.0, 1.0]),
+        ] {
+            s.set_billing(90, 7, flags);
+            assert_eq!(plan(&s), want, "flags {flags:#x}");
+        }
+        // Bit 1 (a recurring plan) answers 0 minutes left; any other keeps them.
+        s.set_billing(4_000_000_000, 4_000_000_001, 0x02);
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRemaining()").unwrap(),
+            0.0
+        );
+        s.set_billing(4_000_000_000, 4_000_000_001, 0x08);
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRemaining()").unwrap(),
+            4_000_000_000.0,
+            "unsigned"
+        );
+        assert_eq!(
+            s.eval::<f64>("return GetBillingTimeRested()").unwrap(),
+            4_000_000_001.0
+        );
+        assert!(s
+            .eval::<bool>("return table.getn({GetBillingPlan()}) == 3")
+            .unwrap());
+    }
+
+    /// `SetMovieSubtitles` stores "1" or "0" in `movieSubtitle` from its flag argument, default 1
+    /// (`0x46db80`).
+    #[test]
+    fn set_movie_subtitles_writes_the_flag_and_the_survey_verb_answers_its_top() {
+        let mut s = UiScript::new_glue().unwrap();
+        s.register_cvars([("movieSubtitle", "0")]);
+        for (call, want) in [
+            ("SetMovieSubtitles()", 1),
+            ("SetMovieSubtitles(0)", 0),
+            ("SetMovieSubtitles('y')", 1),
+            ("SetMovieSubtitles(nil)", 0),
+            ("SetMovieSubtitles(1)", 1),
+            ("SetMovieSubtitles(false)", 0),
+            ("SetMovieSubtitles({})", 1),
+        ] {
+            s.run(call).unwrap();
+            assert_eq!(
+                s.eval::<Option<i64>>("return GetMovieSubtitles()").unwrap(),
+                (want == 1).then_some(1),
+                "{call}"
+            );
+        }
+        assert!(s.eval::<bool>("return SetMovieSubtitles() == nil").unwrap());
+        assert_eq!(
+            s.eval::<String>("return SurveyNotificationDone(1, 'last')")
+                .unwrap(),
+            "last"
+        );
+        assert!(s
+            .eval::<bool>("return SurveyNotificationDone() == nil")
+            .unwrap());
         assert!(s.take_errors().is_empty());
     }
 

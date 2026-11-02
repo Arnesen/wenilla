@@ -36,7 +36,7 @@ mod worldmap_arrow;
 mod button;
 mod calls;
 mod camera_view;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(debug_assertions)]
 pub mod census;
 mod channel;
 mod char_stats;
@@ -159,9 +159,10 @@ mod messageframe;
 mod minimap;
 mod movieframe;
 pub mod nameplate;
+pub mod unit_watch;
 pub use nameplate::{
-    PlateAction, PlateBitWrite, PlateBitWrites, PlateClick, PlateGeometry, PlateState,
-    PLATE_BIT_ENEMY, PLATE_BIT_FRIEND,
+    PlateAction, PlateBitWrite, PlateBitWrites, PlateClick, PlateGateQuery, PlateGeometry,
+    PlateState, PlateUnit, PlateUnitQuery, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND,
 };
 mod model;
 mod modelframe;
@@ -314,8 +315,8 @@ pub use cvar_checks::{
     check_anisotropic, check_dist_cull, check_error_filter, check_error_level_max,
     check_error_level_min, check_ffx_echo, check_footstep_bias, check_horizon_farclip,
     check_lod_dist, check_map_obj_light_lod, check_max_lights, check_particle_density,
-    check_shadow_bias, check_target_nearest_distance, check_texture_lod_dist, check_unit_draw_dist,
-    check_water_lod, check_weather_density, scanf_f_prefix,
+    check_shadow_bias, check_shadow_lod, check_target_nearest_distance, check_texture_lod_dist,
+    check_unit_draw_dist, check_water_lod, check_weather_density, scanf_f_prefix,
 };
 pub use cvar_checks::{
     check_base_mip, check_camera_decay, check_camera_distance_max, check_camera_pitch,
@@ -349,14 +350,14 @@ pub use guild::{
 };
 pub use guild_read::{GuildAnswer, GuildRead, OwnGuild, UnitGuildRead};
 pub use held::{BagGuidQuery, BagHead, BagItemsQuery, BagQuery, BagSlotQuery, HasKeyQuery};
-pub use host::{CallHost, CallTail, Deferring, LiveReader};
+pub use host::{CallHost, CallTail, LiveReader};
 pub use input_verbs::{
     BindingInput, ClickCall, ClickMode, ClickPress, FiredInput, HeldInput, LookCall,
     MouselookingQuery, PostureCall, ViewAxis,
 };
 pub use item_calls::ItemCall;
 pub use item_read::{ItemInfoFields, ItemKey, ItemRead, ItemRoll};
-pub use lfg::LfgDungeon;
+pub use lfg::{LfgDungeon, LfgReply, LfgResultRead, LfgStore};
 pub use lottery::UnservedSend;
 pub use modelframe::{CharacterPaneFrame, ModelPaneFrame, ModelWanted};
 pub use movieframe::{
@@ -521,6 +522,10 @@ pub use unit::{
     UnitHeldQuery, UnitIdentityRead, UnitObject, UnitObjectRead, UnitRecord, UnitRecordQuery,
     UnitRelations, UnitState, UnitStateAnswer, UnitStateQuery, UnitTokenGlobals, UnitTokenObjects,
     UnitTokenParse,
+};
+pub use unit_watch::{
+    HealthWatch, TokenChange, TokenFlagsCarry, TOKEN_PARTY, TOKEN_PARTY_PET, TOKEN_PET,
+    TOKEN_PLAYER, TOKEN_RAID, TOKEN_RAID_PET, TOKEN_TARGET,
 };
 pub use use_gates::{ControlBypassQuery, FarSightOnQuery};
 pub use weapon_enchant::{WeaponEnchant, WeaponEnchantQuery};
@@ -857,7 +862,7 @@ impl UiScript {
         let lua = install_framescript(VmKind::InGame)?;
         install_in_game(&lua)?;
         object::guard_receivers(&lua)?;
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(debug_assertions)]
         census::survey_listener(&lua);
         Ok(Self::host(lua))
     }
@@ -871,7 +876,11 @@ impl UiScript {
         let lua = install_framescript(VmKind::Glue)?;
         glue::install(&lua)?;
         object::guard_receivers(&lua)?;
-        Ok(Self::host(lua))
+        let script = Self::host(lua);
+        // The glue build's `CSimpleTop::SetCursor` with the cursor texture (`0x46a872` →
+        // `0x764da6`) shows the pointer.
+        script.model_mut().glue.pointer_calls.push(true);
+        Ok(script)
     }
 
     fn host(lua: Lua) -> UiScript {
@@ -947,8 +956,9 @@ impl UiScript {
     /// runs. The app arms it only for the world-entry load, so a hung load reports instead of
     /// freezing the loading screen, and disarms it ([`Self::clear_instruction_budget`]) before the
     /// session's first frame. Deviation: the client's Lua has no such bound, as nothing sets a
-    /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that
-    /// never ends hangs it.
+    /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never
+    /// ends hangs it; benilla bounds it because a hung load would otherwise freeze the loading
+    /// screen instead of reporting.
     ///
     /// An abort runs no error handler, so its message waits and is handed to the error function
     /// when the budget is disarmed, as a compile failure is (`0x704b42`), once per arming: the
@@ -1103,24 +1113,13 @@ impl UiScript {
         self.model_mut().minimap.inside = inside;
     }
 
-    /// The Minimap's per-frame update (`0x4eb040`) on every Minimap's player arrow: once its model
-    /// is loaded (`0x7103d0`), `0x4ee100` centres it on its own size, half its width and height
-    /// (slots 0x1c and 0x20) in layout units; then `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at
-    /// `0x4eb0a4`–`0x4eb0b1`) copies the player's facing (radians) raw into the field
-    /// `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
-    pub fn set_minimap_player_facing(&mut self, facing: f32) {
+    /// The Minimap's per-frame update (`0x4eb040`) on every Minimap's player arrow, ahead of its
+    /// object lookup (`0x4eb04f`-`0x4eb074`): once its model is loaded (`0x7103d0`), `0x4ee100`
+    /// centres it on its own size, half its width and height (slots 0x1c and 0x20) in layout units.
+    pub fn centre_minimap_player_arrows(&mut self) {
         let mut model = self.model_mut();
         let unit = model.layout_unit();
-        let arrows: Vec<crate::widget::FrameHandle> = model
-            .arena
-            .minimap_kinds()
-            .iter()
-            .filter_map(|&h| match model.arena.frame(h).map(|f| &f.kind_state) {
-                Some(KindState::Minimap(m)) => m.player_arrow,
-                _ => None,
-            })
-            .collect();
-        for h in arrows {
+        for h in minimap::player_arrows(&model) {
             let size = model.layout_inputs.get(&h).map_or((0.0, 0.0), |i| {
                 let u = model.layout_units();
                 (i.width.script(u), i.height.script(u))
@@ -1132,12 +1131,26 @@ impl UiScript {
                     .is_some_and(|p| model.model_facts.contains_key(&crate::widget::model_key(p))),
                 _ => false,
             };
+            if !loaded {
+                continue;
+            }
             if let Some(KindState::Model(state)) =
                 model.arena.frame_mut(h).map(|f| &mut f.kind_state)
             {
-                if loaded {
-                    state.position = (size.0 / unit * 0.5, size.1 / unit * 0.5, 0.0);
-                }
+                state.position = (size.0 / unit * 0.5, size.1 / unit * 0.5, 0.0);
+            }
+        }
+    }
+
+    /// `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at `0x4eb0a4`–`0x4eb0b1`) on every Minimap's
+    /// player arrow: copies the facing (radians) of the object the camera follows raw into the
+    /// field `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
+    pub fn set_minimap_player_facing(&mut self, facing: f32) {
+        let mut model = self.model_mut();
+        for h in minimap::player_arrows(&model) {
+            if let Some(KindState::Model(state)) =
+                model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+            {
                 state.facing = facing;
             }
         }

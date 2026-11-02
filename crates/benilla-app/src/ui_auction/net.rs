@@ -180,6 +180,11 @@ pub(crate) struct HouseLane {
 }
 
 impl HouseLane {
+    /// The teardown's free of the lists' name callbacks, running none (`0x55f990`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.waits.clear();
+    }
+
     pub(super) fn push(&mut self, step: HouseStep) {
         let stamp = crate::lanes::stamp();
         let at = self.steps.partition_point(|(s, _)| *s < stamp);
@@ -198,9 +203,9 @@ impl HouseLane {
     }
 
     /// Keep a name's wait for `list`, once per name and list (`0x55f080`'s dedupe flag 1). The
-    /// list callbacks (`0x4cf290`, `0x4cf2b0`, `0x4cf2d0`) are engine code that only the name
-    /// cache's cancel `0x55f870` removes, and no auction caller makes it, so a wait outlives the VM
-    /// whose getter made it and signals the next one.
+    /// list callbacks (`0x4cf290`, `0x4cf2b0`, `0x4cf2d0`) are engine code no auction caller
+    /// cancels (`0x55f870`), so a wait outlives the window and ends at its answer or at the
+    /// interface's teardown ([`crate::wdb::free_store_callbacks`]).
     pub(super) fn wait_for_name(&mut self, guid: u64, list: usize) {
         if !self.waits.contains(&(guid, list)) {
             self.waits.push((guid, list));
@@ -307,9 +312,9 @@ fn patch_step(h: &House, list: usize, auction_id: u32) -> Option<HouseStep> {
     })
 }
 
-/// A list result's page as its handler writes it, the tail run there when every item is known
-/// ([`AuctionOpen::land_page`]), each item asked with the list's callback (`0x4cc9bf`,
-/// `0x4ccbff`, `0x4cce4f`), readied onto the house lane, stamped with the tick it is read at
+/// A list result's page as its handler writes it, each item looked up with the list's callback
+/// (`0x4cc9bf`, `0x4ccbff`, `0x4cce4f`) and the tail run there when none missed
+/// ([`AuctionOpen::land_page`]), readied onto the house lane, stamped with the tick it is read at
 /// (`0x4cc865`): the VM's clock, or with none the host's copy of it.
 fn land_page(vm: &mut HouseVm, list: usize) {
     vm.turn(|script, mut h| {
@@ -320,7 +325,11 @@ fn land_page(vm: &mut HouseVm, list: usize) {
             return;
         };
         let tick = script.map_or(h.wire.view().now, |s| s.auction_tick_ms());
-        let tail = h.auction.land_page(list, tick, items);
+        let ask = match h.wire.commands.as_deref() {
+            Some(commands) => crate::query_cache::Ask::Event(commands),
+            None => crate::query_cache::Ask::Read,
+        };
+        let tail = h.auction.land_page(list, tick, items, ask);
         let reads = super::ListReads {
             self_guid: h.self_q.iter().next().map(|g| g.0),
             items,
@@ -331,11 +340,9 @@ fn land_page(vm: &mut HouseVm, list: usize) {
                 enchants: h.enchants.as_deref(),
             },
         };
-        let ask = match h.wire.commands.as_deref() {
-            Some(commands) => crate::query_cache::Ask::Event(commands),
-            None => crate::query_cache::Ask::Read,
-        };
-        let state = h.auction.list_state(list, tick, &reads, ask);
+        let state = h
+            .auction
+            .list_state(list, tick, &reads, crate::query_cache::Ask::Read);
         let sorts = h.auction.sorts.0;
         h.lane.push(HouseStep::Page {
             list,
@@ -347,8 +354,8 @@ fn land_page(vm: &mut HouseVm, list: usize) {
 }
 
 /// A line readied onto the house lane, its item's name filled as the cache holds it; one whose
-/// item is not cached waits on the record, asked with the callback `0x4cd190` (`0x4ccf6e`,
-/// `0x4cd3eb`, `0x4cd4ef`), and shows when it lands ([`message_answered`]). Whether it was
+/// item is not cached waits on the record, asked with the callback `0x4cd190` (`0x4ccfa2`,
+/// `0x4cd41f`, `0x4cd51a`), and shows when it lands ([`message_answered`]). Whether it was
 /// readied, with the rest of its handler past it.
 fn show_line(h: &mut House, msg: AuctionMessage, then: Option<AfterLine>) -> bool {
     let fill = match msg.item {
@@ -684,21 +691,12 @@ fn end_session_house(mut lane: ResMut<HouseLane>) {
     lane.clear();
 }
 
-/// An item record answered in the packet being handled, a record or a refusal: each list whose
-/// page waited on it and now waits on nothing runs its sort tail here, as the pending counter's
-/// last decrement runs it inside the record's callback (`0x4cc9e8`, `0x4cca10`), whatever the
-/// session; browse, bidder, then owner.
-pub(crate) fn record_answered(
-    auction: &mut AuctionOpen,
-    lane: &mut HouseLane,
-    items: &Items,
-    entry: u32,
-) {
-    for list in [LIST, BIDDER, OWNER] {
-        if auction.lists[list].awaits_only_answered(entry, items) {
-            auction.lists[list].awaiting = None;
-            lane.push(HouseStep::Tail(list));
-        }
+/// A list's callback on one of its rows' records, run in the answer's list, a record or a
+/// refusal alike (`0x4cca10`, `0x4ccc60`, `0x4cceb0`): its counter down, and the sort tail at 0
+/// (`0x4cca21`, `0x4ccc71`, `0x4ccec1`), whatever the session.
+pub(crate) fn list_record_answered(auction: &mut AuctionOpen, lane: &mut HouseLane, list: usize) {
+    if auction.list_record_answered(list) {
+        lane.push(HouseStep::Tail(list));
     }
 }
 
@@ -1621,6 +1619,31 @@ mod tests {
         auction_owner_list_result(vec![entry(1)], 60, &mut a);
         auction_bidder_list_result(vec![entry(1)], 60, &mut a);
         assert!(a.owner_armed && a.bidder_armed);
+    }
+
+    /// A line is its callback's own data (`0x4ccf8d`, `0x4cd1d9`), so the teardown's free takes it,
+    /// and a later miss on the entry shows its own line, not the stale one first.
+    #[test]
+    fn a_freed_line_goes_with_its_callback_and_a_later_miss_shows_its_own() {
+        let mut a = AuctionOpen::default();
+        let mut lane = HouseLane::default();
+        let mut items = Items::default();
+        a.messages
+            .push(AuctionMessage::chat_item("ERR_AUCTION_SOLD_S", 2589));
+        a.free_store_callbacks();
+        a.messages
+            .push(AuctionMessage::chat_item("ERR_AUCTION_WON_S", 2589));
+        items.insert_template(2589, Some(crate::items::test_template("Cloth")));
+        message_answered(&mut a, &mut lane, &items, 2589);
+        let shown: Vec<&str> = lane
+            .steps
+            .iter()
+            .filter_map(|(_, step)| match step {
+                HouseStep::Line { msg, .. } => Some(msg.key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, ["ERR_AUCTION_WON_S"]);
     }
 
     #[test]

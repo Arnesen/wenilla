@@ -393,11 +393,11 @@ fn a_build_with_no_player_empties_the_book_silently() {
     assert_eq!(first, None, "the rows are gone");
 }
 
-/// A `/reload` with a product's record in flight: the open's build kept the callback `0x4fc8e0`
-/// in the item cache, which outlives the VM, so the record's answer rebuilds the book with flag 1
-/// into the new interface at its packet (`0x4fc8fb`, `0x4fc900`), which then lists it.
+/// A `/reload` with a product's record in flight: its teardown frees the callback `0x4fc8e0` the
+/// open's build kept, running none (`0x490c35` → `0x5556c0` → `0x55c1b0`), so the record's answer
+/// signals no update in the new interface.
 #[test]
-fn a_products_record_answer_rebuilds_the_book_after_a_reload() {
+fn a_reload_frees_a_products_callback_and_its_answer_signals_nothing() {
     let mut app = crafter();
     app.world_mut()
         .resource_mut::<crate::items::Items>()
@@ -407,7 +407,8 @@ fn a_products_record_answer_rebuilds_the_book_after_a_reload() {
         ["TRADE_SKILL_SHOW"],
         "the pending build signals no update"
     );
-    // The reload: a new VM, seeded and entered as the load and the cascade do.
+    // The reload: the free, then a new VM, seeded and entered as the load and the cascade do.
+    crate::wdb::free_store_callbacks(app.world_mut());
     let mut script = UiScript::new().unwrap();
     crate::ui_tradeskill::seed_repeat(app.world(), &mut script);
     script.reset_crafts_on_world_enter();
@@ -428,14 +429,64 @@ fn a_products_record_answer_rebuilds_the_book_after_a_reload() {
     };
     assert_eq!(
         frame(&mut app, vec![fall(5), answer, fall(6)]),
-        ["UNIT_COMBAT", "TRADE_SKILL_UPDATE", "UNIT_COMBAT"]
+        ["UNIT_COMBAT", "UNIT_COMBAT"]
     );
-    let rows = app
-        .world()
+}
+
+/// A product's record the cache refused is looked up again by `GetTradeSkillItemStats`, which
+/// asks with the callback `0x4fdc30` inside its call (`0x4fdf64`-`0x4fdf95`): a fall's listener's
+/// query goes out ahead of the next packet's handler send, and its callback waits for the answer.
+#[test]
+fn a_products_stats_miss_asks_inside_the_getters_call() {
+    let mut app = crafter();
+    let (tx, sent) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx));
+    quietly(&mut app, r#"CastSpellByName("Tailoring")"#);
+    let refusal = SessionEvent::ItemTemplate {
+        entry: 2996,
+        info: None,
+    };
+    frame(&mut app, vec![refusal]);
+    sent.try_iter().for_each(drop);
+    app.world()
         .non_send_resource::<UiScript>()
-        .eval::<i64>("return GetNumTradeSkills()")
+        .run(
+            r#"
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UNIT_COMBAT")
+            f:SetScript("OnEvent", function()
+                if Asked then return end
+                Asked = true
+                for i = 1, GetNumTradeSkills() do
+                    if GetTradeSkillInfo(i) == "Bolt of Linen Cloth" then
+                        GetTradeSkillItemStats(i)
+                    end
+                end
+            end)
+            "#,
+        )
         .unwrap();
-    assert!(rows > 0, "{rows}");
+    let duel = SessionEvent::DuelRequested {
+        arbiter: 0xF110_0000_0000_0055,
+        challenger: ME,
+    };
+    frame(&mut app, vec![fall(5), duel]);
+    let order: Vec<&str> = sent
+        .try_iter()
+        .filter_map(|c| match c {
+            crate::net::ClientCommand::ItemQuery { entry: 2996, .. } => Some("ItemQuery"),
+            crate::net::ClientCommand::DuelAccepted { .. } => Some("DuelAccepted"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["ItemQuery", "DuelAccepted"]);
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<crate::items::Items>()
+            .take_waiters(2996, crate::items::RecordCallback::TradeSkill),
+        1,
+        "the getter's callback waits on the answer"
+    );
 }
 
 /// A fall's listener that records `expr`'s answer at its call as `tag:answer`.

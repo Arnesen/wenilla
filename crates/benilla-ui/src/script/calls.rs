@@ -557,8 +557,7 @@ pub(crate) struct CallRaises {
 }
 
 /// What waits for the host, in the order made: a call, or a handler an engine step fired while
-/// the host was out ([`Held`]), each with the input events running when it was made, and the lock
-/// and cursor writes made among them ([`Waiting::Lock`], [`Waiting::Cursor`]).
+/// the host was out ([`Held`]), each with the input events running when it was made.
 #[derive(Clone, Debug)]
 pub(crate) enum Waiting {
     Call(QueuedCall),
@@ -568,24 +567,6 @@ pub(crate) enum Waiting {
         /// The `PlaySound` suppression depth it was fired under (`0x458f50`): a load's or a
         /// sweep's handlers stay silent though they run once the scope has closed.
         muted: u32,
-    },
-    /// A write of item `guid`'s lock bit made while something waited ([`Model::set_item_lock`]):
-    /// `locked` after it, `was` before it. The take puts the bit back ([`take_waiting`]) and the
-    /// write is made again in its place, so what waited ahead of it reads the lock as it stood
-    /// then, as `UnlockItem` (`0x495420`) signals before the step's next write.
-    Lock {
-        guid: u64,
-        locked: bool,
-        was: bool,
-    },
-    /// A cursor write made while something waited ([`super::cursor::write`]): the take puts the
-    /// cursor back as it found it, so what waited ahead of it reads the cursor as it stood then,
-    /// and its operation runs again in its place against the cursor as it is then, as
-    /// `ClearCursor` (`0x495190`) acts on what the cursor holds when it runs. `shown`: Lua the
-    /// turn ran in place made it and its events fired then, so it is made again without them.
-    Cursor {
-        write: Box<super::cursor::CursorWrite>,
-        shown: bool,
     },
 }
 
@@ -620,6 +601,21 @@ impl super::Model {
     pub(crate) fn push_waiting(&mut self, item: Waiting) {
         self.script_calls.push(item);
     }
+
+    /// Hold `raised`, a write's records made outside a segment while something waits for the
+    /// host, behind it as a segment of its own ([`Held::Segment`]), with the input events running
+    /// now.
+    pub(crate) fn hold_behind(&mut self, raised: Vec<super::tick::Raised>) {
+        let input = self.protected.events();
+        let muted = self.sound_suppression;
+        self.push_waiting(Waiting::Lua {
+            held: Held::Segment(raised),
+            input,
+            muted,
+        });
+        #[cfg(debug_assertions)]
+        super::census::held();
+    }
 }
 
 /// Hold `held` for the host, with the input events running now: an engine step fired it while it
@@ -629,7 +625,7 @@ pub(crate) fn hold(lua: &Lua, held: Held) {
     let input = model.protected.events();
     let muted = model.sound_suppression;
     model.push_waiting(Waiting::Lua { held, input, muted });
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(debug_assertions)]
     super::census::held();
 }
 
@@ -642,10 +638,9 @@ pub(crate) fn signal_waiting(lua: &Lua) -> bool {
         .any(|item| matches!(item, Waiting::Lua { .. }))
 }
 
-/// Take what waits, with the lock bits and the cursor its writes changed put back, last first:
-/// each item then runs against the locks and the cursor as they stood when it was made, and each
-/// write is made again in its place ([`Waiting::Lock`], [`Waiting::Cursor`], a held segment's
-/// own).
+/// Take what waits, with the lock bits and the cursor its held segments' writes changed put back,
+/// last first: each item then runs against the locks and the cursor as they stood when it was
+/// made, and each segment's write is made again in its place.
 fn take_waiting(lua: &Lua) -> VecDeque<Waiting> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     let model = &mut *model;
@@ -654,41 +649,16 @@ fn take_waiting(lua: &Lua) -> VecDeque<Waiting> {
     batch.into()
 }
 
-/// Put back, last first, the lock bits and the cursor `batch`'s writes changed.
+/// Put back, last first, the lock bits and the cursor `batch`'s held segments' writes changed.
 fn rewind_waiting(model: &mut Model, batch: &[Waiting]) {
     for item in batch.iter().rev() {
-        match item {
-            Waiting::Lock { guid, was, .. } => {
-                super::tick::set_lock_bit(model, *guid, *was);
-            }
-            Waiting::Cursor { write, .. } => write.rewind(model),
-            Waiting::Lua {
-                held: Held::Segment(raised),
-                ..
-            } => super::tick::rewind(model, raised),
-            Waiting::Lua { .. } | Waiting::Call(_) => {}
+        if let Waiting::Lua {
+            held: Held::Segment(raised),
+            ..
+        } = item
+        {
+            super::tick::rewind(model, raised);
         }
-    }
-}
-
-/// Make a lock write that waited, in its place.
-fn relock(lua: &Lua, guid: u64, locked: bool) {
-    lua.app_data_mut::<Model>()
-        .expect("model app_data")
-        .set_item_lock(guid, locked);
-}
-
-/// Make a cursor write that waited again, in its place, against the cursor as it is now: as the
-/// engine half made it, outside any segment, or with `shown` silently, its events having fired
-/// as it was first made.
-fn rewrite(lua: &Lua, write: Box<super::cursor::CursorWrite>, shown: bool) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    if shown {
-        let outer = model.verb_events.replace(Vec::new());
-        super::cursor::write(&mut model, write.op);
-        model.verb_events = outer;
-    } else {
-        super::cursor::write(&mut model, write.op);
     }
 }
 
@@ -729,7 +699,7 @@ fn run_held(lua: &Lua, held: Held) {
 /// such a chain always ends inside its frame.
 ///
 /// Deviation: the reference's only bound is `luaD_call`'s count of 200 nested calls (`0x6f65ae`),
-/// past which it raises `C stack overflow` (`0x6f65bf`); eight here, as each level keeps an
+/// past which it raises `C stack overflow` (`0x6f65bf`); eight here, because each level keeps an
 /// apply's frame on the Rust stack.
 pub(crate) const MAX_NESTING: u8 = 8;
 
@@ -762,11 +732,6 @@ pub(crate) fn submit(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
     }
     if model.call_depth >= MAX_NESTING {
         return Err(mlua::Error::runtime(TOO_DEEP));
-    }
-    if super::host::splitting(lua) {
-        drop(model);
-        apply_now(lua, call);
-        return Ok(());
     }
     let seq = model.queue_call(call);
     model.call_raises.awaited.push(seq);
@@ -873,7 +838,7 @@ fn drain_within(lua: &Lua) {
                 // key, click or Enter that made it, and only inside that: a queued call gets
                 // exactly its events.
                 let tail = script.with_input_events(input, |script| {
-                    #[cfg(any(test, feature = "test-support"))]
+                    #[cfg(debug_assertions)]
                     let _census = super::census::Applying::new(&call);
                     super::host::with_host(lua, |host| host.apply(script, call)).flatten()
                 });
@@ -886,8 +851,6 @@ fn drain_within(lua: &Lua) {
                 }
             }
             Waiting::Lua { held, input, muted } => replay(lua, &mut script, held, input, muted),
-            Waiting::Lock { guid, locked, .. } => relock(lua, guid, locked),
-            Waiting::Cursor { write, shown } => rewrite(lua, write, shown),
         }
         drain(lua);
     }
@@ -911,51 +874,12 @@ fn settle_within(lua: &Lua, script: &mut UiScript) {
         }
         match item {
             Waiting::Lua { held, input, muted } => replay(lua, script, held, input, muted),
-            Waiting::Lock { guid, locked, .. } => relock(lua, guid, locked),
-            Waiting::Cursor { write, shown } => rewrite(lua, write, shown),
             call @ Waiting::Call(_) => {
                 requeue(lua, [call]);
                 drain(lua);
             }
         }
     }
-}
-
-/// A held segment's calls inside a split stretch ([`super::host::splitting`]), each applied at
-/// once through the lent host in its order: what the segment raised ahead of a call is held as
-/// its own segment first, so what the call's apply signals waits behind it; the rest is returned
-/// to be held.
-pub(crate) fn apply_split_calls(
-    lua: &Lua,
-    raised: Vec<super::tick::Raised>,
-) -> Vec<super::tick::Raised> {
-    use super::tick::Raised;
-    if !super::host::splitting(lua) || !raised.iter().any(|r| matches!(r, Raised::Call(_))) {
-        return raised;
-    }
-    let mut rest = Vec::with_capacity(raised.len());
-    // Cursor views open in `rest`: a segment is cut only where none is, so each view stays with
-    // its end.
-    let mut views = 0usize;
-    for r in raised {
-        match r {
-            Raised::Call(call) if super::host::splitting(lua) => {
-                if views == 0 {
-                    hold_segment(lua, std::mem::take(&mut rest));
-                }
-                apply_now(lua, *call);
-            }
-            other => {
-                match other {
-                    Raised::CursorView(_) => views += 1,
-                    Raised::EndCursorView => views = views.saturating_sub(1),
-                    _ => {}
-                }
-                rest.push(other);
-            }
-        }
-    }
-    rest
 }
 
 /// Hold `raised` for the host as one segment ([`Held::Segment`]) when it holds anything a
@@ -969,22 +893,6 @@ pub(crate) fn hold_segment(lua: &Lua, raised: Vec<super::tick::Raised>) {
         )
     }) {
         hold(lua, Held::Segment(raised));
-    }
-}
-
-/// Apply `call` through the lent host at once, with its tail, inside a split stretch: what it
-/// signals waits; what it raises is the script's error.
-fn apply_now(lua: &Lua, call: ScriptCall) {
-    let outer = swap_raising(lua, None);
-    let mut script = UiScript::reentrant(lua);
-    let tail = super::host::with_host(lua, |host| host.apply(&mut script, call)).flatten();
-    if let Some(tail) = tail {
-        tail(&mut script);
-    }
-    if let Some(message) = swap_raising(lua, outer) {
-        lua.app_data_mut::<Model>()
-            .expect("model app_data")
-            .record_lua_error(&mlua::Error::runtime(message));
     }
 }
 
@@ -1025,8 +933,6 @@ fn refuse_waiting_within(lua: &Lua) -> usize {
                     Waiting::Lua { held, input, muted } => {
                         replay(lua, &mut script, held, input, muted)
                     }
-                    Waiting::Lock { guid, locked, .. } => relock(lua, guid, locked),
-                    Waiting::Cursor { write, shown } => rewrite(lua, write, shown),
                 }
             }
         }
@@ -1034,40 +940,6 @@ fn refuse_waiting_within(lua: &Lua) -> usize {
 }
 
 impl UiScript {
-    /// How much waits for the host now: the mark a deferred stretch parks from
-    /// ([`Self::park_since`]).
-    pub fn waiting_mark(&self) -> usize {
-        self.model_ref().script_calls.len()
-    }
-
-    /// Park what has waited since `mark`, a deferred stretch's held handlers and writes
-    /// ([`Self::defer`]), with the lock bits and the cursor its writes changed put back, so what
-    /// runs before it reads them as they stood; the key [`Self::run_parked`] runs it by, `None`
-    /// when nothing waited.
-    pub fn park_since(&mut self, mark: usize) -> Option<u64> {
-        let mut model = self.model_mut();
-        let model = &mut *model;
-        if model.script_calls.len() <= mark {
-            return None;
-        }
-        let parked = model.script_calls.split_off(mark);
-        rewind_waiting(model, &parked);
-        let key = model.next_parked;
-        model.next_parked += 1;
-        model.parked.insert(key, parked);
-        Some(key)
-    }
-
-    /// Run what [`Self::park_since`] parked under `key`, behind what waits now, each write made
-    /// again in its place, with the host lent; a key this VM never parked runs nothing.
-    pub fn run_parked(&mut self, key: u64) {
-        let Some(parked) = self.model_mut().parked.remove(&key) else {
-            return;
-        };
-        self.model_mut().script_calls.extend(parked);
-        drain(self.lua());
-    }
-
     /// Raise `message` in the verb of the call the host is applying, as that verb returns: the
     /// reference's verb raises in its own body (`lua_error`, through `0x6f4940`), after what it did
     /// before, which stands. A verb that returned while its call waited for the host reports it as
@@ -1733,9 +1605,11 @@ mod tests {
     /// `UnlockItem` (`0x495420`) clears the bit (`0x495449`) and signals `ITEM_LOCK_CHANGED`
     /// (`0x495455`) before it returns, so a step that unlocks two items in turn, as a refused move
     /// unlocks its two (`0x5e3ac0`, `0x5e3ad3`), shows the first signal's handlers the second item
-    /// still locked. Held for the host, they read the locks as each signal left them.
+    /// still locked. An engine step that makes the second write while the first's handlers are
+    /// held for the host writes ahead of their point, which the census refuses.
     #[test]
-    fn a_held_handler_reads_the_locks_its_signal_left() {
+    #[should_panic(expected = "wrote the lock while a handler it signalled was held")]
+    fn a_lock_write_ahead_of_a_held_handlers_point_is_refused() {
         let mut s = UiScript::new().unwrap();
         watch_locks(&s);
         s.seed_item_locks([1, 2]);
@@ -1743,10 +1617,6 @@ mod tests {
             s.unlock_item(1);
             s.unlock_item(2);
         });
-        let mut host = Stamping::default();
-        s.hosted(&mut host, |_| ());
-        assert_eq!(global::<String>(&s, "SEEN"), "01 00 ");
-        assert_eq!(s.item_locks(), Vec::<u64>::new());
     }
 
     /// A held verb segment carries its lock writes: the sell-slot clear (`0x4cd640`) unlocks its
@@ -2023,142 +1893,6 @@ mod tests {
         };
         s.hosted(&mut next, |s| s.run("ClearTarget()")).unwrap();
         assert_eq!(next.applied, 1);
-    }
-
-    /// While a stretch is deferred, a handler fired is held even with a host lent, and a lend's
-    /// drain runs nothing; each leg's handlers park apart, and each parked run fires once, in
-    /// order, with the host lent.
-    #[test]
-    fn a_deferred_stretch_parks_each_legs_handlers_for_one_run() {
-        let mut s = UiScript::new().unwrap();
-        on(&s, "LOOT_OPENED", r#"ORDER = (ORDER or "") .. "opened ""#);
-        on(&s, "LOOT_CLOSED", r#"ORDER = (ORDER or "") .. "closed ""#);
-        let mut host = Nesting {
-            applied: Vec::new(),
-            inner: None,
-        };
-        let mark = s.waiting_mark();
-        let deferring = s.defer();
-        s.hosted(&mut host, |s| s.fire_event("LOOT_OPENED", vec![]));
-        assert_eq!(global::<Option<String>>(&s, "ORDER"), None, "held");
-        let first = s.park_since(mark).expect("the first leg's");
-        s.fire_event("LOOT_CLOSED", vec![]);
-        s.hosted(&mut host, |_| ());
-        assert_eq!(
-            global::<Option<String>>(&s, "ORDER"),
-            None,
-            "the drain refused"
-        );
-        let second = s.park_since(mark).expect("the second leg's");
-        assert_eq!(s.park_since(mark), None, "nothing since");
-        drop(deferring);
-        let lua = s.lua().clone();
-        assert!(!super::super::host::holding(&lua));
-        s.hosted(&mut host, |s| {
-            s.run_parked(first);
-            s.run_parked(first);
-        });
-        assert_eq!(global::<String>(&s, "ORDER"), "opened ", "once");
-        s.hosted(&mut host, |s| s.run_parked(second));
-        assert_eq!(global::<String>(&s, "ORDER"), "opened closed ");
-    }
-
-    /// A parked stretch puts back the lock bits and the cursor its writes changed, so what runs
-    /// before it reads them as they stood, and makes each write again in its place when it runs:
-    /// the clear's `CURSOR_UPDATE` reads the emptied cursor then.
-    #[test]
-    fn a_parked_stretch_rewinds_its_cursor_and_lock_writes_and_makes_them_again() {
-        use super::super::cursor::{CursorItem, CursorPayload};
-        const LOCKED: u64 = 0x200;
-        let mut s = UiScript::new().unwrap();
-        on(&s, "CURSOR_UPDATE", r#"SEEN = tostring(CursorHasItem())"#);
-        // A handler held ahead of the writes, so they wait behind it.
-        on(&s, "LOOT_OPENED", "OPENED = 1");
-        s.set_cursor_for_test(CursorPayload::Item(CursorItem {
-            item_class: None,
-            guid: 0x106,
-            bar_placeable: true,
-            consumable: false,
-            bag: 0,
-            slot: 1,
-            item_id: 117,
-            texture: None,
-            link: None,
-            count: None,
-            quality: None,
-            equip_slots: Vec::new(),
-        }));
-        let mark = s.waiting_mark();
-        let deferring = s.defer();
-        s.fire_event("LOOT_OPENED", vec![]);
-        s.lock_item(LOCKED);
-        s.clear_cursor_payload();
-        let key = s.park_since(mark).expect("parked");
-        drop(deferring);
-        assert!(!s.item_locked(LOCKED), "the lock put back");
-        assert!(s.cursor_payload().is_some(), "the cursor put back");
-        let mut host = Nesting {
-            applied: Vec::new(),
-            inner: None,
-        };
-        s.hosted(&mut host, |s| s.run_parked(key));
-        assert!(s.item_locked(LOCKED), "the lock made again");
-        assert!(s.cursor_payload().is_none(), "the clear made again");
-        assert_eq!(global::<String>(&s, "SEEN"), "nil");
-    }
-
-    /// A host whose every call signals `PLAYER_TARGET_CHANGED`.
-    struct Signalling(Vec<ScriptCall>);
-
-    impl CallHost for Signalling {
-        fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
-            self.0.push(call);
-            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-            None
-        }
-    }
-
-    /// In a split stretch, a verb that signals and then makes a call applies the call at once,
-    /// and what was raised before it waits ahead of what its apply signals.
-    #[test]
-    fn a_split_stretch_keeps_a_signal_ahead_of_a_later_calls_signals() {
-        let mut s = UiScript::new().unwrap();
-        on(&s, "LOOT_OPENED", r#"ORDER = (ORDER or "") .. "opened ""#);
-        on(
-            &s,
-            "PLAYER_TARGET_CHANGED",
-            r#"ORDER = (ORDER or "") .. "applied ""#,
-        );
-        let mut host = Signalling(Vec::new());
-        let lua = s.lua().clone();
-        let mark = s.waiting_mark();
-        let deferring = s.defer_split();
-        s.hosted(&mut host, |_| {
-            super::super::tick::verb(&lua, |model| {
-                model.raise("LOOT_OPENED", vec![]);
-                model.call_in_verb(ScriptCall::ClearTarget);
-            })
-        });
-        assert_eq!(host.0, vec![ScriptCall::ClearTarget], "applied at once");
-        assert_eq!(global::<Option<String>>(&s, "ORDER"), None, "held");
-        let key = s.park_since(mark).expect("parked");
-        drop(deferring);
-        s.hosted(&mut host, |s| s.run_parked(key));
-        assert_eq!(global::<String>(&s, "ORDER"), "opened applied ");
-    }
-
-    /// The deferral's guard ends with a panic that unwinds through it: nothing is held after.
-    #[test]
-    fn a_panic_ends_the_deferral() {
-        let s = UiScript::new().unwrap();
-        let lua = s.lua().clone();
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _deferring = s.defer();
-            panic!("inside a deferred stretch");
-        }));
-        assert!(unwound.is_err());
-        assert!(!super::super::host::holding(&lua));
-        assert!(!super::super::host::open(&lua));
     }
 
     /// A host whose `ClearTarget` panics; its other calls signal `PLAYER_TARGET_CHANGED`, stop at a

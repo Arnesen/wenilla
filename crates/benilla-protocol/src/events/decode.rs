@@ -31,7 +31,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         } => decode_objects(first_pass, objects),
         // In order, each move as if alone: the app rebuilds a mover's arc from packet order.
         ServerPacket::CompressedMoves { packets } => packets.into_iter().flat_map(decode).collect(),
-        ServerPacket::CharEnum { characters } => vec![SessionEvent::CharacterList {
+        ServerPacket::CharEnum { characters, .. } => vec![SessionEvent::CharacterList {
             characters,
             realm: None,
             cause: super::RosterCause::Unasked,
@@ -538,6 +538,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             launch,
         }],
         ServerPacket::GroupInvite { inviter } => vec![SessionEvent::GroupInvite { inviter }],
+        ServerPacket::GroupCancel => vec![SessionEvent::GroupCancel],
         ServerPacket::GroupDecline { name } => vec![SessionEvent::GroupDecline { name }],
         ServerPacket::GroupUninvited => vec![SessionEvent::GroupUninvited],
         ServerPacket::GroupLeaderChanged { name } => {
@@ -631,6 +632,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::IgnoreList { guids } => vec![SessionEvent::IgnoreList { guids }],
         ServerPacket::FriendStatus(status) => vec![SessionEvent::FriendStatus(status)],
         ServerPacket::WhoResults(results) => vec![SessionEvent::WhoResults(results)],
+        ServerPacket::LookingForGroup(results) => vec![SessionEvent::LfgResults(results)],
         ServerPacket::GuildQueryResponse(response) => {
             vec![SessionEvent::GuildQueryResponse(response)]
         }
@@ -930,6 +932,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::GameObjectDespawnAnim { guid } => {
             vec![SessionEvent::GameObjectDespawnAnim { guid }]
         }
+        ServerPacket::GameObjectResetState { guid } => {
+            vec![SessionEvent::GameObjectResetState { guid }]
+        }
         ServerPacket::GameObjectPageText { guid } => {
             vec![SessionEvent::GameObjectPageText { guid }]
         }
@@ -988,8 +993,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 flags,
                 pitch,
                 time,
-                // The opcode's meaning is the speed, carried by its own event: the pose is plain.
-                verb: crate::messages::RelayVerb::Pose,
+                // The opcode's meaning is the speed, carried by its own event: the pose is plain,
+                // and its packet goes on to the speed.
+                verb: crate::messages::RelayVerb::Speed,
                 fall_time,
                 jump,
                 transport,
@@ -1148,7 +1154,8 @@ fn decode_objects(first_pass: bool, objects: Vec<Object>) -> Vec<SessionEvent> {
             // Deviation: an out-of-range list past the first block reads no body in the write
             // passes (`0x466076`), which misread every block behind it, while the notify pass
             // reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it,
-            // keeping the blocks behind it whole.
+            // keeping the blocks behind it whole, because the faults the reference's passes have on
+            // malformed packets are recorded, not copied.
             Object::OutOfRange { guids } => {
                 if at == 0 {
                     first.push(SessionEvent::ObjectsRemoved(guids));
@@ -1165,7 +1172,7 @@ fn decode_objects(first_pass: bool, objects: Vec<Object>) -> Vec<SessionEvent> {
             // Deviation: the flagged pass reads a movement block's guid as 8 raw bytes
             // (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens
             // to be 8 bytes the reference misreads the rest of that pass; benilla reads the block
-            // once, packed, as pass 0 does (`0x467080`).
+            // once, packed, as pass 0 does (`0x467080`), because of the misreading just described.
             Object::Movement { guid, movement } => {
                 if let Some((position, orientation)) = movement.position {
                     second.push(SessionEvent::ObjectMove {

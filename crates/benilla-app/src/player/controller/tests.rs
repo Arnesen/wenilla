@@ -281,6 +281,7 @@ fn a_water_walk_or_hover_ack_ends_the_precast_and_a_root_or_feather_fall_ack_doe
         (MoveMode::Root, false, false),
         (MoveMode::FeatherFall, true, false),
     ] {
+        const CORPSE: u64 = 0xF130_0000_0000_0042;
         let mut client = Client::new(Body::Own, |_| {});
         let world = client.app.world_mut();
         let me = world.resource::<GuidIndex>().0[&ME];
@@ -288,6 +289,16 @@ fn a_water_walk_or_hover_ack_ends_the_precast_and_a_root_or_feather_fall_ack_doe
             spell_id: 133,
             busy: true,
         });
+        let mut loot = world.resource_mut::<crate::ui_loot::LootState>();
+        loot.open(
+            CORPSE,
+            benilla_protocol::messages::loot_type::CORPSE,
+            5,
+            vec![],
+        );
+        // Open long ago: its `LOOT_OPENED` has fired.
+        loot.signals_fired();
+        world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
         world.write_message(crate::net::MoveModeMessage {
             guid: ME,
             counter: 1,
@@ -303,11 +314,19 @@ fn a_water_walk_or_hover_ack_ends_the_precast_and_a_root_or_feather_fall_ack_doe
             "{mode:?} {}",
             if apply { "on" } else { "off" }
         );
-        // The end's tail releases our loot (`0x60d10b`), precast or not: the move-start close
-        // while the body falls through this empty world, the full one at rest.
-        let released = std::mem::take(&mut world.resource_mut::<crate::ui_loot::LootMoveStart>().0)
-            | std::mem::take(&mut world.resource_mut::<crate::ui_loot::LootCloseAtRest>().0);
-        assert_eq!(released, ends, "{mode:?}: the loot release");
+        // The end's tail releases our loot (`0x60d10b`), precast or not, as the ack's end applies:
+        // the move-start close while the body falls through this empty world, the full one at
+        // rest, either of which takes a corpse's window.
+        let closed = world
+            .resource::<crate::ui_loot::LootState>()
+            .source()
+            .is_none();
+        assert_eq!(closed, ends, "{mode:?}: the loot release");
+        let released = client
+            .sent
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::LootRelease { guid } if guid == CORPSE));
+        assert_eq!(released, ends, "{mode:?}: released as it closes");
     }
 }
 
@@ -998,15 +1017,35 @@ fn a_move_key_in_the_air_closes_the_loot_and_ends_a_follow_at_the_press() {
         "falling through the empty world"
     );
     follow(&mut client);
+    const CORPSE: u64 = 0xF130_0000_0000_0042;
     let world = client.app.world_mut();
-    world.resource_mut::<crate::ui_loot::LootMoveStart>().0 = false;
+    let mut loot = world.resource_mut::<crate::ui_loot::LootState>();
+    loot.open(
+        CORPSE,
+        benilla_protocol::messages::loot_type::CORPSE,
+        5,
+        vec![],
+    );
+    // Open long ago: its `LOOT_OPENED` has fired.
+    loot.signals_fired();
+    world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
+    let _ = client.sent.try_iter().count();
+    let world = client.app.world_mut();
     *world.resource_mut::<BindingsState>() = BindingsState::after_calls(vec![], forward());
     for system in [client.sample, client.commands, client.cancel, client.press] {
         world.run_system(system).expect("the press runs");
     }
-    assert!(
-        world.resource::<crate::ui_loot::LootMoveStart>().0,
+    assert_eq!(
+        world.resource::<crate::ui_loot::LootState>().source(),
+        None,
         "the loot closes at the press"
+    );
+    assert!(
+        client
+            .sent
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::LootRelease { guid } if guid == CORPSE)),
+        "released there"
     );
     assert!(!following(&mut client), "and the follow ends there");
 }
@@ -1086,4 +1125,43 @@ fn a_standing_jump_keeps_its_air_nudge_for_a_key_pressed_mid_arc() {
         (speed - crate::player::AIR_NUDGE_SPEED).abs() < 1e-4,
         "the forward press nudges the arc: {speed}"
     );
+}
+
+/// One frame with the spyglass's aura as `zoom` leaves it.
+fn scope_frame(client: &mut Client, zoom: Option<f32>) {
+    let world = client.app.world_mut();
+    world.resource_mut::<scoped_view::ScopedView>().zoom = zoom;
+    client.frame(vec![], vec![]);
+}
+
+/// The aura's start and end reach the camera in the frame's controller (`0x5ff462`, `0x61236e` →
+/// `0x50d320`): view 0 at once and the bit, then the bit cleared and view 1 at once, which takes
+/// the camera back out with no zoom asked.
+#[test]
+fn the_spyglass_selects_its_views_at_its_start_and_end() {
+    let mut client = Client::new(Body::Own, |_| {});
+    scope_frame(&mut client, Some(1.0 / 6.0));
+    let world = client.app.world();
+    let rig = world.resource::<CameraControl>();
+    assert!(rig.scoped);
+    assert_eq!(rig.distance, 0.0);
+    assert!(world.resource::<camera_view::CameraViews>().owes_active());
+
+    scope_frame(&mut client, None);
+    let rig = client.app.world().resource::<CameraControl>();
+    assert!(!rig.scoped);
+    assert_eq!((rig.distance, rig.target_distance), (5.55, 5.55));
+}
+
+/// Our arrival ends the scope its create's `PostInit` started under a standing aura, which selects
+/// view 1 at once (`0x5fbb3c`, `0x5deb44`).
+#[test]
+fn an_arrival_under_the_aura_selects_view_one() {
+    let mut client = Client::new(Body::Own, |_| {});
+    let world = client.app.world_mut();
+    world.resource_mut::<scoped_view::ScopedView>().arrival_end = true;
+    client.frame(vec![], vec![]);
+    let rig = client.app.world().resource::<CameraControl>();
+    assert!(!rig.scoped);
+    assert_eq!((rig.distance, rig.target_distance), (5.55, 5.55));
 }

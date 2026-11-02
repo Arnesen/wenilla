@@ -40,6 +40,7 @@ mod wdt;
 pub use adt::{chunk_to_mesh, chunks_to_mesh, AdtLoader, AdtTile, ChunkShading};
 pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
+mod tga_chain;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
 /// Whether this GPU takes WoW's stored DXT blocks, and the chain form that follows.
 mod gpu_blp;
@@ -83,49 +84,178 @@ impl MpqAssetReader {
     }
 }
 
-/// The archive path an asset path names: the sampler-mode marker ([`texture_url`]) names the
-/// asset, not the archive file.
-fn internal_path(path: &Path) -> Result<String, AssetReaderError> {
+/// The archive files an asset path may name, in the order to try them: the sampler-mode marker
+/// ([`texture_url`]) names the asset, not the archive file, and a `.blp` or `.tga` name is the
+/// two-candidate chain of `TextureCreate` (`0x449d90`, [`sprite_candidates`]). Any other name is
+/// itself.
+fn archive_names(path: &Path) -> Result<Vec<String>, AssetReaderError> {
     let raw = path
         .to_str()
         .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?;
-    Ok(strip_sampler_marker(raw).unwrap_or_else(|| raw.to_string()))
+    let (name, tga_first) = match parse_marker(raw) {
+        Some(m) => (format!("{}.{}", m.base, m.ext), m.tga_first),
+        None => (raw.to_string(), false),
+    };
+    // A `.tga` named outright (a mip file, `<name>_mip1.tga`) is that file alone.
+    let is_blp = name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".blp");
+    if !is_blp && !tga_first {
+        return Ok(vec![name]);
+    }
+    let probe = if tga_first {
+        format!("{}.tga", &name[..name.len() - 4])
+    } else {
+        name
+    };
+    Ok(sprite_candidates(&probe).to_vec())
+}
+
+/// The `.tga` a texture URL's path names, cut at its last dot: the base of its `_mip<n>.tga` files
+/// (`0x449550`).
+fn tga_stem(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let name = parse_marker(&path).map_or(path, |m| format!("{}.{}", m.base, m.ext));
+    name.rsplit_once('.')
+        .map_or(name.clone(), |(stem, _)| stem.to_string())
+}
+
+/// Whether a candidate that opened makes a texture: a `.tga` needs a header the device takes
+/// (`0x448450`), else the next candidate is tried (`0x44a140`).
+fn opens_as_texture(name: &str, bytes: &[u8]) -> bool {
+    !name.ends_with(".tga") || benilla_formats::tga_texture_size(bytes).is_some()
+}
+
+/// The bytes of the first of `path`'s candidate files that `open` gives and that makes a texture.
+/// A candidate that is not there, or whose `.tga` header makes no texture, is passed over for the
+/// next, as the reference's two loaders fail silently (`0x44a169`, `0x44a399`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn first_candidate(
+    path: &Path,
+    mut open: impl FnMut(&str) -> Result<Option<Vec<u8>>, AssetReaderError>,
+) -> Result<Vec<u8>, AssetReaderError> {
+    for name in archive_names(path)? {
+        if let Some(bytes) = open(&name)? {
+            if opens_as_texture(&name, &bytes) {
+                return Ok(bytes);
+            }
+        }
+    }
+    Err(AssetReaderError::NotFound(path.to_path_buf()))
 }
 
 impl MpqAssetReader {
-    /// The bytes of the archive file `path` names.
+    /// The chain's file `name`, or `None` where it holds none.
     #[cfg(not(target_arch = "wasm32"))]
-    async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
-        let internal = internal_path(path)?;
-        if !self.chain.contains(&internal) {
-            return Err(AssetReaderError::NotFound(path.to_path_buf()));
+    fn read_candidate(&self, name: &str) -> Result<Option<Vec<u8>>, AssetReaderError> {
+        if !self.chain.contains(name) {
+            return Ok(None);
         }
         self.chain
-            .read(&internal)
+            .read(name)
+            .map(Some)
             .map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))
     }
 
-    /// The bytes of the archive file `path` names, from the web host. A page has no filesystem,
-    /// so there is no cheap `Chain::contains` pre-check: the one fetch answers either way, a 404
-    /// as `NotFound` ([`wasm_fetch`]).
-    #[cfg(target_arch = "wasm32")]
-    async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
-        let internal = internal_path(path)?;
+    /// The bytes of the first of `path`'s candidate archive files that opens.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
+        first_candidate(path, |name| self.read_candidate(name))
+    }
+}
+
+/// `CM2Scene::CreateModel` (`0x707350`) opens [`ERROR_CUBE`] when the requested model fails to
+/// open (`0x70737f`), for every lane that creates through it (units `0x613e43`, GameObjects
+/// `0x5f7bde`, items, spell effects, `Model:SetModel` `0x76cd01`). So a model path whose file is
+/// missing reads the cube's bytes, from the archives with open flag 0; any other miss, and the
+/// cube's own, stays a miss.
+fn or_error_cube(
+    path: &Path,
+    read: Result<Vec<u8>, AssetReaderError>,
+    cube: impl FnOnce(&str) -> Result<Option<Vec<u8>>, AssetReaderError>,
+) -> Result<Vec<u8>, AssetReaderError> {
+    let Err(AssetReaderError::NotFound(_)) = &read else {
+        return read;
+    };
+    let is_m2 = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("m2"));
+    let Some(file) = benilla_formats::m2_file_name(ERROR_CUBE) else {
+        return read;
+    };
+    if !is_m2
+        || path
+            .to_str()
+            .is_some_and(|p| p.eq_ignore_ascii_case(&file.replace('\\', "/")))
+    {
+        return read;
+    }
+    match cube(&file) {
+        Ok(Some(bytes)) => Ok(bytes),
+        _ => read,
+    }
+}
+
+/// wenilla: the web host's half of [`MpqAssetReader`]. A page cannot block on a fetch, so the
+/// candidate walk ([`first_candidate`]) and the error cube's open ([`or_error_cube`]) await each
+/// candidate here, one at a time and in the same order.
+#[cfg(target_arch = "wasm32")]
+impl MpqAssetReader {
+    /// The chain's file `name` from the web host, or `None` where it holds none (a 404). There is
+    /// no cheap `Chain::contains` pre-check in a page: the one fetch answers either way.
+    async fn fetch_candidate(&self, name: &str) -> Result<Option<Vec<u8>>, AssetReaderError> {
         let url = format!(
             "{}/{}",
             benilla_formats::web::data_base(),
-            benilla_formats::web::encode_name(&internal)
+            benilla_formats::web::encode_name(name)
         );
-        wasm_fetch(&url).await.map_err(|e| match e {
-            WasmFetchError::NotFound => AssetReaderError::NotFound(path.to_path_buf()),
-            WasmFetchError::Other(msg) => AssetReaderError::Io(Arc::new(std::io::Error::other(msg))),
-        })
+        match wasm_fetch(&url).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(WasmFetchError::NotFound) => Ok(None),
+            Err(WasmFetchError::Other(msg)) => {
+                Err(AssetReaderError::Io(Arc::new(std::io::Error::other(msg))))
+            }
+        }
+    }
+
+    /// [`first_candidate`] over [`Self::fetch_candidate`].
+    async fn read_bytes_web(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
+        for name in archive_names(path)? {
+            if let Some(bytes) = self.fetch_candidate(&name).await? {
+                if opens_as_texture(&name, &bytes) {
+                    return Ok(bytes);
+                }
+            }
+        }
+        Err(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+
+    /// [`or_error_cube`], the cube fetched first when the miss is a model's, the only case that
+    /// opens it.
+    async fn or_error_cube_web(
+        &self,
+        path: &Path,
+        read: Result<Vec<u8>, AssetReaderError>,
+    ) -> Result<Vec<u8>, AssetReaderError> {
+        let model_miss = matches!(read, Err(AssetReaderError::NotFound(_)))
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("m2"));
+        let cube = match benilla_formats::m2_file_name(ERROR_CUBE).filter(|_| model_miss) {
+            Some(file) => self.fetch_candidate(&file).await,
+            None => Ok(None),
+        };
+        or_error_cube(path, read, |_| cube)
     }
 }
 
 impl AssetReader for MpqAssetReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
-        Ok(VecReader::new(self.read_bytes(path).await?))
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = or_error_cube(path, self.read_bytes(path), |cube| {
+            self.read_candidate(cube)
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let bytes = self.or_error_cube_web(path, self.read_bytes_web(path).await).await?;
+        Ok(VecReader::new(bytes))
     }
 
     async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
@@ -208,13 +338,34 @@ impl AssetReader for LooseAssetReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
         // The URL holds `/` where the model's name held `\` ([`m2_url`] writes every separator
         // as `/`), so it is turned back for the index.
-        let name = internal_path(path)?.replace('/', "\\");
-        let bytes = match self.loose.find(&name, LooseOpen::Index) {
-            // A loose file that will not open is a miss, with no turn to the chain (`0x647865`).
-            Some(file) => file
-                .read()
-                .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?,
-            None => self.mpq.read_bytes(path).await?,
+        #[cfg(not(target_arch = "wasm32"))]
+        let found = first_candidate(path, |name| {
+            let name = name.replace('/', "\\");
+            match self.loose.find(&name, LooseOpen::Index) {
+                // A loose file that will not open is a miss, with no turn to the chain
+                // (`0x647865`), and the next candidate is tried.
+                Some(file) => Ok(file.read()),
+                None => self.mpq.read_candidate(&name),
+            }
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = or_error_cube(path, found, |cube| self.mpq.read_candidate(cube))?;
+        // wenilla: the same walk with each archive candidate fetched from the web host.
+        #[cfg(target_arch = "wasm32")]
+        let bytes = {
+            let mut found = Err(AssetReaderError::NotFound(path.to_path_buf()));
+            for name in archive_names(path)? {
+                let name = name.replace('/', "\\");
+                let got = match self.loose.find(&name, LooseOpen::Index) {
+                    Some(file) => file.read(),
+                    None => self.mpq.fetch_candidate(&name).await?,
+                };
+                if let Some(bytes) = got.filter(|b| opens_as_texture(&name, b)) {
+                    found = Ok(bytes);
+                    break;
+                }
+            }
+            self.mpq.or_error_cube_web(path, found).await?
         };
         Ok(VecReader::new(bytes))
     }
@@ -247,20 +398,27 @@ pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
 
 /// [`texture_url`] on the asset source `source`: a model's textures are read from the source its
 /// `.m2` was, as they open with the model's flag (`0x71da64`).
+///
+/// The name is `TextureCreate`'s (`0x449d90`): [`sprite_key`] strips an extension of three
+/// characters (`0x449590`), so `Foo`, `Foo.blp` and `Foo.tga` are one URL, and the archive file is
+/// the first of [`sprite_candidates`] that opens. The URL always ends `.blp`, which picks the
+/// loader; a `.tga` name, whose candidates run `.tga` first, carries that in the marker. The
+/// reference caches one texture by stripped name and flags (`0x449eb0`), so where both `Foo.tga` and
+/// `Foo.blp` exist, the two URLs are two handles here and can differ from it.
 pub fn texture_url_on(source: &str, internal: &str, wrap: (bool, bool)) -> String {
-    let path = internal.replace('\\', "/").to_ascii_lowercase();
-    if wrap == (true, true) {
-        return format!("{source}://{path}");
+    let stem = sprite_key(internal).replace('\\', "/");
+    let tga_first = sprite_candidates(internal)[0].ends_with(".tga");
+    if wrap == (true, true) && !tga_first {
+        return format!("{source}://{stem}.blp");
     }
     let tag = match wrap {
+        (true, true) => "rr",
         (true, false) => "rc",
         (false, true) => "cr",
-        _ => "cc",
+        (false, false) => "cc",
     };
-    match path.rsplit_once('.') {
-        Some((stem, ext)) => format!("{source}://{stem}{SAMPLER_MARKER}{tag}.{ext}"),
-        None => format!("{source}://{path}{SAMPLER_MARKER}{tag}"),
-    }
+    let t = if tga_first { "t" } else { "" };
+    format!("{source}://{stem}{SAMPLER_MARKER}{tag}{t}.blp")
 }
 
 /// The `Map.dbc` [`MapCatalog`] (`mapId` to directory and `LoadingScreenID`) as a Bevy resource; a
@@ -303,24 +461,47 @@ pub fn skin_url(model_dir: &str, name: &str) -> String {
     }
 }
 
+/// A texture URL's marker, parsed.
+struct Marker {
+    /// The path before the marker.
+    base: String,
+    ext: String,
+    wrap: (bool, bool),
+    /// The reference's `.tga`-first candidate order ([`texture_url_on`]).
+    tga_first: bool,
+}
+
+fn parse_marker(path: &str) -> Option<Marker> {
+    let (stem, ext) = path.rsplit_once('.')?;
+    let (base, tag) = stem.rsplit_once(SAMPLER_MARKER)?;
+    let (mode, tga_first) = match tag.strip_suffix('t') {
+        Some(mode) => (mode, true),
+        None => (tag, false),
+    };
+    let wrap = match mode {
+        "rr" => (true, true),
+        "rc" => (true, false),
+        "cr" => (false, true),
+        "cc" => (false, false),
+        _ => return None,
+    };
+    Some(Marker {
+        base: base.to_string(),
+        ext: ext.to_string(),
+        wrap,
+        tga_first,
+    })
+}
+
 /// The address mode encoded in an asset path by [`texture_url`]; repeat/repeat when unmarked.
 pub fn sampler_mode_of(path: &str) -> (bool, bool) {
-    let Some((stem, _)) = path.rsplit_once('.') else {
-        return (true, true);
-    };
-    match stem.rsplit_once(SAMPLER_MARKER) {
-        Some((_, "rc")) => (true, false),
-        Some((_, "cr")) => (false, true),
-        Some((_, "cc")) => (false, false),
-        _ => (true, true),
-    }
+    parse_marker(path).map_or((true, true), |m| m.wrap)
 }
 
 /// The archive path under a [`texture_url`] marker; `None` when unmarked.
+#[cfg(test)]
 fn strip_sampler_marker(path: &str) -> Option<String> {
-    let (stem, ext) = path.rsplit_once('.')?;
-    let (base, tag) = stem.rsplit_once(SAMPLER_MARKER)?;
-    matches!(tag, "rc" | "cr" | "cc").then(|| format!("{base}.{ext}"))
+    parse_marker(path).map(|m| format!("{}.{}", m.base, m.ext))
 }
 
 /// Register the `mpq://` source on `app`, backed by the patch chain at `data_dir`, and the
@@ -365,6 +546,35 @@ mod tests {
     use super::*;
     use bevy::camera::primitives::MeshAabb;
     use bevy::tasks::block_on;
+
+    /// `0x70737f`: a model that fails to open stands the error cube; nothing else does.
+    #[test]
+    fn a_missing_model_reads_the_error_cube() {
+        let missing = || Err(AssetReaderError::NotFound("x".into()));
+        let cube = |name: &str| {
+            assert_eq!(name, "spells\\errorcube.m2");
+            Ok(Some(vec![7u8]))
+        };
+        let m2 = Path::new("creature/crystalspider/crystalspider.m2");
+        assert_eq!(or_error_cube(m2, missing(), cube).unwrap(), vec![7u8]);
+        assert_eq!(
+            or_error_cube(m2, Ok(vec![1u8]), cube).unwrap(),
+            vec![1u8],
+            "a model that opens is its own"
+        );
+        assert!(
+            or_error_cube(Path::new("creature/x/x.blp"), missing(), cube).is_err(),
+            "a texture miss is not a model miss"
+        );
+        assert!(
+            or_error_cube(Path::new("spells/errorcube.m2"), missing(), cube).is_err(),
+            "no cube behind the cube"
+        );
+        assert!(
+            or_error_cube(m2, missing(), |_| Ok(None)).is_err(),
+            "an install without the cube keeps the miss"
+        );
+    }
 
     /// `0x706a50`'s extension rule: the last dot's `.mdx`/`.mdl` in any case is `.m2`, `.m2`
     /// stands, and anything else stands the error cube from the archives (`0x70737f`).
@@ -419,6 +629,178 @@ mod tests {
         assert_eq!(strip_sampler_marker("world/foo.blp"), None);
         assert_eq!(strip_sampler_marker("world/foo@bar.blp"), None);
         assert_eq!(sampler_mode_of("world/foo@bar.blp"), (true, true));
+    }
+
+    /// `TextureCreate` (`0x449d90`) strips a three-character extension, so a model texture named
+    /// `Foo`, `Foo.blp` or `Foo.tga` is one asset; only a `.tga` name tries `.tga` first.
+    #[test]
+    fn a_model_texture_name_resolves_as_texturecreate_resolves_it() {
+        let stem = "world/azeroth/trees/canopy";
+        for raw in [
+            "World\\Azeroth\\Trees\\Canopy",
+            "World\\Azeroth\\Trees\\Canopy.BLP",
+        ] {
+            assert_eq!(texture_url(raw, (true, true)), format!("mpq://{stem}.blp"));
+            assert_eq!(
+                archive_names(Path::new(
+                    texture_url(raw, (true, true))
+                        .strip_prefix("mpq://")
+                        .unwrap()
+                ))
+                .unwrap(),
+                [
+                    format!("{}.blp", stem.replace('/', "\\")),
+                    format!("{}.tga", stem.replace('/', "\\"))
+                ]
+            );
+        }
+        // A `.tga` name asks `.tga` first, at any sampler mode, and the marker carries it.
+        let tga = "World\\Azeroth\\Trees\\Canopy.tga";
+        for wrap in [(true, true), (true, false), (false, true), (false, false)] {
+            let url = texture_url(tga, wrap);
+            assert!(url.ends_with(".blp"), "{url}");
+            assert_eq!(sampler_mode_of(&url), wrap);
+            let names = archive_names(Path::new(url.strip_prefix("mpq://").unwrap())).unwrap();
+            assert_eq!(names[0], "world\\azeroth\\trees\\canopy.tga", "{url}");
+            assert_eq!(names[1], "world\\azeroth\\trees\\canopy.blp", "{url}");
+        }
+        // The same texture at a mode is one URL whatever extension the model spelled.
+        assert_eq!(
+            texture_url("Foo\\Bar", (false, false)),
+            texture_url("Foo\\Bar.blp", (false, false))
+        );
+        // A name that is not a three-character extension keeps it.
+        assert_eq!(
+            texture_url("Foo\\Bar.jpeg", (true, true)),
+            "mpq://foo/bar.jpeg.blp"
+        );
+        // A path that is no texture stands as itself.
+        assert_eq!(
+            archive_names(Path::new("world/maps/azeroth/azeroth.wdt")).unwrap(),
+            ["world/maps/azeroth/azeroth.wdt"]
+        );
+    }
+
+    /// Against the chain: the extension a model spells does not matter, and a name the chain
+    /// holds under `.blp` answers a `.tga` spelling.
+    #[test]
+    fn a_model_texture_reads_whichever_extension_the_chain_holds() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let reader = MpqAssetReader::open(&data).expect("open mpq reader");
+        let name = "World\\KhazModan\\Ironforge\\PassiveDoodads\\Trees\\IronForgeleaves01";
+        let read = |raw: &str, wrap| {
+            let url = texture_url(raw, wrap);
+            reader.read_bytes(Path::new(url.strip_prefix("mpq://").unwrap()))
+        };
+        let blp = read(&format!("{name}.blp"), (true, true)).expect("the stock spelling reads");
+        assert_eq!(&blp[..4], b"BLP2");
+        for raw in [
+            name.to_string(),
+            format!("{name}.tga"),
+            format!("{name}.BLP"),
+        ] {
+            for wrap in [(true, true), (false, false)] {
+                assert_eq!(read(&raw, wrap).as_ref().ok(), Some(&blp), "{raw} {wrap:?}");
+            }
+        }
+        assert!(read("World\\No\\Such\\Texture", (true, true)).is_err());
+    }
+
+    /// A candidate that is missing, or a `.tga` that makes no texture, is passed over for the next.
+    #[test]
+    fn a_candidate_that_makes_no_texture_falls_through_to_the_next() {
+        let tga_first = Path::new("tex/a@cct.blp");
+        let blp_first = Path::new("tex/a.blp");
+        let mut asked = Vec::new();
+        let got = first_candidate(tga_first, |name| {
+            asked.push(name.to_string());
+            // The `.tga` opens but its header makes no texture (a 4x4 size).
+            Ok(Some(if name.ends_with(".tga") {
+                vec![0u8; 40]
+            } else {
+                b"BLP2".to_vec()
+            }))
+        })
+        .unwrap();
+        assert_eq!(got, b"BLP2");
+        assert_eq!(asked, ["tex\\a.tga", "tex\\a.blp"]);
+        // A missing `.blp` tries the `.tga`, whose header here makes no texture.
+        let mut asked = Vec::new();
+        let got = first_candidate(blp_first, |name| {
+            asked.push(name.to_string());
+            Ok(name.ends_with(".tga").then(|| vec![1u8; 4]))
+        });
+        assert!(matches!(got, Err(AssetReaderError::NotFound(_))));
+        assert_eq!(asked, ["tex\\a.blp", "tex\\a.tga"]);
+        assert!(matches!(
+            first_candidate(blp_first, |_| Ok(None)),
+            Err(AssetReaderError::NotFound(_))
+        ));
+    }
+
+    /// The loose source passes a candidate over per file: a `.tga` that makes no texture falls to
+    /// the `.blp`, and a loose file that will not open falls to the next candidate.
+    #[test]
+    fn the_loose_source_falls_through_per_candidate() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        let data = benilla_formats::wow_data_or_skip!();
+        let install =
+            std::env::temp_dir().join(format!("benilla-loose-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&install);
+        let dir = install.join("Data/zzfall");
+        std::fs::create_dir_all(&dir).unwrap();
+        // `a`: a `.tga` with no texture header, then the `.blp`.
+        std::fs::write(dir.join("a.tga"), [0u8; 40]).unwrap();
+        std::fs::write(dir.join("a.blp"), b"BLP2-a").unwrap();
+        // `b`: a `.blp` that will not read, then a `.tga` whose header makes a texture.
+        let mut good_tga = vec![0u8; 18];
+        good_tga[2] = 2;
+        good_tga[12] = 8;
+        good_tga[14] = 8;
+        good_tga[16] = 32;
+        std::fs::write(dir.join("b.tga"), &good_tga).unwrap();
+        std::fs::write(dir.join("b.blp"), b"BLP2-b").unwrap();
+        // Unreadable by mode on unix alone; elsewhere the `.blp` stays readable and the second
+        // half's assertion is skipped below.
+        #[cfg(unix)]
+        std::fs::set_permissions(dir.join("b.blp"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let root = install.clone();
+        let cell = LooseIndexCell::new(move || LooseIndex::build(Some(&root), &root.join("Data")));
+        let reader = LooseAssetReader {
+            mpq: MpqAssetReader::open(&data).expect("open mpq reader"),
+            loose: LooseFiles {
+                addons: None,
+                install: Some(Arc::new(cell)),
+            },
+        };
+        let read = |url: &str| {
+            let url = url.strip_prefix("mpq://").unwrap().to_string();
+            block_on(async {
+                let mut out = AssetReader::read(&reader, Path::new(&url)).await.ok()?;
+                let mut buf = Vec::new();
+                out.read_to_end(&mut buf).await.ok()?;
+                Some(buf)
+            })
+        };
+        assert_eq!(
+            read(&texture_url("zzfall\\a.tga", (true, true))).as_deref(),
+            Some(&b"BLP2-a"[..]),
+            "the .tga without a header is passed over"
+        );
+        let got = read(&texture_url("zzfall\\b", (true, true)));
+        let readable = std::fs::read(dir.join("b.blp")).is_ok();
+        #[cfg(unix)]
+        let _ = std::fs::set_permissions(dir.join("b.blp"), std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::remove_dir_all(&install);
+        if !readable {
+            assert_eq!(
+                got.as_deref(),
+                Some(&good_tga[..]),
+                "the unreadable .blp falls to the .tga"
+            );
+        }
     }
 
     /// The loose source answers a model or texture loose in the install ahead of the chain, by its

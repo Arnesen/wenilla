@@ -19,18 +19,18 @@
 //! free (`0x61b760`). Stock `GroupLootFrame_OpenNewFrame` has four frames and drops a fifth
 //! silently, so an unqueued fifth could never be voted.
 //!
-//! Deviation: the open count is the number of rolls announced and not closed. The reference keeps
-//! a counter that its server-close paths decrement for any roll whose closed byte is clear
+//! Deviation: the open count is the number of rolls announced and not closed, because the reference
+//! keeps a counter that its server-close paths decrement for any roll whose closed byte is clear
 //! (`0x61b6f8`, `0x61bc17`), a deferred roll that never counted up included, so it under-counts
 //! and lets a fifth frame open; here a deferred roll's close changes nothing.
 //!
 //! A result's line, its `CANCEL_LOOT_ROLL` and the promotion after it wait for the result's item
 //! record and, for a win, the winner's name (`0x61b96a` → `0x61b9a0` → `0x61b9bf` → `0x61b9e0`,
 //! `0x61b5c0` → `0x61b640`); until then the roll stays listed. Deviation: a refused record or name
-//! closes the roll unspoken. In 1.12.1 the failure callbacks (`0x61bc80`, `0x61bd50`, `0x61b7d0`)
-//! free the record with no `CANCEL_LOOT_ROLL` and leave the open count unlowered, so its frame
-//! stays up, empty and dead, until a `/reload`, and holds one of the four frames, so a later
-//! fourth roll never shows; benilla closes the roll instead.
+//! closes the roll unspoken because in 1.12.1 the failure callbacks (`0x61bc80`, `0x61bd50`,
+//! `0x61b7d0`) free the record with no `CANCEL_LOOT_ROLL` and leave the open count unlowered, so
+//! its frame stays up, empty and dead, until a `/reload`, and holds one of the four frames, so a
+//! later fourth roll never shows; benilla closes the roll instead.
 //!
 //! A promoted roll's `arg2` is still the wire's countdown (`0x61b430` and `0x61b79a` push
 //! `node+0x3c`, which nothing rewrites); only the bar is short, as `GetLootRollTimeLeft` counts
@@ -249,6 +249,24 @@ pub(crate) struct RollLookups<'a> {
 }
 
 impl LootRolls {
+    /// The teardown's free of the lines' item and name callbacks, running none (`0x55c1b0`,
+    /// `0x55f990`), with the lines they held. A result's line took its roll's close with it
+    /// (`0x61bc12`, `0x61b6f3`), so the roll goes unsignalled and the oldest deferred one opens,
+    /// where the reference strands it holding a slot ([`crate::wdb::free_store_callbacks`]'s
+    /// deviation, as the module's for a refusal).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        let before = self.active.len();
+        for pending in std::mem::take(&mut self.pending) {
+            if let Some(wire) = pending.line.closes() {
+                self.active
+                    .retain(|r| (r.looted_target, r.item_slot) != wire);
+            }
+        }
+        if self.active.len() != before {
+            self.promote();
+        }
+    }
+
     /// Queue `event` stamped now, behind everything stamped before it.
     fn push(&mut self, event: RollEvent) {
         let stamp = crate::lanes::stamp();
@@ -1601,6 +1619,37 @@ mod tests {
         r.won(won_at(0), &f.look());
         f.answer(&mut r, ROLLED, false);
         assert_eq!(lane(&mut r), ["S1:60001", "C1"]);
+    }
+
+    /// The teardown frees a result's line, whose callbacks would have closed its roll: the roll
+    /// goes with no `CANCEL_LOOT_ROLL` and the oldest deferred one opens; a vote's line just goes.
+    #[test]
+    fn a_freed_result_line_frees_its_roll_unsignalled_and_promotes() {
+        type Arrive = fn(&mut LootRolls, &RollLookups);
+        let results: [(&str, Arrive); 2] = [
+            ("won", |r, look| r.won(won_at(1), look)),
+            ("all passed", |r, look| r.all_passed(passed_at(1), look)),
+        ];
+        for (name, result) in results {
+            let f = Fixture::new(false);
+            let cold = Fixture::new(true);
+            let mut r = opened(&f, 6);
+            lane(&mut r);
+            result(&mut r, &cold.look());
+            assert_eq!(lane(&mut r), Vec::<String>::new(), "{name} waits");
+            r.free_store_callbacks();
+            assert_eq!(lane(&mut r), ["S5:60005"], "{name}");
+            assert!(!r.holds(2), "{name}");
+        }
+
+        let f = Fixture::new(false);
+        let cold = Fixture::new(true);
+        let mut r = opened(&f, 6);
+        lane(&mut r);
+        r.announce(announce(1, 57, roll_vote::GREED), &cold.look());
+        r.free_store_callbacks();
+        assert_eq!(lane(&mut r), Vec::<String>::new(), "no slot came free");
+        assert!(r.holds(2));
     }
 
     /// With `showLootSpam` at 0 a vote line is looked up and dropped at its composer

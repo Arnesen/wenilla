@@ -45,6 +45,8 @@ pub(crate) struct ChatCtx<'a> {
     pub items: Option<&'a crate::items::Items>,
     /// The game object cache (`0xc0e318`), which `LogOpenLock` reads for an opened object.
     pub gameobjects: Option<&'a crate::go_templates::GameObjectTemplates>,
+    /// The wire an item line's lookup asks a miss on; absent in a harness, which asks nothing.
+    pub net: Option<&'a crate::net::NetCommands>,
     /// The display ranges: the reference's `0x8629e0` table, CVar-backed.
     pub ranges: &'a combat::CombatLogRanges,
     /// `CombatLogPeriodicSpells`, for its two chat-only read sites; the whole-packet gate is in
@@ -66,6 +68,14 @@ impl ChatCtx<'_> {
         )
     }
 
+    /// How an item line's lookup asks a miss: on the wire, or not at all in a harness.
+    fn item_ask(&self) -> crate::query_cache::Ask<'_> {
+        self.net.map_or(
+            crate::query_cache::Ask::Read,
+            crate::query_cache::Ask::Event,
+        )
+    }
+
     /// Whether the client holds `guid` as a unit, the `0x468460` lookup with type mask 8.
     fn holds_unit(&self, guid: u64, stores: &impl Stores) -> bool {
         combat::holds_unit(guid, self.index, stores)
@@ -80,6 +90,20 @@ impl ChatCtx<'_> {
             self.index,
             poses,
         )
+    }
+
+    /// The two-sided gate `0x626630`: false when the target is no live object of any type
+    /// (`0x626690`-`0x6266a6`), whatever the source's range; else an OR, either endpoint within its
+    /// class's range (`0x6267c7`, `0x6267e5`).
+    fn pair_in_range(
+        &self,
+        source: (u64, UnitClass),
+        target: (u64, UnitClass),
+        poses: &impl Poses,
+    ) -> bool {
+        self.index.0.contains_key(&target.0)
+            && (self.in_range(source.0, source.1, poses)
+                || self.in_range(target.0, target.1, poses))
     }
 
     /// A spell's display name, or `None` where the formatter writes no line
@@ -212,6 +236,9 @@ pub(super) fn damage_shield(
 /// `SMSG_PARTYKILLLOG`: "You have slain %s!" or "%s is slain by %s!". Only killer class 0
 /// (`SELFKILLOTHER`) and 2, a party member (`PARTYKILLOTHER`), produce a line (`0x628890`); a
 /// pet's kill gets the plain `UNITDIES*` line instead. The chat type comes off the victim.
+///
+/// The sentence's subject is the victim, but `0x626630` takes the killer as its source and the
+/// victim as its target (`0x6288e1`-`0x6288f8`), so a victim no longer held ends the line here.
 pub(super) fn party_kill_log(
     s: PartyKillLog,
     ctx: &ChatCtx,
@@ -219,6 +246,9 @@ pub(super) fn party_kill_log(
     poses: &impl Poses,
     log: &ChatLog,
 ) {
+    if !ctx.index.0.contains_key(&s.victim) {
+        return;
+    }
     let killer = ctx.classify(s.killer, stores);
     let victim = ctx.classify(s.victim, stores);
     let family = match killer {
@@ -238,8 +268,9 @@ pub(super) fn party_kill_log(
     );
 }
 
-/// `SMSG_SPELLINSTAKILLLOG`: "You are killed by %s." or "%s is killed by %s.". `0x62cbe0` passes
-/// the victim's class in both selector positions (`0x626be0(class, class)`).
+/// `SMSG_SPELLINSTAKILLLOG`: "You are killed by %s." or "%s is killed by %s.". `0x62cbe0` needs the
+/// victim held as a unit (`0x62cc52`-`0x62cc60`), and passes its class in both selector positions
+/// (`0x626be0(class, class)`).
 pub(super) fn spell_insta_kill_log(
     s: SpellInstaKillLog,
     ctx: &ChatCtx,
@@ -247,6 +278,9 @@ pub(super) fn spell_insta_kill_log(
     poses: &impl Poses,
     log: &ChatLog,
 ) {
+    if !ctx.holds_unit(s.victim, stores) {
+        return;
+    }
     let victim = ctx.classify(s.victim, stores);
     let Some(spell) = ctx.spell_name(s.spell_id) else {
         return;
@@ -400,18 +434,41 @@ pub(super) fn dispel_failed(
     }
 }
 
-/// `SMSG_ENCHANTMENTLOG` (`0x628f40`): "You cast %s on your %s." (`0x6291d0`) or "%s has faded
-/// from your %s." (`0x628ff0`, an empty caster guid). The first `%s` is the enchantment's name,
-/// read through `0xc0d7d8` by the packet's id; no row, or `Flags & 0x2`, and neither writes
-/// anything. The item name, the last `%s`, comes from the item cache, so an uncached entry
-/// waits. Each raises its word, `ENCHANTMENT_ADDED` or `ENCHANTMENT_REMOVED` with the
-/// enchantment's name, when the item is yours (`0x62937a`, `0x6291b6`).
+/// `SMSG_ENCHANTMENTLOG` (`0x628ea0` → `0x628f40`): the item looked up first, ahead of every
+/// test (`0x628f83`), with the log's callback, kind 1. A miss asks and keeps the packet's
+/// arguments in the wait list (`0x6293a0`), and the item's callback runs the lines again
+/// ([`item_answered`]); a cached item writes them here ([`enchantment_lines`]).
+pub(super) fn enchantment_log(
+    s: EnchantmentLog,
+    ctx: &ChatCtx,
+    stores: &impl Stores,
+    poses: &impl Poses,
+    log: &ChatLog,
+) {
+    if let Some(items) = ctx.items {
+        if items.template(s.item_entry, 0, ctx.item_ask()).is_none() {
+            let kind = combat::ItemLog::Enchantment;
+            items.wait(s.item_entry, crate::items::RecordCallback::CombatLog(kind));
+            log.push_combat_waiting(kind, s.item_entry, combat::Replay::Enchantment(s));
+            return;
+        }
+    }
+    enchantment_lines(s, ctx, stores, poses, log);
+}
+
+/// The enchantment's two lines past the lookup, at the packet or at the item's callback: "You
+/// cast %s on your %s." (`0x6291d0`) or "%s has faded from your %s." (`0x628ff0`, an empty
+/// caster guid). The first `%s` is the enchantment's name, read through `0xc0d7d8` by the
+/// packet's id; no row, or `Flags & 0x2`, and neither writes anything. The item name, the last
+/// `%s`, comes from the item cache. Each raises its word, `ENCHANTMENT_ADDED` or
+/// `ENCHANTMENT_REMOVED` with the enchantment's name, when the item is yours (`0x62937a`,
+/// `0x6291b6`).
 ///
 /// The fade needs its owner held as a unit (`0x62902c`) within its class's range; an added line
 /// takes the two-sided gate. The chat type is the literal `0x44` `SPELL_ITEM_ENCHANTMENTS` for a
 /// fade and for the owner's copy (`show_affiliation` clear); the broadcast copy takes the BUFF
 /// matrix (`0x62934e`).
-pub(super) fn enchantment_log(
+fn enchantment_lines(
     s: EnchantmentLog,
     ctx: &ChatCtx,
     stores: &impl Stores,
@@ -442,7 +499,7 @@ pub(super) fn enchantment_log(
             (s.owner, owner),
             (s.owner, owner),
             fills,
-            combat::Named::Item(s.item_entry),
+            combat::Named::Item(s.item_entry, combat::ItemLog::Enchantment),
             to_me(owner, LineWord::with("ENCHANTMENT_REMOVED", name)),
         );
         return;
@@ -464,7 +521,7 @@ pub(super) fn enchantment_log(
         (s.caster, caster),
         (s.owner, owner),
         fills,
-        combat::Named::Item(s.item_entry),
+        combat::Named::Item(s.item_entry, combat::ItemLog::Enchantment),
         to_me(owner, LineWord::with("ENCHANTMENT_ADDED", name)),
     );
 }
@@ -533,9 +590,10 @@ pub(super) fn spell_log_execute(
                 // Effect 19 ADD_EXTRA_ATTACKS: no caster in the sentence (`0x62d9f0`), only the
                 // unit that gained the attacks, typed by the spell's hostility (`0x62b190`, from
                 // `0x62db78`) and worded `EXTRA_ATTACKS` with the count when that is you
-                // (`0x62db7d`-`0x62dba9`); a count of 0 writes neither (`0x62da2a`).
+                // (`0x62db7d`-`0x62dba9`); a count of 0 writes neither (`0x62da2a`), and nor does
+                // a target not held as a unit (`0x62da73`-`0x62da83`).
                 E::ExtraAttacks { target, count } => {
-                    if count == 0 {
+                    if count == 0 || !ctx.holds_unit(target, stores) {
                         continue;
                     }
                     let Some(spell) = spell() else { continue };
@@ -565,30 +623,42 @@ pub(super) fn spell_log_execute(
                     );
                 }
                 // Effect 24 CREATE_ITEM: the tradeskill line, literal type `0x3e`, split on the
-                // caster being you; no target on the wire.
-                E::CreateItem { item_entry } => queue_named(
-                    log,
-                    ctx,
-                    poses,
-                    crate::ui_chat::ChatEventKind::SpellTradeskills,
-                    combat::TRADESKILL_LOG,
-                    (s.caster, caster),
-                    (s.caster, caster),
-                    Fills::default(),
-                    combat::Named::Item(item_entry),
-                ),
-                // Effect 101 FEED_PET: CREATE_ITEM's shape, a different sentence.
-                E::FeedPet { item_entry } => queue_named(
-                    log,
-                    ctx,
-                    poses,
-                    crate::ui_chat::ChatEventKind::SpellTradeskills,
-                    combat::FEEDPET_LOG,
-                    (s.caster, caster),
-                    (s.caster, caster),
-                    Fills::default(),
-                    combat::Named::Item(item_entry),
-                ),
+                // caster being you, who must be held as a unit (`0x62d8f6`-`0x62d904`); no target
+                // on the wire.
+                E::CreateItem { item_entry } => {
+                    if !ctx.holds_unit(s.caster, stores) {
+                        continue;
+                    }
+                    queue_named(
+                        log,
+                        ctx,
+                        poses,
+                        crate::ui_chat::ChatEventKind::SpellTradeskills,
+                        combat::TRADESKILL_LOG,
+                        (s.caster, caster),
+                        (s.caster, caster),
+                        Fills::default(),
+                        combat::Named::Item(item_entry, combat::ItemLog::TradeSkill),
+                    );
+                }
+                // Effect 101 FEED_PET: CREATE_ITEM's shape, a different sentence
+                // (`0x62d826`-`0x62d834`).
+                E::FeedPet { item_entry } => {
+                    if !ctx.holds_unit(s.caster, stores) {
+                        continue;
+                    }
+                    queue_named(
+                        log,
+                        ctx,
+                        poses,
+                        crate::ui_chat::ChatEventKind::SpellTradeskills,
+                        combat::FEEDPET_LOG,
+                        (s.caster, caster),
+                        (s.caster, caster),
+                        Fills::default(),
+                        combat::Named::Item(item_entry, combat::ItemLog::FeedPet),
+                    );
+                }
                 // Effect 68 INTERRUPT_CAST: the sentence names the interrupted spell, off the row,
                 // not the packet's own, and so does the `INTERRUPT` word when the interrupted unit
                 // is you (`0x626b53`-`0x626b69`).
@@ -656,7 +726,7 @@ pub(super) fn spell_log_execute(
                         (s.caster, caster),
                         (target, victim),
                         spell_fill(),
-                        combat::Named::Item(entry),
+                        combat::Named::Item(entry, combat::ItemLog::Durability),
                     );
                 }
                 // Effect 102 DISMISS_PET, in the guid-only tail: split on the caster being you, at
@@ -862,8 +932,9 @@ fn spell_cast_line(
     }
 }
 
-/// `SMSG_ENVIRONMENTALDAMAGELOG`'s handler `0x624f30`, which writes and signals nothing for a hit
-/// of all zeros (`0x624f4c`-`0x624f60`). The line, "You fall and lose %d health." and its five
+/// `SMSG_ENVIRONMENTALDAMAGELOG`: the packet's handler looks the victim up with type mask 8 and
+/// calls `0x624f30` only for a unit it finds (`0x62565c`), which writes and signals nothing for a
+/// hit of all zeros (`0x624f4c`-`0x624f60`). The line, "You fall and lose %d health." and its five
 /// siblings: `0x62aac0` builds the key from a six-entry damage-type table and SELF/OTHER, and calls
 /// the melee HITS selector with the victim's class in both positions, so a party member's fall
 /// types as `HOSTILEPLAYER_HITS` through the selector's tgt<=3 override, as in the reference. It
@@ -871,9 +942,8 @@ fn spell_cast_line(
 /// for the active player (`0x624f83`), `UNIT_COMBAT` `WOUND` in the type's school, marked `0x20`
 /// for an absorb and `0x40` for a resist (`0x624f8c`-`0x624fc4`).
 ///
-/// A victim the client holds as a unit, within its class's range (the one-sided test, strictly
-/// inside), of a type below 6 (`0x62aae7`) flashes its nameplate (`0x62abac`) ahead of the line;
-/// the answer is that victim.
+/// A victim within its class's range (the one-sided test, strictly inside), of a type below 6
+/// (`0x62aae7`), flashes its nameplate (`0x62abac`) ahead of the line; the answer is that victim.
 pub(super) fn environmental_damage_log(
     e: EnvironmentalDamageLog,
     ctx: &ChatCtx,
@@ -881,13 +951,11 @@ pub(super) fn environmental_damage_log(
     poses: &impl Poses,
     log: &ChatLog,
 ) -> Option<u64> {
-    if e.damage == 0 && e.absorb == 0 && e.resist == 0 {
+    if !ctx.holds_unit(e.victim, stores) || (e.damage == 0 && e.absorb == 0 && e.resist == 0) {
         return None;
     }
     let victim = ctx.classify(e.victim, stores);
-    let flash = (e.victim != 0
-        && usize::from(e.damage_type) < ENV_DAMAGE_SCHOOLS.len()
-        && ctx.holds_unit(e.victim, stores)
+    let flash = (usize::from(e.damage_type) < ENV_DAMAGE_SCHOOLS.len()
         && ctx.in_range(e.victim, victim, poses))
     .then_some(e.victim);
     let kind = combat::combat_kind(victim, victim, false);
@@ -1095,16 +1163,67 @@ fn queue_reported(
     named: combat::Named,
     word: Option<LineWord>,
 ) -> bool {
-    // An OR, not an AND (`0x626630`): either endpoint within its class's range shows the line.
-    if !ctx.in_range(subject.0, subject.1, poses) && !ctx.in_range(object.0, object.1, poses) {
+    // The object is `0x626630`'s target, the party kill's excepted (`party_kill_log`); a one-unit
+    // line's is the unit itself.
+    if !ctx.pair_in_range(subject, object, poses) {
         return false;
     }
     let Some(mut line) = combat::queue(kind, family, subject, object, fills, named) else {
         return false;
     };
     line.word = word;
+    // The item looked up past the caller's range test with the log's callback, dedupe 0, its
+    // kind the data (`0x629650`, `0x6297a0`, `0x6298e1`): a miss asks, leaves `0x6294b0` in the
+    // answer's list, one per line, and keeps the line in the wait list (`0x629730`, `0x629870`,
+    // `0x629a30`). The enchantment's was looked up ahead of every test ([`enchantment_log`]).
+    if let (combat::Named::Item(entry, kind), Some(items)) = (named, ctx.items) {
+        if kind != combat::ItemLog::Enchantment
+            && items.template(entry, 0, ctx.item_ask()).is_none()
+        {
+            items.wait(entry, crate::items::RecordCallback::CombatLog(kind));
+            let line = Box::new(line);
+            let replay = match kind {
+                combat::ItemLog::Durability => combat::Replay::Ranged(line),
+                _ => combat::Replay::Line(line),
+            };
+            log.push_combat_waiting(kind, entry, replay);
+            return true;
+        }
+    }
     log.push_combat(line);
     true
+}
+
+/// `OnCombatLogItemRecord 0x6294b0`, one callback for `item` of its formatter's `kind`: the last
+/// waiting entry of that kind and item freed ([`ChatLog::take_wait`]), and for a found record
+/// its formatter run again past its lookup (`0x629513`), its line written here, at the
+/// callback's place among the answer's others; for a refusal nothing (`0x6294fd`-`0x629504`).
+pub(super) fn item_answered(
+    kind: combat::ItemLog,
+    item: u32,
+    answered: bool,
+    ctx: &ChatCtx,
+    stores: &impl Stores,
+    poses: &impl Poses,
+    log: &ChatLog,
+) {
+    let Some(replay) = log.take_wait(kind, item) else {
+        return;
+    };
+    if !answered {
+        return;
+    }
+    match replay {
+        combat::Replay::Enchantment(s) => enchantment_lines(s, ctx, stores, poses, log),
+        combat::Replay::Line(line) => log.push_combat(*line),
+        combat::Replay::Ranged(line) => {
+            let subject = ctx.classify(line.subject, stores);
+            let object = ctx.classify(line.object, stores);
+            if ctx.pair_in_range((line.subject, subject), (line.object, object), poses) {
+                log.push_combat(*line);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

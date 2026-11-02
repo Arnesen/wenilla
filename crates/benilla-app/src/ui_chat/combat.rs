@@ -80,8 +80,8 @@ impl Poses for Query<'_, '_, &Transform> {
 
 /// One endpoint's half of the reference's display-range gate (`0x626630`, ranges from `0x626810`):
 /// the squared 3-D distance from the active player, strictly below `range` squared, so the
-/// boundary and a NaN are out. `100000.0` always passes and `0.0` always refuses; a pose not yet
-/// held counts as in range, so a despawning mob's killing blow is not lost.
+/// boundary and a NaN are out. `100000.0` always passes and `0.0` always refuses; an endpoint with
+/// no pose to measure counts as in range.
 pub(crate) fn in_range(
     guid: u64,
     range: f32,
@@ -954,7 +954,8 @@ pub(crate) fn unknown_object(script: &benilla_ui::script::UiScript) -> String {
 /// One endpoint's name as `GetObjectName 0x6264e0` prints it: [`object_name`], else the miss of
 /// the getter it went through. A unit the client holds (type bit 3, `0x626526`) goes through
 /// `GetUnitName` (`0x626531`), whose miss is `UNKNOWNOBJECT` else the literal "Unknown Being"
-/// (`0x609324`-`0x60933c`); anything else misses as [`unknown_object`].
+/// (`0x609324`-`0x60933c`); anything else misses as [`unknown_object`], as does a unit whose
+/// record names it with an empty string (`0x609355`, `0x609341`, then `0x6265ef`).
 pub(crate) fn logged_name(
     guid: u64,
     store: Option<&ObjectStore>,
@@ -962,13 +963,14 @@ pub(crate) fn logged_name(
     ask: Ask<'_>,
     script: &benilla_ui::script::UiScript,
 ) -> String {
-    object_name(guid, store, sources, ask).unwrap_or_else(|| {
-        if store.is_some_and(is_unit) {
-            script.unknown_object_text()
-        } else {
-            unknown_object(script)
-        }
-    })
+    match object_name(guid, store, sources, ask) {
+        Some(name) if !name.is_empty() => name,
+        // A name every leg returns empty falls to the same test as a miss (`0x6265eb`-`0x6265f2`
+        // → `0x6265f4`), `GetUnitName`'s own fallback included: the record's empty name reaches it.
+        Some(_) => unknown_object(script),
+        None if store.is_some_and(is_unit) => script.unknown_object_text(),
+        None => unknown_object(script),
+    }
 }
 
 // ────────────────────────── the queued line, awaiting its names ───────────────────────
@@ -1103,7 +1105,7 @@ impl PendingCombat {
                 self.fills.named = name(guid);
                 Filled::Ready
             }
-            Named::Item(entry) => match item(entry) {
+            Named::Item(entry, _) => match item(entry) {
                 ItemName::Named(text) => {
                     self.fills.named = text;
                     Filled::Ready
@@ -1141,10 +1143,40 @@ pub(crate) enum ItemName {
 pub(crate) enum Named {
     /// The text is already in [`Fills::named`], or the family has no `Named` slot.
     Ready,
-    /// An item entry, through the ask-once item cache.
-    Item(u32),
+    /// An item entry, through the ask-once item cache, by one of the log's four item formatters.
+    Item(u32, ItemLog),
     /// A unit or object guid, through the name cache.
     Unit(u64),
+}
+
+/// The combat log's four formatters that name an item, each the kind its line's wait entry holds
+/// (`0x6293a0`, `0x629730`, `0x629870`, `0x629a30`) and its record callback is passed
+/// (`0x628f6c`, `0x629789`, `0x629639`, `0x6298ca`), which the callback replays by (`0x62959c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemLog {
+    /// `LogItemEnchantment 0x628f40`, kind 1.
+    Enchantment,
+    /// `LogFeedPet 0x629760`, kind 2.
+    FeedPet,
+    /// `LogTradeSkillItem 0x629610`, kind 3.
+    TradeSkill,
+    /// `LogDurabilityItem 0x6298a0`, kind 4.
+    Durability,
+}
+
+/// What a wait entry keeps to write its line at its item's callback (`0x6294b0`), which runs the
+/// entry's formatter again past its lookup (`0x629513`).
+pub(crate) enum Replay {
+    /// The packet's arguments, as `0x6293a0` copies them (`+0x8`-`+0x1c`), for `0x628f40` again
+    /// (`0x62952f`): its lines' gates all tested anew, the row (`0x629221`, `0x6290c7`), the
+    /// fade's unit (`0x62902c`) and the range (`0x629209`, `0x6290b6`).
+    Enchantment(benilla_protocol::messages::EnchantmentLog),
+    /// The line as the packet built it, for the feed's and the tradeskill's writers (`0x629760`,
+    /// `0x629690`), which test nothing their callers did not (`0x62d846`, `0x62d916`).
+    Line(Box<PendingCombat>),
+    /// The durability line as the packet built it, whose writer tests the range again
+    /// (`0x629941`).
+    Ranged(Box<PendingCombat>),
 }
 
 /// Build a queued line from an already-classified pair; `None` when neither endpoint resolves.

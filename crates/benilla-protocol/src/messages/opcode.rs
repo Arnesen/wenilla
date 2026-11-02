@@ -381,6 +381,9 @@ pub const SMSG_GAMEOBJECT_CUSTOM_ANIM: u16 = 0x00B3; // 179
 /// The client arms substate 12 (AnimationData 157) and the object outlives its
 /// `SMSG_DESTROY_OBJECT` for that play.
 pub const SMSG_GAMEOBJECT_DESPAWN_ANIM: u16 = 0x0215; // 533
+/// A GameObject's state reset: a bare `u64` guid (vmangos `GameObject.cpp:453`, `:2460-2465`). The
+/// client re-applies the descriptor's `GAMEOBJECT_STATE` (`0x6e9790` → `0x5f8c00` → `0x5f8bd0`).
+pub const SMSG_GAMEOBJECT_RESET_STATE: u16 = 0x02A7; // 679
 /// A used GameObject's page: a bare `u64` guid (vmangos `GameObject.cpp:1549-1554`). The client
 /// opens the item-text reader on the object (`0x5f88c0` → `0x4e32e0`).
 pub const SMSG_GAMEOBJECT_PAGETEXT: u16 = 0x01DF; // 479
@@ -949,6 +952,7 @@ pub const MSG_PETITION_RENAME: u16 = 0x02C1; // 705
 
 pub const CMSG_GROUP_INVITE: u16 = 0x006E; // 110
 pub const SMSG_GROUP_INVITE: u16 = 0x006F; // 111
+pub const SMSG_GROUP_CANCEL: u16 = 0x0071; // 113
 pub const CMSG_GROUP_ACCEPT: u16 = 0x0072; // 114
 pub const CMSG_GROUP_DECLINE: u16 = 0x0073; // 115
 pub const SMSG_GROUP_DECLINE: u16 = 0x0074; // 116

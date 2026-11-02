@@ -355,10 +355,10 @@ pub(crate) enum CursorOp {
     Put(CursorPayload),
 }
 
-/// One cursor write as made: the operation, the cursor state it found, and what it raised. Made
-/// while something waits for the host, the take puts that state back ([`CursorWrite::rewind`])
-/// and the operation runs again in its place, against the cursor as it is then, as the
-/// reference's runs after what came ahead of it: never its recorded result.
+/// One cursor write as made inside a verb segment: the operation, the cursor state it found, and
+/// what it raised. Held for the host with its segment, the take puts that state back
+/// ([`CursorWrite::rewind`]) and the operation runs again in its place, against the cursor as it
+/// is then, as the reference's runs after what came ahead of it: never its recorded result.
 #[derive(Clone, Debug)]
 pub(crate) struct CursorWrite {
     pub(crate) op: CursorOp,
@@ -374,15 +374,21 @@ impl CursorWrite {
     }
 }
 
-/// Make cursor write `op`, recorded whole ([`CursorWrite`]): inside a verb segment as one record,
-/// which its fan-out shows and its replay for the host makes again ([`super::tick::fan_out`]);
-/// outside one while something waits for the host, captured and queued behind it, its events
-/// raised when it is made again. With nothing waiting outside a segment it is just made.
+/// Make cursor write `op`: inside a verb segment as one record ([`CursorWrite`]), which its
+/// fan-out shows and its replay for the host makes again ([`super::tick::fan_out`]); outside one
+/// at once, and while something waits for the host its records wait behind it, held as a segment
+/// of their own ([`super::Model::hold_behind`]); one made ahead of the point of a held handler or
+/// of a signal queued on a lane is the census's to refuse ([`super::census::vm_write`]). With
+/// nothing waiting outside a segment it is just made.
 pub(crate) fn write(model: &mut Model, op: CursorOp) {
     let before = model.cursor_state();
     let start = model.verb_events.as_ref().map(Vec::len);
-    let queued = start.is_none() && !model.script_calls.is_empty();
-    if queued {
+    #[cfg(debug_assertions)]
+    if start.is_none() {
+        super::census::vm_write("cursor");
+    }
+    let behind = start.is_none() && !model.script_calls.is_empty();
+    if behind {
         model.verb_events = Some(Vec::new());
     }
     match op.clone() {
@@ -393,15 +399,15 @@ pub(crate) fn write(model: &mut Model, op: CursorOp) {
         return;
     };
     let raised = segment.split_off(start.unwrap_or(0));
-    let write = Box::new(CursorWrite { op, before, raised });
-    if queued {
+    if behind {
         model.verb_events = None;
-        model.push_waiting(super::calls::Waiting::Cursor {
-            write,
-            shown: false,
-        });
+        model.hold_behind(raised);
     } else {
-        segment.push(super::tick::Raised::CursorWrite(write));
+        segment.push(super::tick::Raised::CursorWrite(Box::new(CursorWrite {
+            op,
+            before,
+            raised,
+        })));
     }
 }
 
@@ -947,10 +953,10 @@ impl super::UiScript {
     /// The unlock-all (`0x495460`), on the revive edge (`0x5fefae`): the player array's items
     /// unlock, then one `ITEM_LOCK_CHANGED` (`0x49557d`).
     ///
-    /// Deviation: every lock lifts here, bag contents included. The reference's walk of a bag's
-    /// contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at least
-    /// 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none of
-    /// them; a lock it strands lasts until the item's seat or stack moves, which this does not
+    /// Deviation: every lock lifts here, bag contents included, because the reference's walk of a
+    /// bag's contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at
+    /// least 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none
+    /// of them; a lock it strands lasts until the item's seat or stack moves, which this does not
     /// copy.
     pub fn unlock_all_items(&mut self) {
         for guid in self.item_locks() {
@@ -1251,9 +1257,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(flag(matches!(model.cursor, Some(CursorPayload::Spell(_)))))
         })?,
     )?;
-    // Deviation: returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4895bc`), so
-    // Lua 5.0 hands back the stack top, the last argument or the function itself: an accident of
-    // the handler, not an API, and copying a stack-top leak would copy a bug.
+    // Deviation: returns nothing because the handler ends `mov eax,1` with nothing pushed
+    // (`0x4895bc`), so Lua 5.0 hands back the stack top, the last argument or the function itself:
+    // an accident of the handler, not an API, and copying a stack-top leak would copy a bug.
     g.set(
         "ClearCursor",
         lua.create_function(|lua, ()| {

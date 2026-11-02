@@ -91,6 +91,14 @@ pub(crate) struct DeathNet {
 }
 
 impl DeathNet {
+    /// The teardown's free of the offer's name callback (`0x5e7d02`, `0x55f990`): the offer stays,
+    /// and no answer shows it.
+    pub(crate) fn free_store_callbacks(&mut self) {
+        if let Some(offer) = self.resurrect.as_mut() {
+            offer.waits_name = false;
+        }
+    }
+
     /// Our own death's timer, by `PLAYER_FIELD_BYTES` bit 0x8 as the death finds it (`0x5e9a27`):
     /// armed at `now` plus the window when set, else off.
     pub(crate) fn arm_release(&mut self, timer_bit: bool, now: f64) {
@@ -306,8 +314,9 @@ pub(crate) fn poll_corpse(mut vm: crate::script_calls::VmWith<CorpsePoll>) {
         let corpse = death_net.corpse.as_ref();
         let in_range = corpse.is_some_and(|cp| {
             // Deviation: `0x492130` compares the positions whatever map we stand on, so a
-            // ghost on another map at the corpse's coordinates reads in range for a reclaim
-            // the server refuses; here only the corpse's display map counts.
+            // ghost on another map at the corpse's coordinates reads in range for a reclaim the
+            // server refuses; here only the corpse's display map counts because the server refuses
+            // that reclaim.
             let on_display_map = map
                 .as_ref()
                 .is_some_and(|m| m.0 == u32::try_from(cp.display_map).unwrap_or(u32::MAX));
@@ -651,9 +660,11 @@ impl DeathSteps<'_, '_> {
                     send(&self.net, ClientCommand::AreaSpiritHealerQueue { healer });
                 }
             }
+            // The host runs the use past the cancel's listeners ([`Self::soulstone_head`]); a
+            // harness with no host runs it here.
             DeathAction::UseSoulstone { .. } => {
-                if let Some(store) = store {
-                    self.use_soulstone(script, &store);
+                if let Some(stone) = self.soulstone_head() {
+                    self.soulstone_use(script, stone);
                 }
             }
         }
@@ -698,17 +709,17 @@ impl DeathSteps<'_, '_> {
         }
     }
 
-    /// `UseSoulstone()` (`0x48ad70`), with no health test: with `PLAYER_SELF_RES_SPELL` set,
-    /// `CMSG_SELF_RES` (`0x48adb6`, `0x48ae05`); else the carried item (`0x5ed630`), the cast
-    /// cancelled before its use (`0x48ae6b` into `0x6e4940`, cl=1, dl=1, reason `0x1c`), then an
-    /// ordinary item use, `0x5d8d00` (`0x48ae7d`), like every bag click: a locked stone is refused
-    /// at its first gate (`0x5d8d32`), after the cancel. Nothing is cleared here: the server zeroes
-    /// the field.
-    fn use_soulstone(&mut self, script: &mut UiScript, store: &benilla_protocol::ObjectFields) {
+    /// `UseSoulstone()` (`0x48ad70`) up to its use, with no health test: with
+    /// `PLAYER_SELF_RES_SPELL` set, `CMSG_SELF_RES` (`0x48adb6`, `0x48ae05`); else the carried item
+    /// (`0x5ed630`) and the cast cancelled before its use (`0x48ae6b` into `0x6e4940`, cl=1, dl=1,
+    /// reason `0x1c`), whose signals' listeners a caller runs before [`Self::soulstone_use`].
+    /// Nothing is cleared here: the server zeroes the field.
+    pub(crate) fn soulstone_head(&mut self) -> Option<SoulstoneUse> {
+        let store = self.targeting.self_store.single().ok()?.0.clone();
         let res = {
             let ladder = self.cast.p0();
             self_res(
-                store,
+                &store,
                 &ladder.objects,
                 &ladder.items,
                 ladder.spells.as_deref(),
@@ -725,11 +736,28 @@ impl DeathSteps<'_, '_> {
             if res.is_some() {
                 let _ = self.net.0.send(ClientCommand::SelfRes);
             }
-            return;
+            return None;
         };
         // Its failed flag disarms the trade-skill repeat on every branch (`0x6e4abc`-`0x6e4ac2`
         // into `0x4fd790`), queued with its event.
         self.cast.p1().abort_cast();
+        Some(SoulstoneUse {
+            bag_index,
+            slot,
+            guid,
+            entry,
+        })
+    }
+
+    /// `UseSoulstone()` past its cancel: an ordinary item use, `0x5d8d00` (`0x48ae7d`), like every
+    /// bag click, a locked stone refused at its first gate (`0x5d8d32`).
+    pub(crate) fn soulstone_use(&mut self, script: &mut UiScript, stone: SoulstoneUse) {
+        let SoulstoneUse {
+            bag_index,
+            slot,
+            guid,
+            entry,
+        } = stone;
         if crate::ui_items::item_use_refused(script, Some(guid)) {
             debug!("death: soulstone {guid:#x} is locked — refused");
             return;
@@ -760,6 +788,14 @@ impl DeathSteps<'_, '_> {
             &self.ui_errors,
         );
     }
+}
+
+/// The carried soulstone `UseSoulstone` uses past its cast cancel ([`DeathSteps::soulstone_head`]).
+pub(crate) struct SoulstoneUse {
+    bag_index: u8,
+    slot: u8,
+    guid: u64,
+    entry: u32,
 }
 
 /// `SpiritHealerDialog 0x5df730(npc)` asking: for a ghost (`PLAYER_FLAGS` bit 0x10, `0x5df74a`),
@@ -1133,6 +1169,41 @@ mod tests {
             2,
             "arming signalled UPDATE_TRADESKILL_RECAST, and so did the disarm (`0x4fd7a3`)"
         );
+    }
+
+    /// The item leg's cancel signals (`0x48ae6b` into `0x6e4940`) before the stone's use
+    /// (`0x48ae7d`), so its `SPELLCAST_FAILED` listener's packet goes between the cancel's and the
+    /// use's.
+    #[test]
+    fn the_soulstones_cancel_listener_sends_ahead_of_its_use() {
+        let (mut app, rx) = soulstone_app();
+        let world = app.world_mut();
+        let mut pending = world.resource_mut::<crate::spell::PendingCast>();
+        pending.fill_record();
+        pending.push(FIREBALL, None, std::time::Instant::now());
+        crate::script_calls::with_hosted_vm(app.world_mut(), |vm| {
+            vm.expect("a VM").run(
+                r#"local r = CreateFrame("Frame")
+                r:RegisterEvent("SPELLCAST_FAILED")
+                r:SetScript("OnEvent", function() RandomRoll(1, 2) end)"#,
+            )
+        })
+        .unwrap();
+        let _ = rx.try_iter().count();
+        press_soulstone(&mut app);
+        let sent: Vec<&str> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::CancelCast { .. } => Some("cancel"),
+                ClientCommand::RandomRoll { .. } => Some("roll"),
+                // The stone's template starts a quest, so its use is the offer's query.
+                ClientCommand::UseItem { .. } | ClientCommand::QuestgiverQuery { .. } => {
+                    Some("use")
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, ["cancel", "roll", "use"]);
     }
 
     /// A pending targeting spell is dropped in place of a cast (`0x6e4955`): no

@@ -157,8 +157,8 @@ pub use instance::{
 };
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_name_query, item_query, open_item,
-    read_item, set_ammo, split_item, swap_inv_item, swap_item, use_item, wrap_item, ItemDamage,
-    ItemInfo, ItemSpellEntry, ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY,
+    read_item, set_ammo, split_item, swap_inv_item, swap_item, use_item, wrap_item, HeldTargets,
+    ItemDamage, ItemInfo, ItemSpellEntry, ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY,
     ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_PLAYERCAST,
     ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
@@ -170,7 +170,7 @@ pub use loot::{
 pub use mail::{
     get_mail_list, item_text_query, mail_action, mail_create_text_item, mail_delete, mail_error,
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
-    send_mail, MailAttachment, MailListEntry,
+    mail_text_key, send_mail, MailAttachment, MailListEntry,
 };
 pub use meeting_stone::{
     meeting_stone_join, meeting_stone_leave, MeetingStoneNotice, MeetingStoneSetQueue,
@@ -230,15 +230,15 @@ pub use roster::{
 pub use skills::{skill_buy_step, unlearn_skill};
 pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
-    looking_for_group_query, read_friend_list, read_friend_status, read_ignore_list, read_who,
-    set_looking_for_group, who, FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry,
-    WhoRequest, WhoResults,
+    looking_for_group_query, read_friend_list, read_friend_status, read_ignore_list, read_lfg,
+    read_who, set_looking_for_group, who, FriendEntry, FriendOnline, FriendStatusUpdate, LfgEntry,
+    LfgResults, WhoEntry, WhoRequest, WhoResults,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
     cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_corpse,
-    cast_spell_gameobject, cast_spell_item, cast_spell_trade_item, CastOutcome, CorpseTarget,
-    SpellCastTargets, SpellChainTargets, SpellGo, SpellGoMiss, SpellStart,
+    cast_spell_gameobject, cast_spell_item, cast_spell_targets, cast_spell_trade_item, CastOutcome,
+    CorpseTarget, SpellCastTargets, SpellChainTargets, SpellGo, SpellGoMiss, SpellStart,
 };
 pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,
@@ -317,7 +317,23 @@ pub struct Billing {
     pub time_rested: u32,
 }
 
+/// The billing fields one response delivered. `GetUInt32` writes nothing on a short read
+/// (`0x418eb0`), so a field the body was too short for keeps its old value (`0x5b4207`-`0x5b4223`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BillingRead {
+    pub time_remaining: Option<u32>,
+    pub plan_flags: Option<u8>,
+    pub time_rested: Option<u32>,
+}
+
 impl Billing {
+    /// Overwrite the fields `read` delivered and keep the rest.
+    pub fn apply(&mut self, read: BillingRead) {
+        self.time_remaining = read.time_remaining.unwrap_or(self.time_remaining);
+        self.plan_flags = read.plan_flags.unwrap_or(self.plan_flags);
+        self.time_rested = read.time_rested.unwrap_or(self.time_rested);
+    }
+
     /// A recurring subscription: the play-time warning never arms (`0x48f654`), and the glue's
     /// `GetBillingTimeRemaining` answers 0 (`0x46dc0a`). vmangos `BILLING_FLAG_RECURRING`.
     pub const RECURRING: u8 = 0x02;

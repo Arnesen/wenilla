@@ -489,7 +489,7 @@ pub(crate) fn close_core(world: &mut World, report: bool) {
             });
         }
     }
-    lane::behind_lane(world, |world| {
+    crate::lanes::step(world, |world| {
         world.resource_mut::<QuestGiver>().clear();
         crate::ui_session::release(world, giver);
         crate::ui_session::fire(world, |script| {
@@ -1087,33 +1087,45 @@ mod tests {
         );
     }
 
-    /// The questgiver lane's items, taking them.
+    /// The questgiver lane's items at each packet's end, ahead of the flush that fires them.
+    #[derive(Resource, Default)]
+    struct TappedGiver(Vec<QuestGiverEvent>);
+
+    fn tap_giver(world: &mut World, _at: crate::lanes::Stamp) {
+        let events = world.resource_mut::<QuestGiverLane>().take();
+        world.resource_mut::<TappedGiver>().0.extend(events);
+    }
+
+    /// The questgiver lane's items, those a packet ended on and those a call queued, taking them.
     fn lane(app: &mut App) -> Vec<QuestGiverEvent> {
-        app.world_mut().resource_mut::<QuestGiverLane>().take()
+        let mut events =
+            std::mem::take(&mut app.world_mut().get_resource_or_init::<TappedGiver>().0);
+        events.extend(app.world_mut().resource_mut::<QuestGiverLane>().take());
+        events
     }
 
     /// Each panel setter fires its event at its end, every time (`0x500ee5`, `0x50105d`,
     /// `0x501120`), at its packet's place: a second offer queues `QUEST_DETAIL` again, an
-    /// identical one too. `QUEST_ITEM_UPDATE` is queued only by the callback `GetQuestItemInfo`'s
+    /// identical one too, its latch's re-registration closing the first in place. `QUEST_ITEM_UPDATE` is queued only by the callback `GetQuestItemInfo`'s
     /// lookup keeps (`0x5017ce`), once per call, at the record's answer (`0x5018fe`-`0x501903`); a
     /// record no call asked for queues nothing.
     #[test]
     fn panel_events_queue_per_publish_and_item_updates_per_callback() {
         let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        app.init_resource::<TappedGiver>();
+        crate::net::handlers::add_packet_end(&mut app, tap_giver);
         app.insert_non_send_resource(UiScript::new().unwrap());
         hold_for_test(app.world_mut(), 0x42);
         let detail = |app: &mut App, choice| {
             open_panel(app.world_mut(), 0x42, detail(100, "", vec![triple(choice)]))
         };
-        detail(&mut app, 901);
-        detail(&mut app, 901);
-        assert_eq!(
-            lane(&mut app),
-            [
-                QuestGiverEvent::Panel(QuestPanel::Detail, 0x42),
-                QuestGiverEvent::Panel(QuestPanel::Detail, 0x42)
-            ]
-        );
+        for _ in 0..2 {
+            detail(&mut app, 901);
+            assert_eq!(
+                lane(&mut app),
+                [QuestGiverEvent::Panel(QuestPanel::Detail, 0x42)]
+            );
+        }
         let land = |app: &mut App, entry| {
             let info = Some(Box::new(crate::items::test_template("Sword")));
             crate::net::handlers::dispatch(

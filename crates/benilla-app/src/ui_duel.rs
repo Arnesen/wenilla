@@ -60,6 +60,11 @@ struct Countdown {
 }
 
 impl DuelState {
+    /// A held challenge's wait on its name goes as the name store's callbacks do (`0x55f990`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.challenger = None;
+    }
+
     /// `SMSG_DUEL_REQUESTED`: true when the challenge is our own, and the caller then shows
     /// `ERR_DUEL_REQUESTED` and accepts inline, as the reference's handler does (`0x4d4a12`).
     fn apply_requested(&mut self, arbiter: u64, challenger: u64, own: Option<u64>) -> bool {
@@ -92,7 +97,7 @@ impl DuelState {
 
     /// `SMSG_DUEL_COUNTDOWN` (`0x4d4ae0`): the seconds stored and `ProcessCountdown`'s body run
     /// before its timer is armed, so the first line is the packet's; the line it owes.
-    /// Deviation: zero arms nothing, where the reference prints 0 and re-arms forever on the
+    /// Deviation: zero arms nothing, because the reference prints 0 and re-arms forever on the
     /// `dec`'s wraparound, a bug vmangos never reaches (it sends 3000).
     fn apply_countdown(&mut self, seconds: u32) -> Option<OwedLine> {
         self.countdown = (seconds > 0).then(|| Countdown {

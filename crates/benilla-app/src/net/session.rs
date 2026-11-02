@@ -176,8 +176,9 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
                 generation,
             });
         }
-        SessionEvent::RosterFailed { epoch } => {
-            e.roster_failed.write(RosterFailedMessage { epoch });
+        SessionEvent::RosterFailed { epoch, emptied } => {
+            e.roster_failed
+                .write(RosterFailedMessage { epoch, emptied });
         }
         SessionEvent::AddonInfo { records } => {
             // Held for the screens built after it, and for the world entry's load.
@@ -190,8 +191,16 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
         SessionEvent::LoginFailed {
             refusal, reason, ..
         } => login_failed(refusal, reason, &mut e.login_failures),
-        SessionEvent::RealmList { realms, failed } => {
-            e.realm_lists.write(RealmListMessage { realms, failed });
+        SessionEvent::RealmList {
+            realms,
+            failed,
+            emptied,
+        } => {
+            e.realm_lists.write(RealmListMessage {
+                realms,
+                failed,
+                emptied,
+            });
         }
         SessionEvent::CharActionResult { action, code } => {
             char_action_result(action, code, &mut e.char_actions)
@@ -308,9 +317,9 @@ fn on_disconnected(
         // so the selection ends as at the world's teardown, with nothing sent or signalled.
         //
         // Deviation: on benilla's unattended reconnect, which the reference lacks, the world's VM
-        // survives the loss, so the clear signals its `PLAYER_TARGET_CHANGED` and usable refresh
-        // as a release's teardown does (`0x493a69`, `0x493a73`), still sending nothing, and the
-        // surviving target frame lets the lost unit go.
+        // survives the loss; because of that the clear signals its `PLAYER_TARGET_CHANGED` and
+        // usable refresh as a release's teardown does (`0x493a69`, `0x493a73`), still sending
+        // nothing, and the surviving target frame lets the lost unit go.
         let LostSelection { selection, owed } = lost;
         if let Some(mut selection) = selection.filter(|s| s.guid.is_some()) {
             let before = selection.guid;

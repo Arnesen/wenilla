@@ -31,6 +31,20 @@ impl MailVerbs<'_> {
         self.mail.as_deref().and_then(|m| m.mailbox)
     }
 
+    /// The mailbox a use asked to open ([`super::MailOpen::use_mailbox`]), taken. The cell is
+    /// lent mutably only when a use left one, so a use that opened no mailbox writes nothing.
+    pub(crate) fn take_used(&mut self) -> Option<u64> {
+        let mail = self.mail.as_mut().filter(|m| m.used.is_some())?;
+        mail.used.take()
+    }
+
+    /// The open's cell (`0x4acd27`).
+    pub(crate) fn open(&mut self, mailbox: u64) {
+        if let Some(mail) = self.mail.as_deref_mut() {
+            mail.click(mailbox);
+        }
+    }
+
     /// The close core's clear of the cell (`0x4acd8f`), the VM's verbs finding none from here.
     pub(crate) fn clear_mailbox(&mut self, script: &mut UiScript) {
         if let Some(mail) = self.mail.as_deref_mut() {
@@ -102,9 +116,10 @@ impl MailVerbs<'_> {
             } => {
                 // A miss asks and keeps the callback `0x4af340`, one per call (`0x4af1bf`).
                 let held = mail.bodies.lookup(text_id, || {
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::ItemTextQuery { text_id, mail_id });
+                    let _ = commands.0.send(ClientCommand::ItemTextQuery {
+                        text_id,
+                        key: benilla_protocol::messages::mail_text_key(mail_id),
+                    });
                 });
                 if held.is_none() {
                     mail.wait(super::MailWait::Body(text_id));

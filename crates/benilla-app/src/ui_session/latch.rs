@@ -27,6 +27,7 @@
 
 use bevy::prelude::*;
 
+use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::script::UiScript;
 
 /// The windows `0x493310` tests, in its order (`0x493341` to `0x4934de`): the first whose cell
@@ -63,6 +64,23 @@ pub(crate) enum NpcWindow {
 }
 
 impl NpcWindow {
+    /// Every window, in `0x493310`'s order.
+    pub(crate) const ORDER: [Self; 13] = [
+        Self::Trade,
+        Self::ItemText,
+        Self::Gossip,
+        Self::Quest,
+        Self::Merchant,
+        Self::Taxi,
+        Self::Trainer,
+        Self::Bank,
+        Self::Registrar,
+        Self::Tabard,
+        Self::Mail,
+        Self::Auction,
+        Self::Stable,
+    ];
+
     /// The window's bit among [`PARKED_CLOSES`].
     const fn bit(self) -> u16 {
         1 << self as u16
@@ -75,9 +93,8 @@ thread_local! {
     static PARKED_CLOSES: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
-/// Run `f`, the interface half of `window`'s close that a handler or a lane's earlier item held
-/// back ([`crate::lanes::behind`]): its signals, and the VM's view of the window, at the close's
-/// place on its lane. The engine half, the cell, the latch and the sends, ran where the close was
+/// Run `f`, the interface half of `window`'s close, run as a step at the close's place on its lane
+/// ([`crate::lanes::step`]): its signals, and the VM's view of the window. The engine half, the cell, the latch and the sends, ran where the close was
 /// entered, as the reference runs them inside the handler, so the live window may by now be a
 /// session a later open began. A close verb the half's listeners re-enter ([`parked_close`])
 /// therefore acts on the session this close closed, never on that newer one.
@@ -171,6 +188,31 @@ impl LatchSteps<'_> {
         #[cfg(debug_assertions)]
         latch.released.push(cell);
         true
+    }
+
+    /// `0x4930d0`'s walk inside a call that opens: the latched guid, taken (`0x49334b`), whose
+    /// holder the caller closes next ([`register`]'s), and checked once the call is done as a
+    /// release is ([`check_call_releases`]).
+    pub(crate) fn take(&mut self) -> Option<u64> {
+        let latch = self.latch.as_deref_mut()?;
+        let old = latch.guid.take()?;
+        #[cfg(debug_assertions)]
+        latch.released.push(old);
+        Some(old)
+    }
+
+    /// `0x4930d0`'s tail inside a call that opens: `guid` latched (`0x493114`), and greeted when
+    /// it differs from `before`, the guid latched ahead of the walk (`0x49318f`).
+    pub(crate) fn latch(&mut self, guid: u64, before: Option<u64>) {
+        let Some(latch) = self.latch.as_deref_mut() else {
+            return;
+        };
+        latch.guid = Some(guid);
+        if guid != 0 && before != Some(guid) {
+            if let Some(vocal) = self.vocal.as_deref_mut() {
+                vocal.write(LatchVocal::Hello(guid));
+            }
+        }
     }
 }
 
@@ -302,7 +344,10 @@ fn walk(world: &mut World, left: usize) {
         .into_iter()
         .find(|e| (e.cell)(world) == Some(guid))
     {
-        (e.dispatched)(world);
+        // The close core signals inside the walk (`0x493310`), the watchdog's every frame.
+        within(Origin::Allowed("ui_session::latch::walk"), || {
+            (e.dispatched)(world)
+        });
     }
     debug_assert_one_holder(world, guid, left);
 }

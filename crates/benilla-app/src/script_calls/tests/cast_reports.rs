@@ -3,6 +3,7 @@
 //! and `UseAction 0x4e5ee0`), so the line after a cast reads the state it left.
 
 use super::*;
+use benilla_protocol::messages::UseItemTarget;
 
 /// The `CMSG_CAST_SPELL`s and `CMSG_CANCEL_CAST`s sent, in order.
 fn casts_and_cancels(f: &Frame) -> Vec<(&'static str, u32)> {
@@ -719,4 +720,650 @@ fn mouselook_start_under_a_left_drag_cancels_inside_the_call() {
             })
             .collect();
     assert_eq!(sent, [format!("cancel {HEAL}"), "chat".to_string()]);
+}
+
+/// The casts, attack stops and rolls sent, in order.
+fn cast_wire(f: &Frame) -> Vec<String> {
+    f.rx.try_iter()
+        .filter_map(|c| match c {
+            ClientCommand::CastSpell { spell_id, .. } => Some(format!("CastSpell {spell_id}")),
+            ClientCommand::AttackStop => Some("AttackStop".to_string()),
+            ClientCommand::RandomRoll { .. } => Some("RandomRoll".to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A listener of `event` that rolls the first time it hears it.
+fn roll_once_on(f: &mut Frame, event: &str) {
+    run(
+        f,
+        &format!(
+            r#"local r = CreateFrame("Frame")
+            r:RegisterEvent("{event}")
+            r:SetScript("OnEvent", function()
+                if not ROLLED then ROLLED = 1 RandomRoll(1, 2) end
+            end)"#
+        ),
+    );
+}
+
+/// The attempt's push and arm signal (`0x6e5026`, `0x6e5333`) ahead of `SendCast` (`0x6e5349`),
+/// which runs their listeners there (`0x703e50`): a `CURRENT_SPELL_CAST_CHANGED` listener's packet
+/// goes before the cast's.
+#[test]
+fn an_attempts_signal_listener_sends_ahead_of_its_cast() {
+    let mut f = frame(false);
+    with_book_spell(
+        &mut f,
+        HEAL,
+        "Heal",
+        benilla_formats::SpellDisplay::default(),
+    );
+    roll_once_on(&mut f, "CURRENT_SPELL_CAST_CHANGED");
+    f.rx.try_iter().for_each(drop);
+    run_hosted(&mut f, r#"CastSpellByName("Heal")"#);
+    assert_eq!(cast_wire(&f), ["RandomRoll", "CastSpell 2050"]);
+}
+
+/// A cursor's bind merges and signals (`0x6e60cb`) ahead of its send (`0x6e60d7`), so a
+/// `CURRENT_SPELL_CAST_CHANGED` listener's packet goes before the cast's.
+#[test]
+fn a_cursor_binds_signal_listener_sends_ahead_of_its_cast() {
+    let mut f = frame(true);
+    with_factions(&mut f, FOE, &[(FLAGS, 0x8)]);
+    with_friendly_party1(&mut f, true);
+    with_book_spell(
+        &mut f,
+        MOTW,
+        "Mark of the Wild",
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 21,
+            ..Default::default()
+        },
+    );
+    run_hosted(&mut f, r#"CastSpellByName("Mark of the Wild")"#);
+    assert!(cursor_is_up(&f));
+    roll_once_on(&mut f, "CURRENT_SPELL_CAST_CHANGED");
+    f.rx.try_iter().for_each(drop);
+    run_hosted(&mut f, r#"SpellTargetUnit("party1")"#);
+    assert_eq!(cast_wire(&f), ["RandomRoll", "CastSpell 1126"]);
+}
+
+/// A repeat's send signals `START_AUTOREPEAT_SPELL` (`0x6e5952`), whose listeners run before its
+/// StopAttack sends `CMSG_ATTACKSTOP` (`0x6e5976` → `0x5ecac0`).
+#[test]
+fn a_repeats_start_listener_sends_ahead_of_its_attack_stop() {
+    const AUTO_SHOT: u32 = 75;
+    let mut f = frame(true);
+    super::selection::swinging_at_old(&mut f);
+    with_book_spell(
+        &mut f,
+        AUTO_SHOT,
+        "Auto Shot",
+        benilla_formats::SpellDisplay {
+            targets: 0x2,
+            attributes_ex2: 0x20,
+            ..Default::default()
+        },
+    );
+    roll_once_on(&mut f, "START_AUTOREPEAT_SPELL");
+    f.rx.try_iter().for_each(drop);
+    run_hosted(&mut f, r#"CastSpellByName("Auto Shot")"#);
+    assert_eq!(cast_wire(&f), ["CastSpell 75", "RandomRoll", "AttackStop"]);
+}
+
+/// A listener's `SpellStopCasting` at the attempt's push signal cancels the cast in flight, which
+/// zeroes the record's caster (`0x6e4a5a`), so `SendCast` finds no caster and leaves unsent
+/// (`0x6e5572` → `0x6e59b0`): the wire holds the cancel alone.
+#[test]
+fn a_cancel_at_the_push_signal_leaves_the_cast_unsent() {
+    let mut f = frame(false);
+    with_book_spell(
+        &mut f,
+        HEAL,
+        "Heal",
+        benilla_formats::SpellDisplay::default(),
+    );
+    run(
+        &mut f,
+        r#"local r = CreateFrame("Frame")
+        r:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+        r:SetScript("OnEvent", function()
+            if not STOPPED then STOPPED = 1 SpellStopCasting() end
+        end)"#,
+    );
+    f.rx.try_iter().for_each(drop);
+    run_hosted(&mut f, r#"CastSpellByName("Heal")"#);
+    assert_eq!(casts_and_cancels(&f), vec![("cancel", HEAL)]);
+}
+
+/// `spells` in the catalog and the book together.
+fn seat_spells(f: &mut Frame, spells: Vec<(u32, benilla_formats::SpellDisplay)>) {
+    let world = f.app.world_mut();
+    let ids: Vec<u32> = spells.iter().map(|(id, _)| *id).collect();
+    world.insert_resource(crate::ui_action::Spells {
+        catalog: benilla_formats::SpellCatalog::from_displays(spells.into_iter().collect()),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    let mut actions = world.resource_mut::<crate::ui_action::PlayerActions>();
+    actions.spells.extend(ids);
+}
+
+/// The potion's on-use spell.
+const QUAFF: u32 = 4321;
+/// Power Word: Fortitude's word, an assist unit (implicit target 21).
+const FORTITUDE: u32 = 1243;
+
+/// Backpack slot 1 holds a potion casting [`QUAFF`], an item with no `ITEM_FLAG_PLAYERCAST`, so
+/// its attempt pushes nothing (`0x6e500b`-`0x6e501f`) and a listener's cast is not refused as in
+/// progress; `quaff` is the spell's record. `OLD` is selected, of template `old`.
+fn with_quaff(f: &mut Frame, old: u32, quaff: benilla_formats::SpellDisplay) {
+    with_quaff_flagged(f, old, quaff, 0);
+}
+
+/// [`with_quaff`] with the item's template `flags`.
+fn with_quaff_flagged(f: &mut Frame, old: u32, quaff: benilla_formats::SpellDisplay, flags: u32) {
+    let mut t = crate::items::test_template("Potion");
+    t.flags = flags;
+    t.spells = vec![benilla_protocol::messages::ItemSpellEntry {
+        index: 0,
+        spell_id: QUAFF,
+        trigger: 0,
+        charges: 0,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    }];
+    t.use_spell = Some(benilla_protocol::messages::ItemUseSpell {
+        spell_id: QUAFF,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    });
+    with_potion(f, t);
+    with_factions(f, old, &[(2, 0x19), (FLAGS, 0x8)]);
+    // The faction fixture's descriptor for us, with the backpack slot the potion sits in.
+    typed(
+        f.app.world_mut(),
+        ME,
+        &[(532, POTION as u32), (533, (POTION >> 32) as u32)],
+    );
+    seat_spells(
+        f,
+        vec![
+            (
+                QUAFF,
+                benilla_formats::SpellDisplay {
+                    name: "Quaff".into(),
+                    ..quaff
+                },
+            ),
+            (
+                FORTITUDE,
+                benilla_formats::SpellDisplay {
+                    name: "Fortitude".into(),
+                    implicit_target_a1: 21,
+                    ..Default::default()
+                },
+            ),
+        ],
+    );
+}
+
+/// The targets of the `CMSG_USE_ITEM`s sent.
+fn item_targets(f: &Frame) -> Vec<UseItemTarget> {
+    f.rx.try_iter()
+        .filter_map(|c| match c {
+            ClientCommand::UseItem { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A listener of `CURRENT_SPELL_CAST_CHANGED` that runs `lua` the first time it hears it.
+fn once_on_change(f: &mut Frame, lua: &str) {
+    run(
+        f,
+        &format!(
+            r#"local r = CreateFrame("Frame")
+            r:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+            r:SetScript("OnEvent", function()
+                if not ONCE then ONCE = 1 {lua} end
+            end)"#
+        ),
+    );
+    f.rx.try_iter().for_each(drop);
+}
+
+/// `ArmCast` reads its candidate past the attempt's push and arm signals (`0x6e5333` →
+/// `0x6e539f`): a listener there that targets another unit binds the cast to that unit.
+#[test]
+fn a_push_listener_that_retargets_binds_the_cast_to_its_target() {
+    let mut f = frame(true);
+    with_factions(&mut f, FRIEND, &[(2, 0x19), (FLAGS, 0x8)]);
+    with_friendly_party1(&mut f, true);
+    with_book_spell(
+        &mut f,
+        MOTW,
+        "Mark of the Wild",
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 21,
+            ..Default::default()
+        },
+    );
+    once_on_change(&mut f, r#"TargetUnit("party1")"#);
+    run_hosted(&mut f, r#"CastSpellByName("Mark of the Wild")"#);
+    assert_eq!(casts(&f), vec![(MOTW, Some(NEW))]);
+    assert_eq!(selected(&f), Some(NEW));
+}
+
+/// A cursor a listener raises at the arm's signal stands in the word the arm tests (`0x6e5338`),
+/// so the arm takes its bind leg on that cursor's record (`0x6e5359`): its own candidate, the
+/// player its use was aimed at (`0x6e5393`), binds the listener's spell (`0x6e53c3`), which goes
+/// out at the player (`0x6e60d7`).
+#[test]
+fn a_listener_that_raises_a_cursor_takes_the_bind_leg() {
+    let mut f = frame(true);
+    with_quaff(&mut f, FOE, Default::default());
+    once_on_change(&mut f, r#"CastSpellByName("Fortitude")"#);
+    run_hosted(&mut f, "UseContainerItem(0, 1, 1)");
+    let wire: Vec<String> = f.rx.try_iter().map(|c| format!("{c:?}")).collect();
+    let fortitude = ClientCommand::CastSpell {
+        spell_id: FORTITUDE,
+        target: Some(ME),
+    };
+    assert_eq!(
+        wire,
+        [format!("{fortitude:?}")],
+        "the potion never goes out"
+    );
+    assert!(!cursor_is_up(&f), "the bind emptied the word");
+}
+
+/// A listener's attempt at the arm's signal finds the potion's word up and cancels it
+/// (`0x6e4d71`), whose `SPELLCAST_FAILED` fires first (`0x6e4a50`); refilling the record, it is
+/// refused at its own arm's tail, which empties the word (`0x6e5098`) and, never pushed, keeps the
+/// record's caster (`0x6e2228`). So the arm finds the word empty and sends the record as the
+/// listener left it (`0x6e5338` → `0x6e5349`): the potion goes out with no target, and the
+/// attempt's own refusal never comes.
+#[test]
+fn a_listener_that_refills_the_record_without_sending_has_it_sent() {
+    let mut f = frame(true);
+    with_quaff(
+        &mut f,
+        FRIEND,
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 6,
+            ..Default::default()
+        },
+    );
+    record_changes(&mut f);
+    once_on_change(&mut f, "UseContainerItem(0, 1)");
+    run_hosted(&mut f, &format!("UseContainerItem(0, 1) {CHANGES}"));
+    assert_eq!(item_targets(&f), vec![UseItemTarget::SelfImplicit]);
+    let seen = seen(&mut f);
+    let refusals: Vec<&str> = seen
+        .split(',')
+        .filter(|e| *e == "SPELLCAST_FAILED" || *e == "SPELL_FAILED_BAD_TARGETS")
+        .collect();
+    assert_eq!(
+        refusals,
+        [
+            "SPELLCAST_FAILED",
+            "SPELL_FAILED_BAD_TARGETS",
+            "SPELLCAST_FAILED"
+        ],
+        "the cancel's, then the listener's refusal alone: {seen}"
+    );
+}
+
+/// An item use passes the selection, as its verb read it, as `TryCast`'s guid (`0x4fa163`,
+/// `0x5d9249` → `0x6e5a90`), which the arm takes (`0x6e5393`) without reading the selection again:
+/// a listener's retarget at the push's signal (`0x6e5026`), with no word up yet, leaves the bind
+/// where the use aimed it. The potion carries `ITEM_FLAG_PLAYERCAST`, so its attempt pushes.
+#[test]
+fn an_item_use_binds_the_unit_selected_at_its_call() {
+    let mut f = frame(true);
+    with_quaff_flagged(
+        &mut f,
+        FRIEND,
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 21,
+            ..Default::default()
+        },
+        benilla_protocol::messages::ITEM_FLAG_PLAYERCAST,
+    );
+    with_friendly_party1(&mut f, true);
+    once_on_change(&mut f, r#"TargetUnit("party1")"#);
+    run_hosted(&mut f, "UseContainerItem(0, 1)");
+    assert_eq!(item_targets(&f), vec![UseItemTarget::Unit(OLD)]);
+    assert_eq!(selected(&f), Some(NEW));
+}
+
+/// A unit selected at the arm's signal finds the potion's word up (`0x4935ca`) and goes to
+/// `BindTarget` in the select's place (`0x4935d5`), whose merge refuses it out of range
+/// (`0x6e6063` → `0x6e6089`). The potion was never pushed, so the report cancels nothing
+/// (`0x6e2201`): the word is restored (`0x6e6096`), the caster stands and the selection never
+/// moved, and the arm binds the unit it reads there (`0x6e539f`).
+#[test]
+fn a_cursor_bind_refused_out_of_range_at_the_arm_signal_leaves_the_word_to_the_arm() {
+    let mut f = frame(true);
+    with_quaff(
+        &mut f,
+        FRIEND,
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 21,
+            range_index: 5,
+            ..Default::default()
+        },
+    );
+    with_friendly_party1(&mut f, true);
+    with_party1_out_of_range(&mut f);
+    record_changes(&mut f);
+    once_on_change(&mut f, r#"TargetUnit("party1")"#);
+    run_hosted(&mut f, &format!("UseAction(1) {CHANGES}"));
+    assert_eq!(item_targets(&f), vec![UseItemTarget::Unit(OLD)]);
+    assert_eq!(selected(&f), Some(OLD));
+    let seen = seen(&mut f);
+    assert!(seen.contains("ERR_SPELL_OUT_OF_RANGE"), "{seen}");
+}
+
+/// `party1` (`NEW`) 100 yd out, past range row 5's 30 yd.
+fn with_party1_out_of_range(f: &mut Frame) {
+    let world = f.app.world_mut();
+    world.resource_mut::<crate::ui_action::Spells>().ranges =
+        benilla_formats::SpellRangeCatalog::from_rows(
+            [(
+                5,
+                benilla_formats::SpellRange {
+                    min: 0.0,
+                    max: 30.0,
+                    flags: 0,
+                },
+            )]
+            .into(),
+        );
+    let new = world.resource::<GuidIndex>().0[&NEW];
+    world.entity_mut(new).insert((
+        Transform::from_xyz(100.0, 0.0, 0.0),
+        GlobalTransform::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+    ));
+}
+
+/// `TryCast`'s tail picks its refusal of a standing enemy word by whether anything is selected
+/// (`0x6e5084`), not by the candidate: cast on the player with nothing selected, it is "You have no
+/// target".
+#[test]
+fn the_tails_refusal_reads_the_selection_not_the_candidate() {
+    const BOLT: u32 = 133;
+    let mut f = frame(false);
+    with_book_spell(
+        &mut f,
+        BOLT,
+        "Bolt",
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 6,
+            ..Default::default()
+        },
+    );
+    record_changes(&mut f);
+    run_hosted(&mut f, &format!(r#"CastSpellByName("Bolt", 1) {CHANGES}"#));
+    let seen = seen(&mut f);
+    assert!(seen.contains("ERR_GENERIC_NO_TARGET"), "{seen}");
+    assert!(!seen.contains("SPELL_FAILED_BAD_TARGETS"), "{seen}");
+}
+
+/// A listener of `CURRENT_SPELL_CAST_CHANGED` that runs `lua` the `n`th time it hears it: an
+/// attempt that pushes signals the first (`0x6e5026`), its arm the second (`0x6e5333`).
+fn on_change_number(f: &mut Frame, n: u32, lua: &str) {
+    run(
+        f,
+        &format!(
+            r#"local r = CreateFrame("Frame")
+            r:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+            r:SetScript("OnEvent", function()
+                HEARD = (HEARD or 0) + 1
+                if HEARD == {n} then {lua} end
+            end)"#
+        ),
+    );
+    f.rx.try_iter().for_each(drop);
+}
+
+/// Mark of the Wild and Heal in the catalog and the book, `OLD` a friendly player.
+fn with_motw_and_heal(f: &mut Frame) {
+    with_factions(f, FRIEND, &[(2, 0x19), (FLAGS, 0x8)]);
+    seat_spells(
+        f,
+        vec![
+            (
+                MOTW,
+                benilla_formats::SpellDisplay {
+                    name: "Mark of the Wild".into(),
+                    implicit_target_a1: 21,
+                    ..Default::default()
+                },
+            ),
+            (
+                HEAL,
+                benilla_formats::SpellDisplay {
+                    name: "Heal".into(),
+                    ..Default::default()
+                },
+            ),
+        ],
+    );
+}
+
+/// `ArmCast` writes its word (`0x6e525e`) ahead of its signal (`0x6e5333`), so a `TargetUnit`
+/// there finds targeting up (`0x6e48a0` at `0x4935ca`) and binds the cast in the select's place
+/// (`0x4935d5`), which sends it (`0x6e60d7`); the arm then finds its word empty and sends the
+/// record again (`0x6e5338` → `0x6e5349`). The selection never moves.
+#[test]
+fn a_target_unit_at_the_arm_signal_binds_and_the_cast_goes_twice() {
+    let mut f = frame(true);
+    with_motw_and_heal(&mut f);
+    with_friendly_party1(&mut f, true);
+    on_change_number(&mut f, 2, r#"TargetUnit("party1")"#);
+    run_hosted(&mut f, r#"CastSpellByName("Mark of the Wild")"#);
+    assert_eq!(casts(&f), vec![(MOTW, Some(NEW)), (MOTW, Some(NEW))]);
+    assert_eq!(selected(&f), Some(OLD));
+}
+
+/// A cast at the arm's signal finds targeting up and cancels it (`0x6e4d62` → `0x6e4d71`): the
+/// word drops, the pop takes the attempt's spell (`0x6e49d6`) and its `SPELLCAST_FAILED` fires
+/// (`0x6e4a50`), so the in-flight test passes (`0x6e4d97`) and the cast goes on, not refused with
+/// 0x61. The arm then finds the word empty and sends the record the cast refilled (`0x6e5349`).
+#[test]
+fn a_cast_at_the_arm_signal_cancels_the_attempt_and_goes_on() {
+    let mut f = frame(true);
+    with_motw_and_heal(&mut f);
+    record_changes(&mut f);
+    on_change_number(&mut f, 2, r#"CastSpellByName("Heal")"#);
+    run_hosted(
+        &mut f,
+        &format!(r#"CastSpellByName("Mark of the Wild") {CHANGES}"#),
+    );
+    let seen = seen(&mut f);
+    assert!(seen.contains("SPELLCAST_FAILED"), "{seen}");
+    assert!(!seen.contains("SPELL_FAILED_SPELL_IN_PROGRESS"), "{seen}");
+    assert_eq!(casts(&f), vec![(HEAL, None), (HEAL, None)]);
+}
+
+/// A cancel at the arm's signal finds targeting up and drops the word first (`0x6e4955`), with no
+/// packet, and clears the record's caster (`0x6e4a5a`): the arm finds the word empty and
+/// `SendCast` no caster (`0x6e5349` → `0x6e5580`), so nothing goes out and no cursor comes up.
+#[test]
+fn a_cancel_at_the_arm_signal_sends_nothing_and_raises_no_cursor() {
+    let mut f = frame(true);
+    with_motw_and_heal(&mut f);
+    on_change_number(&mut f, 2, "SpellStopCasting()");
+    run_hosted(&mut f, r#"CastSpellByName("Mark of the Wild")"#);
+    assert_eq!(casts_and_cancels(&f), vec![]);
+    assert!(!cursor_is_up(&f));
+}
+
+/// A unit selected out of range at a pushed cast's arm signal is refused by the merge
+/// (`0x6e6089`), whose report finds the cast in flight and cancels it (`0x6e2201` → `0x6e4940`),
+/// popping it from the slot. benilla re-arms the cursor as the attempt left it (`merge`'s
+/// deviation), its hold on the slot included, so the click that commits it sends a cast in
+/// flight, which `SpellStopCasting` finds (`0x6e3d30`) and cancels.
+#[test]
+fn a_cursor_rearmed_at_the_arm_signal_keeps_its_cast_in_flight() {
+    let mut f = frame(true);
+    with_factions(&mut f, FRIEND, &[(2, 0x19), (FLAGS, 0x8)]);
+    seat_spells(
+        &mut f,
+        vec![(
+            MOTW,
+            benilla_formats::SpellDisplay {
+                name: "Mark of the Wild".into(),
+                implicit_target_a1: 21,
+                range_index: 5,
+                ..Default::default()
+            },
+        )],
+    );
+    with_friendly_party1(&mut f, true);
+    with_party1_out_of_range(&mut f);
+    on_change_number(&mut f, 2, r#"TargetUnit("party1")"#);
+    run_hosted(&mut f, r#"CastSpellByName("Mark of the Wild")"#);
+    assert!(cursor_is_up(&f), "the refusal re-armed the cursor");
+    assert_eq!(casts_and_cancels(&f), vec![]);
+    run_hosted(
+        &mut f,
+        r#"SpellTargetUnit("target") STOPPED = SpellStopCasting()"#,
+    );
+    assert_eq!(global(&mut f, "STOPPED"), Some(1));
+    assert_eq!(
+        casts_and_cancels(&f),
+        vec![("cast", MOTW), ("cancel", MOTW)]
+    );
+}
+
+/// The arm tail's refusal reports (`0x6e507b` → `0x6e1a00`): its line signals
+/// `UI_ERROR_MESSAGE` (`0x6e21dd`) ahead of the tail's cancel of the pushed spell (`0x6e2218`),
+/// whose `CMSG_CANCEL_CAST` (`0x6e4970`) follows what the line's listeners sent.
+#[test]
+fn the_arm_tails_refusal_sends_its_cancel_after_its_lines_listeners() {
+    const BOLT: u32 = 133;
+    let mut f = frame(false);
+    with_book_spell(
+        &mut f,
+        BOLT,
+        "Bolt",
+        benilla_formats::SpellDisplay {
+            implicit_target_a1: 6,
+            ..Default::default()
+        },
+    );
+    run(
+        &mut f,
+        r#"local l = CreateFrame("Frame")
+        l:RegisterEvent("UI_ERROR_MESSAGE")
+        l:SetScript("OnEvent", function() SendChatMessage("seen", "SAY") end)"#,
+    );
+    f.rx.try_iter().for_each(drop);
+    run_hosted(&mut f, r#"CastSpellByName("Bolt", 1)"#);
+    let wire: Vec<&str> =
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::Chat { .. } => Some("chat"),
+                ClientCommand::CancelCast { .. } => Some("cancel"),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(wire, ["chat", "cancel"]);
+}
+
+/// The dead rung (`0x6e4c49`) and the loot rungs (`0x6e4ca2`-`0x6e4d31`) come ahead of the
+/// same-spell bail (`0x6e4d43`), so they refuse a press of the spell in flight, and the report's
+/// tail cancels it (`0x6e2201` → `0x6e2218` → `0x6e4970`) after its line signals
+/// `UI_ERROR_MESSAGE` (`0x6e21dd`): the line's listener sends ahead of the cancel.
+#[test]
+fn a_rung_refusing_the_spell_in_flight_sends_its_cancel_after_its_lines_listeners() {
+    const DISENCHANT: u32 = 13262;
+    for looting in [false, true] {
+        let mut f = frame(false);
+        with_book_spell(
+            &mut f,
+            DISENCHANT,
+            "Disenchant",
+            benilla_formats::SpellDisplay {
+                effects: [99, 0, 0],
+                ..Default::default()
+            },
+        );
+        run_hosted(&mut f, r#"CastSpellByName("Disenchant")"#);
+        if looting {
+            f.app
+                .world_mut()
+                .resource_mut::<crate::ui_loot::LootLatch>()
+                .0 = Some(OLD);
+        } else {
+            dead(&mut f);
+        }
+        run(
+            &mut f,
+            r#"local l = CreateFrame("Frame")
+            l:RegisterEvent("UI_ERROR_MESSAGE")
+            l:SetScript("OnEvent", function() RandomRoll(1, 1) end)"#,
+        );
+        f.rx.try_iter().for_each(drop);
+        run_hosted(&mut f, r#"CastSpellByName("Disenchant")"#);
+        let wire: Vec<&str> =
+            f.rx.try_iter()
+                .filter_map(|c| match c {
+                    ClientCommand::RandomRoll { .. } => Some("roll"),
+                    ClientCommand::CancelCast {
+                        spell_id: DISENCHANT,
+                    } => Some("cancel"),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(wire, ["roll", "cancel"], "looting: {looting}");
+    }
+}
+
+/// A unit selected at the push's signal (`0x6e5026`) is the arm's candidate (`0x6e539f`), and
+/// `BindTarget`'s merge refuses it out of range (`0x6e6063` → `0x6e6089`): the report's line
+/// signals `UI_ERROR_MESSAGE` (`0x6e21dd`) ahead of its tail's cancel of the pushed spell
+/// (`0x6e2218` → `0x6e4970`), so the line's listener sends ahead of the cancel.
+#[test]
+fn the_arms_range_refusal_sends_its_cancel_after_its_lines_listeners() {
+    let mut f = frame(true);
+    with_factions(&mut f, FRIEND, &[(2, 0x19), (FLAGS, 0x8)]);
+    seat_spells(
+        &mut f,
+        vec![(
+            MOTW,
+            benilla_formats::SpellDisplay {
+                name: "Mark of the Wild".into(),
+                implicit_target_a1: 21,
+                range_index: 5,
+                ..Default::default()
+            },
+        )],
+    );
+    with_friendly_party1(&mut f, true);
+    with_party1_out_of_range(&mut f);
+    on_change_number(&mut f, 1, r#"TargetUnit("party1")"#);
+    run(
+        &mut f,
+        r#"local l = CreateFrame("Frame")
+        l:RegisterEvent("UI_ERROR_MESSAGE")
+        l:SetScript("OnEvent", function() SendChatMessage("seen", "SAY") end)"#,
+    );
+    f.rx.try_iter().for_each(drop);
+    run_hosted(&mut f, r#"CastSpellByName("Mark of the Wild")"#);
+    let wire: Vec<&str> =
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::Chat { .. } => Some("chat"),
+                ClientCommand::CancelCast { spell_id: MOTW } => Some("cancel"),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(wire, ["chat", "cancel"]);
 }

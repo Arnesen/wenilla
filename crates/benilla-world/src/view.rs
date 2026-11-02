@@ -1,4 +1,4 @@
-//! The view: the camera the scene renders through ([`WorldCamera`]), its optic ([`CAM_FOVY`]),
+//! The view: the camera the scene renders through ([`WorldCamera`]), its optic ([`world_fovy`]),
 //! and how far the detailed world draws ([`ViewDistance`], the reference's `nearclip` and
 //! `farclip` pair). `farclip` bounds the per-pixel wall, the CPU cull ([`within_farclip`]) and
 //! the terrain residency window (`terrain_stream::window`), which derives its reach from it as the
@@ -82,7 +82,7 @@ pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
 /// change callback `0x688d90`, `[0x8029d0]` = 0.01 and `[0x808300]` = 0.33.
 ///
 /// Deviation: the reference refuses a value outside them, echoing "NearClip must be in range
-/// 0.01 - 0.33" (`0x869abc`); ours clamps, as every CVar consumer here clamps at its own edge.
+/// 0.01 - 0.33" (`0x869abc`); ours clamps, because every CVar consumer here clamps at its own edge.
 pub const NEARCLIP_RANGE: std::ops::RangeInclusive<f32> = 0.01..=0.33;
 
 /// The world camera's multisampling, the `gxMultisample` CVar: a sample count in [`MSAA_RANGE`],
@@ -289,24 +289,6 @@ pub fn within_farclip(
 #[derive(Component)]
 pub struct WorldCamera;
 
-/// The `$WOW_MSAA` knob as a Bevy `Msaa` level, 4x when unset. `8` falls back to 4x:
-/// `Rgba16Float` is only guaranteed `[1, 4]` samples, and there is no adapter to ask here.
-pub fn msaa_from_env() -> bevy::render::view::Msaa {
-    use bevy::render::view::Msaa;
-    match std::env::var("WOW_MSAA").ok().as_deref() {
-        Some("off") | Some("0") | Some("1") => Msaa::Off,
-        Some("2") => Msaa::Sample2,
-        Some("8") => {
-            warn!(
-                "WOW_MSAA=8: Rgba16Float is only guaranteed [1, 4] samples and this adapter \
-                 reports [1, 2, 4] — falling back to 4x rather than panicking the render thread"
-            );
-            Msaa::Sample4
-        }
-        _ => Msaa::Sample4,
-    }
-}
-
 /// The `nearclip` CVar's registered default, 0.1 (the string at `0x84fb48`, registered at
 /// `0x68867a`, record `[0xc7f348]`); the camera ctor's 1/9 (`0x50a6c0`) is overwritten from the
 /// record in the first frame, before it renders. The small near keeps the waterline-crossing band
@@ -334,10 +316,54 @@ pub fn stamp_near_clip(
         }
     }
 }
-/// The vertical field of view in radians, shared by the projection and every consumer of the near
-/// rectangle: 45°, Bevy's `PerspectiveProjection` default; the reference's follows the aspect,
-/// 44.1° at 16:9.
-pub const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
+/// The camera's field-of-view parameter, `[cam+0x40]` = π/2 (the constructor, `0x50a707`).
+pub const CAM_FOV: f32 = std::f32::consts::FRAC_PI_2;
+
+/// The world camera's vertical field of view in radians at `aspect` (width over height): the
+/// world projection `0x50ab70` hands `[cam+0x40]` and the frame's aspect to `0x5c3cc0`, whose
+/// vertical half-angle is `fov / (2·√(aspect² + 1))` (`0x5c3d0b`-`0x5c3d4c`). 54.0° at 4:3, 44.1°
+/// at 16:9.
+pub fn world_fovy(aspect: f32) -> f32 {
+    CAM_FOV / (aspect * aspect + 1.0).sqrt()
+}
+
+/// The held fraction of `[cam+0x40]`: 1 normally; the spyglass (aura 76, `0x50d320`) writes
+/// `n × π/180` there, so its zoom scales the field of view before `0x5c3cc0` sees it.
+#[derive(Resource, Clone, Copy)]
+pub struct FovZoom(pub f32);
+
+impl Default for FovZoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// Derives the world camera's vertical field of view from its viewport's aspect every frame, so a
+/// window resize re-derives it as `0x50ab79`-`0x50ab93` re-reads the frame's aspect.
+pub fn stamp_world_fov(
+    zoom: Res<FovZoom>,
+    mut cam: Query<(&Camera, &mut Projection), With<WorldCamera>>,
+) {
+    for (camera, mut proj) in &mut cam {
+        let Some(size) = camera
+            .physical_viewport_size()
+            .filter(|s| s.x > 0 && s.y > 0)
+        else {
+            continue;
+        };
+        let want = world_fovy(size.x as f32 / size.y as f32) * zoom.0;
+        // `&mut` marks the component changed even when the value is equal, so compare first.
+        let Projection::Perspective(p) = proj.as_ref() else {
+            continue;
+        };
+        if (p.fov - want).abs() <= f32::EPSILON {
+            continue;
+        }
+        if let Projection::Perspective(p) = &mut *proj {
+            p.fov = want;
+        }
+    }
+}
 
 /// The world camera's pose made current within `Update`, for every viewer authority there: Bevy
 /// propagates `GlobalTransform` in `PostUpdate`, a whole jump late after a teleport snap.
@@ -358,7 +384,7 @@ pub(crate) fn publish_camera_pose(mut cam: RootCameraPose) {
     }
 }
 
-/// The view lane's plugin: [`stamp_near_clip`] and [`publish_camera_pose`].
+/// The view lane's plugin: [`stamp_near_clip`], [`stamp_world_fov`] and [`publish_camera_pose`].
 pub(crate) struct ViewPlugin;
 
 impl Plugin for ViewPlugin {
@@ -371,6 +397,8 @@ pub(crate) fn plugin(app: &mut App) {
     // In `Update`, so this frame's `nearclip` write reaches this frame's projection, as `0x511bc0`
     // runs inside the world-frame driver; initialized here too for a harness with only this plugin.
     app.init_resource::<ViewDistance>()
+        .init_resource::<FovZoom>()
+        .add_systems(Update, stamp_world_fov)
         // After the frame's script calls, whose `nearclip` callback writes it.
         .add_systems(
             Update,
@@ -389,6 +417,60 @@ pub(crate) fn plugin(app: &mut App) {
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// `0x5c3cc0`'s relation: 90° over `√(a² + 1)`.
+    #[test]
+    fn the_vertical_fov_follows_the_aspect() {
+        for (a, deg) in [
+            (4.0 / 3.0, 54.0),
+            (16.0 / 10.0, 47.7),
+            (16.0 / 9.0, 44.1),
+            (64.0 / 27.0, 35.0),
+        ] {
+            let got = world_fovy(a).to_degrees();
+            assert!((got - deg).abs() < 0.06, "aspect {a}: {got}");
+        }
+    }
+
+    /// A resize re-derives the field of view, and the spyglass scales it.
+    #[test]
+    fn the_stamp_rederives_on_a_resize_and_scales_by_the_zoom() {
+        let mut app = App::new();
+        app.init_resource::<FovZoom>();
+        app.add_systems(Update, stamp_world_fov);
+        let cam = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Camera {
+                    viewport: Some(bevy::camera::Viewport {
+                        physical_size: UVec2::new(1600, 1200),
+                        ..default()
+                    }),
+                    ..default()
+                },
+                Projection::from(PerspectiveProjection::default()),
+            ))
+            .id();
+        let fov = |app: &App| match app.world().get::<Projection>(cam).unwrap() {
+            Projection::Perspective(p) => p.fov,
+            _ => unreachable!(),
+        };
+        app.update();
+        assert!((fov(&app) - world_fovy(4.0 / 3.0)).abs() < 1e-6);
+        app.world_mut()
+            .get_mut::<Camera>(cam)
+            .unwrap()
+            .viewport
+            .as_mut()
+            .unwrap()
+            .physical_size = UVec2::new(1920, 1080);
+        app.update();
+        assert!((fov(&app) - world_fovy(16.0 / 9.0)).abs() < 1e-6);
+        app.insert_resource(FovZoom(1.0 / 6.0));
+        app.update();
+        assert!((fov(&app) - world_fovy(16.0 / 9.0) / 6.0).abs() < 1e-6);
+    }
 
     /// `0x511bc0`'s near stamp reaches the projection, and an unchanged one stays unmarked.
     #[test]

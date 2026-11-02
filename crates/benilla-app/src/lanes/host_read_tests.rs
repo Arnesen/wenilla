@@ -38,11 +38,6 @@ use bevy::prelude::*;
 
 use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoints};
 
-/// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
-/// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 2;
-const FRAME_FINAL_INPUTS: usize = 15;
-
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
 /// listener's call or a handler reads inside a packet, by its name in the crate, and why: the
@@ -58,16 +53,7 @@ const FRAME_FINAL_INPUTS: usize = 15;
 /// filters out and may add with its commands, which access does not show; `exclusive` a system
 /// whose access Bevy does not report.
 #[rustfmt::skip]
-const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
-    ("::net::motion::remote::extrapolate_remote_units", &["Commands net::motion::spline::Spline",
-        "Transform", "net::motion::remote::RemoteMotion"],
-        "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
-        "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::ui_item_text::apply_reads", &["ui_item_text::ItemTextOpen"],
-        "a click's or a bag use's read, queued in its input or its call, which the reference \
-         opens inside them (`0x5f58c0`, `0x4e32e0`), ahead of the packets (`0x420d23`)"),
-];
+const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[];
 
 /// The systems between the dispatch and the drain that write what the host's live reads read,
 /// as [`BETWEEN_THE_DISPATCH_AND_THE_DRAIN`]'s, but where the reference too runs them after the
@@ -76,26 +62,47 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
 /// held to its systems' access by the same test.
 #[rustfmt::skip]
 const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
-    ("::net::motion::facing::drive_display_facing", &["Commands net::motion::remote::RemoteMotion",
-        "Commands net::motion::spline::Spline", "Transform"],
+    ("::net::motion::facing::drive_display_facing", &["Commands net::motion::spline::Spline",
+        "Transform"],
         "turns the units' models toward their facing; unit movement is \
          frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
-    ("::net::motion::spline::ground_clamp_creatures", &["Transform"],
-        "settles the creatures on the ground; unit movement is \
-         frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
-    ("::net::motion::remote::drain_pending_moves", &["Commands net::motion::spline::Spline",
+    ("::net::motion::spline::ground_clamp_creatures", &["Transform",
         "net::motion::remote::RemoteMotion"],
+        "settles the creatures on the ground, and a re-grounded mover's state with them; unit \
+         movement is frame time, which the reference runs after the packets (`0x420d63` after \
+         `0x420d55`)"),
+    ("::net::motion::remote::extrapolate_remote_units", &["Commands net::motion::spline::Spline",
+        "Transform", "net::motion::remote::RemoteMotion"],
+        "dead-reckons the remote players between their packets in the movement tick (event 5's \
+         `0x616800` → `0x615b10`), frame time, which the reference runs after the packets \
+         (`0x420d63` after `0x420d55`); a due packet seats its unit in the handler \
+         (`0x7c6420` at `0x618dfc`)"),
+    ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
+        "carries the riders with their decks, which move in the movement tick (event 5's \
+         `0x616800` → `0x630970`), frame time, which the reference runs after the packets \
+         (`0x420d63` after `0x420d55`): a rider's position reads through its deck at the call \
+         (`0x5f1f10` → `0x7c4930`); a packet seats its rider in the handler (`0x618b30` → \
+         `0x7c6900`, at `0x618e07`)"),
+    ("::net::motion::remote::drain_pending_moves", &["Commands net::motion::spline::Spline",
+        "net::motion::remote::MoveTick", "net::motion::remote::RemoteMotion"],
         "fires the relayed moves queued past their arrival in the movement tick (event 5's \
-         `0x616800` → `0x615b10` → `0x616620` → `0x615c30`), frame time, which the reference \
-         runs after the packets (`0x420d63` after `0x420d55`)"),
+         `0x616800` → `0x615b10` → `0x616620` → `0x615c30`), then stamps the clock the next \
+         frame's arrivals are due by (`0x616846`), frame time, which the reference runs after \
+         the packets (`0x420d63` after `0x420d55`)"),
+    ("::Collider>", &["ColliderTrees"],
+        "refits the collision world's trees to the colliders frame time moved, the decks among \
+         them, which the reference moves in the movement tick (event 5's `0x616800` → \
+         `0x630970`), after the packets (`0x420d63` after `0x420d55`): a due arrival's catch-up \
+         resolves against the world as that tick left it (`0x618bb0` → `0x634040`)"),
     ("::net::game_time::tick_game_time", &["net::game_time::ServerTime"],
         "steps the game clock by the frame time, the category 5 handler `0x401ec0` → `0x6c5d50` \
          → `0x6435a0`, which the reference runs after the packets (`0x420d63` after \
          `0x420d55`)"),
     ("::net::motion::spline::sample_splines", &["Commands net::motion::spline::Spline",
-        "Transform"],
-        "moves the units along their splines; unit movement is \
-         frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
+        "Transform", "net::motion::remote::RemoteMotion"],
+        "moves the units along their splines and stops a mover where its path ends; unit \
+         movement is frame time, which the reference runs after the packets (`0x420d63` after \
+         `0x420d55`)"),
     ("::transport::ground_deck_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "settles the riders on their decks; unit movement is \
          frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
@@ -122,8 +129,8 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
         "steps the pending-mail time in the world frame's update (its slot `0x38`, `0x4818d0` → \
          `0x4ade60`), which the frame pass runs after the packets (`0x420d6a` after `0x420d55`)"),
     ("::ui_loot::drop_loot_steps", &["ui_loot::LootState"],
-        "drops the loot lane's window signals, its pushes kept, run only while no in-game \
-         interface is up, so no listener exists"),
+        "drops the loot lane's window signals, its pushes kept and its releases sent, run only \
+         while no in-game interface is up, so no listener exists"),
     ("::ui_loot_roll::lane::drop_roll_events", &["ui_loot_roll::LootRolls"],
         "drops the rolls' lane, run only while no in-game interface is up, so no listener \
          exists"),
@@ -144,6 +151,10 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
          update (`0x6d93a0`, its clears at `0x6d93fb` and `0x6d9a3a`), which the minimap frame's \
          draw runs (`0x4ebea0` → `0x4ec950`) in the frame pass, after the packets (`0x420d6a` \
          after `0x420d55`)"),
+    ("::minimap::feed_minimap_player_facing", &["player::view_subject::FarSight"],
+        "reads the camera's object off the far-sight machine and writes nothing of it, in the \
+         minimap's frame update (`0x4eb079`-`0x4eb07e`), which the frame pass runs after the \
+         packets (`0x420d6a` after `0x420d55`)"),
     ("::ui_battlefield::drive_battlefield_leash", &["ui_battlefield::BattlefieldLeash"],
         "the list's leash (`0x4aa090`), polled in the world frame's update (`0x4818d5`), which \
          the frame pass runs after the packets (`0x420d6a` after `0x420d55`)"),
@@ -441,17 +452,17 @@ fn every_writer_between_the_dispatch_and_the_drain_is_listed() {
     assert!(empty.is_empty(), "rows with no reason: {empty:?}");
 }
 
-/// The frame-final views only shrink: [`super::guard_tests::READS_FRAME_FINAL`] holds no more rows
-/// or inputs than its ceiling.
+/// The frame-final views are gone: [`super::guard_tests::READS_FRAME_FINAL`] holds no row, and a
+/// view of a handler's state reads it live through the host instead.
 #[test]
-fn the_frame_final_views_only_shrink() {
-    let rows = super::guard_tests::READS_FRAME_FINAL;
-    let inputs: usize = rows.iter().map(|(_, i)| i.len()).sum();
+fn no_view_reads_frame_final_state() {
+    let rows: Vec<&str> = super::guard_tests::READS_FRAME_FINAL
+        .iter()
+        .map(|(feed, _)| *feed)
+        .collect();
     assert!(
-        rows.len() <= FRAME_FINAL_FEEDS && inputs <= FRAME_FINAL_INPUTS,
-        "READS_FRAME_FINAL grew to {} rows and {inputs} inputs, past {FRAME_FINAL_FEEDS} and \
-         {FRAME_FINAL_INPUTS}: read the new state live through the host instead",
-        rows.len()
+        rows.is_empty(),
+        "READS_FRAME_FINAL holds {rows:?}: read the new state live through the host instead"
     );
 }
 

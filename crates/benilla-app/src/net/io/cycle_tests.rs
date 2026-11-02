@@ -7,7 +7,9 @@ use std::sync::Mutex;
 use std::thread;
 
 use benilla_protocol::messages::opcode;
-use benilla_protocol::{RealmInfo, RosterCause, SessionEvent};
+use benilla_protocol::{
+    AuthReject, LogonReply, RealmInfo, RealmListEmptied, RosterCause, SessionEvent,
+};
 
 use super::fake::{self, FakeRealm, WAIT};
 use super::{run, Cycle, LoginRequest, Parks, PingClock, WriterSwap};
@@ -60,7 +62,7 @@ fn enter(realm: RealmInfo) -> RealmRequest {
 /// The next realm list, its realms and whether the query failed.
 fn next_list(events: &crossbeam_channel::Receiver<SessionEvent>) -> (Vec<RealmInfo>, bool) {
     match next_event(events) {
-        SessionEvent::RealmList { realms, failed } => (realms, failed),
+        SessionEvent::RealmList { realms, failed, .. } => (realms, failed),
         other => panic!("expected the realm list, got {other:?}"),
     }
 }
@@ -304,6 +306,34 @@ fn an_empty_realm_list_is_published_and_parked() {
     assert_eq!(realmd.lists(), 2);
 }
 
+/// A realm whose address is 32 characters or more passes the link's walk and poisons the record
+/// fill's (`0x5b22d9`): the list fails emptied (`0x5b23ff`, `0x5abbd8`) with the link up, so a
+/// query asks on it again and no second logon dials.
+#[test]
+fn a_realm_address_past_its_cap_fails_the_list_on_a_link_that_stays() {
+    let address = format!("{}:8085", "a".repeat(27));
+    let (realmd, _) = fake::servers(|_| vec![FakeRealm::new(REALM, &address)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    for lists in 1..=2 {
+        match next_event(&cycles.events) {
+            SessionEvent::RealmList {
+                realms,
+                failed,
+                emptied,
+            } => {
+                assert!(realms.is_empty() && failed);
+                assert_eq!(emptied, Some(RealmListEmptied::ListFailed));
+            }
+            other => panic!("expected the refused list, got {other:?}"),
+        }
+        assert_eq!(realmd.lists(), lists);
+        cycles.realm.send(RealmRequest::Refresh).unwrap();
+    }
+    assert!(next_list(&cycles.events).1);
+    assert_eq!(realmd.logons(), 1, "the link stayed: no second logon");
+}
+
 /// Change Realm with the world up drops the session first (`0x46b22b`) and returns to the logon
 /// park, realmd still up: the world socket closes before any query.
 #[test]
@@ -500,13 +530,45 @@ fn a_roster_ask_cut_on_the_stream_reports_its_failure_then_the_loss() {
     };
     cycles.pick.send(CharRequest::Enumerate).unwrap();
     match next_event(&cycles.events) {
-        SessionEvent::RosterFailed { epoch: failed } => assert_eq!(failed, epoch),
+        SessionEvent::RosterFailed {
+            epoch: failed,
+            emptied,
+        } => {
+            assert_eq!(failed, epoch);
+            assert!(!emptied, "the stream failed, not the list");
+        }
         other => panic!("expected the failed roster ask, got {other:?}"),
     }
     assert!(matches!(
         next_event(&cycles.events),
         SessionEvent::Disconnected { .. }
     ));
+}
+
+/// A reply that fails the list, here a count above 10 (`0x5b42d5`), tells the screen its query
+/// failed (`0x5ab300`'s `0x2c` leg) and ends nothing: the next ask is answered on the same link.
+#[test]
+fn a_failed_character_list_fails_the_ask_on_a_link_that_stays() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    let epoch = dial(&cycles, realms[0].clone());
+    world.answer_roster_asks(Some(vec![11]));
+    cycles.pick.send(CharRequest::Enumerate).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::RosterFailed {
+            epoch: failed,
+            emptied,
+        } => {
+            assert_eq!(failed, epoch);
+            assert!(emptied, "the list failed, not the stream");
+        }
+        other => panic!("expected the failed roster ask, got {other:?}"),
+    }
+    world.answer_roster_asks(None);
+    assert_eq!(ask_roster(&cycles), epoch);
+    assert_eq!(world.open(), 1, "the link stayed");
 }
 
 /// The reference keeps servicing the connection at character select, and a server that drops it
@@ -554,6 +616,38 @@ fn a_create_sends_its_result_alone() {
         SessionEvent::CharActionResult { .. }
     ));
     assert_eq!(world.enumerations(), 0);
+}
+
+/// The select build's guild lookup goes out at the park as the guild cache's query (`0x560e30`),
+/// opcode 0x54 and the key with no guid (`0x560f68`), byte for byte, and its answer goes up as the
+/// world stream's does, with nothing at the park waiting on it.
+#[test]
+fn the_park_asks_for_a_guild_and_hands_up_its_answer() {
+    let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (realms, _) = next_list(&cycles.events);
+    dial(&cycles, realms[0].clone());
+    cycles.pick.send(CharRequest::GuildQuery(0x1234)).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::GuildQueryResponse(answer) => {
+            assert_eq!(
+                (answer.guild_id, answer.name.as_str()),
+                (0x1234, "Probe Guild")
+            );
+            assert_eq!((answer.emblem_style, answer.background_color), (1, 5));
+        }
+        other => panic!("expected the guild's answer, got {other:?}"),
+    }
+    let packets = world.packets.lock().unwrap();
+    let asked = packets
+        .iter()
+        .find(|p| p[2..4] == opcode::CMSG_GUILD_QUERY.to_le_bytes())
+        .expect("the query went out");
+    assert_eq!(
+        asked.as_slice(),
+        [0x00, 0x08, 0x54, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00]
+    );
 }
 
 /// The park serves a rename in place: the reply goes out as it came, with no roster asked, and
@@ -1044,6 +1138,50 @@ fn a_redial_derives_a_totp_code_per_prompt() {
         Some(kept.to_vec())
     );
     assert_eq!(super::redial_digits(None, &none), None);
+}
+
+/// A failed re-dial ends the query as a failed reconnect does: the held list is emptied
+/// (`0x5b2893`, `0x5b2560`, `0x5b2c9e`), here on a refused proof, the arm for 1 (`0x5b28dd`).
+#[test]
+fn a_failed_redial_empties_the_held_list() {
+    let (realmd, _) = fake::servers_with_pin(|world| vec![FakeRealm::new(REALM, world)]);
+    let cycles = fake::spawn_cycles();
+    fake::login(&cycles, &realmd.addr);
+    let (grid, prompt) = next_pin(&cycles.events);
+    cycles.realm.send(keys(&grid, prompt)).unwrap();
+    assert_eq!(next_list(&cycles.events).0.len(), 1);
+    realmd.set_pin(1357);
+    realmd.drop_links();
+    cycles.realm.send(RealmRequest::Refresh).unwrap();
+    match next_event(&cycles.events) {
+        SessionEvent::RealmList {
+            realms,
+            failed,
+            emptied,
+        } => {
+            assert!(realms.is_empty() && failed);
+            assert_eq!(emptied, Some(RealmListEmptied::SessionExpired));
+        }
+        other => panic!("expected the emptied list, got {other:?}"),
+    }
+}
+
+/// `0x5b2860`'s table (`0x5b2910`) sends a reconnect proof's 9 and 10 to the arms that pass 2 and
+/// 3, and the rest to the one that passes 1; a refused challenge (`0x5bae37`) or a dead link
+/// reaches the same 1 through `0x5b2c9e`.
+#[test]
+fn a_failed_redial_maps_its_status_by_the_reconnect_arms() {
+    use RealmListEmptied::{ListFailed, SessionExpired};
+    let reject = |reply, code| {
+        let e = anyhow::Error::new(AuthReject { code, reply });
+        super::redial_failure(&e)
+    };
+    assert_eq!(reject(LogonReply::Proof, 9), ListFailed);
+    assert_eq!(reject(LogonReply::Proof, 10), ListFailed);
+    assert_eq!(reject(LogonReply::Proof, 4), SessionExpired);
+    assert_eq!(reject(LogonReply::Challenge, 9), SessionExpired);
+    let dead = anyhow::anyhow!("no route to realmd");
+    assert_eq!(super::redial_failure(&dead), SessionExpired);
 }
 
 /// A re-dial whose kept PIN is refused (a TOTP code that has expired, vmangos

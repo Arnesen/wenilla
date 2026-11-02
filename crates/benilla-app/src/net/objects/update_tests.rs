@@ -6,7 +6,9 @@ const ME: u64 = 0x0000_0000_0000_0007;
 const MOB: u64 = 0xF130_0000_1234_0001;
 
 fn client() -> App {
-    crate::game_plugins::schedule_tests::headless_client_unrun()
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+    crate::lanes::tap_tests::tap(&mut app);
+    app
 }
 
 /// An indexed entity for `guid`, as a create leaves it.
@@ -246,9 +248,8 @@ fn send(world: &mut World, blocks: impl IntoIterator<Item = SessionEvent>) {
 
 fn notices(world: &mut World) -> Vec<crate::field_watch::FieldNotice> {
     world
-        .resource_mut::<crate::field_watch::NoticeLane>()
-        .drain()
-        .collect()
+        .resource_mut::<crate::lanes::tap_tests::Tapped>()
+        .fields()
 }
 
 /// The field edges written, as `(guid, index, old, new)`.
@@ -320,12 +321,15 @@ fn one_packets_blocks_for_one_object_notify_against_its_last_copy() {
 }
 
 /// One block's edges and notices take their stamps in the notify pass's one ascending walk: the
-/// health edge, the bridge's `UNIT_HEALTH` on field 22, then the aura edge, whose line the aura
+/// health edge, the health watcher's plate legs (the colour, the flash on the loss), the bridge's
+/// `UNIT_HEALTH` on field 22, then the aura edge, whose line the aura
 /// watcher `0x604d00` writes at field 47 after the notices of the lower fields and ahead of the
 /// bridge's `UNIT_AURA` there, the type watchers running first.
 #[test]
 fn a_blocks_edges_and_notices_are_stamped_in_field_order() {
+    use crate::vplates::PlateCall;
     use benilla_protocol::field::{FIELD_UNIT_AURA, FIELD_UNIT_HEALTH};
+    let plate = |call| crate::field_watch::FieldNotice::Plate { guid: MOB, call };
     let mut app = client();
     let world = app.world_mut();
     world.resource_mut::<SelfGuid>().0 = Some(ME);
@@ -341,8 +345,9 @@ fn a_blocks_edges_and_notices_are_stamped_in_field_order() {
         )],
     );
     let mut order: Vec<(crate::lanes::Stamp, String)> = world
-        .resource_mut::<crate::field_watch::NoticeLane>()
-        .drain_stamped()
+        .resource_mut::<crate::lanes::tap_tests::Tapped>()
+        .fields_stamped()
+        .into_iter()
         .map(|(at, n)| (at, format!("{n:?}")))
         .collect();
     order.extend(
@@ -357,6 +362,8 @@ fn a_blocks_edges_and_notices_are_stamped_in_field_order() {
         order,
         [
             "edge 22".to_string(),
+            format!("{:?}", plate(PlateCall::Colour)),
+            format!("{:?}", plate(PlateCall::Flash)),
             format!(
                 "{:?}",
                 crate::field_watch::FieldNotice::Unit {
@@ -425,7 +432,16 @@ fn the_coinage_watcher_trims_the_trade_offer_inside_its_packet() {
 /// has its tail stamped there.
 #[test]
 fn an_item_answer_runs_a_waiting_auction_pages_tail_in_its_handler() {
+    /// The auction house lane's tails at each packet's end, ahead of the flush that fires them.
+    #[derive(Resource, Default)]
+    struct TappedTails(Vec<usize>);
+    fn tap_tails(world: &mut World, _at: crate::lanes::Stamp) {
+        let tails = world.resource::<crate::ui_auction::HouseLane>().tails();
+        world.resource_mut::<TappedTails>().0.extend(tails);
+    }
     let mut app = client();
+    app.init_resource::<TappedTails>();
+    crate::net::handlers::add_packet_end(&mut app, tap_tails);
     let world = app.world_mut();
     let row = benilla_protocol::messages::AuctionListEntry {
         auction_id: 1,
@@ -443,9 +459,12 @@ fn an_item_answer_runs_a_waiting_auction_pages_tail_in_its_handler() {
         bidder_guid: 0,
         current_bid: 0,
     };
-    world
-        .resource_mut::<crate::ui_auction::AuctionOpen>()
-        .set_list(benilla_ui::script::LIST, vec![row], 1);
+    world.resource_scope(|world, mut auction: Mut<crate::ui_auction::AuctionOpen>| {
+        auction.set_list(benilla_ui::script::LIST, vec![row], 1);
+        let items = world.resource::<crate::items::Items>();
+        let ask = crate::query_cache::Ask::Read;
+        assert!(!auction.land_page(benilla_ui::script::LIST, 0, items, ask));
+    });
     super::super::handlers::dispatch(
         world,
         vec![SessionEvent::ItemTemplate {
@@ -454,7 +473,7 @@ fn an_item_answer_runs_a_waiting_auction_pages_tail_in_its_handler() {
         }],
     );
     assert_eq!(
-        world.resource::<crate::ui_auction::HouseLane>().tails(),
+        world.resource::<TappedTails>().0,
         [benilla_ui::script::LIST]
     );
 }
@@ -518,10 +537,23 @@ fn a_released_player_comes_back_with_its_fields_and_no_create_hook() {
         )
     };
     let signal = |id| FieldNotice::Signal { guid: MATE, id };
+    let gate = FieldNotice::Plate {
+        guid: MATE,
+        call: crate::vplates::PlateCall::Gate,
+    };
     send(world, [mate(5)]);
     assert_eq!(
         notices(world),
-        [FieldNotice::Global { id: 376 }, signal(345), signal(22)],
+        [
+            FieldNotice::TokenFlags {
+                guid: MATE,
+                change: benilla_ui::script::TokenChange::Update,
+            },
+            gate,
+            FieldNotice::Global { id: 376 },
+            signal(345),
+            signal(22)
+        ],
         "control: a first create runs the hook"
     );
     edges(world);
@@ -533,9 +565,15 @@ fn a_released_player_comes_back_with_its_fields_and_no_create_hook() {
     assert!(held(world, MATE));
     assert_eq!(
         notices(world),
-        [signal(22)],
-        "no bridge until its slot 3 (`0x5fbc44`, `0x5fbe36`), then the packet end's party \
-         record; no guild tag"
+        [
+            FieldNotice::TokenFlags {
+                guid: MATE,
+                change: benilla_ui::script::TokenChange::Update,
+            },
+            signal(22)
+        ],
+        "no bridge until its slot 3 reads its tokens again (`0x5fbc44`, `0x5fbe36`), then the \
+         packet end's party record; no guild tag"
     );
     assert_eq!(edges(world), [(MATE, STAT0, 5, 7)]);
 }
@@ -558,9 +596,13 @@ fn a_values_movement_or_near_block_brings_a_released_object_back() {
     assert!(held(world, MOB), "a values block");
     assert_eq!(field(world, MOB, ENTRY), Some(299), "the kept fields");
     assert_eq!(field(world, MOB, STAT0), Some(6));
-    assert!(
-        notices(world).is_empty(),
-        "no bridge in the packet that brings it back"
+    assert_eq!(
+        notices(world),
+        [FieldNotice::TokenFlags {
+            guid: MOB,
+            change: benilla_ui::script::TokenChange::Update,
+        }],
+        "no bridge in the packet that brings it back, only slot 3's read of its tokens"
     );
     send(world, [values(MOB, &[(STAT0, 7)])]);
     assert_eq!(
@@ -1134,6 +1176,40 @@ fn a_despawn_the_model_cannot_play_holds_nothing_from_its_destroy() {
     assert_eq!(field(world, DOOR, STALE), None, "a fresh object");
 }
 
+/// `SMSG_GAMEOBJECT_RESET_STATE` (`0x6e9790`) stores the descriptor's state over the client's own
+/// prediction (an open-lock cast, `0x6e83b5`, drops it to ACTIVE while the wire still says READY).
+#[test]
+fn a_reset_state_packet_restores_the_descriptors_state() {
+    use benilla_protocol::field::FIELD_GAMEOBJECT_STATE;
+    let mut app = client();
+    let world = app.world_mut();
+    let e = animated_door(world, DOOR, &[146, 147, 148, 149]);
+    send(world, [values(DOOR, &[(FIELD_GAMEOBJECT_STATE, 1)])]);
+    let state = |world: &World| {
+        crate::go_anim::go_state(
+            world.get::<crate::go_anim::GoAnim>(e),
+            world.get::<ObjectStore>(e).unwrap(),
+        )
+    };
+    world
+        .get_mut::<crate::go_anim::GoAnim>(e)
+        .unwrap()
+        .set_wire_state(0);
+    assert_eq!(state(world), 0, "control: the prediction stands");
+
+    super::super::handlers::dispatch(
+        world,
+        vec![SessionEvent::GameObjectResetState { guid: DOOR }],
+    );
+    assert_eq!(state(world), 1, "the descriptor's READY is back");
+
+    // An unknown guid is skipped.
+    super::super::handlers::dispatch(
+        world,
+        vec![SessionEvent::GameObjectResetState { guid: 0xDEAD }],
+    );
+}
+
 /// A `GAMEOBJECT_STATE` change to a motion the model lacks (Destroy, 150) still holds: the state
 /// arm plays and holds unchecked (`0x5f3af8`-`0x5f3b27`). The destroy behind it only marks the
 /// object pending (`0x464920`), and the unhold parks it in the released table, where a block
@@ -1354,4 +1430,54 @@ fn a_known_transport_keeps_its_anchor_through_a_re_create() {
         Some((1234, first)),
         "brought back by values"
     );
+}
+
+/// An object leaving frees its effects at once (`ReleaseEffects`, `0x614120`): a unit as its
+/// release runs (`CGUnit_C::Release`, `0x5fbc84`), any object as it is freed (`0x613be2`). A game
+/// object's release has no such call, so its leaving range alone releases nothing.
+#[test]
+fn a_leaving_unit_and_a_freed_object_release_their_effects() {
+    use crate::creature_anim::spell_visual::{SpellKitFx, SpellKitSound};
+    const CHEST: u64 = 0xF110_0000_0000_0E68;
+    let mut app = client();
+    app.add_message::<SpellKitFx>()
+        .add_message::<SpellKitSound>();
+    let world = app.world_mut();
+    let spawn = |world: &mut World, guid, kind| {
+        let e = indexed(world, guid);
+        world.entity_mut(e).insert(NetEntity {
+            kind,
+            display_id: Some(7),
+            scale: 1.0,
+        });
+        e
+    };
+    let mob = spawn(world, MOB, EntityKind::Unit);
+    spawn(world, DOOR, EntityKind::GameObject);
+    let chest = spawn(world, CHEST, EntityKind::GameObject);
+    let released = |world: &mut World| {
+        let fx: Vec<_> = (world.resource_mut::<Messages<SpellKitFx>>().drain())
+            .filter_map(|m| match m {
+                SpellKitFx::Release { entity, .. } => Some(entity),
+                _ => None,
+            })
+            .collect();
+        let sounds: Vec<_> = (world.resource_mut::<Messages<SpellKitSound>>().drain())
+            .filter_map(|m| match m {
+                SpellKitSound::Release { entity, .. } => Some(entity),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fx, sounds, "the models and the sounds go together");
+        fx
+    };
+
+    super::super::handlers::dispatch(
+        world,
+        super::wire(vec![SessionEvent::ObjectsRemoved(vec![MOB, DOOR])]),
+    );
+    assert_eq!(released(world), [mob], "the unit's release, not the door's");
+
+    super::super::handlers::dispatch(world, vec![SessionEvent::ObjectDestroyed(CHEST)]);
+    assert_eq!(released(world), [chest], "a freed object's destructor");
 }

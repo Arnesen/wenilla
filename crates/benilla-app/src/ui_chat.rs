@@ -63,7 +63,9 @@ pub(crate) use away::AfkMirror;
 pub(crate) use broadcast::Broadcast;
 /// The zone-channel catalog's seed, called from the world-entry UI load: addons read the catalog
 /// at file scope, before an `Update` push would land.
-pub(crate) use channels::{seed_zone_channel_catalog, TaxiWalk};
+pub(crate) use channels::{
+    seed_zone_channel_catalog, walk_when_cinematic_ends, TaxiWalk, ZoneCommit,
+};
 /// The joined-channel roster and the `ChatChannels.dbc` catalog.
 pub(crate) use edit::ChannelState;
 /// `ui_script::chat_tests` checks every fired name against the live `ChatTypeInfo`; in the app the
@@ -79,6 +81,7 @@ pub(crate) use input::{chat_world, run_chat};
 /// The host's chat appliers ([`crate::script_calls::ScriptCallHost`]).
 pub(crate) use input::{ChatSender, ChatStep, EmoteDoer};
 pub(crate) use recruitment::{GuildRecruitmentCascade, RecruitmentLive};
+pub(crate) use roster::ChannelRosters;
 
 /// The chat feed once, for a test over the whole client: the `CHAT_MSG_*` fan-out of what the
 /// log holds, with the call host the world lends.
@@ -213,19 +216,18 @@ impl Plugin for UiChatPlugin {
                     .before(channels::end_session_channels_on_disconnect)
                     .in_set(crate::client_state::InWorldGated),
             )
-            // The zone-channel auto-join, which vmangos leaves to the client. The disconnect clear
-            // runs first, so a same-frame drop cannot leave the walk diffing stale membership.
-            // After `AreaAuthoritySet`, since a stale area joins and leaves the wrong channels, and
-            // after the settle state's release, which the walk's gate reads.
+            // The zone-channel auto-join, which vmangos leaves to the client, runs inside the zone
+            // commit ([`crate::area::feed_zone_events`]). The disconnect clear runs first, so a
+            // same-frame drop cannot leave the walk diffing stale membership, and world entry
+            // arms the walk ahead of the commit.
             .add_systems(
                 Update,
                 (
                     channels::end_session_channels_on_disconnect,
-                    channels::auto_join_zone_channels.in_set(crate::client_state::InWorldGated),
+                    channels::arm_zone_channel_walk.in_set(crate::client_state::InWorldGated),
                 )
                     .chain()
-                    .after(benilla_world::terrain_stream::AreaAuthoritySet)
-                    .after(crate::player::WorldFocusSet),
+                    .before(crate::area::feed_zone_events),
             )
             // After the shutdown's `PLAYER_LOGOUT`, whose handlers read the windows and the
             // channels as they stood, and before the glue VM goes in.
@@ -265,8 +267,8 @@ pub(crate) fn add_chat_lane(app: &mut App) {
 /// lines. The Lua state is itself replaced at the session end, as the reference destroys its own
 /// at logout.
 ///
-/// Deviation: not run on benilla's same-character reconnect, which the reference lacks (it
-/// returns to the login screen), so the window keeps its scrollback there.
+/// Deviation: not run on benilla's same-character reconnect, which the reference lacks (it returns
+/// to the login screen), because that way the window keeps its scrollback there.
 fn end_session_chat(
     mut hosted_vm: crate::script_calls::HostedVm,
     log: Res<ChatLog>,

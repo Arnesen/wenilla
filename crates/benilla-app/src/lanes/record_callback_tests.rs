@@ -430,3 +430,600 @@ fn a_bind_on_equip_replay_asks_at_its_answers_place() {
     );
     assert!(equips_and_duels(&sent).is_empty(), "nothing sent");
 }
+
+/// A try-on of an item the cache lacks keeps `0x504ba0` on the record (`0x504579`, dedupe 0);
+/// the answer tries it on again inside its handler (`0x504bae` → `0x504540`), whose refusal of a
+/// non-equippable item shows `ERR_NOT_EQUIPPABLE` (`0x504b2d`) at the packet's place, between
+/// the falls of the packets around it.
+#[test]
+fn a_try_on_refused_at_its_records_answer_shows_at_the_answers_place() {
+    const BOX: u32 = 5_555;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            ERR_NOT_EQUIPPABLE = "Not equippable"
+            local pane = CreateFrame("Frame", "DressUpFrame", UIParent)
+            CreateFrame("DressUpModel", "DressUpModel", pane)
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UI_ERROR_MESSAGE")
+            f:SetScript("OnEvent", function() table.insert(Seen, event .. ":" .. arg1) end)
+            "#,
+        )
+        .unwrap();
+    hosted(&mut app, &format!("DressUpModel:TryOn({BOX})"));
+    let mut t = crate::items::test_template("Box");
+    t.inventory_type = 0;
+    let answer = SessionEvent::ItemTemplate {
+        entry: BOX,
+        info: Some(Box::new(t)),
+    };
+    assert_eq!(
+        frame(&mut app, vec![fall(5), answer, fall(6)]),
+        [FELL, "UI_ERROR_MESSAGE:Not equippable", FELL]
+    );
+}
+
+/// A crafting line whose item the cache lacks waits with the combat log's callback `0x6294b0`
+/// (`0x55ba30`, dedupe 0), ahead of a leaderboard read's `0x4e0830` on the same record; the answer
+/// runs them in that order (`0x55bf12`-`0x55bf39`), so the line is written ahead of the quest
+/// log's update.
+#[test]
+fn a_combat_lines_callback_runs_at_its_place_in_the_answers_list() {
+    use crate::ui_quest_log::fixture::{quest, seat};
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
+    const PELT: u32 = 900;
+    let mut app = client();
+    {
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut pelts = quest(50, "Pelts", 1);
+        pelts.record.objectives[0] = benilla_ui::script::QuestObjectiveView {
+            item_id: PELT,
+            item_count: 5,
+            ..Default::default()
+        };
+        seat(&mut s, &[pelts]);
+        s.run(
+            r#"
+            TRADESKILL_LOG_FIRSTPERSON = "You create %s."
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("QUEST_LOG_UPDATE")
+            f:RegisterEvent("CHAT_MSG_SPELL_TRADESKILLS")
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, event .. (arg1 and (":" .. arg1) or ""))
+            end)
+            "#,
+        )
+        .unwrap();
+    }
+    let craft = SessionEvent::SpellLogExecute(SpellLogExecute {
+        caster: ME,
+        spell_id: 1,
+        effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry: PELT }])],
+    });
+    let slot = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+    frame(&mut app, vec![values(ME, &[(slot, 50)]), craft]);
+    crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
+        let s = s.expect("a VM");
+        s.run("GetQuestLogLeaderBoard(1, 2) Seen = {}")
+            .expect("the chunk runs");
+    });
+    let answer = SessionEvent::ItemTemplate {
+        entry: PELT,
+        info: Some(Box::new(crate::items::test_template("Wolf Pelt"))),
+    };
+    assert_eq!(
+        frame(&mut app, vec![answer]),
+        [
+            "CHAT_MSG_SPELL_TRADESKILLS:You create Wolf Pelt.",
+            "QUEST_LOG_UPDATE"
+        ]
+    );
+}
+
+/// A crafting line whose item the cache lacks looks it up at its packet (`0x629650`) and waits;
+/// the answer later in the same span writes it inside its callback (`0x6294b0`), between the
+/// falls around the answer, never at its own packet's place off the later record. The span's
+/// packets run while the interface is down, as a reload's do, and fire once it is up, so the
+/// line's first drain comes after the answer's handler.
+#[test]
+fn a_combat_line_waits_for_an_answer_later_in_its_span() {
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
+    const PELT: u32 = 900;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            TRADESKILL_LOG_FIRSTPERSON = "You create %s."
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("CHAT_MSG_SPELL_TRADESKILLS")
+            f:SetScript("OnEvent", function() table.insert(Seen, event .. ":" .. arg1) end)
+            "#,
+        )
+        .unwrap();
+    let craft = SessionEvent::SpellLogExecute(SpellLogExecute {
+        caster: ME,
+        spell_id: 1,
+        effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry: PELT }])],
+    });
+    let answer = SessionEvent::ItemTemplate {
+        entry: PELT,
+        info: Some(Box::new(crate::items::test_template("Wolf Pelt"))),
+    };
+    use crate::client_state::ClientState;
+    app.insert_resource(State::new(ClientState::CharSelect));
+    let world = app.world_mut();
+    crate::net::handlers::dispatch(world, vec![craft, fall(5), answer, fall(6)]);
+    world.insert_resource(State::new(ClientState::InWorld));
+    crate::lanes::fire_in_order(world);
+    let script = world.non_send_resource::<UiScript>();
+    assert_eq!(
+        script.eval::<Vec<String>>("return Seen").unwrap(),
+        [
+            FELL,
+            "CHAT_MSG_SPELL_TRADESKILLS:You create Wolf Pelt.",
+            FELL
+        ]
+    );
+}
+
+/// Two crafting lines of one kind naming one uncached item, a leaderboard read of it between
+/// them: each line keeps its entry in the wait list (`0x6293a0`, the lowest free slot
+/// `0x6293f0`) and its own callback. The answer runs the callbacks oldest first, and each writes
+/// one line, the last waiting entry of its kind and item (`0x6295b0` scans from the back): the
+/// newer line at the first callback, the quest log's between, the older at the last.
+#[test]
+fn two_waiting_lines_of_one_item_are_written_newest_first_one_per_callback() {
+    use crate::ui_quest_log::fixture::{quest, seat};
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
+    const PELT: u32 = 900;
+    /// [`client`]'s wolf.
+    const WOLF: u64 = 0xF130_0000_0044_0001;
+    let mut app = client();
+    {
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut pelts = quest(50, "Pelts", 1);
+        pelts.record.objectives[0] = benilla_ui::script::QuestObjectiveView {
+            item_id: PELT,
+            item_count: 5,
+            ..Default::default()
+        };
+        seat(&mut s, &[pelts]);
+        s.run(
+            r#"
+            TRADESKILL_LOG_FIRSTPERSON = "You create %s."
+            TRADESKILL_LOG_THIRDPERSON = "%s creates %s."
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("QUEST_LOG_UPDATE")
+            f:RegisterEvent("CHAT_MSG_SPELL_TRADESKILLS")
+            f:SetScript("OnEvent", function()
+                table.insert(Seen, arg1 and event .. ":" .. arg1 or event)
+            end)
+            "#,
+        )
+        .unwrap();
+    }
+    let slot = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+    frame(&mut app, vec![values(ME, &[(slot, 50)])]);
+    let craft = |caster| {
+        SessionEvent::SpellLogExecute(SpellLogExecute {
+            caster,
+            spell_id: 1,
+            effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry: PELT }])],
+        })
+    };
+    frame(&mut app, vec![craft(ME)]);
+    hosted(&mut app, "GetQuestLogLeaderBoard(1, 2)");
+    frame(&mut app, vec![craft(WOLF)]);
+    hosted(&mut app, "Seen = {}");
+    let answer = SessionEvent::ItemTemplate {
+        entry: PELT,
+        info: Some(Box::new(crate::items::test_template("Wolf Pelt"))),
+    };
+    assert_eq!(
+        frame(&mut app, vec![fall(5), answer, fall(6)]),
+        [
+            FELL,
+            "CHAT_MSG_SPELL_TRADESKILLS:Unknown Being creates Wolf Pelt.",
+            "QUEST_LOG_UPDATE",
+            "CHAT_MSG_SPELL_TRADESKILLS:You create Wolf Pelt.",
+            FELL
+        ]
+    );
+}
+
+/// A reconnect drops the item callbacks (`net::session`'s teardown) and the wait list with them:
+/// a line on the same kind and item after it, in the lowest free slot, is the one its callback
+/// frees and writes, never an entry left from before the reconnect in a slot above it.
+#[test]
+fn a_reconnect_clears_the_combat_logs_wait_list() {
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
+    const PELT: u32 = 900;
+    const LEATHER: u32 = 901;
+    /// [`client`]'s wolf.
+    const WOLF: u64 = 0xF130_0000_0044_0001;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            TRADESKILL_LOG_FIRSTPERSON = "You create %s."
+            TRADESKILL_LOG_THIRDPERSON = "%s creates %s."
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("CHAT_MSG_SPELL_TRADESKILLS")
+            f:SetScript("OnEvent", function() table.insert(Seen, arg1) end)
+            "#,
+        )
+        .unwrap();
+    let craft = |caster, item_entry| {
+        SessionEvent::SpellLogExecute(SpellLogExecute {
+            caster,
+            spell_id: 1,
+            effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry }])],
+        })
+    };
+    let answer = |entry, name| SessionEvent::ItemTemplate {
+        entry,
+        info: Some(Box::new(crate::items::test_template(name))),
+    };
+    // The leather's line takes the first slot and the wolf's pelt the second; the leather's
+    // answer frees the first.
+    frame(&mut app, vec![craft(ME, LEATHER), craft(WOLF, PELT)]);
+    frame(&mut app, vec![answer(LEATHER, "Light Leather")]);
+    frame(
+        &mut app,
+        vec![SessionEvent::Disconnected {
+            reason: "lost".into(),
+            end: benilla_protocol::SessionEnd::Lost,
+        }],
+    );
+    // The reconnect's world entry: we are created again.
+    app.world_mut().resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+    frame(
+        &mut app,
+        vec![super::unit_view_tests::created(
+            ME,
+            benilla_protocol::EntityKind::Player,
+            &[],
+        )],
+    );
+    let me = app.world().resource::<crate::net::GuidIndex>().0[&ME];
+    app.world_mut()
+        .entity_mut(me)
+        .insert(crate::net::SelfPlayer);
+    frame(&mut app, vec![craft(ME, PELT)]);
+    hosted(&mut app, "Seen = {}");
+    let seen = frame(&mut app, vec![answer(PELT, "Wolf Pelt")]);
+    assert_eq!(seen, ["You create Wolf Pelt."]);
+}
+
+/// The wait list has no timer or count: only an item callback or the session's end frees an
+/// entry (`0x6293a0`, `0x6294cc`, `0x629a90`), so a record that lands frames later still writes
+/// its line. A refusal's callback frees its entry and writes nothing (`0x6294fd`-`0x629504`), so
+/// a record after it finds no line waiting.
+#[test]
+fn a_waiting_line_outlasts_its_frames_and_a_refusal_frees_it_unwritten() {
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
+    const PELT: u32 = 900;
+    const GONE: u32 = 99_999;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            TRADESKILL_LOG_FIRSTPERSON = "You create %s."
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("CHAT_MSG_SPELL_TRADESKILLS")
+            f:SetScript("OnEvent", function() table.insert(Seen, arg1) end)
+            "#,
+        )
+        .unwrap();
+    let craft = |item_entry| {
+        SessionEvent::SpellLogExecute(SpellLogExecute {
+            caster: ME,
+            spell_id: 1,
+            effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry }])],
+        })
+    };
+    let answer = |entry, name: Option<&str>| SessionEvent::ItemTemplate {
+        entry,
+        info: name.map(|n| Box::new(crate::items::test_template(n))),
+    };
+    frame(&mut app, vec![craft(PELT), craft(GONE)]);
+    for _ in 0..300 {
+        frame(&mut app, vec![]);
+    }
+    hosted(&mut app, "Seen = {}");
+    assert_eq!(
+        frame(&mut app, vec![answer(PELT, Some("Wolf Pelt"))]),
+        ["You create Wolf Pelt."]
+    );
+    hosted(&mut app, "Seen = {}");
+    assert!(frame(&mut app, vec![answer(GONE, None)]).is_empty());
+    assert!(
+        frame(&mut app, vec![answer(GONE, Some("Late Record"))]).is_empty(),
+        "the refusal freed the entry"
+    );
+}
+
+/// The item's callback runs the tradeskill writer again from the entry's guids (`0x629556` →
+/// `0x629610`), which names the caster there (`0x6264e0`): a caster whose name arrives between
+/// the packet and the item's answer is written by that name.
+#[test]
+fn a_waiting_tradeskill_line_names_its_caster_at_the_answer() {
+    use benilla_protocol::messages::{ExecuteLog, SpellLogExecute};
+    const PELT: u32 = 900;
+    const CRAFTER: u64 = 0x0000_0000_0000_0042;
+    let mut app = client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"
+            TRADESKILL_LOG_THIRDPERSON = "%s creates %s."
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("CHAT_MSG_SPELL_TRADESKILLS")
+            f:SetScript("OnEvent", function() table.insert(Seen, arg1) end)
+            "#,
+        )
+        .unwrap();
+    frame(
+        &mut app,
+        vec![super::unit_view_tests::created(
+            CRAFTER,
+            benilla_protocol::EntityKind::Player,
+            &[],
+        )],
+    );
+    let craft = SessionEvent::SpellLogExecute(SpellLogExecute {
+        caster: CRAFTER,
+        spell_id: 1,
+        effects: vec![(24, vec![ExecuteLog::CreateItem { item_entry: PELT }])],
+    });
+    frame(&mut app, vec![craft]);
+    frame(
+        &mut app,
+        vec![SessionEvent::PlayerName {
+            guid: CRAFTER,
+            name: "Crafter".into(),
+            race: 1,
+            gender: 0,
+            class: 1,
+        }],
+    );
+    hosted(&mut app, "Seen = {}");
+    let answer = SessionEvent::ItemTemplate {
+        entry: PELT,
+        info: Some(Box::new(crate::items::test_template("Wolf Pelt"))),
+    };
+    assert_eq!(
+        frame(&mut app, vec![answer]),
+        ["Crafter creates Wolf Pelt."]
+    );
+}
+
+/// Park a swap of backpack slot 1 onto the head on `entry`'s record (`0x5e0dbe`).
+fn park_swap_on(app: &mut App, entry: u32) {
+    use bevy::ecs::system::RunSystemOnce;
+    let mv = benilla_ui::script::ContainerMove {
+        src_bag: 0,
+        src_slot: 1,
+        dst_bag: benilla_ui::script::EQUIPMENT_BAG,
+        dst_slot: 1,
+        count: None,
+    };
+    app.world_mut()
+        .run_system_once(
+            move |mut gate: crate::ui_bind_confirm::BindGate,
+                  items: Res<crate::items::Items>,
+                  net: Res<crate::net::NetCommands>| {
+                gate.park_swap(&mv, entry, &items, &net);
+            },
+        )
+        .unwrap();
+}
+
+/// A listener of `event` that sends a roll, and the wire's rolls and swaps from here on.
+fn rolling_on(app: &mut App, sent: &Receiver<ClientCommand>, event: &str) {
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(&format!(
+            r#"local f = CreateFrame("Frame") f:RegisterEvent("{event}")
+            f:SetScript("OnEvent", function() RandomRoll(1, 2) end)"#
+        ))
+        .unwrap();
+    sent.try_iter().for_each(drop);
+}
+
+/// The rolls and swaps among `sent`, in order.
+fn rolls_and_swaps(sent: &Receiver<ClientCommand>) -> Vec<&'static str> {
+    sent.try_iter()
+        .filter_map(|c| match c {
+            ClientCommand::RandomRoll { .. } => Some("roll"),
+            ClientCommand::SwapInvItem { .. } | ClientCommand::SwapItem { .. } => Some("Swap"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The swap callback walks its table inside the answer (`0x5e1020`): the first swap's clear
+/// signals `CURSOR_UPDATE` (`0x5e0fe7`), whose listener runs there, ahead of the second swap's
+/// send (`0x5e0fdb`), as the walk's next element runs only once the first returns.
+#[test]
+fn a_swaps_clear_runs_its_listener_ahead_of_the_next_swap() {
+    let (mut app, sent) = holding_client();
+    hosted(&mut app, "PickupContainerItem(0, 1)");
+    park_swap_on(&mut app, HELM_ENTRY);
+    park_swap_on(&mut app, HELM_ENTRY);
+    rolling_on(&mut app, &sent, "CURSOR_UPDATE");
+    frame(&mut app, vec![helm_record()]);
+    assert_eq!(rolls_and_swaps(&sent), ["Swap", "roll", "Swap", "roll"]);
+}
+
+/// The try-on callback's refusal (`0x504ba0` → `0x504b2d`) signals `UI_ERROR_MESSAGE` inside the
+/// answer, ahead of the entry's next callback (`0x55bf12`-`0x55bf39`): its listener's roll goes
+/// out ahead of the swap parked after it.
+#[test]
+fn a_try_on_refusals_listener_runs_ahead_of_the_entrys_next_callback() {
+    const BOX: u32 = 5_555;
+    let (mut app, sent) = holding_client();
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(
+            r#"ERR_NOT_EQUIPPABLE = "Not equippable"
+            local pane = CreateFrame("Frame", "DressUpFrame", UIParent)
+            CreateFrame("DressUpModel", "DressUpModel", pane)"#,
+        )
+        .unwrap();
+    // The helm's record held, so the swap parked on the box's waits on nothing else.
+    frame(&mut app, vec![helm_record()]);
+    hosted(&mut app, &format!("DressUpModel:TryOn({BOX})"));
+    park_swap_on(&mut app, BOX);
+    rolling_on(&mut app, &sent, "UI_ERROR_MESSAGE");
+    let mut t = crate::items::test_template("Box");
+    t.inventory_type = 0;
+    frame(
+        &mut app,
+        vec![SessionEvent::ItemTemplate {
+            entry: BOX,
+            info: Some(Box::new(t)),
+        }],
+    );
+    assert_eq!(rolls_and_swaps(&sent), ["roll", "Swap"]);
+}
+
+/// The quest log's callback (`0x4e0830`) signals `QUEST_LOG_UPDATE` inside the answer
+/// (`0x4e083a`), ahead of the entry's next callback: its listener's roll goes out ahead of the
+/// swap parked after it.
+#[test]
+fn a_quest_log_updates_listener_runs_ahead_of_the_entrys_next_callback() {
+    use crate::ui_quest_log::fixture::{quest, seat};
+    const PELT: u32 = 900;
+    let (mut app, sent) = holding_client();
+    {
+        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut pelts = quest(50, "Pelts", 1);
+        pelts.record.objectives[0] = benilla_ui::script::QuestObjectiveView {
+            item_id: PELT,
+            item_count: 5,
+            ..Default::default()
+        };
+        seat(&mut s, &[pelts]);
+    }
+    let slot = benilla_protocol::field::FIELD_PLAYER_QUEST_LOG_1_1;
+    frame(&mut app, vec![values(ME, &[(slot, 50)])]);
+    frame(&mut app, vec![helm_record()]);
+    hosted(&mut app, "GetQuestLogLeaderBoard(1, 2)");
+    park_swap_on(&mut app, PELT);
+    rolling_on(&mut app, &sent, "QUEST_LOG_UPDATE");
+    frame(
+        &mut app,
+        vec![SessionEvent::ItemTemplate {
+            entry: PELT,
+            info: Some(Box::new(crate::items::test_template("Wolf Pelt"))),
+        }],
+    );
+    assert_eq!(rolls_and_swaps(&sent), ["roll", "Swap"]);
+}
+
+/// `/reload` through its real path frees every store's callbacks, running none (`0x495664` →
+/// `0x490bd0`, `0x490c35` → `0x5556c0`): the same waits that signal at their answers before it
+/// signal nothing after it, in the item, the name and the guild stores, and the records file.
+#[test]
+fn pending_records_answered_after_a_reload_raise_nothing() {
+    use crate::ui_battlefield_positions::BattlefieldPositions;
+
+    const SPY: &str = r#"
+        Heard = {}
+        local f = CreateFrame("Frame")
+        for _, e in ipairs({"GUILD_ROSTER_UPDATE", "TRADE_UPDATE", "WORLD_MAP_NAME_UPDATE"}) do
+            f:RegisterEvent(e)
+        end
+        f:SetScript("OnEvent", function() table.insert(Heard, event) end)
+    "#;
+    fn wait(world: &mut World, entry: u32, guid: u64, guild: u32) {
+        world
+            .resource::<crate::items::Items>()
+            .wait_for_trade_record(entry);
+        world.resource_scope(|world, mut positions: Mut<BattlefieldPositions>| {
+            positions.wait_for_name(
+                world.resource::<crate::names::NameCache>(),
+                world.resource::<crate::net::NetCommands>(),
+                guid,
+            );
+        });
+        world
+            .resource::<crate::ui_guild::GuildState>()
+            .wait_for_roster(guild, world.resource::<crate::net::NetCommands>());
+    }
+    fn answer(world: &mut World, entry: u32, guid: u64, guild: u32) -> Vec<String> {
+        crate::net::handlers::dispatch(
+            world,
+            vec![
+                SessionEvent::ItemTemplate {
+                    entry,
+                    info: Some(Box::new(crate::items::test_template("Sword"))),
+                },
+                SessionEvent::PlayerName {
+                    guid,
+                    name: "Mate".into(),
+                    race: 1,
+                    gender: 0,
+                    class: 1,
+                },
+                SessionEvent::GuildQueryResponse(benilla_protocol::messages::GuildQueryResponse {
+                    guild_id: guild,
+                    name: "Legacy".to_string(),
+                    ..Default::default()
+                }),
+            ],
+        );
+        crate::lanes::fire_in_order(world);
+        let script = world.non_send_resource::<UiScript>();
+        let mut heard = script.eval::<Vec<String>>("return Heard").unwrap();
+        script.run("Heard = {}").unwrap();
+        heard.sort();
+        heard
+    }
+
+    let mut app = client();
+    let world = app.world_mut();
+    // The battleground's lane reads it, and this client's `Startup` never ran.
+    world.init_resource::<crate::player::Player>();
+    world.non_send_resource::<UiScript>().run(SPY).unwrap();
+    wait(world, 4_301, 0x22, 8);
+    assert_eq!(
+        answer(world, 4_301, 0x22, 8),
+        [
+            "GUILD_ROSTER_UPDATE",
+            "TRADE_UPDATE",
+            "WORLD_MAP_NAME_UPDATE",
+        ],
+        "the waits that stand signal"
+    );
+
+    wait(world, 4_302, 0x23, 9);
+    world.resource_mut::<crate::ui_script::ReloadUiPending>().0 = true;
+    crate::ui_script::run_pending_reload(world);
+    // The reload's own cascade, spent ahead of the new VM's listener.
+    crate::lanes::fire_in_order(world);
+    world.non_send_resource::<UiScript>().run(SPY).unwrap();
+    assert_eq!(
+        answer(world, 4_302, 0x23, 9),
+        Vec::<String>::new(),
+        "none runs"
+    );
+    assert!(world
+        .resource::<crate::names::NameCache>()
+        .resolve_player(0x23, crate::query_cache::Ask::Read)
+        .is_some());
+    assert!(world
+        .resource::<crate::items::Items>()
+        .template(4_302, 0, crate::query_cache::Ask::Read)
+        .is_some());
+    assert!(world
+        .resource::<crate::ui_guild::GuildState>()
+        .own_emblem_record(9)
+        .is_some());
+}

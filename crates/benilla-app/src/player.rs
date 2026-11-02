@@ -58,6 +58,7 @@ mod input;
 pub(crate) mod land;
 mod move_trace;
 mod movement_net;
+pub(crate) use movement_net::send_heartbeat;
 mod posture;
 // A movement command's press or release, run inside the frame's input records.
 mod press;
@@ -91,6 +92,7 @@ pub(crate) struct ControlRestore;
 // The last writer of a self body part's render alpha: `entities::apply_unit_mat_alpha` orders
 // itself before it.
 pub(crate) use camera::apply_self_model_fade;
+pub(crate) use camera_saved::{camera_at_interface_load, rebuild_camera};
 use controller::control;
 pub(crate) use controller::LookSample;
 // The private camera and `state` items are re-imported for the modules beside this one, which
@@ -130,9 +132,12 @@ use state::{
 /// The swim boundary `0.75·h`, also the wade ceiling, for the creature swim marker and the
 /// footstep splash, which have no `Player`.
 pub(crate) use swim::{may_swim, swim_enter_depth};
+/// The camera on a followed object, for the tests of the arrows' feeds.
+#[cfg(test)]
+pub(crate) use view_subject::followed_tests::camera_on_an_eye;
 /// The camera's followed unit when not our body; [`crate::camera_shake`] takes its body frame and
 /// two suspend gates from it, as the reference does from `[cam+0x88]`.
-pub(crate) use view_subject::{FarSight, ViewSubject};
+pub(crate) use view_subject::{FarSight, FollowedObject, ViewSubject};
 
 /// `UNIT_FLAG_STUNNED`, the `UNIT_FIELD_FLAGS` bit that stops turning. The reference reads it off
 /// the descriptor (`[[unit+0x110]+0xa0]`, predicate `0x5145b0`, an inverted `not/shr/and` test) at
@@ -147,18 +152,57 @@ pub(crate) use view_subject::{FarSight, ViewSubject};
 /// cannot.
 pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
 
-/// `IsSelfControlled` (`0x5fa550`, `test eax, 0xc00004` at `0x5fa566`): false while
-/// `DISABLE_MOVE` (`0x4`), `CONFUSED` (`0x400000`) or `FLEEING` (`0x800000`) is set; the stun and
-/// taxi bits are not in the mask. It is true for an ordinary player, so a gate on it fires in the
-/// normal case and is suppressed while feared. Its readers are the movement and collision layer
-/// and `DoEmote`.
+/// `UNIT_FIELD_FLAGS` bit 0x1, `0x5fa5dd`: the server controls the unit.
+const UNIT_FLAG_SERVER_CONTROLLED: u32 = 0x0000_0001;
+/// `UNIT_FIELD_FLAGS` bit 0x2, `0x5fa55e`: with it set the `0xc00004` test is skipped.
+const UNIT_FLAG_SKIP_CONTROL_TEST: u32 = 0x0000_0002;
+/// `UNIT_FLAG_POSSESSED`, `0x5fa582`.
+const UNIT_FLAG_POSSESSED: u32 = 0x0100_0000;
+
+/// A unit as `IsSelfControlled` reads it: its descriptor and whether it is player-type
+/// (`[[obj+8]+8] & 0x10`, `0x5fa5cd`).
+pub(crate) type ControlSubject<'a> = (&'a benilla_protocol::ObjectFields, bool);
+
+/// `IsSelfControlled` (`0x5fa550`), on the unit's `UNIT_FIELD_FLAGS` at `+0xa0`:
+/// - unless bit 0x2 is set, any of `DISABLE_MOVE` (`0x4`), `CONFUSED` (`0x400000`) or `FLEEING`
+///   (`0x800000`), the literal `0xc00004`, answers false (`0x5fa566`);
+/// - `POSSESSED` (`0x1000000`) answers with the same question of the charmer, else the creator
+///   (`UNIT_FIELD_CHARMEDBY` at `+0x10`, else `UNIT_FIELD_CREATEDBY` at `+0x20`), found among the
+///   units in view (`0x468460`, mask `0x8`); one not in view answers false (`0x5fa5c3`);
+/// - otherwise true only for a player-type object with no charmer and bit 0x1 clear.
 ///
-/// `POSSESSED` (`0x1000000`) is not handled: the reference recurses on the charmer's guid
-/// (`0x5fa582`) and answers with the charmer's flags, which needs the charmer's descriptor.
-pub(crate) fn self_controlled(unit_flags: u32) -> bool {
+/// `find` is the object manager's unit lookup by guid. The reference recurses without a bound; a
+/// charm cycle, which a server never sends, ends false here at [`MAX_CONTROL_HOPS`].
+pub(crate) fn self_controlled<'a>(
+    subject: ControlSubject<'a>,
+    find: impl Fn(u64) -> Option<ControlSubject<'a>>,
+) -> bool {
+    /// More hops than any real charm chain.
+    const MAX_CONTROL_HOPS: u32 = 16;
     /// `DISABLE_MOVE | CONFUSED | FLEEING`, the reference's literal `0xc00004`.
     const NOT_SELF_CONTROLLED: u32 = 0x0000_0004 | 0x0040_0000 | 0x0080_0000;
-    unit_flags & NOT_SELF_CONTROLLED == 0
+    let mut current = subject;
+    for _ in 0..MAX_CONTROL_HOPS {
+        let (fields, is_player) = current;
+        let flags = fields.unit_flags();
+        if flags & UNIT_FLAG_SKIP_CONTROL_TEST == 0 && flags & NOT_SELF_CONTROLLED != 0 {
+            return false;
+        }
+        if flags & UNIT_FLAG_POSSESSED != 0 {
+            let controller = fields
+                .unit_charmed_by()
+                .or_else(|| fields.unit_created_by());
+            match controller.and_then(&find) {
+                Some(next) => current = next,
+                None => return false,
+            }
+            continue;
+        }
+        return is_player
+            && fields.unit_charmed_by().is_none()
+            && flags & UNIT_FLAG_SERVER_CONTROLLED == 0;
+    }
+    false
 }
 
 /// `UNIT_FLAG_IN_COMBAT`, bit 19 of `UNIT_FIELD_FLAGS` (vmangos `UnitDefines.h:564`), read by the
@@ -182,14 +226,6 @@ pub(crate) struct StandStateRequest {
     /// The packet went out where the request was made, past the gate: the setter owes the local
     /// apply alone.
     pub(crate) sent: bool,
-}
-
-/// `SMSG_STANDSTATE_UPDATE` for our body (the eat and drink sit, the stand on damage), applied by
-/// [`posture`] through the same local setter with no refusal and no packet back (`0x603e50` →
-/// `0x6127b0`).
-#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
-pub(crate) struct ServerStandState {
-    pub(crate) state: u8,
 }
 
 /// The active player, whichever body is driven: what the posture verbs read and act on, as the
@@ -350,8 +386,8 @@ impl Plugin for PlayerPlugin {
                 Update,
                 (
                     view_subject::publish_view_subject,
-                    // The spyglass zoom (aura 76), before `control`, which reads it to hold the
-                    // rig in first person.
+                    // The spyglass zoom (aura 76), before `control`, which takes its start and end
+                    // onto the camera.
                     scoped_view::apply_scoped_view,
                 )
                     .in_set(WorldStage::Input)
@@ -384,7 +420,6 @@ impl Plugin for PlayerPlugin {
         )
         // The posture queue (the `/sit` family), which `control` alone executes.
         .add_message::<StandStateRequest>()
-        .add_message::<ServerStandState>()
         // Land-here, before `control`, so the frame that applies the teleport takes control back.
         .add_message::<land::LandHere>()
         .add_systems(
