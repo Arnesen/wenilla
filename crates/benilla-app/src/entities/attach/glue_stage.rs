@@ -80,6 +80,13 @@ type StageKey = (Option<GlueLook>, Option<GlueSceneFile>, u64);
 /// Build the stage's character and pet; on a new stage's first frame, until it is whole.
 fn build_glue_stage(world: &mut World, mut waited: Local<Option<StageKey>>) {
     build(world);
+    // wenilla: a page cannot hold its frame for a read. Its files arrive through the browser's
+    // event loop, which runs only between frames, so a wait here never sees them land, and
+    // `std::thread::sleep` panics there anyway. The stage builds over the next frames as its
+    // files land, as it did before the reference's in-frame wait was taken.
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     let Some(preview) = world.get_resource::<GluePreview>() else {
         return;
     };
