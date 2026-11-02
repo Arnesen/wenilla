@@ -184,7 +184,19 @@ pub(super) fn attach_inner_colliders(
         };
         let collider = match (pc.built.take(), pc.task.take()) {
             (Some(collider), _) => collider,
+            #[cfg(not(target_arch = "wasm32"))]
             (None, Some(task)) => block_on(task),
+            // wenilla: a page's build is a task on the browser's event loop (`web_budget`), which
+            // a wait inside the frame never lets run. One still building attaches in a later
+            // frame (`finish_colliders`), behind the teleport's settle hold.
+            #[cfg(target_arch = "wasm32")]
+            (None, Some(mut task)) => match block_on(future::poll_once(&mut task)) {
+                Some(collider) => collider,
+                None => {
+                    pc.task = Some(task);
+                    continue;
+                }
+            },
             (None, None) => continue,
         };
         // In `finish_colliders`' order, so avian's observers see what they see there.

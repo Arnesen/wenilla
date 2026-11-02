@@ -872,6 +872,13 @@ struct InnerWaitCap(Duration);
 /// per request, and its tile then streams on unwaited like the outer ring, where the reference
 /// waits for ever, because that way a hung read costs one capped stall, not one every frame.
 fn await_inner_tiles(world: &mut World) {
+    // wenilla: a page cannot hold its frame for a read. Its files arrive through the browser's
+    // event loop, which runs only between frames, so this wait would stall to its cap, and
+    // `std::thread::sleep` panics there anyway. The tiles land over the next frames, behind the
+    // teleport's settle hold, which releases the body only once they and their colliders are in.
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     let pending: Vec<((i32, i32), Handle<AdtTile>)> = {
         let state = world.resource::<TerrainStreamer>();
         if state.plan.is_none() {
