@@ -25,6 +25,8 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{
     AccumulatedMouseMotion, AccumulatedMouseScroll, MouseButtonInput, MouseMotion, MouseWheel,
 };
+#[cfg(any(target_arch = "wasm32", test))]
+use bevy::input::touch::TouchInput;
 use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::window::{CursorLeft, CursorMoved, PrimaryWindow, WindowEvent};
@@ -89,6 +91,8 @@ struct RawInput<'w> {
     motion: ResMut<'w, Messages<MouseMotion>>,
     wheel: ResMut<'w, Messages<MouseWheel>>,
     moved: ResMut<'w, Messages<CursorMoved>>,
+    #[cfg(any(target_arch = "wasm32", test))]
+    touch: ResMut<'w, Messages<TouchInput>>,
     /// The window's stream, the input records' source (`crate::ui_script::InputRecords`).
     window: Option<ResMut<'w, Messages<WindowEvent>>>,
 }
@@ -100,6 +104,8 @@ impl RawInput<'_> {
         self.motion.clear();
         self.wheel.clear();
         self.moved.clear();
+        #[cfg(any(target_arch = "wasm32", test))]
+        self.touch.clear();
         if let Some(window) = self.window.as_mut() {
             window.clear();
         }
@@ -318,6 +324,13 @@ mod tests {
             repeat: false,
             window,
         });
+        app.world_mut().write_message(TouchInput {
+            phase: bevy::input::touch::TouchPhase::Started,
+            position: Vec2::new(400.0, 300.0),
+            window,
+            force: None,
+            id: 1,
+        });
         app.update();
 
         assert!(
@@ -339,9 +352,17 @@ mod tests {
             app.world().resource::<Messages<KeyboardInput>>().is_empty(),
             "the raw queue is drained too, so a MessageReader sees nothing either"
         );
+        assert!(
+            app.world().resource::<Messages<TouchInput>>().is_empty(),
+            "a covered touch cannot reach the browser UI adapter"
+        );
 
         app.world_mut().resource_mut::<LoadingScreen>().active = false;
         app.update();
+        assert!(
+            app.world().resource::<Messages<TouchInput>>().is_empty(),
+            "a covered touch is never replayed after the cover drops"
+        );
         assert_eq!(
             seen(&app),
             Some(Vec2::new(400.0, 300.0)),

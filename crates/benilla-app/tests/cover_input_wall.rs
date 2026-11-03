@@ -30,6 +30,7 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("MouseMotion", Swallowed),
     ("MouseWheel", Swallowed),
     ("CursorMoved", Swallowed),
+    ("TouchInput", Swallowed),
     // The stream the input records are read from, in the window's order.
     ("WindowEvent", Swallowed),
     ("AccumulatedMouseMotion", Swallowed),
@@ -80,6 +81,10 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // ── Not input at all ────────────────────────────────────────────────────────────────────
     ("ButtonState", Plumbing),
+    ("TouchPhase", Plumbing),
+    // The browser's wake-up handle and event keep the loop running; they carry no controls.
+    ("EventLoopProxyWrapper", Plumbing),
+    ("WinitUserEvent", Plumbing),
     // Cursor outputs benilla writes; nothing arrives through them.
     ("CursorGrabMode", Plumbing),
     ("CursorIcon", Plumbing),

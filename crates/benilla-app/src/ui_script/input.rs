@@ -124,6 +124,9 @@ pub(crate) struct RecordWalk {
     stopped: Option<super::InputRecord>,
     hooked: Option<(usize, bool)>,
     hook_due: bool,
+    /// Touch owns the pointer for this entire drain, including resumed keyboard records.
+    #[cfg(target_arch = "wasm32")]
+    touch_handled: bool,
 }
 
 /// Dispatch the frame's input records, each whole and in arrival order (`0x423920` → `0x4239a0` →
@@ -205,6 +208,7 @@ pub(super) fn feed_ui_input(
     // Carries the `wl_display` the Wayland clipboard backend needs, once winit has a surface.
     window: Query<(&Window, Option<&bevy::window::RawHandleWrapper>), With<PrimaryWindow>>,
     records: Res<super::InputRecords>,
+    #[cfg(target_arch = "wasm32")] mut touch: super::web_touch::TouchFeed,
     mut pointer: PointerFeed,
     mut kbd: KeyboardFeed,
     // The keys this feed believes down, a fact about the keyboard and not the VM.
@@ -255,6 +259,10 @@ pub(super) fn feed_ui_input(
     let (mut script, (window, raw_handle)) = match (script, window) {
         (Some(script), Some(window)) => (script, window),
         (script, _) => {
+            #[cfg(target_arch = "wasm32")]
+            let mut script = script;
+            #[cfg(target_arch = "wasm32")]
+            touch.clear(script.as_deref_mut());
             // No VM or no window: no walk, and the world frame's binding meets every record, the VM's
             // bodies running when there is one.
             capture.typing = false;
@@ -292,21 +300,12 @@ pub(super) fn feed_ui_input(
     // ([`super::UiScreen`]).
     let widescreen = host.widescreen();
     let screen = super::UiScreen::of_window(window, widescreen.as_ref());
-    // The window cursor in the root's y-up 768-high units, `GetCursorPosition`'s answer. The
-    // headless hover probe's aim stands in for a missing cursor, so `PointerOverUi` rises and falls
-    // over a panel in an automated run as for a person; a real pointer wins.
-    let ui_point = |at: Option<Vec2>| {
-        at.or_else(crate::target::hover_probe_point)
-            .filter(|_| !synthetic)
-            .map(|c| super::window_to_ui(screen, c))
-    };
     let plane = keymap::Mods {
         shift: keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight),
         ctrl: keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight),
         alt: keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight),
         sup: keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight),
     };
-    let end = ui_point(window.cursor_position());
     let walk = &mut *walk;
     let feed = |script: &mut UiScript| {
         // The pick routes the world drop: an object keeps the payload, terrain or sky drops it.
@@ -315,7 +314,30 @@ pub(super) fn feed_ui_input(
             pressed.reconcile(keys);
             walk.walked = None;
             walk.relative = script.freelook_now().unwrap_or(false);
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Touch handlers see the current modifiers before the queued keyboard walk.
+                script.set_modifiers(plane.shift, plane.ctrl, plane.alt);
+                script.set_alt_down(plane.alt);
+                let result = touch.feed(script, window, screen, synthetic);
+                walk.touch_handled = result.handled;
+                if result.handled {
+                    hover.0 = result.owner;
+                    press_consumed.0 = true;
+                }
+            }
         }
+        #[cfg(target_arch = "wasm32")]
+        let synthetic = synthetic || walk.touch_handled;
+        // The window cursor in the root's y-up 768-high units, `GetCursorPosition`'s answer. The
+        // headless hover probe's aim stands in for a missing cursor, so `PointerOverUi` rises and
+        // falls over a panel in an automated run as for a person; a real pointer wins.
+        let ui_point = |at: Option<Vec2>| {
+            at.or_else(crate::target::hover_probe_point)
+                .filter(|_| !synthetic)
+                .map(|c| super::window_to_ui(screen, c))
+        };
+        let end = ui_point(window.cursor_position());
         let relative = walk.relative;
         // The point the hover was last walked at this pass: a move to it again is ignored, as
         // `0x7660d0` ignores a move to the stored position.
@@ -328,6 +350,10 @@ pub(super) fn feed_ui_input(
         };
         capture.typing = script.has_keyboard_focus() || egui_keyboard;
         for (i, r) in records.iter().enumerate().skip(start) {
+            #[cfg(target_arch = "wasm32")]
+            if walk.touch_handled && !matches!(r.record, super::Record::Key(_)) {
+                continue;
+            }
             // A right press the walk stopped ahead of the binding of goes on at the binding, its
             // interface's walk done.
             let resumed = walk

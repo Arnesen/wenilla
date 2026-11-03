@@ -191,11 +191,13 @@ pub fn finalize_rig_worlds(
             let root_rel = crate::rig_palette::rebase_global(root_g, origin);
             #[cfg(target_os = "macos")]
             let (worlds, touched) = rig_worlds(rig, root_rel, cam_basis);
+            #[cfg(target_os = "macos")]
+            let worlds = worlds.as_slice();
             #[cfg(not(target_os = "macos"))]
             let (worlds, touched) = scratch.compose(rig, root_rel, cam_basis);
             if let Some(skin) = skin {
                 if let Some(ibp) = ibps.get(&skin.ibp) {
-                    palettes.write_rig_worlds(skin, &worlds, ibp, origin);
+                    palettes.write_rig_worlds(skin, worlds, ibp, origin);
                 }
             }
             if !rig.has_special && !root_moved {

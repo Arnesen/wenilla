@@ -171,11 +171,12 @@ impl Conn {
         // A close and an error both end the stream: the reader turns the flag into `UnexpectedEof`,
         // which the app already reads as a lost session.
         let queue = Rc::clone(&inbox);
-        let on_close = Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |_: web_sys::CloseEvent| {
-            let mut queue = queue.borrow_mut();
-            queue.closed = true;
-            queue.wake();
-        });
+        let on_close =
+            Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |_: web_sys::CloseEvent| {
+                let mut queue = queue.borrow_mut();
+                queue.closed = true;
+                queue.wake();
+            });
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
         let queue = Rc::clone(&inbox);
@@ -387,7 +388,10 @@ impl Drop for Timer {
 fn js_err(e: JsValue) -> io::Error {
     let message = e
         .as_string()
-        .or_else(|| e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())))
+        .or_else(|| {
+            e.dyn_ref::<js_sys::Error>()
+                .map(|e| String::from(e.message()))
+        })
         .unwrap_or_else(|| format!("{e:?}"));
     io::Error::other(message)
 }

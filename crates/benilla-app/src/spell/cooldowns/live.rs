@@ -73,7 +73,13 @@ impl CooldownLive<'_, '_> {
                 let d = catalog.and_then(|c| c.get(u.spell_id));
                 Some(
                     cooldowns
-                        .info_item(u.spell_id, entry, u.category, d, bevy::platform::time::Instant::now())
+                        .info_item(
+                            u.spell_id,
+                            entry,
+                            u.category,
+                            d,
+                            bevy::platform::time::Instant::now(),
+                        )
                         .ui_triple(anchor, ui_now),
                 )
             }

@@ -45,6 +45,7 @@ mod act;
 mod path;
 
 /// The `path` verb's default search budget (cells), when the page names none.
+#[cfg(target_arch = "wasm32")]
 fn path_budget() -> usize {
     path::MAX_EXPANSIONS
 }

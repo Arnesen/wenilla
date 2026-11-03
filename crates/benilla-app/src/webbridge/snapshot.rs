@@ -16,8 +16,8 @@ use benilla_ui::script::UnitState;
 use benilla_world::world_map::CurrentMap;
 
 use crate::area::ZoneInfo;
-use crate::client_state::ClientState;
 use crate::chr_classes::{ChrClassTable, ChrRaceTable};
+use crate::client_state::ClientState;
 use crate::creature_anim::select::{move_flags, MovementState};
 use crate::entities::mount::MountChild;
 use crate::names::NameCache;
@@ -32,6 +32,25 @@ use super::BridgeConfig;
 #[path = "nearby.rs"]
 mod nearby;
 
+type SelfQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ObjectStore,
+        Option<&'static MovementState>,
+        Has<MountChild>,
+    ),
+    With<SelfPlayer>,
+>;
+type UnitRow<'a> = (
+    &'a Guid,
+    &'a NetEntity,
+    &'a Transform,
+    Option<&'a ObjectStore>,
+    Option<&'a MovementState>,
+);
+type UnitsQuery<'w, 's> = Query<'w, 's, UnitRow<'static>, Without<SelfPlayer>>;
+
 /// Everything the snapshot reads, as one parameter (the `UnitStores` idiom: Bevy's tuple limit
 /// is sixteen, and the outbound system has its own parameters besides). Every resource is
 /// `Option` for the same reason the unit feed's are — a UI-only harness runs without the net
@@ -44,32 +63,12 @@ pub(crate) struct BridgeReadout<'w, 's> {
     map: Option<Res<'w, CurrentMap>>,
     player: Option<Res<'w, Player>>,
     self_guid: Option<Res<'w, SelfGuid>>,
-    self_q: Query<
-        'w,
-        's,
-        (
-            &'static ObjectStore,
-            Option<&'static MovementState>,
-            Has<MountChild>,
-        ),
-        With<SelfPlayer>,
-    >,
+    self_q: SelfQuery<'w, 's>,
     selection: Option<Res<'w, Selection>>,
     hovered: Option<Res<'w, Hovered>>,
     pending_cast: Option<Res<'w, PendingCast>>,
     channel: Option<Res<'w, ActiveChannel>>,
-    units: Query<
-        'w,
-        's,
-        (
-            &'static Guid,
-            &'static NetEntity,
-            &'static Transform,
-            Option<&'static ObjectStore>,
-            Option<&'static MovementState>,
-        ),
-        Without<SelfPlayer>,
-    >,
+    units: UnitsQuery<'w, 's>,
     names: Option<Res<'w, NameCache>>,
     factions: Option<Res<'w, Factions>>,
     reputations: Option<Res<'w, Reputations>>,
@@ -220,16 +219,7 @@ impl BridgeReadout<'_, '_> {
             cfg.radius * cfg.radius,
             cfg.max_units,
         );
-        let payload = |(d2, (guid, net, transform, store, motion)): (
-            f32,
-            (
-                &Guid,
-                &NetEntity,
-                &Transform,
-                Option<&ObjectStore>,
-                Option<&MovementState>,
-            ),
-        )| {
+        let payload = |(d2, (guid, net, transform, store, motion)): (f32, UnitRow<'_>)| {
             self.unit_row(
                 guid.0,
                 net,
@@ -285,12 +275,10 @@ impl BridgeReadout<'_, '_> {
     }
 
     fn peek_name(&self, guid: u64) -> Option<String> {
-        self.names
-            .as_ref()
-            .and_then(|n| {
-                n.resolve_unit(guid, None, crate::query_cache::Ask::Read)
-                    .map(str::to_string)
-            })
+        self.names.as_ref().and_then(|n| {
+            n.resolve_unit(guid, None, crate::query_cache::Ask::Read)
+                .map(str::to_string)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -366,7 +354,9 @@ impl BridgeReadout<'_, '_> {
                 guid,
                 net.kind,
                 store,
-                self.quest.as_ref().and_then(|q| q.statuses().get(&guid).copied()),
+                self.quest
+                    .as_ref()
+                    .and_then(|q| q.statuses().get(&guid).copied()),
             ));
         }
         u.push(("pos".into(), pos_payload(transform.translation)));
@@ -405,10 +395,32 @@ const DYNFLAG_TAPPED: u32 = 0x4;
 const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
 /// `GAMEOBJECT_TYPE_ID` names, 1.12's `GameobjectTypes` (herbs and veins are chests with a lock).
 const GO_TYPES: [&str; 26] = [
-    "door", "button", "questgiver", "chest", "binder", "generic", "trap", "chair", "spellfocus",
-    "text", "goober", "transport", "areadamage", "camera", "mapobject", "motransport",
-    "duelarbiter", "fishingnode", "ritual", "mailbox", "auctionhouse", "guardpost", "spellcaster",
-    "meetingstone", "flagstand", "fishinghole",
+    "door",
+    "button",
+    "questgiver",
+    "chest",
+    "binder",
+    "generic",
+    "trap",
+    "chair",
+    "spellfocus",
+    "text",
+    "goober",
+    "transport",
+    "areadamage",
+    "camera",
+    "mapobject",
+    "motransport",
+    "duelarbiter",
+    "fishingnode",
+    "ritual",
+    "mailbox",
+    "auctionhouse",
+    "guardpost",
+    "spellcaster",
+    "meetingstone",
+    "flagstand",
+    "fishinghole",
 ];
 
 /// What a row adds for automation: the template entry, an NPC's services and overhead quest
@@ -443,8 +455,14 @@ fn object_fields(
                         .collect(),
                 ),
             ));
-            u.push(("lootable".into(), PlainValue::Bool(dynamic & DYNFLAG_LOOTABLE != 0)));
-            u.push(("tapped".into(), PlainValue::Bool(dynamic & DYNFLAG_TAPPED != 0)));
+            u.push((
+                "lootable".into(),
+                PlainValue::Bool(dynamic & DYNFLAG_LOOTABLE != 0),
+            ));
+            u.push((
+                "tapped".into(),
+                PlainValue::Bool(dynamic & DYNFLAG_TAPPED != 0),
+            ));
             u.push((
                 "skinnable".into(),
                 PlainValue::Bool(s.unit_flags() & UNIT_FLAG_SKINNABLE != 0),

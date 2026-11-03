@@ -55,7 +55,12 @@ impl Conn {
         match peeked {
             Ok(0) => Ok(LinkState::Closed),
             Ok(_) => Ok(LinkState::Readable),
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
                 Ok(LinkState::Quiet)
             }
             Err(e) => Err(e),

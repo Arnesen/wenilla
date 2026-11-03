@@ -1142,7 +1142,9 @@ mod tests {
             state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
         }
         assert!(matches!(
-            std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>().as_slice(),
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .collect::<Vec<_>>()
+                .as_slice(),
             [CharRequest::GuildQuery(5)]
         ));
         assert!(state.built && state.emblem.is_none(), "nothing has landed");
@@ -1154,7 +1156,11 @@ mod tests {
         state.built = true;
         state.watch_crest(look, Some(&displays), Some(&guilds), Some(&pick));
         assert!(state.built, "once");
-        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 0, "a held record sends nothing");
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok()).count(),
+            0,
+            "a held record sends nothing"
+        );
     }
 
     /// Slot 18's gates (`0x472ca0`, `0x472ca4`) and guild 0 (`0x560e3d`) ask for nothing.

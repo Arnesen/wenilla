@@ -3,10 +3,10 @@
 //! [`crate::boot::tuned_default_plugins`], under the same `EnvFilter` as stderr, so it holds
 //! exactly the lines stderr showed. Read with [`recent`].
 
+use bevy::platform::time::Instant;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::{Mutex, OnceLock};
-use bevy::platform::time::Instant;
 
 use bevy::log::tracing::field::{Field, Visit};
 use bevy::log::tracing::{Event, Subscriber};

@@ -20,8 +20,8 @@ use anyhow::{anyhow, Context, Result};
 // probe stays a straight-line CLI and drives each of them to completion where it stands.
 use benilla_protocol::transport::Conn;
 use benilla_protocol::{auth, host_port, AuthReject, AUTH_PORT, CLIENT_BUILD};
-use futures_lite::future::block_on;
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge};
+use futures_lite::future::block_on;
 use sha1::{Digest, Sha1};
 
 /// Which `crc_hash` the arm puts in the proof packet.

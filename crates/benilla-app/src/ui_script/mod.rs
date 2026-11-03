@@ -29,6 +29,8 @@ pub(crate) mod raise_origin;
 mod records;
 /// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
 pub(crate) mod server_alert;
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_touch;
 #[cfg(test)]
 pub(crate) use input::dispatch_input_records;
 #[cfg(test)]

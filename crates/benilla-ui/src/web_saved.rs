@@ -23,6 +23,9 @@ pub fn set_reader(read: fn(&Path) -> Result<Vec<u8>>) {
 pub(crate) fn read(path: &Path) -> Result<Vec<u8>> {
     match READER.get() {
         Some(read) => read(path),
-        None => Err(Error::new(ErrorKind::NotFound, "no state folder reader installed")),
+        None => Err(Error::new(
+            ErrorKind::NotFound,
+            "no state folder reader installed",
+        )),
     }
 }

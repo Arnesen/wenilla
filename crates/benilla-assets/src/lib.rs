@@ -254,7 +254,9 @@ impl AssetReader for MpqAssetReader {
             self.read_candidate(cube)
         })?;
         #[cfg(target_arch = "wasm32")]
-        let bytes = self.or_error_cube_web(path, self.read_bytes_web(path).await).await?;
+        let bytes = self
+            .or_error_cube_web(path, self.read_bytes_web(path).await)
+            .await?;
         Ok(VecReader::new(bytes))
     }
 

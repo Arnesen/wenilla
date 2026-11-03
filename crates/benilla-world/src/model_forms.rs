@@ -4,8 +4,8 @@
 //! nearest requester first, uncapped behind the loading cover. One [`Entry`] per model asset
 //! serves every instance.
 
-use std::collections::HashMap;
 use bevy::platform::time::Instant;
+use std::collections::HashMap;
 
 use benilla_assets::{
     submesh_to_skinned_mesh, submesh_to_static_mesh, M2Model, ModelSubmesh, WmoModel,

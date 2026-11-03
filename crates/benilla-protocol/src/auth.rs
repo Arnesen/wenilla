@@ -123,9 +123,13 @@ mod zone {
 mod zone {
     pub(super) fn standard_offset_east() -> Option<i64> {
         let year = js_sys::Date::new_0().get_full_year();
-        let west = |month: i32| js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset();
+        let west = |month: i32| {
+            js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset()
+        };
         let standard_west = west(0).max(west(6));
-        standard_west.is_finite().then(|| (-standard_west * 60.0) as i64)
+        standard_west
+            .is_finite()
+            .then(|| (-standard_west * 60.0) as i64)
     }
 }
 
@@ -766,8 +770,7 @@ mod tests {
         packet.extend_from_slice(&body);
         packet.extend_from_slice(&0u16.to_le_bytes()); // footer padding
 
-        let realms =
-            futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
+        let realms = futures_lite::future::block_on(read_realm_list(&mut Cursor(&packet))).unwrap();
         assert_eq!(realms.len(), 1);
         let r = &realms[0];
         assert_eq!(r.name, "Onyxia");
@@ -853,7 +856,12 @@ mod tests {
     #[test]
     fn a_realm_list_whose_size_disagrees_with_its_records_is_malformed() {
         let good = realm_packet(b"R", b"h:1");
-        assert_eq!(futures_lite::future::block_on(read_realm_list(&mut good.as_slice())).unwrap().len(), 1);
+        assert_eq!(
+            futures_lite::future::block_on(read_realm_list(&mut good.as_slice()))
+                .unwrap()
+                .len(),
+            1
+        );
         let off_by = |delta: i16, tail: &[u8]| {
             let mut p = good.clone();
             let size = u16::from_le_bytes([p[1], p[2]]).wrapping_add_signed(delta);
@@ -896,7 +904,10 @@ mod tests {
     fn a_realm_address_of_32_characters_is_refused_with_the_stream_aligned() {
         let fits = "a".repeat(31);
         let p = realm_packet(b"R", fits.as_bytes());
-        assert_eq!(futures_lite::future::block_on(read_realm_list(&mut p.as_slice())).unwrap()[0].address, fits);
+        assert_eq!(
+            futures_lite::future::block_on(read_realm_list(&mut p.as_slice())).unwrap()[0].address,
+            fits
+        );
         for len in [32, 255] {
             let mut p = realm_packet(b"R", "a".repeat(len).as_bytes());
             p.push(0xee);

@@ -586,10 +586,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 let mut pending = world
                     .remove_resource::<PendingEntryUiLoad>()
                     .expect("the load is pending");
-                let core = pending
-                    .core
-                    .take()
-                    .expect("the core is resolved at Armed");
+                let core = pending.core.take().expect("the core is resolved at Armed");
                 let more = next < core.toc.files.len();
                 if more {
                     // Each file runs with a call host lent, as the one-shot load's do. Failures
@@ -784,30 +781,36 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     let inputs = entry_prepare(world, &mut script, seat);
     // No sound during the load edge, as in the reference's `UI_Init` (`0x48fbfa` → `0x49016d`).
     // The files run with a call host lent, as `entry_finish`'s phases do.
-    in_load_scope(|| silenced_ui_load(&mut script, |script| {
-        crate::script_calls::lent_by_world(world, script, |script| {
-            let _ = load_ingame_ui(
-                script,
-                inputs.identity.as_ref(),
-                &inputs.roster,
-                inputs.version_check,
-            );
-        });
-        entry_finish(world, script, &inputs);
-    }));
+    in_load_scope(|| {
+        silenced_ui_load(&mut script, |script| {
+            crate::script_calls::lent_by_world(world, script, |script| {
+                let _ = load_ingame_ui(
+                    script,
+                    inputs.identity.as_ref(),
+                    &inputs.roster,
+                    inputs.version_check,
+                );
+            });
+            entry_finish(world, script, &inputs);
+        })
+    });
     entry_close(world, script, inputs.identity, seat);
 }
 
 /// The interface load's origin scope ([`Origin::Allowed`]): the load signals its own events,
-/// `VARIABLES_LOADED` among them (`0x49156a`), outside any packet. wenilla: the sliced load
-/// ([`run_pending_entry_load`]) opens it around each step, under the one-shot load's key.
+/// `VARIABLES_LOADED` among them (`0x49156a`), outside any packet. The one-shot load and each
+/// step of the sliced load ([`run_pending_entry_load`]) share this scope.
 fn in_load_scope<R>(f: impl FnOnce() -> R) -> R {
-    within(Origin::Allowed("ui_script::lifecycle::load_ingame_ui_seated"), f)
+    within(Origin::Allowed("ui_script::lifecycle::in_load_scope"), f)
 }
 
 /// One step of the sliced load: `f` on the VM with a call host lent, inside the load's origin
 /// scope ([`in_load_scope`]).
-fn entry_step<R>(world: &mut World, script: &mut UiScript, f: impl FnOnce(&mut UiScript) -> R) -> R {
+fn entry_step<R>(
+    world: &mut World,
+    script: &mut UiScript,
+    f: impl FnOnce(&mut UiScript) -> R,
+) -> R {
     in_load_scope(|| crate::script_calls::lent_by_world(world, script, f))
 }
 

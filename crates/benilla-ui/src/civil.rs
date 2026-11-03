@@ -489,6 +489,30 @@ mod tests {
         assert_eq!(zone_name(false), b"JST");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn explicit_daylight_zones_do_not_inherit_the_host_bias() {
+        let _zone = ZoneGuard::set("UTC0");
+        // Simulate a host without daylight saving, as restored between guarded test zones.
+        platform::hold_dstbias(Some(0));
+        let at = 1_000_000_000;
+        for (tz, east, dst) in [
+            ("EST5EDT", -4 * 3600, true),
+            ("NPT-05:45", 5 * 3600 + 45 * 60, false),
+            ("EST5EDT", -4 * 3600, true),
+        ] {
+            put_tz(Some(tz.as_ref()));
+            platform::hold_dstbias(None);
+            reread_zone();
+            assert_eq!(local(at), (from_unix(at + east), dst), "{tz}");
+            assert_eq!(
+                local_seconds((at + east) as i32, dst),
+                Some(at as i32),
+                "{tz} round trip"
+            );
+        }
+    }
+
     /// A zone with daylight time: each change of offset found to the second. The Windows runtime
     /// reads no rule from `TZ`, only names and an offset, and keeps the USA's for daylight time,
     /// which the rule spelled out for unix matches.

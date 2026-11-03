@@ -356,8 +356,8 @@ fn upload(section: usize, contents: Vec<u8>) -> ClientCommand {
 /// `0x5af880`: `cache.md5` into the cached digests, each cleared before its 16 bytes are read; a
 /// file that does not open leaves them as they were (`0x5af898`).
 fn read_cache(cache: &mut [AccountDataDigest; ACCOUNT_DATA_SECTIONS]) {
-    let Some(bytes) =
-        crate::local_state::account_data_digests_path().and_then(|path| crate::local_state::read(&path).ok())
+    let Some(bytes) = crate::local_state::account_data_digests_path()
+        .and_then(|path| crate::local_state::read(&path).ok())
     else {
         return;
     };
