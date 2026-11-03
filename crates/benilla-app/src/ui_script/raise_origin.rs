@@ -51,7 +51,7 @@ pub(crate) const RAISES_AT_THEIR_OWN_PLACE: &[Allow] = &[
               (`0x46b848`) itself, outside any packet",
     },
     Allow {
-        site: "ui_script::lifecycle::load_ingame_ui_seated",
+        site: "ui_script::lifecycle::in_load_scope",
         why: "the interface's load signals its own events, `VARIABLES_LOADED` among them \
               (`0x49156a`), outside any packet",
     },

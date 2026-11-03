@@ -798,13 +798,10 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
 }
 
 /// The interface load's origin scope ([`Origin::Allowed`]): the load signals its own events,
-/// `VARIABLES_LOADED` among them (`0x49156a`), outside any packet. wenilla: the sliced load
-/// ([`run_pending_entry_load`]) opens it around each step, under the one-shot load's key.
+/// `VARIABLES_LOADED` among them (`0x49156a`), outside any packet. The one-shot load and each
+/// step of the sliced load ([`run_pending_entry_load`]) share this scope.
 fn in_load_scope<R>(f: impl FnOnce() -> R) -> R {
-    within(
-        Origin::Allowed("ui_script::lifecycle::load_ingame_ui_seated"),
-        f,
-    )
+    within(Origin::Allowed("ui_script::lifecycle::in_load_scope"), f)
 }
 
 /// One step of the sliced load: `f` on the VM with a call host lent, inside the load's origin
