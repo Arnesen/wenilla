@@ -59,8 +59,6 @@ fn web_command_error_handler(
 mod creature_anim;
 mod creature_type;
 mod cursor;
-/// The cursor is cropped where it meets the window's edge, so the
-/// browser still draws it.
 #[cfg(any(not(target_os = "macos"), test))]
 mod cursor_edge;
 mod cvars;

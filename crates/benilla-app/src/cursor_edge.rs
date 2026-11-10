@@ -1,12 +1,4 @@
-//! The cursor is cropped where it meets the window's right or bottom
-//! edge, so the browser still draws it.
-//!
-//! In the browser the cursor is a CSS `cursor: url(…) 0 0, auto` (winit's web backend). Chromium
-//! falls back to `auto` for a custom cursor image that isn't wholly inside the viewport, so the
-//! 32×32 icon held on the cursor vanished whenever the pointer came within 32 px of the bottom
-//! edge, right over the action bars. The stock client's cursor is clipped by the screen instead.
-//! Showing only the part that fits keeps the image inside the viewport: the browser draws it,
-//! clipped like the stock one.
+//! The cursor cropped to the window: a browser drops a custom cursor that crosses its edge.
 
 use bevy::math::{URect, Vec2};
 
