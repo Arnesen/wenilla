@@ -498,7 +498,7 @@ mod other {
         mut images: ResMut<Assets<Image>>,
         mut payload_cursors: ResMut<PayloadCursorImages>,
         screen: Res<crate::loading_screen::LoadingScreen>,
-        window: Option<Single<Entity, With<PrimaryWindow>>>,
+        window: Option<Single<(Entity, &Window), With<PrimaryWindow>>>,
         // The key of the cursor last handed the window: OS state, so not a
         // [`crate::ui_script::VmMemo`].
         mut last_set: Local<Option<String>>,
@@ -507,11 +507,22 @@ mod other {
         let Some(window) = window else {
             return;
         };
+        let (window, win) = window.into_inner();
+        // In the browser, show only the part that fits in the window (see `cursor_edge`).
+        let crop = if cfg!(target_arch = "wasm32") {
+            crate::cursor_edge::edge_crop(win.cursor_position(), win.size(), 32)
+        } else {
+            None
+        };
+        let keyed = |key: &str| match crop {
+            Some(r) => format!("{key}@{}x{}", r.max.x, r.max.y),
+            None => key.to_string(),
+        };
         let held_icon = script
             .as_ref()
             .and_then(|s| payload_icon(s, screen.covering()));
         if let Some(icon) = held_icon {
-            if last_set.as_deref() == Some(icon.as_str()) {
+            if last_set.as_deref() == Some(keyed(&icon).as_str()) {
                 return; // already showing this icon
             }
             if !payload_cursors.0.contains_key(&icon) && !decode_failed.contains(&icon) {
@@ -530,8 +541,8 @@ mod other {
                 }
             }
             if let Some(handle) = payload_cursors.0.get(&icon) {
-                set_custom_cursor(&mut commands, *window, handle.clone());
-                *last_set = Some(icon);
+                set_custom_cursor(&mut commands, window, handle.clone(), crop);
+                *last_set = Some(keyed(&icon));
                 return;
             }
             // Decode failed: fall through to the mode cursor.
@@ -540,7 +551,7 @@ mod other {
         // Mode 41 shows the picture `SetCursor` loaded, built from its path on first use.
         if cursor.0.kind == crate::target::CursorKind::Custom {
             let key = format!("custom:{}", custom.0);
-            if last_set.as_deref() == Some(key.as_str()) {
+            if last_set.as_deref() == Some(keyed(&key).as_str()) {
                 return;
             }
             if !payload_cursors.0.contains_key(&key) && !decode_failed.contains(&key) {
@@ -562,8 +573,8 @@ mod other {
                 }
             }
             if let Some(handle) = payload_cursors.0.get(&key) {
-                set_custom_cursor(&mut commands, *window, handle.clone());
-                *last_set = Some(key);
+                set_custom_cursor(&mut commands, window, handle.clone(), crop);
+                *last_set = Some(keyed(&key));
                 return;
             }
         }
@@ -572,7 +583,7 @@ mod other {
             return;
         };
         let stem = cursor.0.stem();
-        if last_set.as_deref() == Some(stem.as_str()) {
+        if last_set.as_deref() == Some(keyed(&stem).as_str()) {
             return;
         }
         let handle = cursors
@@ -581,9 +592,9 @@ mod other {
             .or_else(|| cursors.0.get(stem.trim_start_matches("Unable")))
             .or_else(|| cursors.0.get("Point"));
         if let Some(handle) = handle {
-            set_custom_cursor(&mut commands, *window, handle.clone());
+            set_custom_cursor(&mut commands, window, handle.clone(), crop);
         }
-        *last_set = Some(stem);
+        *last_set = Some(keyed(&stem));
     }
 
     /// The device's flag on the window's pointer, for the cinematic, the glue and the look's
@@ -602,8 +613,14 @@ mod other {
         }
     }
 
-    /// Insert a custom cursor with hotspot `(0, 0)`, the vanilla cursors' top-left tip.
-    fn set_custom_cursor(commands: &mut Commands, window: Entity, handle: Handle<Image>) {
+    /// Insert a custom cursor with hotspot `(0, 0)`, the vanilla cursors' top-left tip; `rect` crops
+    /// it.
+    fn set_custom_cursor(
+        commands: &mut Commands,
+        window: Entity,
+        handle: Handle<Image>,
+        rect: Option<URect>,
+    ) {
         commands
             .entity(window)
             .insert(CursorIcon::Custom(CustomCursor::Image(CustomCursorImage {
@@ -611,7 +628,7 @@ mod other {
                 texture_atlas: None,
                 flip_x: false,
                 flip_y: false,
-                rect: None,
+                rect,
                 hotspot: (0, 0),
             })));
     }
