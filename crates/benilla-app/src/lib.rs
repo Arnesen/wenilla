@@ -59,6 +59,8 @@ fn web_command_error_handler(
 mod creature_anim;
 mod creature_type;
 mod cursor;
+#[cfg(any(not(target_os = "macos"), test))]
+mod cursor_edge;
 mod cvars;
 mod death;
 #[cfg(feature = "dev")]
